@@ -303,6 +303,10 @@ async def test_reopen_awaits_inflight_teardown(
 
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: "-100:5" in io.archived)  # teardown started, blocked
+    # The first idle timer has fired (its sleep elapsed). The reopened turn will re-arm
+    # a fresh timer on completion; lengthen idle now so that one can't fire during the
+    # assertion tail and clobber OPEN→DONE (only the second arm sees the new value).
+    mgr._idle_archive_seconds = 1000.0
 
     rt = mgr._tasks["-100:5"]
     assert rt.cancelled is True  # slot kept (cancelled) until teardown finishes
