@@ -1,0 +1,26 @@
+# S0 walking skeleton (throwaway). Outbound-only; no public ingress.
+# Secrets come from a sibling .env (gitignored). Real Docker secrets arrive at M0.
+# Run from the repo root:  docker compose -f s0/compose.yml run --rm auth-proof
+#                          docker compose -f s0/compose.yml up bot
+services:
+  # S0a — prove Max auth runs the SDK headless. No Telegram needed.
+  auth-proof:
+    build:
+      context: ..
+      dockerfile: s0/Dockerfile
+    environment:
+      # ANTHROPIC_API_KEY is intentionally absent — it would outrank the OAuth token.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and set it in s0/.env}
+    command: ["python", "s0/verify_auth.py"]
+
+  # S0b — prove a Telegram DM round-trips through the SDK.
+  bot:
+    build:
+      context: ..
+      dockerfile: s0/Dockerfile
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and set it in s0/.env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?get one from @BotFather and set it in s0/.env}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:?your numeric Telegram user id, set it in s0/.env}
+    command: ["python", "s0/bot.py"]
+    restart: unless-stopped
