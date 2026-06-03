@@ -1,8 +1,9 @@
-"""Schema creation and the contact repository."""
+"""Schema creation and the contact + task repositories."""
 
 from sqlalchemy import Connection, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from chief.persistence import tasks as task_repo
 from chief.persistence.contacts import get_or_create_contact
 
 
@@ -46,3 +47,48 @@ async def test_get_or_create_contact_is_idempotent(db_session: AsyncSession) -> 
     )
 
     assert first.id == second.id
+
+
+async def test_get_or_create_task_inserts_and_is_idempotent(
+    db_session: AsyncSession,
+) -> None:
+    first = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:5", tier="owner", title="ship"
+    )
+    second = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:5", tier="owner"
+    )
+
+    assert first.id == second.id
+    assert first.status == task_repo.OPEN
+    assert first.title == "ship"
+
+
+async def test_set_status_and_session_id_persist(db_session: AsyncSession) -> None:
+    task = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:6", tier="owner"
+    )
+
+    await task_repo.set_session_id(db_session, task, "sess-abc")
+    await task_repo.set_status(db_session, task, task_repo.RUNNING)
+
+    reloaded = await task_repo.get_task(
+        db_session, platform="telegram", thread_key="-100:6"
+    )
+    assert reloaded is not None
+    assert reloaded.sdk_session_id == "sess-abc"
+    assert reloaded.status == task_repo.RUNNING
+
+
+async def test_list_active_excludes_terminal(db_session: AsyncSession) -> None:
+    live = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:7", tier="owner"
+    )
+    done = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:8", tier="owner"
+    )
+    await task_repo.set_status(db_session, done, task_repo.DONE)
+
+    active = await task_repo.list_active(db_session)
+
+    assert [t.id for t in active] == [live.id]

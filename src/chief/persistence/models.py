@@ -42,6 +42,9 @@ class Task(Base):
     """One conversation = one task/session (lifecycle owned by M2)."""
 
     __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("platform", "thread_key", name="uq_task_platform_thread"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     platform: Mapped[str]

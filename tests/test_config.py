@@ -73,6 +73,23 @@ def test_rejects_anthropic_api_key(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+def test_m2_defaults_and_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CONCURRENCY", "5")
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.concurrency == 5  # env override
+    assert settings.grace_seconds == 6.0
+    assert settings.idle_archive_seconds == 3600
+    assert settings.classifier_model == "claude-haiku-4-5"
+
+
 def test_missing_required_field_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

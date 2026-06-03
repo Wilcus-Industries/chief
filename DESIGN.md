@@ -103,7 +103,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Blocklist | Owner block/mute; chief self-blocks only on clear abuse (notifies owner) |
 | Language | Match the sender |
 | Testing | Mocked unit+integration + live sandbox (TG test bot, Google test acct) |
-| Task close | Auto-archive on distill-idle; reopens on next message |
+| Task close | Auto-archive on ~1-hr idle; reopens on next message |
 | Failures | Auto-retry transient w/ backoff, then report; keep recoverable |
 | Discord owner | Private server, channel threads = tasks (mirrors Telegram) |
 | Addressing | Persona-driven from `Soul.md`/`User.md`; "<Owner>'s assistant" to guests |
@@ -175,8 +175,10 @@ bounded parallelism, milestone progress, live steering.
   message in its topic is pushed into the running session (with `interrupt()` for "stop,
   do X instead"). Ordering/interrupt edge cases are a known cost — handle explicitly.
 - **Controls:** `/cancel` (or button) stops a task; `/tasks` lists in-flight with status.
-- **Auto-archive.** After distill-on-idle (~10 min), chief marks the task done and archives
-  its topic/thread; a later message **reopens it** with context intact. Keeps the list tidy.
+- **Auto-archive.** After ~1 hr idle, chief marks the task done and archives its
+  topic/thread; a later message **reopens it** with context intact (resume the SDK session
+  by id). Keeps the list tidy. (Distinct from the ~10-min distill-on-staleness trigger,
+  which only writes memory and leaves the task open — see Memory & learning.)
 - **Failures:** transient tool/API errors **auto-retry with backoff**, then report clearly
   in-thread and leave the task recoverable (never silently swallow).
 
@@ -245,7 +247,9 @@ needs them (+ grep as a cheap fallback). No vector search until/unless scale dem
   Guest-stated facts are fenced into that contact's namespace and tagged low-trust.
 - **Distill on staleness.** Full transcripts are kept (SDK behavior). When a conversation
   goes idle ~10 min, a **reflection step** (subagent/hook) reads it and writes distilled
-  facts to memory. Memory = distilled facts; transcripts = the raw record.
+  facts to memory. Memory = distilled facts; transcripts = the raw record. This is
+  **separate from task auto-archive** (~1-hr idle, closes the topic): distill only writes
+  memory and the task stays open.
 - **Overwrite, don't accumulate.** A changed fact ("afternoons now") **overwrites** the old
   one rather than piling up contradictions.
 - **Flag time-sensitive facts.** Any ephemeral fact ("out sick this week") is marked with
@@ -631,11 +635,13 @@ chief/
     config.py                # pydantic-settings
     app.py                   # wiring / entrypoint
     adapters/                # one per platform behind a shared interface
-      base.py                # Adapter iface, Message/Reply types, tier classification
-      telegram.py            # long-poll; supergroup topics + DM + group-mention
+      base.py                # Adapter iface, Message type + tier classification, TaskIO
+      telegram.py            # long-poll; supergroup topics + DM + group-mention; TaskIO impl
       discord.py             # later
     core/
-      agent.py               # Agent SDK wrapper; session per task
+      agent.py               # one-shot Agent SDK query helper (NO_REPLY sentinel)
+      session.py             # persistent ClaudeSDKClient session per task (resume/stream)
+      classify.py            # cheap Haiku judgments (stop-intent / warrants-task)
       tasks.py               # lifecycle, semaphore, live steering, auto-archive, recovery
       personas.py            # owner/guest system-prompt assembly (Soul.md/User.md)
     gate/
@@ -671,8 +677,8 @@ chief/
    allowed calls execute (MCP / sandbox / workspace), and **tool results are untrusted data**.
    Milestones post on tool events; **usage is metered per call** against the budget.
 4. **Reply** streams back, smart-split / as files. Fast finish → inline; slow → "working…".
-5. **Idle ~10 min →** distill transcript → memory write (auto-notify) → **auto-archive** the
-   thread (reopens on next message).
+5. **Idle ~10 min →** distill transcript → memory write (auto-notify); task stays open.
+   **Idle ~1 hr →** mark done + **auto-archive** the thread (reopens on next message).
 6. **Audit log** records every tool call, approval, and memory write throughout.
 
 ## Verified (technical) — researched 2026-06-03
@@ -748,15 +754,20 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   rejected at startup. Persistent sessions / steering / resume land at M2.
 
 **Phase 1 — Core loop (the spine)**
-- **M2 task engine:** topics = tasks (forum topics), hybrid inline/background, milestone
-  progress, live steering, auto-archive, persistence + notify-on-restart recovery. Built
-  full-fat (no deferral of steering/concurrency). Two things to spec up front:
-  - **Interrupt semantics:** decide whether a new in-topic message during a running turn
-    *always* `interrupt()`s, or only on an explicit "stop / do X instead." Cheap to spec
-    now, expensive to retrofit — this is the flagged ordering/interrupt cost.
+- **M2 task engine — ✅ done.** Topics = tasks (forum topics), hybrid inline/background,
+  milestone progress, live steering, ~1-hr idle auto-archive, persistence + notify-on-restart
+  recovery. Persistent `ClaudeSDKClient` session per `thread_key` (`core/session.py`), a
+  per-task input queue + single consumer bounded by a shared semaphore (`core/tasks.py`),
+  and a platform-neutral `TaskIO` the adapter implements. Resolved forks:
+  - **Interrupt semantics → auto-detect with Haiku.** A mid-turn message is *queued* as the
+    next turn by default; a cheap Haiku classify (`core/classify.py:stop_intent`) flags
+    "stop / do X instead" → `interrupt()` then run it. `/cancel` interrupts deterministically.
+    No mid-turn token injection (sidesteps the flagged ordering hazard).
+  - **Task topics → chief auto-decides.** A General-topic message is Haiku-classified
+    (`warrants_task`) → yes: spawn a tracked topic; no: casual reply in General.
   - **Semaphore re-arm on restart:** the ~3-slot cap bounds only *actively-generating*
-    turns, not open/idle sessions. Restart recovery must rebuild the semaphore correctly
-    so a reboot can't resume past the cap.
+    turns; recovered tasks start idle and acquire a slot only when they next generate, so
+    the semaphore starts empty — no pre-acquire needed.
 - **M3 gate + approvals:** default-ask permission gate (NEVER/APPROVED, safe-matching) +
   approval flow (in-context + Front Desk, always-allow buttons). Reused everywhere.
 - **M4 memory:** markdown + wikilinks, namespaced, `MEMORY.md` index, distill-on-staleness,
