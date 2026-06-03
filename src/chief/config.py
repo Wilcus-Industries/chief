@@ -9,13 +9,24 @@ first: explicit init kwargs → environment → ``config.yaml`` → secret files
 import os
 from typing import Any
 
-from pydantic import model_validator
+from pydantic import BaseModel, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+
+class PolicySeed(BaseModel):
+    """One boot-seeded permission rule. ``arg_pattern`` ``None`` = whole-tool rule."""
+
+    tool: str
+    arg_pattern: str | None = None
+
+    def as_pair(self) -> tuple[str, str | None]:
+        """The ``(tool, arg_pattern)`` tuple :meth:`PolicyStore.seed` expects."""
+        return self.tool, self.arg_pattern
 
 
 class Settings(BaseSettings):
@@ -47,6 +58,16 @@ class Settings(BaseSettings):
     grace_seconds: float = 6.0
     idle_archive_seconds: int = 3600
     classifier_model: str = "claude-haiku-4-5"
+
+    # Permission gate + approval flow (M3). approval_timeout_seconds is the fail-closed
+    # deny window; never_seed/approved_seed prime the NEVER/APPROVED lists on boot;
+    # audit_log_path is the append-only JSONL sink; front_desk_thread_key is the M6
+    # routing stub (guest-originated approvals post there once guests exist).
+    approval_timeout_seconds: float = 600.0
+    never_seed: list[PolicySeed] = []
+    approved_seed: list[PolicySeed] = []
+    audit_log_path: str = "/data/audit.jsonl"
+    front_desk_thread_key: str | None = None
 
     # Secrets (secrets_dir / env).
     telegram_bot_token: str

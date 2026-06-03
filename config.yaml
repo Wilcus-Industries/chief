@@ -20,3 +20,13 @@ concurrency: 3              # max tasks actively generating a turn at once
 grace_seconds: 6.0         # inline reply if the turn finishes within this, else "working…"
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
 classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments
+
+# Permission gate + approval flow (M3). The gate classifies every tool call; an ASK posts
+# an approval card and blocks until a button tap or this timeout (then fail-closed deny).
+approval_timeout_seconds: 600  # no decision within this window = deny
+audit_log_path: /data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
+# front_desk_thread_key:           # M6 stub — guest-originated approvals route here
+# Boot-seeded policy rules (idempotent). Each item: {tool, arg_pattern?}; arg_pattern
+# omitted = whole-tool rule. Real entries arrive with the tools they guard (M5/M7/M8).
+never_seed: []      # tools/commands hard-denied with no prompt
+approved_seed: []   # tools/commands pre-allowed with no prompt

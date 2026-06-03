@@ -15,6 +15,9 @@ from telegram.ext import Application
 from .adapters.telegram import TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core.tasks import TaskManager
+from .gate.approvals import ApprovalManager
+from .gate.policy import PolicyStore
+from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
 
@@ -37,16 +40,35 @@ def build_components(
     *,
     application: Application,  # type: ignore[type-arg]
     session_factory: async_sessionmaker[AsyncSession],
-) -> tuple[TaskManager, TelegramAdapter]:
-    """Wire the engine and adapter against a built ``application`` (shared bot)."""
+) -> tuple[TaskManager, TelegramAdapter, PolicyStore, ApprovalManager]:
+    """Wire the gate, engine, and adapter against a built ``application`` (shared bot).
+
+    The one ``TelegramTaskIO`` doubles as the engine's ``TaskIO`` and the approval
+    ``ApprovalIO`` (it implements both), so cards post through the same bot. Policy
+    seeding and pending-approval re-arming are async and happen in :func:`serve`.
+    """
+    io = TelegramTaskIO(application.bot)
+    audit = AuditLog(settings.audit_log_path)
+    policy = PolicyStore(session_factory, audit=audit)
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=io,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=settings.approval_timeout_seconds,
+    )
     manager = TaskManager(
         session_factory=session_factory,
-        io=TelegramTaskIO(application.bot),
+        io=io,
         owner_model=settings.owner_model_default,
         classifier_model=settings.classifier_model,
         concurrency=settings.concurrency,
         grace_seconds=settings.grace_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        front_desk_thread_key=settings.front_desk_thread_key,
     )
     adapter = TelegramAdapter(
         application=application,
@@ -54,21 +76,32 @@ def build_components(
         owner_id=settings.owner_telegram_id,
         guest_ack=settings.guest_ack,
         session_factory=session_factory,
+        approvals=approvals,
     )
-    return manager, adapter
+    return manager, adapter, policy, approvals
 
 
 async def serve(settings: Settings) -> None:
-    """Bring up db + engine + adapter on one loop and run until stopped."""
+    """Bring up db + gate + engine + adapter on one loop and run until stopped."""
     engine: AsyncEngine = create_engine(settings.db_path)
     await init_db(engine)
     factory = session_factory(engine)
     application = Application.builder().token(settings.telegram_bot_token).build()
-    manager, adapter = build_components(
+    manager, adapter, policy, approvals = build_components(
         settings, application=application, session_factory=factory
     )
+    # Seed NEVER/APPROVED before serving so the gate is correct from the first message.
+    await policy.seed(
+        never=[s.as_pair() for s in settings.never_seed],
+        approved=[s.as_pair() for s in settings.approved_seed],
+    )
+
+    async def on_ready() -> None:
+        await manager.recover()
+        await approvals.re_arm()
+
     try:
-        await adapter.run(on_ready=manager.recover)
+        await adapter.run(on_ready=on_ready)
     finally:
         await manager.shutdown()
         await engine.dispose()

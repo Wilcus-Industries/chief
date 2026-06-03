@@ -17,11 +17,14 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CanUseTool,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     TextBlock,
     ToolUseBlock,
 )
+from claude_agent_sdk.types import HookEvent
 
 from .agent import NO_REPLY
 
@@ -69,9 +72,16 @@ class TaskSession:
         *,
         model: str,
         resume: str | None = None,
+        can_use_tool: CanUseTool | None = None,
+        hooks: dict[HookEvent, list[HookMatcher]] | None = None,
         client_factory: ClientFactory = _default_client,
     ) -> None:
-        self._options = ClaudeAgentOptions(model=model, resume=resume)
+        self._options = ClaudeAgentOptions(
+            model=model,
+            resume=resume,
+            can_use_tool=can_use_tool,
+            hooks=hooks,
+        )
         self._client = client_factory(self._options)
         self._connected = False
         #: Resumable SDK session id, populated from the first turn's stream.
