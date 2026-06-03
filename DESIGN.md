@@ -717,18 +717,32 @@ See reworked "Usage budgeting" — and the guest-billing fork it raises.
 ## Build plan (phased milestones)
 
 Approval gate + memory are built early because everything reuses them. Order respects the
-"verify Max auth first" rule.
+"verify Max auth first" rule — and pulls that proof ahead of the real skeleton as a
+throwaway slice (S0), so the one existential unknown is retired on day 1.
+
+**S0 — Walking skeleton (throwaway).** Telegram DM (owner) → core → Agent SDK one-shot →
+reply, running in a real container. No structure: no topics, no tools, no gate, no sqlite.
+Sole goal: prove **Max auth (`CLAUDE_CODE_OAUTH_TOKEN`) runs the SDK headless in docker on
+the subscription** (verify #1) and that a TG message round-trips. If this fails the project
+premise fails, so it goes first; the code is disposable and gets superseded by M0/M1.
 
 **Phase 0 — Foundations**
 - **M0 skeleton:** repo layout, `config.yaml`/pydantic-settings/Docker secrets, sqlite
   schema, JSON logging, Telegram long-poll adapter that echoes + tier classification by
   sender ID.
-- **M1 agent online:** wire the Agent SDK; owner one-shot chat (no tools); **Max auth proven
-  in docker** (verify #1).
+- **M1 agent online:** wire the Agent SDK; owner one-shot chat (no tools). Max auth already
+  proven in S0 — here it's hardened into the real core (folds into M0 if S0 stands).
 
 **Phase 1 — Core loop (the spine)**
 - **M2 task engine:** topics = tasks (forum topics), hybrid inline/background, milestone
-  progress, live steering, auto-archive, persistence + notify-on-restart recovery.
+  progress, live steering, auto-archive, persistence + notify-on-restart recovery. Built
+  full-fat (no deferral of steering/concurrency). Two things to spec up front:
+  - **Interrupt semantics:** decide whether a new in-topic message during a running turn
+    *always* `interrupt()`s, or only on an explicit "stop / do X instead." Cheap to spec
+    now, expensive to retrofit — this is the flagged ordering/interrupt cost.
+  - **Semaphore re-arm on restart:** the ~3-slot cap bounds only *actively-generating*
+    turns, not open/idle sessions. Restart recovery must rebuild the semaphore correctly
+    so a reboot can't resume past the cap.
 - **M3 gate + approvals:** default-ask permission gate (NEVER/APPROVED, safe-matching) +
   approval flow (in-context + Front Desk, always-allow buttons). Reused everywhere.
 - **M4 memory:** markdown + wikilinks, namespaced, `MEMORY.md` index, distill-on-staleness,
