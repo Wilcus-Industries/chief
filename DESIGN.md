@@ -720,11 +720,23 @@ Approval gate + memory are built early because everything reuses them. Order res
 "verify Max auth first" rule — and pulls that proof ahead of the real skeleton as a
 throwaway slice (S0), so the one existential unknown is retired on day 1.
 
-**S0 — Walking skeleton (throwaway).** Telegram DM (owner) → core → Agent SDK one-shot →
-reply, running in a real container. No structure: no topics, no tools, no gate, no sqlite.
-Sole goal: prove **Max auth (`CLAUDE_CODE_OAUTH_TOKEN`) runs the SDK headless in docker on
-the subscription** (verify #1) and that a TG message round-trips. If this fails the project
-premise fails, so it goes first; the code is disposable and gets superseded by M0/M1.
+**S0 — Walking skeleton (throwaway) — 🟡 core proven 2026-06-03; token+TG run pending.**
+Telegram DM (owner) → core → Agent SDK one-shot → reply, running in a real container. No
+structure: no topics, no tools, no gate, no sqlite. Sole goal: prove **Max auth
+(`CLAUDE_CODE_OAUTH_TOKEN`) runs the SDK headless in docker on the subscription** (verify #1)
+and that a TG message round-trips. If this fails the project premise fails, so it goes first;
+the code is disposable and gets superseded by M0/M1. Code in `s0/` (`verify_auth.py`,
+`bot.py`, `Dockerfile`, `compose.yml`, runbook).
+
+> **Test results (2026-06-03).** Ran the SDK one-shot headless from Python on the host's
+> existing Max login (stored creds, no API key): got `reply: 'pong'`, `is_error: False`,
+> `total_cost_usd ≈ 0.10`, populated `model_usage` (`claude-opus-4-8` — host default) and
+> `session_id`. **Premise confirmed:** the Agent SDK runs on the subscription headless and
+> the telemetry fields work. **Still unproven (needs owner):** (1) the
+> `CLAUDE_CODE_OAUTH_TOKEN`-in-clean-docker path (`claude setup-token` is interactive OAuth);
+> (2) Console cross-check that spend draws subscription credit, not API; (3) the Telegram
+> round-trip (BotFather token + owner TG id). Residual risk is docker plumbing (CLI install,
+> HOME perms), not the auth premise.
 
 **Phase 0 — Foundations**
 - **M0 skeleton:** repo layout, `config.yaml`/pydantic-settings/Docker secrets, sqlite
