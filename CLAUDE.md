@@ -1,6 +1,9 @@
 # CLAUDE.md
 
 > **Read first:** [`STYLEGUIDE.md`](./STYLEGUIDE.md) — code conventions, follow on every change.
+>
+> **Plan / roadmap:** [`DESIGN.md`](./DESIGN.md) — full design and the phased build plan
+> (S0 → M13). Check it for what's being built and in what order before starting work.
 
 Project-specific rules only. The universal working rules — boundaries, when-stuck,
 secrets, done-honesty — live in the global `~/.claude/CLAUDE.md` and apply underneath
