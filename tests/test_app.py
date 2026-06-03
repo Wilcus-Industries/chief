@@ -10,7 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram.ext import Application
 
 from chief import app
-from chief.config import Settings
+from chief.config import PolicySeed, Settings
+from chief.persistence import approvals as appr_repo
+from chief.persistence import policy as policy_repo
 
 
 def test_load_settings_uses_env_when_no_secrets_dir(
@@ -28,24 +30,78 @@ def test_load_settings_uses_env_when_no_secrets_dir(
     assert settings.telegram_bot_token == "env-tg"
 
 
-def test_build_components_wires_engine_into_adapter(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    settings = Settings(
+def _settings(**overrides: object) -> Settings:
+    base: dict[str, object] = dict(
         owner_telegram_id=42,
         telegram_bot_token="x:y",
         claude_code_oauth_token="t",
         classifier_model="claude-haiku-4-5",
     )
-    application = cast(
+    base.update(overrides)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+def _application() -> Application:  # type: ignore[type-arg]
+    return cast(
         Application,  # type: ignore[type-arg]
         SimpleNamespace(bot=object(), add_handler=Mock()),
     )
 
-    manager, adapter = app.build_components(
-        settings, application=application, session_factory=session_factory
+
+def test_build_components_wires_gate_into_engine_and_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    manager, adapter, policy, approvals = app.build_components(
+        _settings(), application=_application(), session_factory=session_factory
     )
 
     assert adapter._engine is manager
     assert adapter._owner_id == 42
     assert manager._classifier_model == "claude-haiku-4-5"
+    # The gate is shared across engine, adapter, and the approval manager.
+    assert manager._policy is policy
+    assert manager._approvals is approvals
+    assert adapter._approvals is approvals
+
+
+async def test_seed_on_boot_populates_policy(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        never_seed=[PolicySeed(tool="WebFetch")],
+        approved_seed=[PolicySeed(tool="Bash", arg_pattern="git status")],
+    )
+    _, _, policy, _ = app.build_components(
+        settings, application=_application(), session_factory=session_factory
+    )
+
+    # Mirror serve()'s seeding step.
+    await policy.seed(
+        never=[s.as_pair() for s in settings.never_seed],
+        approved=[s.as_pair() for s in settings.approved_seed],
+    )
+
+    assert policy.classify_against("Bash", {"command": "git status"}) == (
+        policy_repo.APPROVED
+    )
+    assert policy.classify_against("WebFetch", {"url": "http://x"}) == (
+        policy_repo.NEVER
+    )
+
+
+async def test_re_arm_on_boot_recovers_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        approval = await appr_repo.create_approval(
+            session, task_id=None, kind="Bash", payload_preview="Run: git push"
+        )
+        await appr_repo.set_state(session, approval, appr_repo.NOTIFIED)
+        approval_id = approval.id
+    _, _, _, approvals = app.build_components(
+        _settings(), application=_application(), session_factory=session_factory
+    )
+
+    rearmed = await approvals.re_arm()
+
+    assert rearmed == [approval_id]

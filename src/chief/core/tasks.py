@@ -26,10 +26,16 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
+from claude_agent_sdk import CanUseTool, HookMatcher
+from claude_agent_sdk.types import HookEvent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..gate.approvals import ApprovalManager
+from ..gate.gate import build_can_use_tool, build_pretool_hook
+from ..gate.policy import PolicyStore
+from ..obs.audit import AuditLog
 from ..persistence.models import Task
 from ..persistence.tasks import (
     CANCELLED,
@@ -75,8 +81,16 @@ SessionFactory = Callable[..., SessionProto]
 Classifier = Callable[..., Awaitable[bool]]
 
 
-def _default_session(*, model: str, resume: str | None = None) -> SessionProto:
-    return TaskSession(model=model, resume=resume)
+def _default_session(
+    *,
+    model: str,
+    resume: str | None = None,
+    can_use_tool: CanUseTool | None = None,
+    hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+) -> SessionProto:
+    return TaskSession(
+        model=model, resume=resume, can_use_tool=can_use_tool, hooks=hooks
+    )
 
 
 def _title(text: str) -> str:
@@ -114,6 +128,10 @@ class TaskManager:
         session_factory_sdk: SessionFactory = _default_session,
         stop_intent: Classifier = classify.stop_intent,
         warrants_task: Classifier = classify.warrants_task,
+        policy: PolicyStore | None = None,
+        approvals: ApprovalManager | None = None,
+        audit: AuditLog | None = None,
+        front_desk_thread_key: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -125,6 +143,10 @@ class TaskManager:
         self._session_factory_sdk = session_factory_sdk
         self._stop_intent = stop_intent
         self._warrants_task = warrants_task
+        self._policy = policy
+        self._approvals = approvals
+        self._audit = audit
+        self._front_desk_thread_key = front_desk_thread_key
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -212,15 +234,65 @@ class TaskManager:
                 session, platform=self._platform, thread_key=thread_key, tier=tier
             )
             db_id, resume = db.id, db.sdk_session_id
+        can_use_tool, hooks = self._build_gate(
+            task_id=db_id, thread_key=thread_key, tier=tier
+        )
+        gate_kwargs: dict[str, Any] = {}
+        if can_use_tool is not None or hooks is not None:
+            gate_kwargs = {"can_use_tool": can_use_tool, "hooks": hooks}
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
-            session=self._session_factory_sdk(model=self._owner_model, resume=resume),
+            session=self._session_factory_sdk(
+                model=self._owner_model, resume=resume, **gate_kwargs
+            ),
             queue=asyncio.Queue(),
             tier=tier,
         )
         self._tasks[thread_key] = rt
         return rt
+
+    def _build_gate(
+        self, *, task_id: int, thread_key: str, tier: str
+    ) -> tuple[CanUseTool | None, dict[HookEvent, list[HookMatcher]] | None]:
+        """Bind this session's gate callbacks, or ``(None, None)`` if unwired.
+
+        Returns the ``can_use_tool`` callback and the ``PreToolUse`` hook map for the
+        SDK options. The status hooks flip the task ``waiting``/``running`` around an
+        approval so ``/tasks`` reflects a blocked turn.
+        """
+        if self._policy is None or self._approvals is None or self._audit is None:
+            return None, None
+        route = (
+            thread_key
+            if tier == "owner"
+            else (self._front_desk_thread_key or thread_key)
+        )
+        hook = build_pretool_hook(
+            thread_key=thread_key, tier=tier, policy=self._policy, audit=self._audit
+        )
+
+        async def on_waiting() -> None:
+            await self._set_status_by_thread(thread_key, WAITING)
+
+        async def on_running() -> None:
+            await self._set_status_by_thread(thread_key, RUNNING)
+
+        can_use_tool = build_can_use_tool(
+            task_id=task_id,
+            thread_key=thread_key,
+            tier=tier,
+            route=route,
+            policy=self._policy,
+            approvals=self._approvals,
+            audit=self._audit,
+            on_waiting=on_waiting,
+            on_running=on_running,
+        )
+        hooks: dict[HookEvent, list[HookMatcher]] = {
+            "PreToolUse": [HookMatcher(hooks=[hook])]
+        }
+        return can_use_tool, hooks
 
     async def _submit(self, task: _RunningTask, text: str) -> None:
         self._cancel_idle(task)
@@ -328,9 +400,12 @@ class TaskManager:
     # ---- persistence helpers --------------------------------------------
 
     async def _set_status(self, task: _RunningTask, status: str) -> None:
+        await self._set_status_by_thread(task.thread_key, status)
+
+    async def _set_status_by_thread(self, thread_key: str, status: str) -> None:
         async with self._session_factory() as session:
             db = await get_task(
-                session, platform=self._platform, thread_key=task.thread_key
+                session, platform=self._platform, thread_key=thread_key
             )
             if db is not None:
                 await set_status(session, db, status)

@@ -12,8 +12,10 @@ from telegram.ext import Application
 from chief.adapters.telegram import (
     TelegramAdapter,
     TelegramTaskIO,
+    parse_callback,
     split_message,
 )
+from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.persistence.models import Contact, Task
 
 OWNER_ID = 42
@@ -42,8 +44,21 @@ class FakeEngine:
         return self._active
 
 
+class FakeResolver:
+    def __init__(self) -> None:
+        self.resolved: list[tuple[int, ApprovalAction, str]] = []
+
+    async def resolve(
+        self, approval_id: int, action: ApprovalAction, *, decided_by: str
+    ) -> None:
+        self.resolved.append((approval_id, action, decided_by))
+
+
 def _adapter(
-    session_factory: async_sessionmaker[AsyncSession], engine: FakeEngine
+    session_factory: async_sessionmaker[AsyncSession],
+    engine: FakeEngine,
+    *,
+    approvals: FakeResolver | None = None,
 ) -> TelegramAdapter:
     app = cast(Application, SimpleNamespace(add_handler=Mock()))  # type: ignore[type-arg]
     return TelegramAdapter(
@@ -52,7 +67,16 @@ def _adapter(
         owner_id=OWNER_ID,
         guest_ack="noted, thanks",
         session_factory=session_factory,
+        approvals=approvals,
     )
+
+
+def _callback_update(*, user_id: int, data: str) -> Update:
+    update = SimpleNamespace(
+        callback_query=SimpleNamespace(data=data, answer=AsyncMock()),
+        effective_user=SimpleNamespace(id=user_id, full_name="Someone"),
+    )
+    return cast(Update, update)
 
 
 def _fake_update(
@@ -292,3 +316,96 @@ def test_split_message_splits_over_limit() -> None:
     assert len(chunks) == 3
     assert all(len(c) <= 4096 for c in chunks)
     assert "".join(chunks) == "a" * 9000
+
+
+# ---- approval cards (ApprovalIO) ---------------------------------------------
+
+
+async def test_send_card_posts_keyboard_and_returns_ref() -> None:
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=77)
+
+    ref = await TelegramTaskIO(bot).send_card(
+        "-100:5", ApprovalCard(approval_id=9, text="Run: git push")
+    )
+
+    assert ref == "-100:77"
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == -100
+    assert kwargs["text"] == "Run: git push"
+    assert kwargs["message_thread_id"] == 5
+    # All four buttons, payloads carrying the approval id + action token.
+    rows = kwargs["reply_markup"].inline_keyboard
+    payloads = [b.callback_data for row in rows for b in row]
+    assert payloads == [
+        "appr:9:approve_once",
+        "appr:9:deny_once",
+        "appr:9:always_allow",
+        "appr:9:always_deny",
+    ]
+
+
+async def test_edit_card_rewrites_outcome() -> None:
+    bot = AsyncMock()
+
+    await TelegramTaskIO(bot).edit_card("-100:77", "✅ Approved (once)")
+
+    bot.edit_message_text.assert_awaited_once_with(
+        text="✅ Approved (once)", chat_id=-100, message_id=77
+    )
+
+
+# ---- parse_callback ----------------------------------------------------------
+
+
+def test_parse_callback_valid() -> None:
+    assert parse_callback("appr:9:always_allow") == (9, ApprovalAction.ALWAYS_ALLOW)
+
+
+def test_parse_callback_rejects_foreign_or_malformed() -> None:
+    assert parse_callback("other:9:approve_once") is None
+    assert parse_callback("appr:9") is None
+    assert parse_callback("appr:notanint:approve_once") is None
+    assert parse_callback("appr:9:bogus_action") is None
+
+
+# ---- _on_callback ------------------------------------------------------------
+
+
+async def test_on_callback_owner_resolves(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    resolver = FakeResolver()
+    adapter = _adapter(session_factory, FakeEngine(), approvals=resolver)
+    update = _callback_update(user_id=OWNER_ID, data="appr:9:approve_once")
+
+    await adapter._on_callback(update, _CTX)
+
+    assert resolver.resolved == [(9, ApprovalAction.APPROVE_ONCE, str(OWNER_ID))]
+    update.callback_query.answer.assert_awaited_once()  # type: ignore[union-attr]
+
+
+async def test_on_callback_ignores_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    resolver = FakeResolver()
+    adapter = _adapter(session_factory, FakeEngine(), approvals=resolver)
+    update = _callback_update(user_id=7, data="appr:9:approve_once")
+
+    await adapter._on_callback(update, _CTX)
+
+    assert resolver.resolved == []
+    update.callback_query.answer.assert_awaited_once_with("Not allowed.")  # type: ignore[union-attr]
+
+
+async def test_on_callback_ignores_foreign_payload(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    resolver = FakeResolver()
+    adapter = _adapter(session_factory, FakeEngine(), approvals=resolver)
+    update = _callback_update(user_id=OWNER_ID, data="other:9:approve_once")
+
+    await adapter._on_callback(update, _CTX)
+
+    assert resolver.resolved == []
+    update.callback_query.answer.assert_awaited_once()  # type: ignore[union-attr]

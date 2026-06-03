@@ -90,6 +90,29 @@ def test_m2_defaults_and_env_override(
     assert settings.classifier_model == "claude-haiku-4-5"
 
 
+def test_m3_gate_defaults_and_seed_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "approval_timeout_seconds: 120\n"
+        "never_seed:\n"
+        "  - {tool: WebFetch}\n"
+        "approved_seed:\n"
+        "  - {tool: Bash, arg_pattern: git status}\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.approval_timeout_seconds == 120
+    assert settings.front_desk_thread_key is None  # stub default
+    assert settings.never_seed[0].as_pair() == ("WebFetch", None)
+    assert settings.approved_seed[0].as_pair() == ("Bash", "git status")
+
+
 def test_missing_required_field_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

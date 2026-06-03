@@ -17,15 +17,17 @@ import logging
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from telegram import Bot, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
 )
 
+from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..persistence.contacts import get_or_create_contact
 from ..persistence.models import Task
 from .base import Adapter, Message, ReadyHook, Tier, classify_tier
@@ -35,6 +37,7 @@ logger = logging.getLogger("chief.adapters.telegram")
 PLATFORM = "telegram"
 TELEGRAM_LIMIT = 4096
 TOPIC_NAME_LIMIT = 128
+CALLBACK_PREFIX = "appr"  # approval button callback_data: "appr:{id}:{action}"
 
 
 class Engine(Protocol):
@@ -45,6 +48,47 @@ class Engine(Protocol):
     ) -> None: ...
     async def cancel(self, thread_key: str) -> bool: ...
     async def active_tasks(self) -> list[Task]: ...
+
+
+class ApprovalResolver(Protocol):
+    """The slice of :class:`~chief.gate.approvals.ApprovalManager` button taps call."""
+
+    async def resolve(
+        self, approval_id: int, action: ApprovalAction, *, decided_by: str
+    ) -> None: ...
+
+
+def _approval_keyboard(approval_id: int) -> InlineKeyboardMarkup:
+    """The four-button approval card keyboard (DESIGN: self-curating gate)."""
+
+    def button(label: str, action: ApprovalAction) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            label, callback_data=f"{CALLBACK_PREFIX}:{approval_id}:{action.value}"
+        )
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                button("✅ Approve once", ApprovalAction.APPROVE_ONCE),
+                button("❌ Deny once", ApprovalAction.DENY_ONCE),
+            ],
+            [
+                button("⭐ Always allow", ApprovalAction.ALWAYS_ALLOW),
+                button("🚫 Always deny", ApprovalAction.ALWAYS_DENY),
+            ],
+        ]
+    )
+
+
+def parse_callback(data: str) -> tuple[int, ApprovalAction] | None:
+    """Decode approval ``callback_data``, or ``None`` if it is not ours / malformed."""
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX:
+        return None
+    try:
+        return int(parts[1]), ApprovalAction(parts[2])
+    except ValueError:
+        return None
 
 
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -90,6 +134,24 @@ class TelegramTaskIO:
             chat_id=chat_id, message_thread_id=thread_id
         )
 
+    async def send_card(self, route: str, card: ApprovalCard) -> str:
+        """Post an approval card to ``route`` (a ``thread_key``); return its msg ref."""
+        chat_id, thread_id = _parse(route)
+        sent = await self._bot.send_message(
+            chat_id=chat_id,
+            text=card.text,
+            message_thread_id=thread_id or None,
+            reply_markup=_approval_keyboard(card.approval_id),
+        )
+        return f"{chat_id}:{sent.message_id}"
+
+    async def edit_card(self, msg_ref: str, text: str) -> None:
+        """Rewrite a posted card to its outcome, dropping the now-spent buttons."""
+        chat_str, message_str = msg_ref.split(":")
+        await self._bot.edit_message_text(
+            text=text, chat_id=int(chat_str), message_id=int(message_str)
+        )
+
 
 class TelegramAdapter(Adapter):
     """Owner-aware Telegram adapter that routes messages into the task engine."""
@@ -102,18 +164,23 @@ class TelegramAdapter(Adapter):
         owner_id: int,
         guest_ack: str,
         session_factory: async_sessionmaker[AsyncSession],
+        approvals: ApprovalResolver | None = None,
     ) -> None:
         self._app = application
         self._engine = engine
         self._owner_id = owner_id
         self._guest_ack = guest_ack
         self._session_factory = session_factory
+        self._approvals = approvals
         self._stop = asyncio.Event()
         self._register()
 
     def _register(self) -> None:
         self._app.add_handler(CommandHandler("cancel", self._on_cancel))
         self._app.add_handler(CommandHandler("tasks", self._on_tasks))
+        self._app.add_handler(
+            CallbackQueryHandler(self._on_callback, pattern=f"^{CALLBACK_PREFIX}:")
+        )
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -199,6 +266,27 @@ class TelegramAdapter(Adapter):
             return
         lines = [f"• {t.title or t.thread_key} — {t.status}" for t in tasks]
         await update.effective_message.reply_text("\n".join(lines))
+
+    async def _on_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Resolve an approval card button tap (owner only)."""
+        query = update.callback_query
+        user = update.effective_user
+        if query is None or user is None or query.data is None:
+            return
+        if classify_tier(sender_id=user.id, owner_id=self._owner_id) is not Tier.OWNER:
+            await query.answer("Not allowed.")
+            return
+        parsed = parse_callback(query.data)
+        if parsed is None or self._approvals is None:
+            await query.answer()
+            return
+        approval_id, action = parsed
+        await self._approvals.resolve(
+            approval_id, action, decided_by=str(user.id)
+        )
+        await query.answer()
 
     async def run(self, on_ready: ReadyHook | None = None) -> None:
         """Start polling and run until :meth:`stop` is called (shares the loop)."""
