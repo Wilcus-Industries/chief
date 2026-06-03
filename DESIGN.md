@@ -720,13 +720,12 @@ Approval gate + memory are built early because everything reuses them. Order res
 "verify Max auth first" rule — and pulls that proof ahead of the real skeleton as a
 throwaway slice (S0), so the one existential unknown is retired on day 1.
 
-**S0 — Walking skeleton (throwaway) — 🟡 core proven 2026-06-03; token+TG run pending.**
+**S0 — Walking skeleton (throwaway) — ✅ done; superseded by M0/M1, `s0/` deleted.**
 Telegram DM (owner) → core → Agent SDK one-shot → reply, running in a real container. No
 structure: no topics, no tools, no gate, no sqlite. Sole goal: prove **Max auth
 (`CLAUDE_CODE_OAUTH_TOKEN`) runs the SDK headless in docker on the subscription** (verify #1)
-and that a TG message round-trips. If this fails the project premise fails, so it goes first;
-the code is disposable and gets superseded by M0/M1. Code in `s0/` (`verify_auth.py`,
-`bot.py`, `Dockerfile`, `compose.yml`, runbook).
+and that a TG message round-trips. If this fails the project premise fails, so it went first;
+the code was disposable and is now superseded by M0/M1 (the real `src/chief/` package).
 
 > **Test results (2026-06-03).** Ran the SDK one-shot headless from Python on the host's
 > existing Max login (stored creds, no API key): got `reply: 'pong'`, `is_error: False`,
@@ -739,11 +738,14 @@ the code is disposable and gets superseded by M0/M1. Code in `s0/` (`verify_auth
 > HOME perms), not the auth premise.
 
 **Phase 0 — Foundations**
-- **M0 skeleton:** repo layout, `config.yaml`/pydantic-settings/Docker secrets, sqlite
-  schema, JSON logging, Telegram long-poll adapter that echoes + tier classification by
-  sender ID.
-- **M1 agent online:** wire the Agent SDK; owner one-shot chat (no tools). Max auth already
-  proven in S0 — here it's hardened into the real core (folds into M0 if S0 stands).
+- **M0 skeleton — ✅ done.** Real `src/chief/` package: `config.yaml`/pydantic-settings +
+  Docker secrets (`config.py`), full sqlite schema via async SQLAlchemy + aiosqlite
+  (`persistence/`), JSON logging (`obs/logging.py`), Telegram long-poll adapter with
+  tier-by-sender-ID classification (`adapters/`). `Dockerfile.core` + `docker-compose.yml`.
+- **M1 agent online — ✅ done (folded into M0).** Agent SDK wired for the owner one-shot
+  chat (`core/agent.py`); guests get a canned ack (full receptionist is M6). The
+  `CLAUDE_CODE_OAUTH_TOKEN` bridge keeps it on the Max subscription; `ANTHROPIC_API_KEY` is
+  rejected at startup. Persistent sessions / steering / resume land at M2.
 
 **Phase 1 — Core loop (the spine)**
 - **M2 task engine:** topics = tasks (forum topics), hybrid inline/background, milestone
