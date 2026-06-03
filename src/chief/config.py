@@ -39,6 +39,15 @@ class Settings(BaseSettings):
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
     )
 
+    # Task engine (M2). concurrency bounds turns actively generating; grace_seconds is
+    # the inline-vs-"working…" window; idle_archive_seconds is the no-activity → archive
+    # timer (distillation is a separate ~10-min trigger owned by M4); classifier_model
+    # runs the cheap stop-intent / warrants-a-task judgments.
+    concurrency: int = 3
+    grace_seconds: float = 6.0
+    idle_archive_seconds: int = 3600
+    classifier_model: str = "claude-haiku-4-5"
+
     # Secrets (secrets_dir / env).
     telegram_bot_token: str
     claude_code_oauth_token: str

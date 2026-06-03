@@ -1,13 +1,17 @@
 """Platform-neutral adapter interface and message types.
 
 Each chat platform implements :class:`Adapter`; the rest of the system speaks only in
-:class:`Message`/:class:`Reply` and :class:`Tier`. Tier is decided by the *sender's* id
-(exact owner-id match, no fuzzy matching — DESIGN: Identity & access).
+:class:`Message` and :class:`Tier`. Tier is decided by the *sender's* id (exact owner-id
+match, no fuzzy matching — DESIGN: Identity & access). Outbound replies go through the
+engine's :class:`~chief.core.tasks.TaskIO`, which the adapter implements.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+
+ReadyHook = Callable[[], Awaitable[None]]
 
 
 class Tier(Enum):
@@ -34,20 +38,14 @@ class Message:
     sender_name: str | None = None
 
 
-@dataclass(frozen=True)
-class Reply:
-    """A normalized outbound reply."""
-
-    text: str
-
-
 class Adapter(ABC):
     """A chat-platform connection that long-polls and routes inbound messages."""
 
     @abstractmethod
-    def run(self) -> None:
-        """Start the platform connection and block, routing messages until stopped.
+    async def run(self, on_ready: ReadyHook | None = None) -> None:
+        """Start the platform connection and route messages until ``stop`` is set.
 
-        Synchronous because long-poll clients (python-telegram-bot ``run_polling``)
-        own their event loop; one-time async setup runs before this is called.
+        Async so the adapter shares the engine's event loop (one loop drives polling,
+        per-task background turns, the semaphore, and idle timers). ``on_ready`` runs
+        once the connection is live (used for restart recovery, which must send).
         """

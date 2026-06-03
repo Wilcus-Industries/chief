@@ -1,14 +1,20 @@
-"""Entrypoint — wire settings, logging, db, and the Telegram adapter, then poll.
+"""Entrypoint — wire settings, logging, db, the task engine, and the adapter, then run.
 
-Run with ``python -m chief.app``. One-time async setup (schema init) runs under a
-throwaway loop before the adapter takes over the event loop via long-polling.
+Run with ``python -m chief.app``. Everything runs on one asyncio loop
+(:func:`asyncio.run`): schema init, the engine's per-task turns/timers, and the
+adapter's long-poll all share it. Restart recovery runs once the connection is live
+(``on_ready``), so it can ping the owner about tasks left mid-flight.
 """
 
 import asyncio
 import os
 
-from .adapters.telegram import TelegramAdapter
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from telegram.ext import Application
+
+from .adapters.telegram import TelegramAdapter, TelegramTaskIO
 from .config import Settings
+from .core.tasks import TaskManager
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
 
@@ -26,6 +32,48 @@ def load_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
+def build_components(
+    settings: Settings,
+    *,
+    application: Application,  # type: ignore[type-arg]
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[TaskManager, TelegramAdapter]:
+    """Wire the engine and adapter against a built ``application`` (shared bot)."""
+    manager = TaskManager(
+        session_factory=session_factory,
+        io=TelegramTaskIO(application.bot),
+        owner_model=settings.owner_model_default,
+        classifier_model=settings.classifier_model,
+        concurrency=settings.concurrency,
+        grace_seconds=settings.grace_seconds,
+        idle_archive_seconds=settings.idle_archive_seconds,
+    )
+    adapter = TelegramAdapter(
+        application=application,
+        engine=manager,
+        owner_id=settings.owner_telegram_id,
+        guest_ack=settings.guest_ack,
+        session_factory=session_factory,
+    )
+    return manager, adapter
+
+
+async def serve(settings: Settings) -> None:
+    """Bring up db + engine + adapter on one loop and run until stopped."""
+    engine: AsyncEngine = create_engine(settings.db_path)
+    await init_db(engine)
+    factory = session_factory(engine)
+    application = Application.builder().token(settings.telegram_bot_token).build()
+    manager, adapter = build_components(
+        settings, application=application, session_factory=factory
+    )
+    try:
+        await adapter.run(on_ready=manager.recover)
+    finally:
+        await manager.shutdown()
+        await engine.dispose()
+
+
 def main() -> None:
     configure_logging()
     settings = load_settings()
@@ -36,17 +84,7 @@ def main() -> None:
     # otherwise outrank it and bill the API.)
     os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = settings.claude_code_oauth_token
 
-    engine = create_engine(settings.db_path)
-    asyncio.run(init_db(engine))
-
-    adapter = TelegramAdapter(
-        token=settings.telegram_bot_token,
-        owner_id=settings.owner_telegram_id,
-        owner_model=settings.owner_model_default,
-        guest_ack=settings.guest_ack,
-        session_factory=session_factory(engine),
-    )
-    adapter.run()
+    asyncio.run(serve(settings))
 
 
 if __name__ == "__main__":
