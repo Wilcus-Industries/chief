@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+# Local tooling artifacts / secrets
+.claude/review-history.jsonl
+.claude/settings.local.json
+.env
