@@ -38,18 +38,19 @@ def test_metacharacter_commands_rejected(command: str) -> None:
     assert gp.is_safe_command(command) is False
 
 
-def test_destructive_binary_with_wildcard_rejected() -> None:
+def test_wildcard_on_any_binary_rejected() -> None:
+    # A glob's effect depends on the cwd at call time, so no binary may bless one.
     assert gp.is_safe_command("rm -rf *") is False
     assert gp.is_safe_command("rm file?") is False
-    assert gp.is_safe_command("/bin/rm -rf *") is False  # basename-aware
+    assert gp.is_safe_command("/bin/rm -rf *") is False
+    assert gp.is_safe_command("ls *.py") is False  # safe binary, still cwd-dependent
+    assert gp.is_safe_command("chmod -R 777 *") is False
+    assert gp.is_safe_command("git add file[1].txt") is False
 
 
-def test_destructive_binary_without_wildcard_admitted() -> None:
+def test_command_without_wildcard_admitted() -> None:
     assert gp.is_safe_command("rm -rf /tmp/build") is True
-
-
-def test_wildcard_on_safe_binary_admitted() -> None:
-    assert gp.is_safe_command("ls *.py") is True
+    assert gp.is_safe_command("ls -la /tmp") is True
 
 
 def test_unparseable_command_rejected() -> None:

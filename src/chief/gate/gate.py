@@ -61,6 +61,8 @@ READ_ONLY: dict[str, Callable[[dict[str, Any]], bool]] = {
     "Glob": _always,
     "Grep": _always,
     "WebSearch": _always,
+    # WebFetch is the GET-only built-in, so any input is read-only. A web tool that can
+    # POST must NOT reuse this name with ``_always`` — gate it with a method predicate.
     "WebFetch": _always,
 }
 

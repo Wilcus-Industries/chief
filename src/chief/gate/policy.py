@@ -7,8 +7,10 @@ rule broader than what the owner actually approved. Two defences:
   ``(binary, args)`` — the string is never handed to a shell. An entry carrying shell
   metacharacters (``;`` ``|`` ``>`` ``$`` …) is rejected: one ``(binary, arg-shape)``
   rule cannot honestly stand for a compound/piped command.
-- **No wildcards on destructive binaries.** ``rm -rf *`` matches the *string* but its
-  *effect* depends on the cwd, so a glob argument to ``rm``/``dd``/``mkfs`` is rejected.
+- **No wildcards in a persisted rule.** ``rm -rf *`` matches the *string* but its
+  *effect* depends on the cwd, so any glob argument (``*`` ``?`` ``[``) is rejected
+  before a rule is blessed — the hazard is the same for ``rm`` as for ``chmod`` or
+  ``mv``. Once-only approval still works; only the permanent rule is withheld.
 
 Matching is exact on the canonical ``(tool, arg_pattern)``: a stored rule only ever
 auto-decides an identical call. ``arg_pattern is None`` is a whole-tool rule (e.g. NEVER
@@ -16,7 +18,6 @@ the ``WebFetch`` tool outright).
 """
 
 import json
-import os
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -31,12 +32,8 @@ COMMAND_TOOLS = frozenset({"Bash"})
 
 #: Shell features a single safe-matched rule cannot faithfully represent.
 _METACHARACTERS = frozenset(";|&<>$`()\n{}")
-#: Glob characters whose expansion makes a destructive command non-deterministic.
+#: Glob characters whose cwd-dependent expansion makes a stored rule non-deterministic.
 _WILDCARDS = frozenset("*?[")
-#: Binaries where a wildcard argument turns a typo into data loss.
-DESTRUCTIVE_BINARIES = frozenset(
-    {"rm", "rmdir", "dd", "shred", "mkfs", "mke2fs", "fdisk", "parted", "wipefs"}
-)
 
 
 def parse_command(command: str) -> tuple[str, list[str]]:
@@ -70,9 +67,11 @@ def is_safe_command(command: str) -> bool:
         return False
     if not binary:
         return False
-    if os.path.basename(binary) in DESTRUCTIVE_BINARIES:
-        if any(any(ch in _WILDCARDS for ch in arg) for arg in args):
-            return False
+    # A glob argument resolves against the cwd at call time, so a stored exact-match
+    # rule carrying one would re-fire against whatever happens to be there. Withhold the
+    # rule for any wildcard arg, on any binary — once-only approval is unaffected.
+    if any(any(ch in _WILDCARDS for ch in arg) for arg in args):
+        return False
     return True
 
 

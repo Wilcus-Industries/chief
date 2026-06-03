@@ -7,7 +7,9 @@ is closed (a decided approval never reopens). ``list_pending`` feeds boot-time r
 a tap that lands after a restart still records a decision.
 """
 
-from sqlalchemy import select
+from typing import Any, cast
+
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Approval, _utcnow
@@ -64,3 +66,26 @@ async def list_pending(session: AsyncSession) -> list[Approval]:
     """Return undecided approvals (``requested``/``notified``), oldest first."""
     stmt = select(Approval).where(Approval.state.in_(PENDING)).order_by(Approval.id)
     return list((await session.execute(stmt)).scalars())
+
+
+async def try_decide(
+    session: AsyncSession,
+    approval_id: int,
+    state: str,
+    *,
+    decided_by: str | None,
+) -> bool:
+    """Atomically move a *pending* approval to terminal ``state``; stamp the decider.
+
+    Returns ``True`` only for the writer that flipped it — a single ``UPDATE … WHERE
+    state IN (pending)`` so two racing taps (or a tap racing the timeout) cannot both
+    decide the same row. ``False`` if it was already terminal or unknown.
+    """
+    stmt = (
+        update(Approval)
+        .where(Approval.id == approval_id, Approval.state.in_(PENDING))
+        .values(state=state, decided_by=decided_by, decided_at=_utcnow())
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    await session.commit()
+    return bool(result.rowcount)

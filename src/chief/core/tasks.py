@@ -263,6 +263,10 @@ class TaskManager:
         """
         if self._policy is None or self._approvals is None or self._audit is None:
             return None, None
+        # Owner work approves in-thread. A guest-originated approval must route to the
+        # Front Desk; until M6 wires it (and the first guest-facing effectful tool), no
+        # such call exists, so the ``or thread_key`` fallback is unreachable — M6 should
+        # make a missing front_desk_thread_key a hard error rather than self-route.
         route = (
             thread_key
             if tier == "owner"
