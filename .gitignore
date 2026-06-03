@@ -13,3 +13,8 @@ dist/
 .claude/review-history.jsonl
 .claude/settings.local.json
 .env
+# Docker secrets — keep the dir's README, never the real token files
+/secrets/*
+!/secrets/README.md
+# Local sqlite databases
+*.db

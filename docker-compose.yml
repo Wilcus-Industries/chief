@@ -1,0 +1,36 @@
+# chief core stack (M0/M1). Outbound-only — Telegram long-poll, no public ingress.
+# Secrets are Docker secrets (files under ./secrets/, mounted at /run/secrets, read by
+# config.py). The sandbox and MCP services arrive at M7/M5.
+#
+# Setup:  put your tokens in ./secrets/telegram_bot_token and ./secrets/claude_code_oauth_token
+#         set OWNER_TELEGRAM_ID (env or .env), then:  docker compose up core
+services:
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile.core
+    restart: unless-stopped
+    environment:
+      # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:?set your numeric Telegram user id}
+    secrets:
+      - telegram_bot_token
+      - claude_code_oauth_token
+    volumes:
+      - sqlite-data:/data
+    healthcheck:
+      # init_db creates the sqlite file on boot, so its presence means the app got past startup.
+      test: ["CMD", "test", "-f", "/data/chief.db"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  telegram_bot_token:
+    file: ./secrets/telegram_bot_token
+  claude_code_oauth_token:
+    file: ./secrets/claude_code_oauth_token
+
+volumes:
+  sqlite-data:

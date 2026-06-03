@@ -1,26 +1,44 @@
 [project]
 name = "chief"
 version = "0.0.0"
-description = "Personal AI assistant on Claude Max — S0 walking skeleton (throwaway)."
+description = "Personal AI assistant on Claude Max — foundations (M0/M1)."
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.2",
     "python-telegram-bot>=21",
+    "sqlalchemy>=2",
+    "aiosqlite>=0.20",
+    "pydantic-settings>=2",
+    "pyyaml>=6",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.6",
     "mypy>=1.11",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
 ]
 
-[tool.uv]
-# S0 ships scripts under s0/, not an installable package — install deps only.
-package = false
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chief"]
 
 [tool.ruff]
 target-version = "py312"
-src = ["s0"]
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["chief"]
+strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

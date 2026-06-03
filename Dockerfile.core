@@ -1,6 +1,5 @@
-# S0 walking skeleton (throwaway). Headless image for both the auth proof and the
-# Telegram bot. The Agent SDK shells out to the `claude` CLI, so the image needs the
-# Node-based Claude Code CLI alongside the Python deps.
+# chief core image. The Agent SDK shells out to the `claude` CLI, so the image carries
+# the Node-based Claude Code CLI alongside the Python package (proven in s0/Dockerfile).
 FROM python:3.12-slim-bookworm
 
 # Node runtime + the Claude Code CLI the SDK invokes (`shutil.which("claude")`).
@@ -14,12 +13,15 @@ RUN apt-get update \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
-COPY pyproject.toml ./
-COPY s0/ ./s0/
-RUN uv sync --no-dev
+# Install deps + the chief package from the locked resolution (src/ needed for the build).
+COPY pyproject.toml uv.lock ./
+COPY src/ ./src/
+RUN uv sync --no-dev --frozen
+
+# Non-secret runtime config; secrets arrive as a Docker secret mount at /run/secrets.
+COPY config.yaml ./
 
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
 
-# Default to the auth proof; override the command (see compose.yml) to run the bot.
-CMD ["python", "s0/verify_auth.py"]
+CMD ["python", "-m", "chief.app"]

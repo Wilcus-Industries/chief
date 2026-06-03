@@ -1,0 +1,16 @@
+# Non-secret configuration (committed). Secrets live in Docker secrets / env — never here.
+# Every value here is overridable by an environment variable of the same name (uppercased).
+
+# Your numeric Telegram user id (the one privileged owner). Ask @userinfobot.
+owner_telegram_id: 0
+owner_name: the owner
+
+# Model posture (DESIGN: Sonnet default for the owner; Opus is approval-gated, later).
+owner_model_default: claude-sonnet-4-6
+guest_model: claude-sonnet-4-6
+
+# sqlite file path (inside the container this is on the persisted volume).
+db_path: /data/chief.db
+
+# What a guest hears back for now (full receptionist scope is M6).
+guest_ack: Thanks for reaching out — I'm an assistant and I've passed your message along.
