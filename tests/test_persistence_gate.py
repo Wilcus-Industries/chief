@@ -64,6 +64,38 @@ async def test_get_missing_returns_none(db_session: AsyncSession) -> None:
     assert await appr_repo.get(db_session, 9999) is None
 
 
+async def test_try_decide_is_atomic_first_writer_wins(
+    db_session: AsyncSession,
+) -> None:
+    approval = await appr_repo.create_approval(db_session, task_id=None, kind="Bash")
+
+    first = await appr_repo.try_decide(
+        db_session, approval.id, appr_repo.APPROVED, decided_by="42"
+    )
+    second = await appr_repo.try_decide(
+        db_session, approval.id, appr_repo.DENIED, decided_by="99"
+    )
+
+    assert first is True
+    assert second is False  # already terminal — not overwritten
+    reloaded = await appr_repo.get(db_session, approval.id)
+    assert reloaded is not None
+    assert reloaded.state == appr_repo.APPROVED
+    assert reloaded.decided_by == "42"
+    assert reloaded.decided_at is not None
+
+
+async def test_try_decide_unknown_id_returns_false(
+    db_session: AsyncSession,
+) -> None:
+    assert (
+        await appr_repo.try_decide(
+            db_session, 9999, appr_repo.APPROVED, decided_by="42"
+        )
+        is False
+    )
+
+
 # ---- policy ------------------------------------------------------------------
 
 

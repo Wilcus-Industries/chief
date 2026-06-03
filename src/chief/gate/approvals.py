@@ -30,12 +30,12 @@ from ..persistence.approvals import (
     APPROVED,
     DENIED,
     NOTIFIED,
-    TERMINAL,
     TIMED_OUT,
     create_approval,
     get,
     list_pending,
     set_state,
+    try_decide,
 )
 from .policy import COMMAND_TOOLS, PolicyStore
 
@@ -94,7 +94,8 @@ class _Live:
 def _preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     """A one-line, human-readable summary of the pending tool call."""
     if tool_name in COMMAND_TOOLS:
-        return f"Run: {tool_input.get('command', '')}".strip()
+        command = str(tool_input.get("command", "")).strip()
+        return f"Run: {command}"
     body = json.dumps(tool_input, default=str)
     if len(body) > 300:
         body = body[:297] + "…"
@@ -163,7 +164,7 @@ class ApprovalManager:
             if row is not None:
                 await set_state(session, row, NOTIFIED)
 
-        future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._live[approval_id] = _Live(
             future=future,
             msg_ref=msg_ref,
@@ -181,25 +182,25 @@ class ApprovalManager:
     async def resolve(
         self, approval_id: int, action: ApprovalAction, *, decided_by: str
     ) -> None:
-        """Apply a button tap: persist, (maybe) write a rule, audit, edit card, wake."""
-        async with self._sf() as session:
-            row = await get(session, approval_id)
-            if row is None or row.state in TERMINAL:
-                return  # unknown or already decided — idempotent
+        """Apply a button tap: atomically decide, (maybe) write a rule, audit, edit.
 
-        live = self._live.get(approval_id)
-        note = await self._persist_rule(action, live) if action.is_always else ""
-
+        The decision is a single ``UPDATE … WHERE state IN (pending)``; only the writer
+        that flips the row proceeds, so concurrent taps (or a tap racing the timeout)
+        can't double-decide, double-audit, or persist a rule against a row that another
+        tap denied. A losing/duplicate tap is a silent no-op (idempotent).
+        """
         async with self._sf() as session:
-            row = await get(session, approval_id)
-            if row is None or row.state in TERMINAL:
-                return
-            await set_state(
+            won = await try_decide(
                 session,
-                row,
+                approval_id,
                 APPROVED if action.allowed else DENIED,
                 decided_by=decided_by,
             )
+        if not won:
+            return  # unknown or already decided — the atomic UPDATE settled the race
+
+        live = self._live.get(approval_id)
+        note = await self._persist_rule(action, live) if action.is_always else ""
         self._audit.log(
             {
                 "event": "approval_decided",
@@ -250,11 +251,14 @@ class ApprovalManager:
 
     async def _expire(self, approval_id: int) -> bool:
         async with self._sf() as session:
-            row = await get(session, approval_id)
-            if row is not None and row.state not in TERMINAL:
-                await set_state(session, row, TIMED_OUT, decided_by="timeout")
-        self._audit.log({"event": "approval_timed_out", "approval_id": approval_id})
-        live = self._live.get(approval_id)
-        if live is not None and live.msg_ref is not None:
-            await self._io.edit_card(live.msg_ref, "⌛ Timed out — denied.")
+            won = await try_decide(
+                session, approval_id, TIMED_OUT, decided_by="timeout"
+            )
+        if won:  # a tap that landed first already decided it — don't double-edit
+            self._audit.log(
+                {"event": "approval_timed_out", "approval_id": approval_id}
+            )
+            live = self._live.get(approval_id)
+            if live is not None and live.msg_ref is not None:
+                await self._io.edit_card(live.msg_ref, "⌛ Timed out — denied.")
         return False

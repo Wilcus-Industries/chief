@@ -273,6 +273,34 @@ async def test_resolve_is_idempotent(
     assert row is not None and row.state == appr_repo.APPROVED  # unchanged
 
 
+async def test_concurrent_resolves_decide_once(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io, audit = FakeIO(), RecordingAudit()
+    manager, _ = await _manager(session_factory, io=io, audit=audit)
+
+    parked = asyncio.create_task(
+        manager.request(
+            task_id=None,
+            thread_key="-100:5",
+            tier="owner",
+            tool_name="Bash",
+            tool_input={"command": "git push"},
+            route="-100:5",
+        )
+    )
+    await _settle(lambda: bool(io.cards))
+    approval_id = io.cards[0][1].approval_id
+    # Two taps land at once; the atomic decide must let exactly one through.
+    await asyncio.gather(
+        manager.resolve(approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"),
+        manager.resolve(approval_id, ApprovalAction.DENY_ONCE, decided_by="99"),
+    )
+    await parked
+
+    assert len(_events(audit, "approval_decided")) == 1
+
+
 async def test_re_arm_registers_pending_and_resolves(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
