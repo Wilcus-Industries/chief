@@ -1,0 +1,24 @@
+diff --git a/src/transports/http.ts b/src/transports/http.ts
+index c8d6a0e..3668951 100644
+--- a/src/transports/http.ts
++++ b/src/transports/http.ts
+@@ -1,5 +1,6 @@
+ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
++import { randomUUID } from "node:crypto";
+ import http from "http";
+ import { TokenManager } from "../auth/tokenManager.js";
+ import { CalendarRegistry } from "../services/CalendarRegistry.js";
+@@ -110,9 +111,10 @@ export class HttpTransportHandler {
+     const port = this.config.port || 3000;
+     const host = this.config.host || '127.0.0.1';
+ 
+-    // Configure transport for stateless mode to allow multiple initialization cycles
++    // Stateful mode: a sessionIdGenerator makes the shared transport session-tracked, so
++    // reusing it across requests is allowed (the SDK's stateless-reuse guard never fires).
+     const transport = new StreamableHTTPServerTransport({
+-      sessionIdGenerator: undefined // Stateless mode - allows multiple initializations
++      sessionIdGenerator: () => randomUUID() // Stateful mode - session-tracked, reuse allowed
+     });
+ 
+     await this.server.connect(transport);
