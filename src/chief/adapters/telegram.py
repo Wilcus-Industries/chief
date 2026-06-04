@@ -14,7 +14,6 @@ map to forum topics.
 
 import asyncio
 import logging
-from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,42 +27,34 @@ from telegram.ext import (
 )
 
 from ..gate.approvals import ApprovalAction, ApprovalCard
-from ..memory.store import OWNER_NAMESPACE, Fact
+from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
-from ..persistence.models import Task
-from .base import Adapter, Message, ReadyHook, Tier, classify_tier
+from .base import (
+    CALLBACK_PREFIX,
+    Adapter,
+    ApprovalResolver,
+    Engine,
+    MemoryReader,
+    Message,
+    ReadyHook,
+    Tier,
+    classify_tier,
+    parse_callback,
+)
+from .base import (
+    split_message as _split,
+)
 
 logger = logging.getLogger("chief.adapters.telegram")
 
 PLATFORM = "telegram"
 TELEGRAM_LIMIT = 4096
 TOPIC_NAME_LIMIT = 128
-CALLBACK_PREFIX = "appr"  # approval button callback_data: "appr:{id}:{action}"
 
 
-class Engine(Protocol):
-    """The slice of :class:`~chief.core.tasks.TaskManager` the adapter drives."""
-
-    async def dispatch(
-        self, *, thread_key: str, text: str, is_general: bool = False
-    ) -> None: ...
-    async def cancel(self, thread_key: str) -> bool: ...
-    async def active_tasks(self) -> list[Task]: ...
-
-
-class ApprovalResolver(Protocol):
-    """The slice of :class:`~chief.gate.approvals.ApprovalManager` button taps call."""
-
-    async def resolve(
-        self, approval_id: int, action: ApprovalAction, *, decided_by: str
-    ) -> None: ...
-
-
-class MemoryReader(Protocol):
-    """The slice of :class:`~chief.memory.store.MemoryStore` the commands touch."""
-
-    def list_facts(self, namespace: str) -> list[Fact]: ...
-    async def forget(self, namespace: str, query: str) -> list[Fact]: ...
+def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Telegram-defaulted wrapper over the shared base ``split_message``."""
+    return _split(text, limit)
 
 
 def _approval_keyboard(approval_id: int) -> InlineKeyboardMarkup:
@@ -86,27 +77,6 @@ def _approval_keyboard(approval_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
-
-
-def parse_callback(data: str) -> tuple[int, ApprovalAction] | None:
-    """Decode approval ``callback_data``, or ``None`` if it is not ours / malformed."""
-    parts = data.split(":")
-    if len(parts) != 3 or parts[0] != CALLBACK_PREFIX:
-        return None
-    try:
-        return int(parts[1]), ApprovalAction(parts[2])
-    except ValueError:
-        return None
-
-
-def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
-    """Split ``text`` into chunks within Telegram's per-message limit.
-
-    Minimal hard split (M2); smart/file-aware splitting is M8.
-    """
-    if len(text) <= limit:
-        return [text]
-    return [text[i : i + limit] for i in range(0, len(text), limit)]
 
 
 def _parse(thread_key: str) -> tuple[int, int]:

@@ -615,7 +615,7 @@ assistant"). Honest about being an assistant; sets recipient expectations.
 
 - Python, `uv + ruff + mypy + pytest` (already scaffolded).
 - Claude Agent SDK (Python).
-- `python-telegram-bot`, `discord.py` (candidates — TBD).
+- `python-telegram-bot`, `discord.py` (both in use — Telegram long-poll + Discord gateway).
 - docker compose.
 
 **Testing:** TDD per `CLAUDE.md`. **Mocked unit + integration** (SDK, Telegram, Google all
@@ -637,7 +637,7 @@ chief/
     adapters/                # one per platform behind a shared interface
       base.py                # Adapter iface, Message type + tier classification, TaskIO
       telegram.py            # long-poll; supergroup topics + DM + group-mention; TaskIO impl
-      discord.py             # later
+      discord.py             # gateway; channel threads = tasks; TaskIO + ApprovalIO impl
     core/
       agent.py               # one-shot Agent SDK query helper (NO_REPLY sentinel)
       session.py             # persistent ClaudeSDKClient session per task (resume/stream)
@@ -789,6 +789,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 - **M11 group chats + Opus escalation** (approval-gated).
 
 **Phase 4 — Ship**
-- **M12 Discord adapter:** private server, threads = tasks.
+- **M12 Discord adapter** ✅ *(built early)***:** private server, threads = tasks; full
+  parity with Telegram (commands, 4-button approval cards, guest ack), runs alongside it
+  off one DB on its own platform-bound engine stack.
 - **M13 hardening:** CI/CD (GHCR + SSH), encryption-at-rest (age), memory-repo backup,
   least-privilege, `BOOTSTRAP.md` onboarding, live sandbox tests.

@@ -1,9 +1,15 @@
 # chief core stack (M0/M1) + the mcp-gcal calendar server (M5). Outbound-only —
-# Telegram long-poll, no public ingress. Secrets are Docker secrets (files under
-# ./secrets/, mounted at /run/secrets, read by config.py). The sandbox arrives at M7.
+# Telegram long-poll / Discord gateway, no public ingress. Secrets are Docker secrets
+# (files under ./secrets/, mounted at /run/secrets, read by config.py). Sandbox at M7.
 #
-# Setup:  put your tokens in ./secrets/telegram_bot_token and ./secrets/claude_code_oauth_token
-#         set OWNER_TELEGRAM_ID (env or .env), then:  docker compose up core
+# Setup:  put ./secrets/claude_code_oauth_token, then configure either or both chat
+#         platforms (config rejects boot with neither):
+#           Telegram — ./secrets/telegram_bot_token + OWNER_TELEGRAM_ID
+#           Discord  — ./secrets/discord_bot_token  + OWNER_DISCORD_ID (enable the
+#                      privileged message_content intent in the Developer Portal)
+#         A referenced docker-secret file must exist, so for the platform you skip,
+#         `touch` its empty token file (e.g. `touch secrets/discord_bot_token`). Then:
+#           docker compose up core
 #
 # Calendar (M5, opt-in):  mint the token (python -m chief.tools.calendar.auth), set
 #         calendar_enabled: true in config.yaml, then:  docker compose --profile calendar up
@@ -16,9 +22,13 @@ services:
     restart: unless-stopped
     environment:
       # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
-      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:?set your numeric Telegram user id}
+      # Both owner ids are optional here — config requires at least one platform fully set
+      # (id + token). Leave one blank to run the other platform only.
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
+      OWNER_DISCORD_ID: ${OWNER_DISCORD_ID:-}
     secrets:
       - telegram_bot_token
+      - discord_bot_token
       - claude_code_oauth_token
     volumes:
       - sqlite-data:/data
@@ -72,6 +82,8 @@ services:
 secrets:
   telegram_bot_token:
     file: ./secrets/telegram_bot_token
+  discord_bot_token:
+    file: ./secrets/discord_bot_token
   claude_code_oauth_token:
     file: ./secrets/claude_code_oauth_token
   google_oauth_client.json:

@@ -1,9 +1,10 @@
 """Typed application settings, split non-secret config from secrets.
 
 Non-secret values come from ``config.yaml`` (committed) with environment-variable
-overrides; secrets (Telegram + Claude OAuth tokens) come from a Docker ``secrets_dir``
-(``/run/secrets``) with an environment fallback for local runs. Precedence, highest
-first: explicit init kwargs → environment → ``config.yaml`` → secret files.
+overrides; secrets (the per-platform bot tokens + the Claude OAuth token) come from a
+Docker ``secrets_dir`` (``/run/secrets``) with an environment fallback for local runs.
+Precedence, highest first: explicit init kwargs → environment → ``config.yaml`` → secret
+files. At least one chat platform (Telegram and/or Discord) must be fully configured.
 """
 
 import os
@@ -40,8 +41,11 @@ class Settings(BaseSettings):
         protected_namespaces=(),
     )
 
-    # Non-secret config (config.yaml / env).
-    owner_telegram_id: int
+    # Non-secret config (config.yaml / env). Each platform's owner id is optional —
+    # configure Telegram, Discord, or both (the after-validator requires at least one).
+    # 0 is the "unset" sentinel committed in config.yaml, treated as not configured.
+    owner_telegram_id: int | None = None
+    owner_discord_id: int | None = None
     owner_name: str = "the owner"
     owner_model_default: str = "claude-sonnet-4-6"
     guest_model: str = "claude-sonnet-4-6"
@@ -89,9 +93,37 @@ class Settings(BaseSettings):
     gcal_mcp_url: str = "http://mcp-gcal:3000/"
     owner_tz: str = "UTC"
 
-    # Secrets (secrets_dir / env).
-    telegram_bot_token: str
+    # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
+    # with their owner id by the configured-platform check; the OAuth token is always
+    # required (it authenticates the Claude SDK regardless of chat platform).
+    telegram_bot_token: str | None = None
+    discord_bot_token: str | None = None
     claude_code_oauth_token: str
+
+    @property
+    def telegram_configured(self) -> bool:
+        """True iff both the Telegram owner id and bot token are set (non-empty)."""
+        return bool(self.owner_telegram_id) and bool(self.telegram_bot_token)
+
+    @property
+    def discord_configured(self) -> bool:
+        """True iff both the Discord owner id and bot token are set (non-empty)."""
+        return bool(self.owner_discord_id) and bool(self.discord_bot_token)
+
+    @model_validator(mode="after")
+    def _require_a_platform(self) -> "Settings":
+        """Refuse to start unless at least one chat platform is fully configured.
+
+        Each platform needs both its owner id and its bot token; a half-set platform
+        (id without token, or vice versa) does not count. This replaces the old
+        "Telegram is mandatory" shape now that Discord is a first-class peer.
+        """
+        if not self.telegram_configured and not self.discord_configured:
+            raise ValueError(
+                "no chat platform configured — set owner_telegram_id + "
+                "telegram_bot_token and/or owner_discord_id + discord_bot_token."
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod

@@ -1,8 +1,11 @@
 # Non-secret configuration (committed). Secrets live in Docker secrets / env — never here.
 # Every value here is overridable by an environment variable of the same name (uppercased).
 
-# Your numeric Telegram user id (the one privileged owner). Ask @userinfobot.
+# Owner ids — the one privileged user per platform. Configure at least one platform
+# (id + token); 0 means "unset / platform off". Telegram id: ask @userinfobot. Discord id:
+# Developer Mode → right-click yourself → Copy User ID. Tokens live in Docker secrets.
 owner_telegram_id: 0
+owner_discord_id: 0
 owner_name: the owner
 
 # Model posture (DESIGN: Sonnet default for the owner; Opus is approval-gated, later).

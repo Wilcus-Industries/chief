@@ -113,13 +113,80 @@ def test_m3_gate_defaults_and_seed_parsing(
     assert settings.approved_seed[0].as_pair() == ("Bash", "git status")
 
 
-def test_missing_required_field_errors(
+def test_no_platform_configured_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Token present but no owner id → Telegram half-set, Discord absent: rejected.
     (tmp_path / "config.yaml").write_text("owner_name: Will\n")  # no owner_telegram_id
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValidationError, match="owner_telegram_id"):
+    with pytest.raises(ValidationError, match="no chat platform configured"):
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_telegram_only_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 42\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.telegram_configured
+    assert not settings.discord_configured
+
+
+def test_discord_only_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No Telegram at all; Discord owner id + token alone is a valid deploy.
+    (tmp_path / "config.yaml").write_text("owner_discord_id: 99\n")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(parents=True, exist_ok=True)
+    (secrets / "discord_bot_token").write_text("dc-secret")
+    (secrets / "claude_code_oauth_token").write_text("oauth-secret")
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.discord_configured
+    assert not settings.telegram_configured
+    assert settings.discord_bot_token == "dc-secret"
+
+
+def test_both_platforms_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 42\nowner_discord_id: 99\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    (secrets / "discord_bot_token").write_text("dc-secret")
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.telegram_configured
+    assert settings.discord_configured
+
+
+def test_zero_owner_id_is_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # config.yaml ships owner_telegram_id: 0 as the unset sentinel — must not count.
+    yaml = "owner_telegram_id: 0\nowner_discord_id: 99\n"
+    (tmp_path / "config.yaml").write_text(yaml)
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    (secrets / "discord_bot_token").write_text("dc-secret")
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert not settings.telegram_configured  # id 0 → not configured
+    assert settings.discord_configured

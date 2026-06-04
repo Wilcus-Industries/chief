@@ -7,9 +7,25 @@ files** — `.gitignore` keeps everything in this directory except this README o
 | File | Value |
 |------|-------|
 | `telegram_bot_token` | Bot token from @BotFather |
+| `discord_bot_token` | Bot token from the Discord Developer Portal (Bot → Reset Token) |
 | `claude_code_oauth_token` | Output of `claude setup-token` (1-year Max OAuth token) |
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
 | `google_calendar_token.json` | Minted by the auth helper from the client above |
+
+## Chat platforms (Telegram and/or Discord)
+
+Configure **either or both** — the app refuses to boot with neither. Each platform needs
+its token (above) **and** its owner id (set as an env var, not a secret):
+
+| Env var | Value |
+|---------|-------|
+| `OWNER_TELEGRAM_ID` | Your numeric Telegram user id (ask @userinfobot) |
+| `OWNER_DISCORD_ID` | Your numeric Discord user id (Developer Mode → right-click yourself → Copy User ID) |
+
+Docker requires every referenced secret file to exist, so for a platform you skip, create
+an empty token file (e.g. `touch secrets/discord_bot_token`). The Discord bot also needs
+the privileged **message_content** intent — enable it under Bot → Privileged Gateway
+Intents in the Developer Portal, or Discord delivers empty message content.
 
 Do **not** create an `ANTHROPIC_API_KEY` — it outranks the OAuth token and would bill the
 API instead of the Max subscription. The app refuses to start if it is set.
