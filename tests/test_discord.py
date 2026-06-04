@@ -111,7 +111,7 @@ def _text_channel(channel_id: int = 100) -> Any:
     return channel
 
 
-def _thread(parent_id: int = 100, thread_id: int = 5) -> Any:
+def _thread(parent_id: int | None = 100, thread_id: int = 5) -> Any:
     """An in-channel thread (a task) — ``isinstance`` passes via the spec."""
     thread = MagicMock(spec=discord.Thread)
     thread.parent_id = parent_id
@@ -192,6 +192,20 @@ def test_to_message_ignores_empty(
         )
         is None
     )
+
+
+def test_to_message_ignores_thread_without_parent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An orphaned thread has no parent channel to key on — skip it, don't build a
+    # "None:5" key that would later blow up in _parse's int().
+    adapter = _adapter(session_factory, FakeEngine())
+
+    message = adapter.to_message(
+        _message(user_id=OWNER_ID, content="hi", channel=_thread(parent_id=None))
+    )
+
+    assert message is None
 
 
 # ---- inbound routing ---------------------------------------------------------

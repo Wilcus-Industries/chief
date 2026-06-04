@@ -11,6 +11,7 @@ tasks left mid-flight.
 """
 
 import asyncio
+import logging
 import os
 
 import discord
@@ -30,6 +31,8 @@ from .memory.versioning import GitVersioner, NullVersioner, Versioner
 from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
+
+logger = logging.getLogger("chief.app")
 
 DOCKER_SECRETS_DIR = "/run/secrets"
 
@@ -277,7 +280,15 @@ async def serve(settings: Settings) -> None:
             )
         )
     finally:
-        for manager, _adapter, _approvals in stacks:
+        # gather propagates the first failure without cancelling its siblings, so one
+        # adapter crashing leaves the others' connections live — close every adapter
+        # before disposing the engine. Guard each stop so one failure can't mask the
+        # rest or skip the engine dispose.
+        for manager, adapter, _approvals in stacks:
+            try:
+                await adapter.stop()
+            except Exception:
+                logger.exception("adapter stop failed during shutdown")
             await manager.shutdown()
         await engine.dispose()
 

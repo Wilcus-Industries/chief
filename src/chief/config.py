@@ -10,7 +10,7 @@ files. At least one chat platform (Telegram and/or Discord) must be fully config
 import os
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -99,6 +99,19 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     discord_bot_token: str | None = None
     claude_code_oauth_token: str
+
+    @field_validator("owner_telegram_id", "owner_discord_id", mode="before")
+    @classmethod
+    def _blank_owner_id_is_none(cls, value: Any) -> Any:
+        """Treat a blank owner id as unset (``None``).
+
+        docker-compose passes ``${OWNER_*_ID:-}`` as an *empty string* when the deployer
+        leaves it unset; without this, pydantic fails to parse ``""`` as an int and the
+        single-platform deploy can't boot. Whitespace-only is treated the same.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def telegram_configured(self) -> bool:
