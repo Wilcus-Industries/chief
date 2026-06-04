@@ -9,7 +9,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.core.session import Final, Milestone, TurnEvent
-from chief.core.tasks import WORKING_ACK, SessionProto, TaskManager
+from chief.core.tasks import (
+    MEMORY_TOOLS,
+    WEB_META_TOOLS,
+    WORKING_ACK,
+    SessionProto,
+    TaskManager,
+)
 from chief.memory.store import Fact, FactDraft
 from chief.persistence.tasks import (
     CANCELLED,
@@ -22,6 +28,7 @@ from chief.persistence.tasks import (
     set_session_id,
     set_status,
 )
+from chief.tools.calendar import mcp as calendar_mcp
 
 Factory = Callable[..., SessionProto]
 
@@ -741,6 +748,9 @@ def _calendar_manager(
     factory: Factory,
     enabled: bool = True,
 ) -> TaskManager:
+    services = (
+        (calendar_mcp.service("http://mcp-calendar:8003/mcp"),) if enabled else ()
+    )
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -752,8 +762,7 @@ def _calendar_manager(
         memory=FakeMemory(),
         memory_dir="/tmp/mem",
         owner_name="Will",
-        calendar_enabled=enabled,
-        gcal_mcp_url="http://mcp-gcal:3000/",
+        google_services=services,
         owner_tz="America/New_York",
     )
 
@@ -769,17 +778,20 @@ async def test_owner_calendar_session_wires_mcp_and_partitions_tools(
     await mgr._ensure_task("-100:5", tier="owner")
 
     assert captured["mcp_servers"] == {
-        "gcal": {"type": "http", "url": "http://mcp-gcal:3000/"}
+        "calendar": {"type": "http", "url": "http://mcp-calendar:8003/mcp"}
     }
     allowed = captured["allowed_tools"]
-    assert "mcp__gcal__list-events" in allowed  # reads pre-approved
-    assert "mcp__gcal__create-event" not in allowed  # writes reach approval
+    assert "mcp__calendar__list-events" in allowed  # reads pre-approved
+    assert "mcp__calendar__create-event" not in allowed  # writes reach approval
     assert "Read" in allowed  # memory tools retained
-    assert "mcp__gcal__delete-event" in captured["disallowed_tools"]  # deferred blocked
+    assert "WebSearch" in allowed  # web/meta tools added for the owner
+    assert "ToolSearch" in allowed
+    # deferred (delete) hard-blocked; reads/writes never land in disallowed
+    assert "mcp__calendar__delete-event" in captured["disallowed_tools"]
     await mgr.shutdown()
 
 
-async def test_guest_gets_no_calendar_tools(
+async def test_guest_gets_no_calendar_or_web_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     captured: dict[str, Any] = {}
@@ -789,12 +801,13 @@ async def test_guest_gets_no_calendar_tools(
 
     await mgr._ensure_task("-100:9", tier="guest")
 
-    assert "mcp_servers" not in captured  # no calendar container for guests
+    assert "mcp_servers" not in captured  # no Google container for guests
+    # Guests stay narrow: only the memory file tools, no web/meta, no Google.
     assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
     await mgr.shutdown()
 
 
-async def test_calendar_disabled_owner_has_no_mcp(
+async def test_calendar_disabled_owner_has_no_mcp_but_keeps_web_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     captured: dict[str, Any] = {}
@@ -805,5 +818,6 @@ async def test_calendar_disabled_owner_has_no_mcp(
     await mgr._ensure_task("-100:5", tier="owner")
 
     assert "mcp_servers" not in captured
-    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    # No Google tools, but the owner still gets memory + web/meta tools.
+    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
     await mgr.shutdown()

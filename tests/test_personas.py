@@ -52,31 +52,52 @@ def test_owner_calendar_guidance_included_with_tz_when_enabled() -> None:
         tier="owner",
         memory=FakeMemory(),
         owner_name="Will",
-        calendar_enabled=True,
+        google_services=frozenset({"calendar"}),
         owner_tz="America/New_York",
     )
 
     assert "## Calendar" in prompt
     assert "America/New_York" in prompt  # times stated in the owner's tz
     assert "free/busy" in prompt  # only book free, in-preference slots
+    # Only the enabled service's block appears.
+    assert "## Google Drive" not in prompt
+    assert "## Google Sheets" not in prompt
 
 
-def test_owner_calendar_guidance_absent_when_disabled() -> None:
-    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+def test_owner_drive_and_sheets_guidance_included_when_enabled() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        google_services=frozenset({"drive", "sheets"}),
+    )
 
+    assert "## Google Drive" in prompt
+    assert "## Google Sheets" in prompt
+    assert "header row" in prompt  # row-1 guard surfaced to the model
     assert "## Calendar" not in prompt
 
 
-def test_guest_never_gets_calendar_guidance() -> None:
+def test_owner_guidance_absent_when_no_services() -> None:
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Calendar" not in prompt
+    assert "## Google Drive" not in prompt
+    assert "## Google Sheets" not in prompt
+
+
+def test_guest_never_gets_service_guidance() -> None:
     prompt = build_system_prompt(
         tier="guest",
         memory=FakeMemory(),
         owner_name="Will",
-        calendar_enabled=True,
+        google_services=frozenset({"calendar", "drive", "sheets"}),
         owner_tz="America/New_York",
     )
 
     assert "## Calendar" not in prompt
+    assert "## Google Drive" not in prompt
+    assert "## Google Sheets" not in prompt
 
 
 def test_guest_prompt_is_receptionist_without_user_profile() -> None:

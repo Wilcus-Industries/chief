@@ -20,8 +20,8 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.4.0",
-    # Host-only OAuth helper (chief.tools.calendar.auth). Not a runtime dep — the core
-    # container reaches Google through the mcp-gcal MCP, not this script.
+    # Host-only OAuth helper (chief.tools.google.auth). Not a runtime dep — the core
+    # container reaches Google through the MCP servers, not this script.
     "google-auth-oauthlib>=1.2",
 ]
 
@@ -44,7 +44,7 @@ python_version = "3.12"
 packages = ["chief"]
 strict = true
 
-# google-auth-oauthlib ships no py.typed; the calendar OAuth helper imports it lazily.
+# google-auth-oauthlib ships no py.typed; the Google OAuth helper imports it lazily.
 [[tool.mypy.overrides]]
 module = ["google_auth_oauthlib.*"]
 ignore_missing_imports = true

@@ -65,6 +65,9 @@ READ_ONLY: dict[str, Callable[[dict[str, Any]], bool]] = {
     # WebFetch is the GET-only built-in, so any input is read-only. A web tool that can
     # POST must NOT reuse this name with ``_always`` — gate it with a method predicate.
     "WebFetch": _always,
+    # ToolSearch only fetches deferred MCP tool *schemas* — it invokes nothing, so it is
+    # safe to ALLOW with no card (it sits in allowed_tools too, see core.tasks).
+    "ToolSearch": _always,
 }
 
 

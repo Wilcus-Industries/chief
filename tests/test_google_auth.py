@@ -1,34 +1,32 @@
-"""The Google Calendar OAuth consent helper (``chief.tools.calendar.auth``).
+"""The shared Google OAuth consent helper (``chief.tools.google.auth``).
 
 The interactive loopback consent is injected, so these run without a browser: they
-exercise path handling, scope wiring, the nspady Node token write, and the CLI's exit
+exercise path handling, scope wiring, the google-auth token write, and the CLI's exit
 codes / operator instructions.
 """
 
 import json
-from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from chief.tools.calendar import auth
-
-_EXPIRY = datetime(2026, 1, 1, 12, 0, 0)  # naive UTC, like google-auth's Credentials
+from chief.tools.google import auth
 
 
 class _FakeCredentials:
-    """Stand-in for ``google.oauth2.credentials.Credentials`` (read attributes).
+    """Stand-in for ``google.oauth2.credentials.Credentials`` — only ``to_json``."""
 
-    Attributes are annotated to the optional types the ``_Credentials`` protocol
-    declares — protocol attributes are invariant, so a bare ``str`` wouldn't satisfy it.
-    """
-
-    def __init__(self) -> None:
-        self.token: str | None = "at"
-        self.refresh_token: str | None = "rt"
-        self.scopes: Sequence[str] | None = list(auth.SCOPES)
-        self.expiry: datetime | None = _EXPIRY
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "token": "at",
+                "refresh_token": "rt",
+                "scopes": list(auth.SCOPES),
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "cid",
+                "client_secret": "secret",
+            }
+        )
 
 
 def _fake_consent(captured: dict[str, object]) -> auth.ConsentFn:
@@ -42,7 +40,14 @@ def _fake_consent(captured: dict[str, object]) -> auth.ConsentFn:
     return consent
 
 
-def test_mint_token_writes_nspady_node_token(tmp_path: Path) -> None:
+def test_scopes_cover_calendar_drive_sheets() -> None:
+    joined = " ".join(auth.SCOPES)
+    assert "auth/calendar" in joined
+    assert "auth/drive" in joined
+    assert "auth/spreadsheets" in joined
+
+
+def test_mint_token_writes_google_auth_token(tmp_path: Path) -> None:
     client = tmp_path / "client.json"
     client.write_text("{}", encoding="utf-8")
     out = tmp_path / "nested" / "token.json"  # parent must be created
@@ -54,29 +59,12 @@ def test_mint_token_writes_nspady_node_token(tmp_path: Path) -> None:
 
     assert result == out
     written = json.loads(out.read_text(encoding="utf-8"))
-    # Pre-wrapped under the 'normal' account so nspady loads it without a migration
-    # write (it would otherwise rewrite a single-account file on first boot).
-    account = written["normal"]
-    assert account["refresh_token"] == "rt"
-    assert account["access_token"] == "at"
-    assert account["token_type"] == "Bearer"
-    # scopes (list) → scope (space-delimited string), the Node google-auth shape.
-    assert account["scope"] == auth.SCOPES[0]
-    expected_ms = int(_EXPIRY.replace(tzinfo=UTC).timestamp() * 1000)
-    assert account["expiry_date"] == expected_ms
+    # Native google-auth shape — refresh_token is the durable bit every server reads.
+    assert written["refresh_token"] == "rt"
+    assert written["token"] == "at"
+    assert written["scopes"] == list(auth.SCOPES)
     assert captured["client"] == client
     assert captured["scopes"] == list(auth.SCOPES)
-
-
-def test_to_node_token_omits_expiry_when_absent() -> None:
-    creds = _FakeCredentials()
-    creds.expiry = None
-
-    account = auth._to_node_token(creds)["normal"]
-
-    # No expiry_date key → nspady refreshes on first use via the refresh_token.
-    assert "expiry_date" not in account
-    assert account["refresh_token"] == "rt"
 
 
 def test_mint_token_missing_client_raises(tmp_path: Path) -> None:
@@ -113,4 +101,4 @@ def test_main_success_writes_and_instructs(
 
     assert code == 0
     assert out.exists()
-    assert "mcp-gcal" in capsys.readouterr().out
+    assert "mcp-calendar" in capsys.readouterr().out

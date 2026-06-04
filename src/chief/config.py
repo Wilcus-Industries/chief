@@ -84,13 +84,17 @@ class Settings(BaseSettings):
     git_author_name: str = "chief"
     git_author_email: str = "chief@localhost"
 
-    # Google Calendar (M5). When calendar_enabled, owner sessions wire the mcp-gcal
-    # container (Streamable HTTP at gcal_mcp_url) and gain calendar tools: reads are
-    # ALLOWed, create/update are approval-gated, delete/batch/RSVP are blocked. owner_tz
-    # frames booking times (an IANA name, e.g. America/New_York). Off until the token +
-    # container exist (see secrets/README.md).
+    # Google services (M5/M8). Each enabled server wires its own MCP container over
+    # streamable HTTP at <svc>_mcp_url (MCP at /mcp) into owner sessions: reads ALLOWed,
+    # writes approval-gated, deferred ops blocked. One shared OAuth token covers all
+    # three (see secrets/README.md). owner_tz frames calendar booking times (an IANA
+    # name, e.g. America/New_York). Each defaults off until its token + container exist.
     calendar_enabled: bool = False
-    gcal_mcp_url: str = "http://mcp-gcal:3000/"
+    calendar_mcp_url: str = "http://mcp-calendar:8003/mcp"
+    drive_enabled: bool = False
+    drive_mcp_url: str = "http://mcp-drive:8001/mcp"
+    sheets_enabled: bool = False
+    sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
     owner_tz: str = "UTC"
 
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
