@@ -304,8 +304,8 @@ async def test_reopen_awaits_inflight_teardown(
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: "-100:5" in io.archived)  # teardown started, blocked
     # The first idle timer has fired (its sleep elapsed). The reopened turn will re-arm
-    # a fresh timer on completion; lengthen idle now so that one can't fire during the
-    # assertion tail and clobber OPEN→DONE (only the second arm sees the new value).
+    # a fresh timer on completion; lengthen idle now so that one can't fire and archive
+    # the just-reopened task before we assert (only the second arm sees the new value).
     mgr._idle_archive_seconds = 1000.0
 
     rt = mgr._tasks["-100:5"]
@@ -316,7 +316,13 @@ async def test_reopen_awaits_inflight_teardown(
     assert reopen.done() is False  # blocked awaiting the in-flight idle_handle
 
     release.set()
-    await _until(lambda: ("-100:5", "reply:again") in io.sends)
+    await reopen  # teardown drains, the task reopens, the new turn is enqueued
+    rt2 = mgr._tasks["-100:5"]
+    # The reopened turn commits OPEN, then arms a fresh idle timer. Sync on that arm: an
+    # in-memory edge landing after the OPEN commit. Polling the row instead would share
+    # the StaticPool connection with the turn's write and could roll it back, stranding
+    # the row at the prior RUNNING.
+    await _until(lambda: rt2.idle_handle is not None)
 
     assert len(sessions) == 2  # one fresh session, no duplicate teardown
     assert sessions[1].resume == "sess-hi"  # resumed from the persisted id
