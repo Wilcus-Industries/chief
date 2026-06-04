@@ -30,7 +30,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from mcp.server.fastmcp import FastMCP
-from owner_tz import resolve_owner_tz
+from owner_tz import owner_tz_from_config, resolve_owner_tz
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
 
@@ -43,7 +43,13 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 TOKEN_PATH = os.environ.get("GOOGLE_TOKEN_PATH", "/token/google_token.json")
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/config.yaml")
 # config.yaml (mounted read-only) is the source of truth; OWNER_TZ env overrides it.
+_configured_tz = (os.environ.get("OWNER_TZ") or "").strip() or owner_tz_from_config(
+    CONFIG_PATH
+)
 OWNER_TZ = resolve_owner_tz(os.environ.get("OWNER_TZ"), CONFIG_PATH)
+if _configured_tz and _configured_tz != OWNER_TZ:
+    # A typo shouldn't silently run in UTC — the very bug this resolution fixes.
+    log.warning("owner_tz %r is not a known IANA zone; using %s", _configured_tz, OWNER_TZ)
 PORT = int(os.environ.get("PORT", "8003"))
 
 _creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
