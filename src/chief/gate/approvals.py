@@ -146,33 +146,38 @@ class ApprovalManager:
                 session, task_id=task_id, kind=tool_name, payload_preview=preview
             )
             approval_id = approval.id
-        self._audit.log(
-            {
-                "event": "approval_requested",
-                "approval_id": approval_id,
-                "thread_key": thread_key,
-                "tier": tier,
-                "tool": tool_name,
-                "route": route,
-            }
-        )
-        msg_ref = await self._io.send_card(
-            route, ApprovalCard(approval_id=approval_id, text=preview)
-        )
-        async with self._sf() as session:
-            row = await get(session, approval_id)
-            if row is not None:
-                await set_state(session, row, NOTIFIED)
-
+        # Arm the future *before* posting the card. The card is the only place a
+        # resolver learns the approval id, so a tap can't arrive until after this; a
+        # synchronous register (no await between the commit above and here) guarantees
+        # any later resolve finds a live future to wake, instead of stranding the turn
+        # until the fail-closed timeout.
         future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-        self._live[approval_id] = _Live(
+        live = _Live(
             future=future,
-            msg_ref=msg_ref,
+            msg_ref=None,
             route=route,
             tool_name=tool_name,
             tool_input=tool_input,
         )
+        self._live[approval_id] = live
         try:
+            self._audit.log(
+                {
+                    "event": "approval_requested",
+                    "approval_id": approval_id,
+                    "thread_key": thread_key,
+                    "tier": tier,
+                    "tool": tool_name,
+                    "route": route,
+                }
+            )
+            live.msg_ref = await self._io.send_card(
+                route, ApprovalCard(approval_id=approval_id, text=preview)
+            )
+            async with self._sf() as session:
+                row = await get(session, approval_id)
+                if row is not None:
+                    await set_state(session, row, NOTIFIED)
             return await asyncio.wait_for(future, self._timeout)
         except TimeoutError:
             return await self._expire(approval_id)
