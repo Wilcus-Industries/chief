@@ -1,13 +1,13 @@
-"""The mcp-gcal catalog (``chief.tools.calendar.mcp``): names, partitions, config."""
+"""The mcp-calendar catalog (chief.tools.calendar.mcp): names, partitions, config."""
 
 from chief.tools.calendar import mcp
 
 
 def test_tool_names_are_server_qualified() -> None:
-    assert mcp.SERVER_NAME == "gcal"
-    assert "mcp__gcal__list-events" in mcp.READ_TOOLS
-    assert "mcp__gcal__create-event" in mcp.WRITE_TOOLS
-    assert "mcp__gcal__delete-event" in mcp.DEFERRED_TOOLS
+    assert mcp.SERVER_NAME == "calendar"
+    assert "mcp__calendar__list-events" in mcp.READ_TOOLS
+    assert "mcp__calendar__create-event" in mcp.WRITE_TOOLS
+    assert "mcp__calendar__delete-event" in mcp.DEFERRED_TOOLS
 
 
 def test_read_write_deferred_are_disjoint() -> None:
@@ -23,10 +23,18 @@ def test_read_write_deferred_are_disjoint() -> None:
 
 def test_freebusy_is_a_read_tool() -> None:
     # Free/busy is the booking flow's availability check — must ALLOW, not ASK.
-    assert "mcp__gcal__get-freebusy" in mcp.READ_TOOLS
+    assert "mcp__calendar__get-freebusy" in mcp.READ_TOOLS
 
 
-def test_server_config_is_streamable_http() -> None:
-    config = mcp.server_config("http://mcp-gcal:3000/")
+def test_service_bundles_url_and_streamable_http_config() -> None:
+    svc = mcp.service("http://mcp-calendar:8003/mcp")
 
-    assert config == {"type": "http", "url": "http://mcp-gcal:3000/"}
+    assert svc.name == "calendar"
+    assert svc.server_name == "calendar"
+    assert svc.read_tools == mcp.READ_TOOLS
+    assert svc.write_tools == mcp.WRITE_TOOLS
+    assert svc.deferred_tools == mcp.DEFERRED_TOOLS
+    assert svc.server_config() == {
+        "type": "http",
+        "url": "http://mcp-calendar:8003/mcp",
+    }

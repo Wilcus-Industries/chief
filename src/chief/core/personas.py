@@ -29,8 +29,8 @@ _RECALL_HINT = (
     "Open any fact file listed below with the Read tool when its line looks relevant."
 )
 
-#: Owner-only calendar guidance (M5), included when the calendar is wired. The M5
-#: stand-in for the packaged booking Skill that arrives with the skills framework (M10).
+#: Owner-only calendar guidance (M5), included when the calendar is wired. The stand-in
+#: for the packaged booking Skill that arrives with the skills framework (M10).
 _CALENDAR_BOOKING_GUIDANCE = (
     "## Calendar\n"
     "You can read {owner}'s Google Calendar and propose, create, or update events. "
@@ -41,19 +41,44 @@ _CALENDAR_BOOKING_GUIDANCE = (
     "approval, so propose the exact time and let the approval card confirm it."
 )
 
+#: Owner-only Drive guidance (M8), included when the drive server is wired.
+_DRIVE_GUIDANCE = (
+    "## Google Drive\n"
+    "You can read {owner}'s Google Drive files (Docs, PDFs, Office files) from a Drive "
+    "URL, and render a local Markdown file to PDF and upload it to a Drive folder. "
+    "Reading is free; uploading a file needs {owner}'s approval."
+)
+
+#: Owner-only Sheets guidance (M8), included when the sheets server is wired.
+_SHEETS_GUIDANCE = (
+    "## Google Sheets\n"
+    "You can read {owner}'s Google Sheets and propose edits. Reading ranges, formulas, "
+    "and sheet/spreadsheet listings is free; writing cells, adding rows or sheets, and "
+    "sharing a spreadsheet need {owner}'s approval. You can never edit row 1 (the "
+    "header row) — it is blocked server-side."
+)
+
+#: service name → its owner guidance block. Appended in this order when each is enabled.
+_SERVICE_GUIDANCE = {
+    "calendar": _CALENDAR_BOOKING_GUIDANCE,
+    "drive": _DRIVE_GUIDANCE,
+    "sheets": _SHEETS_GUIDANCE,
+}
+
 
 def build_system_prompt(
     *,
     tier: str,
     memory: MemoryStore,
     owner_name: str,
-    calendar_enabled: bool = False,
+    google_services: frozenset[str] = frozenset(),
     owner_tz: str | None = None,
 ) -> str:
     """Assemble the system prompt for a ``tier`` session against ``memory``.
 
-    When ``calendar_enabled`` (owner only, M5), the booking guidance is appended so
-    chief books only free, in-preference slots and states times in ``owner_tz``.
+    ``google_services`` names the wired Google MCP servers (owner only) — e.g.
+    ``{"calendar", "drive"}``. Each contributes a guidance block so chief knows the
+    service's rules (calendar booking states times in ``owner_tz``).
     """
     if tier == "owner":
         sections = [
@@ -64,12 +89,10 @@ def build_system_prompt(
             "## Memory index",
             memory.index(),
         ]
-        if calendar_enabled:
-            sections.append(
-                _CALENDAR_BOOKING_GUIDANCE.format(
-                    owner=owner_name, tz=owner_tz or "the owner's timezone"
-                )
-            )
+        tz = owner_tz or "the owner's timezone"
+        for name, guidance in _SERVICE_GUIDANCE.items():
+            if name in google_services:
+                sections.append(guidance.format(owner=owner_name, tz=tz))
     else:
         sections = [memory.soul(), _GUEST_FRAMING.format(owner=owner_name)]
     return "\n\n".join(section.strip() for section in sections if section.strip())

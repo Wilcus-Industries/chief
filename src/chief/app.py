@@ -31,6 +31,10 @@ from .memory.versioning import GitVersioner, NullVersioner, Versioner
 from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
+from .tools.calendar import mcp as calendar_mcp
+from .tools.drive import mcp as drive_mcp
+from .tools.google import GoogleService
+from .tools.sheets import mcp as sheets_mcp
 
 logger = logging.getLogger("chief.app")
 
@@ -68,6 +72,18 @@ def build_memory(settings: Settings) -> MemoryStore:
     )
 
 
+def build_google_services(settings: Settings) -> list[GoogleService]:
+    """Resolve the enabled Google MCP servers from settings (owner-only at runtime)."""
+    services: list[GoogleService] = []
+    if settings.calendar_enabled:
+        services.append(calendar_mcp.service(settings.calendar_mcp_url))
+    if settings.drive_enabled:
+        services.append(drive_mcp.service(settings.drive_mcp_url))
+    if settings.sheets_enabled:
+        services.append(sheets_mcp.service(settings.sheets_mcp_url))
+    return services
+
+
 def build_engine(
     settings: Settings,
     *,
@@ -98,8 +114,7 @@ def build_engine(
         owner_name=settings.owner_name,
         distill_idle_seconds=settings.distill_idle_seconds,
         distill_model=settings.distill_model,
-        calendar_enabled=settings.calendar_enabled,
-        gcal_mcp_url=settings.gcal_mcp_url,
+        google_services=build_google_services(settings),
         owner_tz=settings.owner_tz,
     )
 
