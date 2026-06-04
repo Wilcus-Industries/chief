@@ -95,6 +95,9 @@ def build_components(
         owner_name=settings.owner_name,
         distill_idle_seconds=settings.distill_idle_seconds,
         distill_model=settings.distill_model,
+        calendar_enabled=settings.calendar_enabled,
+        gcal_mcp_url=settings.gcal_mcp_url,
+        owner_tz=settings.owner_tz,
     )
     adapter = TelegramAdapter(
         application=application,

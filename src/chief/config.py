@@ -80,6 +80,15 @@ class Settings(BaseSettings):
     git_author_name: str = "chief"
     git_author_email: str = "chief@localhost"
 
+    # Google Calendar (M5). When calendar_enabled, owner sessions wire the mcp-gcal
+    # container (Streamable HTTP at gcal_mcp_url) and gain calendar tools: reads are
+    # ALLOWed, create/update are approval-gated, delete/batch/RSVP are blocked. owner_tz
+    # frames booking times (an IANA name, e.g. America/New_York). Off until the token +
+    # container exist (see secrets/README.md).
+    calendar_enabled: bool = False
+    gcal_mcp_url: str = "http://mcp-gcal:3000/"
+    owner_tz: str = "UTC"
+
     # Secrets (secrets_dir / env).
     telegram_bot_token: str
     claude_code_oauth_token: str

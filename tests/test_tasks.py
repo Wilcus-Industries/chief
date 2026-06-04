@@ -718,3 +718,92 @@ async def test_distill_failure_is_logged_with_thread_key(
     assert rec.__dict__.get("thread_key") == "-100:5"  # context, not a bare traceback
     assert memory.written == []
     await mgr.shutdown()
+
+
+# ---- calendar wiring (M5) ----------------------------------------------------
+
+
+def _capture_factory(captured: dict[str, Any]) -> Factory:
+    """A session factory that records the kwargs the engine assembled."""
+
+    def factory(**kwargs: Any) -> SessionProto:
+        captured.clear()
+        captured.update(kwargs)
+        return FakeSession(model=kwargs["model"], resume=kwargs.get("resume"))
+
+    return factory
+
+
+def _calendar_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    enabled: bool = True,
+) -> TaskManager:
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        calendar_enabled=enabled,
+        gcal_mcp_url="http://mcp-gcal:3000/",
+        owner_tz="America/New_York",
+    )
+
+
+async def test_owner_calendar_session_wires_mcp_and_partitions_tools(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _calendar_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["mcp_servers"] == {
+        "gcal": {"type": "http", "url": "http://mcp-gcal:3000/"}
+    }
+    allowed = captured["allowed_tools"]
+    assert "mcp__gcal__list-events" in allowed  # reads pre-approved
+    assert "mcp__gcal__create-event" not in allowed  # writes reach approval
+    assert "Read" in allowed  # memory tools retained
+    assert "mcp__gcal__delete-event" in captured["disallowed_tools"]  # deferred blocked
+    await mgr.shutdown()
+
+
+async def test_guest_gets_no_calendar_tools(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _calendar_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:9", tier="guest")
+
+    assert "mcp_servers" not in captured  # no calendar container for guests
+    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    await mgr.shutdown()
+
+
+async def test_calendar_disabled_owner_has_no_mcp(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _calendar_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), enabled=False
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "mcp_servers" not in captured
+    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    await mgr.shutdown()

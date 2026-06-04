@@ -106,12 +106,17 @@ def classify(
     policy: PolicyStore,
     *,
     memory_dir: str | None = None,
+    extra_read_only: frozenset[str] = frozenset(),
 ) -> Verdict:
     """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK.
 
     When ``memory_dir`` is set (M4), a file-op tool (Read/Glob/Grep) is ALLOWed only
     while its path stays inside the memory dir and DENied otherwise — chief's reads are
     confined to memory until a workspace lands (M7).
+
+    ``extra_read_only`` names tools an MCP layer has declared read-only (e.g. the
+    calendar list/free-busy tools, M5); they ALLOW like the built-ins, keeping
+    :mod:`gate` decoupled from any specific MCP. NEVER still wins over them.
     """
     listed = policy.classify_against(tool_name, tool_input)
     if listed == NEVER:
@@ -120,7 +125,7 @@ def classify(
         if confined_to_memory(tool_input, memory_dir):
             return Verdict(GateDecision.ALLOW, f"{tool_name} reads within memory")
         return Verdict(GateDecision.DENY, f"{tool_name} path is outside memory")
-    if is_read_only(tool_name, tool_input):
+    if is_read_only(tool_name, tool_input) or tool_name in extra_read_only:
         return Verdict(GateDecision.ALLOW, f"{tool_name} is read-only")
     if listed is not None:  # APPROVED
         return Verdict(GateDecision.ALLOW, f"{tool_name} is pre-approved")
@@ -156,6 +161,7 @@ def build_pretool_hook(
     policy: PolicyStore,
     audit: _Audit,
     memory_dir: str | None = None,
+    extra_read_only: frozenset[str] = frozenset(),
 ) -> HookCallback:
     """A ``PreToolUse`` hook: classify, audit, return the permission decision."""
 
@@ -166,7 +172,13 @@ def build_pretool_hook(
     ) -> dict[str, Any]:
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {}) or {}
-        verdict = classify(tool_name, tool_input, policy, memory_dir=memory_dir)
+        verdict = classify(
+            tool_name,
+            tool_input,
+            policy,
+            memory_dir=memory_dir,
+            extra_read_only=extra_read_only,
+        )
         audit.log(
             {
                 "event": "tool_call",
@@ -203,6 +215,7 @@ def build_can_use_tool(
     on_waiting: StatusHook | None = None,
     on_running: StatusHook | None = None,
     memory_dir: str | None = None,
+    extra_read_only: frozenset[str] = frozenset(),
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext],
     Awaitable[PermissionResultAllow | PermissionResultDeny],
@@ -220,7 +233,13 @@ def build_can_use_tool(
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        verdict = classify(tool_name, tool_input, policy, memory_dir=memory_dir)
+        verdict = classify(
+            tool_name,
+            tool_input,
+            policy,
+            memory_dir=memory_dir,
+            extra_read_only=extra_read_only,
+        )
         if verdict.decision is GateDecision.ALLOW:
             return PermissionResultAllow()
         if verdict.decision is GateDecision.DENY:

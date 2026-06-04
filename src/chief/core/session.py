@@ -24,7 +24,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
-from claude_agent_sdk.types import HookEvent
+from claude_agent_sdk.types import HookEvent, McpServerConfig
 
 from .agent import NO_REPLY
 
@@ -77,6 +77,8 @@ class TaskSession:
         system_prompt: str | None = None,
         cwd: str | None = None,
         allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        mcp_servers: dict[str, McpServerConfig] | None = None,
         client_factory: ClientFactory = _default_client,
     ) -> None:
         self._options = ClaudeAgentOptions(
@@ -87,6 +89,8 @@ class TaskSession:
             system_prompt=system_prompt,
             cwd=cwd,
             allowed_tools=allowed_tools if allowed_tools is not None else [],
+            disallowed_tools=disallowed_tools if disallowed_tools is not None else [],
+            mcp_servers=mcp_servers if mcp_servers is not None else {},
         )
         self._client = client_factory(self._options)
         self._connected = False

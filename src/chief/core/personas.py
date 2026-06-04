@@ -29,11 +29,32 @@ _RECALL_HINT = (
     "Open any fact file listed below with the Read tool when its line looks relevant."
 )
 
+#: Owner-only calendar guidance (M5), included when the calendar is wired. The M5
+#: stand-in for the packaged booking Skill that arrives with the skills framework (M10).
+_CALENDAR_BOOKING_GUIDANCE = (
+    "## Calendar\n"
+    "You can read {owner}'s Google Calendar and propose, create, or update events. "
+    "Only ever book a slot that is BOTH free on the calendar (check free/busy or list "
+    "events first) AND within {owner}'s scheduling preferences in memory — never "
+    "double-book. State every time in {owner}'s timezone ({tz}) and set that timezone "
+    "explicitly when writing an event. Creating or updating an event needs {owner}'s "
+    "approval, so propose the exact time and let the approval card confirm it."
+)
+
 
 def build_system_prompt(
-    *, tier: str, memory: MemoryStore, owner_name: str
+    *,
+    tier: str,
+    memory: MemoryStore,
+    owner_name: str,
+    calendar_enabled: bool = False,
+    owner_tz: str | None = None,
 ) -> str:
-    """Assemble the system prompt for a ``tier`` session against ``memory``."""
+    """Assemble the system prompt for a ``tier`` session against ``memory``.
+
+    When ``calendar_enabled`` (owner only, M5), the booking guidance is appended so
+    chief books only free, in-preference slots and states times in ``owner_tz``.
+    """
     if tier == "owner":
         sections = [
             memory.soul(),
@@ -43,6 +64,12 @@ def build_system_prompt(
             "## Memory index",
             memory.index(),
         ]
+        if calendar_enabled:
+            sections.append(
+                _CALENDAR_BOOKING_GUIDANCE.format(
+                    owner=owner_name, tz=owner_tz or "the owner's timezone"
+                )
+            )
     else:
         sections = [memory.soul(), _GUEST_FRAMING.format(owner=owner_name)]
     return "\n\n".join(section.strip() for section in sections if section.strip())

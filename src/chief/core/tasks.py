@@ -53,6 +53,7 @@ from ..persistence.tasks import (
     set_session_id,
     set_status,
 )
+from ..tools.calendar import mcp as calendar_mcp
 from . import classify
 from .personas import build_system_prompt
 from .session import Final, TaskSession, TurnEvent
@@ -97,6 +98,8 @@ def _default_session(
     system_prompt: str | None = None,
     cwd: str | None = None,
     allowed_tools: list[str] | None = None,
+    disallowed_tools: list[str] | None = None,
+    mcp_servers: dict[str, Any] | None = None,
 ) -> SessionProto:
     return TaskSession(
         model=model,
@@ -106,6 +109,8 @@ def _default_session(
         system_prompt=system_prompt,
         cwd=cwd,
         allowed_tools=allowed_tools,
+        disallowed_tools=disallowed_tools,
+        mcp_servers=mcp_servers,
     )
 
 
@@ -156,6 +161,9 @@ class TaskManager:
         distill_idle_seconds: float = 1200.0,
         distill_model: str = "claude-sonnet-4-6",
         distill: DistillFn = _distill_default,
+        calendar_enabled: bool = False,
+        gcal_mcp_url: str = "http://mcp-gcal:3000/",
+        owner_tz: str = "UTC",
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -177,6 +185,9 @@ class TaskManager:
         self._distill_idle_seconds = distill_idle_seconds
         self._distill_model = distill_model
         self._distill = distill
+        self._calendar_enabled = calendar_enabled
+        self._gcal_mcp_url = gcal_mcp_url
+        self._owner_tz = owner_tz
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -277,13 +288,33 @@ class TaskManager:
             # guests through here, and cwd/allowed_tools below are *not* tier-scoped, so
             # gate them per-tier then or a guest gets Read/Glob/Grep over the owner's
             # memory dir.
+            calendar_on = self._calendar_enabled and tier == "owner"
+            allowed = list(MEMORY_TOOLS)
+            if calendar_on:
+                # Reads only — writes stay off the allow-list so they reach approval.
+                allowed += list(calendar_mcp.READ_TOOLS)
             gate_kwargs.update(
                 system_prompt=build_system_prompt(
-                    tier=tier, memory=self._memory, owner_name=self._owner_name
+                    tier=tier,
+                    memory=self._memory,
+                    owner_name=self._owner_name,
+                    calendar_enabled=calendar_on,
+                    owner_tz=self._owner_tz,
                 ),
                 cwd=self._memory_dir,
-                allowed_tools=list(MEMORY_TOOLS),
+                allowed_tools=allowed,
             )
+            if calendar_on:
+                # The mcp-gcal container (Step 6). Writes (create/update) are absent
+                # from allowed_tools, so they reach can_use_tool → approval; the
+                # deferred ops are hard-blocked. Reads are pre-approved above + ALLOWed
+                # by the gate's extra_read_only (see _build_gate).
+                gate_kwargs["mcp_servers"] = {
+                    calendar_mcp.SERVER_NAME: calendar_mcp.server_config(
+                        self._gcal_mcp_url
+                    )
+                }
+                gate_kwargs["disallowed_tools"] = list(calendar_mcp.DEFERRED_TOOLS)
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
@@ -307,6 +338,13 @@ class TaskManager:
         """
         if self._policy is None or self._approvals is None or self._audit is None:
             return None, None
+        # Calendar reads ALLOW with no card; the names live with the MCP integration so
+        # the gate stays MCP-agnostic. Owner-only — guests get no calendar tools.
+        extra_read_only = (
+            frozenset(calendar_mcp.READ_TOOLS)
+            if self._calendar_enabled and tier == "owner"
+            else frozenset()
+        )
         # Owner work approves in-thread. A guest-originated approval must route to the
         # Front Desk; until M6 wires it (and the first guest-facing effectful tool), no
         # such call exists, so the ``or thread_key`` fallback is unreachable — M6 should
@@ -322,6 +360,7 @@ class TaskManager:
             policy=self._policy,
             audit=self._audit,
             memory_dir=self._memory_dir,
+            extra_read_only=extra_read_only,
         )
 
         async def on_waiting() -> None:
@@ -341,6 +380,7 @@ class TaskManager:
             on_waiting=on_waiting,
             on_running=on_running,
             memory_dir=self._memory_dir,
+            extra_read_only=extra_read_only,
         )
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "PreToolUse": [HookMatcher(hooks=[hook])]
