@@ -135,6 +135,18 @@ async def _bash_syntax_error(command: str) -> str | None:
     parser process lets the shell reject a typo instantly without disturbing it.
     ``bash -n`` flags some incomplete constructs (an open here-doc) as a stderr
     *warning* with exit 0, so a non-empty diagnostic counts as a rejection too.
+
+    Two caveats around ``bash -n``'s static parse:
+
+    * It accepts a trailing **line continuation** (an odd run of unescaped backslashes
+      at the very end), but splicing that onto the appended sentinel line in the
+      persistent shell would corrupt both the output and the exit code — so it is
+      rejected here explicitly. Quotes are balanced once ``bash -n`` passes, so a final
+      backslash is unquoted; an odd run is a continuation with nothing to continue.
+    * It is a known, accepted **false-reject** for option-dependent syntax: a ``-c``
+      string is parsed in full before any ``shopt`` in it takes effect, so even a
+      self-contained ``shopt -s extglob; ls !(foo)`` is flagged. Split such a command
+      so the ``shopt`` runs in an earlier call.
     """
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash",
@@ -149,9 +161,11 @@ async def _bash_syntax_error(command: str) -> str | None:
     )
     _, raw = await proc.communicate()
     diagnostic = raw.decode(ENCODING, errors="replace").strip()
-    if proc.returncode == 0 and not diagnostic:
-        return None
-    return diagnostic or "syntax error"
+    if proc.returncode != 0 or diagnostic:
+        return diagnostic or "syntax error"
+    if (len(command) - len(command.rstrip("\\"))) % 2 == 1:
+        return "syntax error: command ends in a dangling line continuation (\\)"
+    return None
 
 
 class _Shell:

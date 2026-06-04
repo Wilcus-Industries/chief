@@ -159,7 +159,7 @@ async def _yes(*args: Any, **kwargs: Any) -> bool:
 
 
 def _one(session: FakeSession) -> Factory:
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         session.model = model
         session.resume = resume
         return session
@@ -278,7 +278,7 @@ async def test_semaphore_bounds_generating_turns(
     gate = asyncio.Event()
     started = {"n": 0}
 
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         return FakeSession(
             model=model,
             resume=resume,
@@ -323,7 +323,7 @@ async def test_reopen_after_idle_resumes_session(
     io = FakeIO()
     sessions: list[FakeSession] = []
 
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         sess = FakeSession(model=model, resume=resume)
         sessions.append(sess)
         return sess
@@ -359,7 +359,7 @@ async def test_reopen_awaits_inflight_teardown(
     io = BlockingIO()
     sessions: list[FakeSession] = []
 
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         sess = FakeSession(model=model, resume=resume)
         sessions.append(sess)
         return sess
@@ -461,7 +461,7 @@ async def test_recover_pings_without_autoresume_then_resumes(
     io = FakeIO()
     captured: list[str | None] = []
 
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         captured.append(resume)
         return FakeSession(model=model, resume=resume)
 
@@ -565,7 +565,7 @@ async def test_casual_idle_compacts_and_reseeds(
     io = FakeIO()
     sessions: list[FakeSession] = []
 
-    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
         sess = FakeSession(model=model, resume=resume)
         sessions.append(sess)
         return sess
@@ -976,6 +976,8 @@ async def test_calendar_disabled_owner_has_no_mcp_but_keeps_web_tools(
     assert "mcp_servers" not in captured
     # No Google tools, but the owner still gets memory + web/meta tools.
     assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
+    # The built-in shell stays disallowed even with no services wired.
+    assert "Bash" in captured["disallowed_tools"]
     await mgr.shutdown()
 
 
