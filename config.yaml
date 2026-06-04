@@ -48,7 +48,7 @@ git_author_email: chief@localhost
 # shared OAuth token is minted (secrets/README.md). Owner sessions then read freely;
 # writes post an approval card. URLs are internal compose addresses (no public ingress);
 # the MCP endpoint is mounted at /mcp.
-calendar_enabled: false   # flip true once the mcp-calendar container is up (next session)
+calendar_enabled: true    # mcp-calendar container up; token is calendar-scope only
 calendar_mcp_url: http://mcp-calendar:8003/mcp
 drive_enabled: false
 drive_mcp_url: http://mcp-drive:8001/mcp
