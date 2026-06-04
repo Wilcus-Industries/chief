@@ -271,6 +271,12 @@ class TaskManager:
         if can_use_tool is not None or hooks is not None:
             gate_kwargs = {"can_use_tool": can_use_tool, "hooks": hooks}
         if self._memory is not None:
+            # M4: only owner sessions reach dispatch (telegram short-circuits guests),
+            # so cwd + memory tools are owner-scoped in practice. build_system_prompt
+            # already withholds the owner index from a guest prompt — but M6 will route
+            # guests through here, and cwd/allowed_tools below are *not* tier-scoped, so
+            # gate them per-tier then or a guest gets Read/Glob/Grep over the owner's
+            # memory dir.
             gate_kwargs.update(
                 system_prompt=build_system_prompt(
                     tier=tier, memory=self._memory, owner_name=self._owner_name
@@ -464,36 +470,44 @@ class TaskManager:
             or self._tasks.get(task.thread_key) is not task
         ):
             return
-        transcript = task.transcript
-        task.transcript = []
-        if not transcript:
+        pending = list(task.transcript)  # snapshot; cleared only after a clean flush
+        if not pending:
             return
-        drafts = await self._distill(
-            transcript, self._memory.index(), model=self._distill_model
-        )
-        written = [
-            await self._memory.write_fact(
-                namespace=OWNER_NAMESPACE,
-                slug=draft.slug,
-                title=draft.title,
-                body=draft.body,
-                provenance="inferred",
-                trust=draft.trust,
-                expires=draft.expires,
+        try:
+            drafts = await self._distill(
+                pending, self._memory.index(), model=self._distill_model
             )
-            for draft in drafts
-        ]
-        if not written:
-            return
-        lines = "\n".join(f"• {fact.title}" for fact in written)
-        await self._io.send(task.thread_key, f"📝 Saved to memory:\n{lines}")
-        if self._audit is not None:
-            self._audit.log(
-                {
-                    "event": "memory_write",
-                    "thread_key": task.thread_key,
-                    "count": len(written),
-                }
+            written = [
+                await self._memory.write_fact(
+                    namespace=OWNER_NAMESPACE,
+                    slug=draft.slug,
+                    title=draft.title,
+                    body=draft.body,
+                    provenance="inferred",
+                    trust=draft.trust,
+                    expires=draft.expires,
+                )
+                for draft in drafts
+            ]
+            # Drop the distilled turns now the writes have landed. A cancel (new turn
+            # racing the timer) or an error before this leaves them — and any turns
+            # appended meanwhile — intact for the next pass, instead of losing them.
+            del task.transcript[: len(pending)]
+            if not written:
+                return
+            lines = "\n".join(f"• {fact.title}" for fact in written)
+            await self._io.send(task.thread_key, f"📝 Saved to memory:\n{lines}")
+            if self._audit is not None:
+                self._audit.log(
+                    {
+                        "event": "memory_write",
+                        "thread_key": task.thread_key,
+                        "count": len(written),
+                    }
+                )
+        except Exception:
+            logger.exception(
+                "distillation failed", extra={"thread_key": task.thread_key}
             )
 
     async def _stop_task(self, task: _RunningTask) -> None:
