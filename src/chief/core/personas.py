@@ -12,6 +12,7 @@ Tier isolation is by construction (DESIGN): a guest prompt never carries the own
 """
 
 from ..memory.store import MemoryStore
+from ..tools.shell import SANDBOX_SHELL_CONTRACT
 
 _OWNER_FRAMING = (
     "You are operating for your owner directly. You are a capable, trusted operator: "
@@ -88,11 +89,10 @@ _SHELL_GUIDANCE = (
     "You can run bash commands in a sandboxed Linux container (the bash tool). Its "
     "working directory is /workspace and it has internet access (pip, git, curl all "
     "work). Shell state — environment variables, the current directory, background "
-    "jobs — persists across commands within a task, but not across a restart. There "
-    "are no secrets in this environment. Chain steps with && in a single command "
-    "rather than across separate calls. Running a command needs your owner's approval "
-    "unless they have pre-approved it, so prefer one clear command and let the "
-    "approval card confirm it."
+    "jobs — persists across commands within a task, but not across a restart. "
+    f"{SANDBOX_SHELL_CONTRACT} Running a command needs your owner's approval unless "
+    "they have pre-approved it, so prefer one clear command and let the approval card "
+    "confirm it."
 )
 
 

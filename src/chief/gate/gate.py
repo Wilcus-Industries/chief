@@ -84,6 +84,12 @@ FILE_OP_TOOLS = frozenset({"Read", "Glob", "Grep"})
 #: Write-op tools (M7). Confined to the **workspace** only — writes have a low blast
 #: radius there (DESIGN gate rule #2) and never touch the memory or any other path.
 WRITE_OP_TOOLS = frozenset({"Write", "Edit"})
+#: The SDK's built-in shell tools. They execute **inside core**, where the Max OAuth
+#: token lives in the process env — so they are HARD-DENIED here (and refused at the SDK
+#: layer via ``disallowed_tools``, see core.tasks). The model must use the secret-free
+#: sandbox shell (``mcp__chief_shell__bash``) instead. The deny overrides even an
+#: APPROVED rule: the token must never be reachable, no matter what the owner clicked.
+BUILTIN_SHELL_TOOLS = frozenset({"Bash", "BashOutput", "KillShell"})
 
 
 def confined_to(
@@ -102,6 +108,9 @@ def confined_to(
     candidate = Path(raw)
     if not candidate.is_absolute():
         candidate = base / candidate
+    # Confinement leans on ``resolve()`` to collapse ``..`` and follow symlinks before
+    # the containment check — that normalization is the load-bearing security property
+    # (it resolves a not-yet-existing write tail lexically, so it holds for new files).
     try:
         candidate.resolve().relative_to(Path(root).resolve())
         return True
@@ -127,6 +136,10 @@ def classify(
 ) -> Verdict:
     """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK.
 
+    The SDK's built-in shell tools (``Bash``/``BashOutput``/``KillShell``) are a hard
+    DENY — they run inside core, where the Max token lives — overriding even an APPROVED
+    rule (:data:`BUILTIN_SHELL_TOOLS`); the model gets the sandbox shell instead (M7).
+
     File scoping (M4/M7), enforced before the read-only/approved rules so a path escape
     is a hard DENY even on an otherwise-allowed tool:
 
@@ -142,6 +155,13 @@ def classify(
     listed = policy.classify_against(tool_name, tool_input)
     if listed == NEVER:
         return Verdict(GateDecision.DENY, f"{tool_name} is on the NEVER list")
+    if tool_name in BUILTIN_SHELL_TOOLS:
+        # Overrides APPROVED below: a blessed rule must never resurrect the in-core
+        # shell. The owner's sandbox shell tool is the only way to run commands.
+        return Verdict(
+            GateDecision.DENY,
+            f"{tool_name} (built-in shell) is disabled — use the sandbox shell",
+        )
     read_roots = [r for r in (memory_dir, workspace_dir) if r is not None]
     if read_roots and tool_name in FILE_OP_TOOLS:
         if confined_to_any(tool_input, read_roots, cwd=memory_dir):

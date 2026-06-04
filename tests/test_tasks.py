@@ -1066,4 +1066,23 @@ async def test_guest_gets_no_shell_or_workspace(
     assert "mcp_servers" not in captured  # no shell server for guests
     # Guests stay narrow: only the memory file tools, no Write/Edit, no shell.
     assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    # The built-in shell is refused at the SDK layer for guests too.
+    assert "Bash" in captured["disallowed_tools"]
+    await mgr.shutdown()
+
+
+async def test_builtin_shell_tools_disallowed_at_sdk_layer(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _shell_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    # Belt-and-braces with the gate's hard DENY: the SDK refuses the in-core shell
+    # outright, so the model can't run a command where the Max token lives.
+    disallowed = captured["disallowed_tools"]
+    assert {"Bash", "BashOutput", "KillShell"} <= set(disallowed)
     await mgr.shutdown()

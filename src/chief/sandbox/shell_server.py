@@ -15,12 +15,14 @@ and the server replies with one response line::
 
 **Per-session shell.** Each ``session_id`` gets a long-lived, non-login ``/bin/bash``
 with ``cwd=/workspace``, so ``export``/``cd``/background jobs persist across commands
-within a task. A command is written to the shell's stdin followed by a unique
-**sentinel** marker carrying ``$?``; the server streams stdout/stderr until the
-sentinel, capturing the exit code. A per-command **timeout** SIGINTs then respawns a
-hung shell
-(its state is lost — an accepted degradation); output past a **cap** is dropped and
-flagged ``truncated``.
+within a task. A command is first parse-checked with ``bash -n`` so a malformed one (an
+unterminated quote, an open here-doc) is rejected up front instead of hanging the shell;
+a clean one is written to the shell's stdin followed by a unique **sentinel** marker
+carrying ``$?``, and the server streams stdout/stderr until the sentinel, capturing the
+exit code. A per-command **timeout** SIGINTs then respawns a hung shell (its state is
+lost — an accepted degradation); if the shell dies mid-command the exit code is a
+distinct non-zero, never a bogus 0; output past a **cap** is dropped and flagged
+``truncated``.
 
 The bash process is ephemeral: a sandbox restart drops every shell, and the task resumes
 with a fresh one. The wire format lives here so :mod:`chief.tools.shell` (the core-side
@@ -53,6 +55,12 @@ DEFAULT_OUTPUT_LIMIT = 64_000
 #: Exit code reported when a command is killed for exceeding its timeout (matches the
 #: ``timeout(1)`` convention) so the model sees a distinct "this hung" signal.
 TIMEOUT_EXIT_CODE = 124
+#: Exit code when the shell process dies mid-command (EOF before the sentinel arrives):
+#: a distinct non-zero signal so a crash isn't reported as a clean exit 0.
+SHELL_DIED_EXIT_CODE = 137
+#: Exit code for a command the pre-flight parse check rejects (bash's own convention for
+#: a syntax error). Returned without ever touching the persistent shell.
+SYNTAX_ERROR_EXIT_CODE = 2
 #: Generous per-line buffer for the subprocess stream readers (a single line longer than
 #: this without a newline is beyond scope; the output cap is far smaller anyway).
 _STREAM_LIMIT = 1 << 20
@@ -85,14 +93,11 @@ def _rstrip_newlines(text: str) -> str:
 class _Acc:
     """Accumulates one stream's output up to a cap, then flags truncation."""
 
-    def __init__(self, limit: int, *, want_rc: bool) -> None:
+    def __init__(self, limit: int) -> None:
         self._limit = limit
-        self._want_rc = want_rc
         self.parts: list[str] = []
         self.size = 0
         self.truncated = False
-        self.rc = 0
-        self.done = False
 
     def text(self) -> str:
         return _rstrip_newlines("".join(self.parts))
@@ -107,6 +112,46 @@ class _Acc:
         self.size += len(take)
         if len(take) < len(chunk):
             self.truncated = True
+
+
+@dataclass
+class _DrainEnd:
+    """How a stream drain finished: did the sentinel arrive, and the rc it carried.
+
+    ``saw_sentinel=False`` means the stream hit EOF first — the shell died mid-command,
+    so the rc is meaningless and the caller reports a failure rather than the default 0.
+    """
+
+    saw_sentinel: bool
+    rc: int
+
+
+async def _bash_syntax_error(command: str) -> str | None:
+    """Parse ``command`` with ``bash -n`` (no execution); return the error, or ``None``.
+
+    A command that leaves bash mid-parse — an unterminated quote, a dangling here-doc —
+    would, if written to the persistent shell, swallow the trailing sentinel and hang
+    until the timeout (then respawn, losing session state). Catching it in a throwaway
+    parser process lets the shell reject a typo instantly without disturbing it.
+    ``bash -n`` flags some incomplete constructs (an open here-doc) as a stderr
+    *warning* with exit 0, so a non-empty diagnostic counts as a rejection too.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/bash",
+        "--norc",
+        "--noprofile",
+        "-n",
+        "-c",
+        command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, raw = await proc.communicate()
+    diagnostic = raw.decode(ENCODING, errors="replace").strip()
+    if proc.returncode == 0 and not diagnostic:
+        return None
+    return diagnostic or "syntax error"
 
 
 class _Shell:
@@ -138,6 +183,14 @@ class _Shell:
         self, command: str, *, timeout: float, output_limit: int
     ) -> CommandResult:
         """Run ``command`` on the persistent shell; capture its output + exit code."""
+        syntax_error = await _bash_syntax_error(command)
+        if syntax_error is not None:
+            # Reject a malformed command up front, without writing it to the persistent
+            # shell — doing so would swallow the sentinel and hang until the timeout,
+            # then respawn, losing the whole session over a quoting typo.
+            return CommandResult(
+                "", syntax_error, SYNTAX_ERROR_EXIT_CODE, truncated=False
+            )
         async with self._lock:  # one command at a time per shell
             proc = await self._ensure()
             assert proc.stdin is not None
@@ -155,12 +208,14 @@ class _Shell:
             proc.stdin.write(script.encode(ENCODING))
             await proc.stdin.drain()
 
-            out = _Acc(output_limit, want_rc=True)
-            err = _Acc(output_limit, want_rc=False)
-            out_task = asyncio.create_task(self._drain(proc.stdout, out))
-            err_task = asyncio.create_task(self._drain(proc.stderr, err))
+            out = _Acc(output_limit)
+            err = _Acc(output_limit)
+            out_task = asyncio.create_task(self._drain(proc.stdout, out, parse_rc=True))
+            err_task = asyncio.create_task(
+                self._drain(proc.stderr, err, parse_rc=False)
+            )
             try:
-                await asyncio.wait_for(
+                out_end, _ = await asyncio.wait_for(
                     asyncio.gather(out_task, err_task), timeout=timeout
                 )
             except TimeoutError:
@@ -171,28 +226,43 @@ class _Shell:
                 return CommandResult(
                     out.text(), err.text(), TIMEOUT_EXIT_CODE, truncated=True
                 )
+            truncated = out.truncated or err.truncated
+            if not out_end.saw_sentinel:
+                # Stdout reached EOF before the sentinel: the shell died mid-command.
+                # Report a distinct non-zero code (not the default 0, which would mask
+                # the failure) and force a fresh shell on the next command.
+                await self._terminate()
+                return CommandResult(
+                    out.text(), err.text(), SHELL_DIED_EXIT_CODE, truncated=truncated
+                )
             return CommandResult(
-                out.text(), err.text(), out.rc, truncated=out.truncated or err.truncated
+                out.text(), err.text(), out_end.rc, truncated=truncated
             )
 
-    async def _drain(self, stream: asyncio.StreamReader, acc: _Acc) -> None:
-        """Read lines into ``acc`` until the sentinel (parsing ``$?`` on stdout)."""
+    async def _drain(
+        self, stream: asyncio.StreamReader, acc: _Acc, *, parse_rc: bool
+    ) -> _DrainEnd:
+        """Read lines into ``acc`` until the sentinel; report how the stream ended.
+
+        ``parse_rc`` (stdout only) pulls ``$?`` off the sentinel line. EOF before the
+        sentinel means the shell died mid-command — surfaced via ``saw_sentinel=False``
+        so :meth:`run` reports a failure instead of a bogus exit 0.
+        """
         marker = self._sentinel
         while True:
             line = await stream.readline()
-            if not line:  # EOF — the shell died mid-command
-                acc.done = True
-                return
+            if not line:  # EOF — the shell died mid-command (no sentinel)
+                return _DrainEnd(saw_sentinel=False, rc=0)
             text = line.decode(ENCODING, errors="replace")
             stripped = text.rstrip("\n")
             if stripped == marker or stripped.startswith(marker + " "):
-                if acc._want_rc:
+                rc = 0
+                if parse_rc:
                     parts = stripped.split(" ", 1)
                     if len(parts) == 2:
                         with contextlib.suppress(ValueError):
-                            acc.rc = int(parts[1])
-                acc.done = True
-                return
+                            rc = int(parts[1])
+                return _DrainEnd(saw_sentinel=True, rc=rc)
             acc.append(text)
 
     async def _terminate(self) -> None:
