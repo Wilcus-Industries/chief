@@ -16,6 +16,11 @@ turns hold a slot — idle sessions cost nothing). Behaviours:
 - **Idle archive.** After ``idle_archive_seconds`` of inactivity a task is marked done
   and its thread archived; the next message reopens it (resume). (Memory distillation is
   a separate ~10-min trigger owned by M4.)
+- **Casual self-compaction.** A casual ``:0`` channel can't archive (it has no closable
+  topic) and would otherwise resume an ever-growing transcript every turn. So after
+  ``compaction_idle_seconds`` of inactivity it summarizes its own conversation and
+  reseeds onto a fresh session resumed from that brief — replicating ``/compact``, which
+  the SDK exposes no programmatic trigger for — and stays OPEN instead of dying.
 - **Restart recovery.** :meth:`recover` pings the owner for tasks left mid-flight and
   never auto-resumes; a follow-up message resumes from the persisted ``sdk_session_id``.
 
@@ -68,6 +73,19 @@ MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
 #: A distiller: turn a transcript + the current index into candidate facts.
 DistillFn = Callable[..., Awaitable[list[FactDraft]]]
+#: One-shot prompt that asks the casual session to brief its own history (the live
+#: session, not the engine's pruned transcript, so the brief sees the full context).
+COMPACT_PROMPT = (
+    "Summarize our conversation so far into a compact brief for your future self: the "
+    "durable context, any open threads, and the gist of recurring topics. Reply with "
+    "only the brief, nothing else."
+)
+#: Frames the brief as carried-forward context when priming the reseeded casual session,
+#: so the summary lands in the new transcript (and survives a restart via the new id).
+PRIME_TEMPLATE = (
+    "Here is a brief of our earlier conversation, to carry forward as context:\n\n"
+    "{summary}"
+)
 
 
 class TaskIO(Protocol):
@@ -96,6 +114,7 @@ def _default_session(
     *,
     model: str,
     resume: str | None = None,
+    fork_session: bool = False,
     can_use_tool: CanUseTool | None = None,
     hooks: dict[HookEvent, list[HookMatcher]] | None = None,
     system_prompt: str | None = None,
@@ -107,6 +126,7 @@ def _default_session(
     return TaskSession(
         model=model,
         resume=resume,
+        fork_session=fork_session,
         can_use_tool=can_use_tool,
         hooks=hooks,
         system_prompt=system_prompt,
@@ -129,6 +149,7 @@ class _RunningTask:
     session: SessionProto
     queue: "asyncio.Queue[str]"
     tier: str
+    is_casual: bool = False
     generating: bool = False
     cancelled: bool = False
     consumer: "asyncio.Task[None] | None" = None
@@ -151,6 +172,7 @@ class TaskManager:
         concurrency: int = 3,
         grace_seconds: float = 6.0,
         idle_archive_seconds: float = 3600.0,
+        compaction_idle_seconds: float = 3600.0,
         session_factory_sdk: SessionFactory = _default_session,
         stop_intent: Classifier = classify.stop_intent,
         warrants_task: Classifier = classify.warrants_task,
@@ -174,6 +196,7 @@ class TaskManager:
         self._platform = platform
         self._grace_seconds = grace_seconds
         self._idle_archive_seconds = idle_archive_seconds
+        self._compaction_idle_seconds = compaction_idle_seconds
         self._session_factory_sdk = session_factory_sdk
         self._stop_intent = stop_intent
         self._warrants_task = warrants_task
@@ -198,6 +221,7 @@ class TaskManager:
         self, *, thread_key: str, text: str, is_general: bool = False
     ) -> None:
         """Route an owner message into its task, spawning a topic when warranted."""
+        is_casual = is_general
         if is_general and await self._warrants_task(
             text, model=self._classifier_model
         ):
@@ -206,7 +230,8 @@ class TaskManager:
             )
             await self._io.send(thread_key, "→ Tracking that in a new topic.")
             thread_key = new_key
-        task = await self._ensure_task(thread_key)
+            is_casual = False  # a spawned topic is a real, full-memory task
+        task = await self._ensure_task(thread_key, is_casual=is_casual)
         await self._submit(task, text)
 
     async def cancel(self, thread_key: str) -> bool:
@@ -258,14 +283,14 @@ class TaskManager:
     # ---- per-task machinery ---------------------------------------------
 
     async def _ensure_task(
-        self, thread_key: str, *, tier: str = "owner"
+        self, thread_key: str, *, tier: str = "owner", is_casual: bool = False
     ) -> _RunningTask:
         existing = self._tasks.get(thread_key)
         if existing is not None:
             if not existing.cancelled:
                 return existing
-            # An idle-archive teardown is in flight; wait it out so the DB status
-            # and topic settle (DONE + closed) before we reopen/resume the task.
+            # An idle teardown (archive or casual reseed) is in flight; wait it out so
+            # the DB settles (DONE + closed, or the reseeded id) before we reopen.
             if existing.idle_handle is not None:
                 try:
                     await existing.idle_handle
@@ -276,6 +301,31 @@ class TaskManager:
                 session, platform=self._platform, thread_key=thread_key, tier=tier
             )
             db_id, resume = db.id, db.sdk_session_id
+        gate_kwargs = self._session_kwargs(
+            thread_key=thread_key, tier=tier, db_id=db_id
+        )
+        rt = _RunningTask(
+            thread_key=thread_key,
+            db_id=db_id,
+            session=self._session_factory_sdk(
+                model=self._owner_model, resume=resume, **gate_kwargs
+            ),
+            queue=asyncio.Queue(),
+            tier=tier,
+            is_casual=is_casual,
+        )
+        self._tasks[thread_key] = rt
+        return rt
+
+    def _session_kwargs(
+        self, *, thread_key: str, tier: str, db_id: int
+    ) -> dict[str, Any]:
+        """Assemble the SDK session kwargs (gate + memory/tool scoping) for a thread.
+
+        Shared by :meth:`_ensure_task`, casual reseed, and :meth:`branch` so a session
+        is built the same way wherever it originates (no per-call drift). ``resume`` /
+        ``fork_session`` are layered on by the caller — they vary per origin.
+        """
         can_use_tool, hooks = self._build_gate(
             task_id=db_id, thread_key=thread_key, tier=tier
         )
@@ -321,17 +371,7 @@ class TaskManager:
                 for svc in services:
                     disallowed += list(svc.deferred_tools)
                 gate_kwargs["disallowed_tools"] = disallowed
-        rt = _RunningTask(
-            thread_key=thread_key,
-            db_id=db_id,
-            session=self._session_factory_sdk(
-                model=self._owner_model, resume=resume, **gate_kwargs
-            ),
-            queue=asyncio.Queue(),
-            tier=tier,
-        )
-        self._tasks[thread_key] = rt
-        return rt
+        return gate_kwargs
 
     def _build_gate(
         self, *, task_id: int, thread_key: str, tier: str
@@ -456,7 +496,11 @@ class TaskManager:
         if task.cancelled or self._tasks.get(task.thread_key) is not task:
             return  # torn down or cancelled — don't resurrect a timer
         self._cancel_idle(task)
-        task.idle_handle = asyncio.create_task(self._idle_then_archive(task))
+        # The lanes diverge here: a casual ``:0`` channel self-compacts and stays OPEN;
+        # a real task thread archives and dies. Everything else (live session, resume,
+        # steering, distill@20m) is shared.
+        idle = self._idle_then_compact if task.is_casual else self._idle_then_archive
+        task.idle_handle = asyncio.create_task(idle(task))
 
     def _cancel_idle(self, task: _RunningTask) -> None:
         if task.idle_handle is not None:
@@ -480,6 +524,117 @@ class TaskManager:
         # message awaits this teardown in _ensure_task instead of racing it.
         self._tasks.pop(task.thread_key, None)
         logger.info("task archived on idle", extra={"thread_key": task.thread_key})
+
+    async def _idle_then_compact(self, task: _RunningTask) -> None:
+        """Casual-lane idle handler: self-compact in place of archiving (stays OPEN).
+
+        Mirrors :meth:`_idle_then_archive`'s guard/teardown shape but swaps the archive
+        for a summarize-and-reseed, so the casual channel keeps living — now resumed
+        from a compact brief of its own history instead of an ever-growing transcript.
+        The status is left OPEN and the thread is never archived.
+        """
+        try:
+            await asyncio.sleep(self._compaction_idle_seconds)
+        except asyncio.CancelledError:
+            return
+        if task.cancelled or self._tasks.get(task.thread_key) is not task:
+            return
+        task.cancelled = True
+        try:
+            await self._summarize_and_reseed(task)
+            logger.info(
+                "casual channel compacted on idle",
+                extra={"thread_key": task.thread_key},
+            )
+        except Exception:
+            # A failed compaction leaves the persisted id on the old session, so the
+            # next message resumes the full transcript — no compaction this round.
+            logger.exception(
+                "compaction failed", extra={"thread_key": task.thread_key}
+            )
+        await self._cancel_consumer(task)
+        await task.session.aclose()
+        self._cancel_distill(task)
+        # Pop last (mirrors archive): a reopening message awaits this teardown in
+        # _ensure_task, then resumes the freshly reseeded id.
+        self._tasks.pop(task.thread_key, None)
+
+    async def _summarize_and_reseed(self, task: _RunningTask) -> str:
+        """Brief the live casual session, then reseed onto a fresh one from that brief.
+
+        Replicates ``/compact``'s behaviour (the SDK exposes no programmatic trigger):
+        summarize the full live transcript, seed a brand-new session with the brief, and
+        point the task's persisted ``sdk_session_id`` at that small reseeded session.
+        Returns the brief. The old session is torn down by the caller.
+        """
+        summary = await self._run_silent_turn(task.session, COMPACT_PROMPT)
+        gate_kwargs = self._session_kwargs(
+            thread_key=task.thread_key, tier=task.tier, db_id=task.db_id
+        )
+        fresh = self._session_factory_sdk(
+            model=self._owner_model, resume=None, **gate_kwargs
+        )
+        try:
+            await self._run_silent_turn(fresh, PRIME_TEMPLATE.format(summary=summary))
+            reseeded_id = fresh.session_id
+        finally:
+            await fresh.aclose()
+        if reseeded_id is not None:
+            await self._set_session_id(task, reseeded_id)
+        return summary
+
+    @staticmethod
+    async def _run_silent_turn(session: SessionProto, text: str) -> str:
+        """Drive one turn on ``session`` silently (not surfaced); return its text."""
+        final: Final | None = None
+        async for event in session.run_turn(text):
+            if isinstance(event, Final):
+                final = event
+        return final.text if final is not None else ""
+
+    async def branch(self, thread_key: str, title: str) -> str:
+        """Promote a casual chat into a full-memory thread carrying its current context.
+
+        Creates a new tracked thread and forks the casual channel's live SDK session
+        into it (``resume`` + ``fork_session``), so the new thread starts with the
+        casual channel's full context while the casual channel compacts independently.
+        The forked session's new id is captured + persisted on the new thread's first
+        turn (like any session). Returns the new ``thread_key``.
+        """
+        async with self._session_factory() as session:
+            casual = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            casual_resume = casual.sdk_session_id if casual is not None else None
+        new_key = await self._io.create_thread(
+            like_thread_key=thread_key, title=title
+        )
+        async with self._session_factory() as session:
+            db = await get_or_create_task(
+                session,
+                platform=self._platform,
+                thread_key=new_key,
+                tier="owner",
+                title=title,
+            )
+            db_id = db.id
+        gate_kwargs = self._session_kwargs(
+            thread_key=new_key, tier="owner", db_id=db_id
+        )
+        rt = _RunningTask(
+            thread_key=new_key,
+            db_id=db_id,
+            session=self._session_factory_sdk(
+                model=self._owner_model,
+                resume=casual_resume,
+                fork_session=True,
+                **gate_kwargs,
+            ),
+            queue=asyncio.Queue(),
+            tier="owner",
+        )
+        self._tasks[new_key] = rt
+        return new_key
 
     # ---- distillation (auto-learning; mirrors the idle-archive trio) ------
 

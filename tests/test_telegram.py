@@ -29,6 +29,7 @@ class FakeEngine:
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
         self.cancelled: list[str] = []
+        self.branched: list[tuple[str, str]] = []
         self._active = active or []
         self._cancel = cancel
 
@@ -43,6 +44,10 @@ class FakeEngine:
 
     async def active_tasks(self) -> list[Task]:
         return self._active
+
+    async def branch(self, thread_key: str, title: str) -> str:
+        self.branched.append((thread_key, title))
+        return f"{thread_key.split(':')[0]}:88"
 
 
 class FakeResolver:
@@ -365,6 +370,70 @@ async def test_forget_no_match(
     await adapter._on_forget(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with("Nothing matched.")  # type: ignore[union-attr]
+
+
+# ---- /branch -----------------------------------------------------------------
+
+
+async def test_branch_owner_casual_uses_default_title(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(user_id=OWNER_ID, text="/branch", thread_id=0)
+
+    await adapter._on_branch(update, _CTX)
+
+    assert len(engine.branched) == 1
+    thread_key, title = engine.branched[0]
+    assert thread_key == "-100:0"
+    assert title.startswith("Branched chat ")  # timestamped default
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        f'→ Branched into "{title}".'
+    )
+
+
+async def test_branch_owner_casual_uses_argument_title(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(user_id=OWNER_ID, text="/branch Trip planning", thread_id=0)
+
+    await adapter._on_branch(update, _CTX)
+
+    assert engine.branched == [("-100:0", "Trip planning")]
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        '→ Branched into "Trip planning".'
+    )
+
+
+async def test_branch_rejected_in_task_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(user_id=OWNER_ID, text="/branch", thread_id=5)
+
+    await adapter._on_branch(update, _CTX)
+
+    assert engine.branched == []  # a tracked topic is already full-memory
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "/branch only works in the casual channel."
+    )
+
+
+async def test_branch_ignores_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(user_id=7, text="/branch", thread_id=0)
+
+    await adapter._on_branch(update, _CTX)
+
+    assert engine.branched == []
+    update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
 
 
 # ---- TelegramTaskIO ----------------------------------------------------------

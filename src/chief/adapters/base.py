@@ -9,6 +9,7 @@ engine's :class:`~chief.core.tasks.TaskIO`, which the adapter implements.
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Protocol
 
@@ -33,6 +34,11 @@ def parse_callback(data: str) -> tuple[int, ApprovalAction] | None:
         return int(parts[1]), ApprovalAction(parts[2])
     except ValueError:
         return None
+
+
+def default_branch_title() -> str:
+    """A timestamped default title for a ``/branch`` invoked with no argument."""
+    return "Branched chat " + datetime.now(UTC).strftime("%m-%d %H:%M")
 
 
 def split_message(text: str, limit: int) -> list[str]:
@@ -77,6 +83,7 @@ class Engine(Protocol):
     ) -> None: ...
     async def cancel(self, thread_key: str) -> bool: ...
     async def active_tasks(self) -> list[Task]: ...
+    async def branch(self, thread_key: str, title: str) -> str: ...
 
 
 class ApprovalResolver(Protocol):

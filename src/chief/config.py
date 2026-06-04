@@ -56,11 +56,14 @@ class Settings(BaseSettings):
 
     # Task engine (M2). concurrency bounds turns actively generating; grace_seconds is
     # the inline-vs-"working…" window; idle_archive_seconds is the no-activity → archive
-    # timer (distillation is a separate ~10-min trigger owned by M4); classifier_model
-    # runs the cheap stop-intent / warrants-a-task judgments.
+    # timer for real task threads (distillation is a separate ~10-min trigger owned by
+    # M4); compaction_idle_seconds is its casual-channel twin — instead of archiving (a
+    # ``:0`` channel has no closable topic) the casual lane self-compacts at this idle
+    # window; classifier_model runs the cheap stop-intent / warrants-a-task judgments.
     concurrency: int = 3
     grace_seconds: float = 6.0
     idle_archive_seconds: int = 3600
+    compaction_idle_seconds: float = 3600.0
     classifier_model: str = "claude-haiku-4-5"
 
     # Permission gate + approval flow (M3). approval_timeout_seconds is the fail-closed

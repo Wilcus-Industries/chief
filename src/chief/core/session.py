@@ -76,6 +76,7 @@ class TaskSession:
         *,
         model: str,
         resume: str | None = None,
+        fork_session: bool = False,
         can_use_tool: CanUseTool | None = None,
         hooks: dict[HookEvent, list[HookMatcher]] | None = None,
         system_prompt: str | None = None,
@@ -88,6 +89,7 @@ class TaskSession:
         self._options = ClaudeAgentOptions(
             model=model,
             resume=resume,
+            fork_session=fork_session,
             can_use_tool=can_use_tool,
             hooks=hooks,
             system_prompt=system_prompt,

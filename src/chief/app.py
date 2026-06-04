@@ -105,6 +105,7 @@ def build_engine(
         concurrency=settings.concurrency,
         grace_seconds=settings.grace_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
+        compaction_idle_seconds=settings.compaction_idle_seconds,
         policy=policy,
         approvals=approvals,
         audit=audit,
