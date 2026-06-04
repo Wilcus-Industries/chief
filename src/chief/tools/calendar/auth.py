@@ -2,11 +2,17 @@
 
 The only interactive piece of M5: the operator runs this once on their dev machine
 (``python -m chief.tools.calendar.auth``), completes the loopback consent in a browser,
-and gets an **authorized-user JSON** written to
-``./secrets/google_calendar_token.json``. That file is mounted into the ``mcp-gcal``
-container as the ``google_calendar_token`` Docker secret — so the VPS never runs a
-consent callback server (DESIGN: "run the consent dance once locally, mount the
-resulting refresh token as a Docker secret — no callback server on the VPS").
+and gets **nspady's Node token file** (account ``normal``) written to
+``./secrets/google_calendar_token.json``. That file is bind-mounted into the
+``mcp-gcal`` container at its token path — so the VPS never runs a consent callback
+server (DESIGN: "run the consent dance once locally, mount the resulting refresh token
+— no callback server on the VPS").
+
+The output is shaped for ``nspady/google-calendar-mcp``: google-auth's Python
+``Credentials`` (``token`` / ``scopes`` / ``expiry``) is remapped to the Node
+google-auth-library credential (``access_token`` / ``scope`` / ``expiry_date``) and
+pre-wrapped under the ``normal`` account key, so the server loads it as-is instead of
+rewriting a single-account file on first boot (see :func:`_to_node_token`).
 
 ``google-auth-oauthlib`` is a **dev/host-only** dependency (imported lazily): the
 runtime container reaches Google through the MCP server, not through this helper, so the
@@ -14,7 +20,9 @@ core image stays lean.
 """
 
 import argparse
+import json
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -31,7 +39,10 @@ DEFAULT_TOKEN_PATH = Path("secrets/google_calendar_token.json")
 class _Credentials(Protocol):
     """The slice of ``google.oauth2.credentials.Credentials`` we serialize."""
 
-    def to_json(self) -> str: ...
+    token: str | None
+    refresh_token: str | None
+    scopes: Sequence[str] | None
+    expiry: datetime | None  # naive UTC, per google-auth
 
 
 #: Run the consent dance for ``client_secrets`` over ``scopes`` → fresh credentials.
@@ -40,6 +51,30 @@ ConsentFn = Callable[[Path, list[str]], _Credentials]
 
 class ClientSecretsMissing(FileNotFoundError):
     """The OAuth client-secrets file the operator must download first is absent."""
+
+
+def _to_node_token(creds: _Credentials) -> dict[str, dict[str, object]]:
+    """Remap google-auth ``Credentials`` → nspady's Node token file.
+
+    ``nspady/google-calendar-mcp`` (Node google-auth-library) wants
+    ``access_token`` / ``refresh_token`` / ``scope`` (space-delimited) / ``token_type``
+    / ``expiry_date`` (epoch ms), keyed by account id. We wrap under ``normal`` (the
+    server's default account mode) so it skips its single→multi-account migration
+    write. ``expiry_date`` is omitted when unknown — nspady then refreshes on first use
+    via the ``refresh_token`` (the one field that actually matters for an always-on
+    service; the access token is short-lived and re-minted on demand).
+    """
+    account: dict[str, object] = {
+        "access_token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "scope": " ".join(creds.scopes or ()),
+        "token_type": "Bearer",
+    }
+    if creds.expiry is not None:
+        account["expiry_date"] = int(
+            creds.expiry.replace(tzinfo=UTC).timestamp() * 1000
+        )
+    return {"normal": account}
 
 
 def _run_local_consent(client_secrets: Path, scopes: list[str]) -> _Credentials:
@@ -58,10 +93,11 @@ def mint_token(
     consent: ConsentFn | None = None,
     scopes: Sequence[str] = SCOPES,
 ) -> Path:
-    """Run consent and write the authorized-user token to ``token_out``.
+    """Run consent and write the nspady Node token to ``token_out``.
 
     ``consent`` is injected in tests; production uses :func:`_run_local_consent`
-    (resolved late so a monkeypatch on the module global takes effect). Raises
+    (resolved late so a monkeypatch on the module global takes effect). The credentials
+    are remapped to nspady's shape via :func:`_to_node_token` before writing. Raises
     :class:`ClientSecretsMissing` if the client file isn't present.
     """
     if not client_secrets.exists():
@@ -69,7 +105,9 @@ def mint_token(
     resolver = consent if consent is not None else _run_local_consent
     credentials = resolver(client_secrets, list(scopes))
     token_out.parent.mkdir(parents=True, exist_ok=True)
-    token_out.write_text(credentials.to_json(), encoding="utf-8")
+    token_out.write_text(
+        json.dumps(_to_node_token(credentials), indent=2), encoding="utf-8"
+    )
     return token_out
 
 
@@ -94,8 +132,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(
-        f"Wrote {out}. Mount it into the mcp-gcal container as the Docker secret "
-        "'google_calendar_token'."
+        f"Wrote {out}. docker-compose bind-mounts it into the mcp-gcal container as "
+        "its token store (writable — nspady persists refreshed access tokens there)."
     )
     return 0
 
