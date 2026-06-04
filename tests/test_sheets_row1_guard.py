@@ -89,3 +89,19 @@ def test_check_batch_update() -> None:
 
 def test_unguarded_tool_passes() -> None:
     assert row1_guard._check_row_1("get_sheet_data", {"range": "A1:Z99"}) is None
+
+
+def test_blocked_result_shape() -> None:
+    """The refusal must be a ``CallToolResult`` the lowlevel handler short-circuits on.
+
+    A bare content list is treated as "no structured output" and, because the guarded
+    tools declare an ``outputSchema``, gets replaced by a generic validation error —
+    losing ROW_1_ERROR. A ``CallToolResult`` is returned verbatim, keeping the message.
+    """
+    from mcp.types import CallToolResult
+
+    result = row1_guard.blocked_result(row1_guard.ROW_1_ERROR)
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert result.content[0].type == "text"
+    assert result.content[0].text == row1_guard.ROW_1_ERROR

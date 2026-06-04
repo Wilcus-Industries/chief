@@ -18,9 +18,8 @@ sole writer of the shared token file. Standalone image — no chief import.
 import os
 from typing import Any
 
-from mcp.types import TextContent
 from mcp_google_sheets.server import mcp
-from row1_guard import _check_row_1
+from row1_guard import _check_row_1, blocked_result
 
 PORT = int(os.environ.get("PORT", "8002"))
 
@@ -33,7 +32,7 @@ async def _guarded_call_tool(
 ) -> Any:
     err = _check_row_1(name, arguments)
     if err:
-        return [TextContent(type="text", text=err)]
+        return blocked_result(err)
     return await _original_call_tool(name, arguments, **kwargs)
 
 
