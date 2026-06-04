@@ -25,9 +25,13 @@ def test_is_read_only_known_and_unknown() -> None:
 async def test_never_denies_with_no_prompt(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    store = await _store(session_factory, never=[("Bash", "rm -rf /tmp/x")])
+    store = await _store(
+        session_factory, never=[("mcp__chief_shell__bash", "rm -rf /tmp/x")]
+    )
 
-    verdict = classify("Bash", {"command": "rm -rf /tmp/x"}, store)
+    verdict = classify(
+        "mcp__chief_shell__bash", {"command": "rm -rf /tmp/x"}, store
+    )
 
     assert verdict.decision is GateDecision.DENY
 
@@ -53,14 +57,17 @@ async def test_read_only_allows(
     assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_approved_allows(
+async def test_builtin_shell_denied_over_approved(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    store = await _store(session_factory, approved=[("Bash", "git status")])
+    # The built-in Bash runs inside core (Max token in env). An APPROVED rule must NOT
+    # resurrect it — the hard DENY overrides the allow-list. (APPROVED → ALLOW for a
+    # normal command tool is covered by test_shell_tool_approved_allows.)
+    store = await _store(session_factory, approved=[("Bash", "env")])
 
-    verdict = classify("Bash", {"command": "git status"}, store)
+    verdict = classify("Bash", {"command": "env"}, store)
 
-    assert verdict.decision is GateDecision.ALLOW
+    assert verdict.decision is GateDecision.DENY
 
 
 async def test_unknown_effectful_tool_asks(
@@ -68,10 +75,29 @@ async def test_unknown_effectful_tool_asks(
 ) -> None:
     store = await _store(session_factory)
 
-    verdict = classify("Bash", {"command": "git push"}, store)
+    verdict = classify("mcp__notion__create-page", {"title": "x"}, store)
 
     assert verdict.decision is GateDecision.ASK
     assert "approval" in verdict.reason
+
+
+async def test_builtin_shell_tools_denied(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Bash/BashOutput/KillShell all execute in core — each is a hard DENY so the model
+    # is forced onto the secret-free sandbox shell, even with file scoping wired.
+    store = await _store(session_factory)
+
+    for name in ("Bash", "BashOutput", "KillShell"):
+        verdict = classify(
+            name,
+            {"command": "env"},
+            store,
+            memory_dir="/memory",
+            workspace_dir="/workspace",
+        )
+        assert verdict.decision is GateDecision.DENY, name
+        assert "sandbox shell" in verdict.reason
 
 
 async def test_extra_read_only_tool_allows(

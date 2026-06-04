@@ -32,14 +32,21 @@ from ..sandbox.shell_server import ENCODING
 SERVER_NAME = "chief_shell"
 TOOL_NAME = f"mcp__{SERVER_NAME}__bash"
 
+#: The sandbox shell's two invariants, single-sourced here so the tool description and
+#: the persona guidance (:mod:`chief.core.personas`) can't drift: a secret-free
+#: environment, and chaining steps in one command rather than across separate calls.
+SANDBOX_SHELL_CONTRACT = (
+    "There are no secrets in this environment. Chain steps with && in one command "
+    "rather than relying on separate calls."
+)
+
 _BASH_DESCRIPTION = (
     "Run a bash command in a sandboxed Linux container. The working directory is "
     "/workspace (a scratch space shared with your Read/Write/Edit tools) and has "
     "internet access. Shell state — environment variables, the current directory, "
     "background jobs — persists across calls within this task (but not across a "
-    "restart). There are no secrets in this environment. Chain steps with && in one "
-    "call rather than relying on separate calls. Commands require approval unless the "
-    "owner has pre-approved them."
+    f"restart). {SANDBOX_SHELL_CONTRACT} Commands require approval unless the owner "
+    "has pre-approved them."
 )
 
 #: Grace added to the server's own per-command timeout so the sandbox returns its

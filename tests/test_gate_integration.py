@@ -123,11 +123,15 @@ async def test_read_only_allows_through_both_callbacks(
 async def test_never_denies_with_no_approval(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    gate = await _gate(session_factory, never=[("Bash", "rm -rf /tmp/x")])
+    gate = await _gate(
+        session_factory, never=[("mcp__chief_shell__bash", "rm -rf /tmp/x")]
+    )
     call = {"command": "rm -rf /tmp/x"}
 
-    decision = await gate.run_hook("Bash", call)
-    result = await gate.can_use_tool("Bash", call, ToolPermissionContext())
+    decision = await gate.run_hook("mcp__chief_shell__bash", call)
+    result = await gate.can_use_tool(
+        "mcp__chief_shell__bash", call, ToolPermissionContext()
+    )
 
     assert decision == "deny"
     assert isinstance(result, PermissionResultDeny)
@@ -144,9 +148,9 @@ async def test_ask_approved_flips_waiting_then_allows(
     gate = await _gate(session_factory)
     call = {"command": "git push"}
 
-    assert await gate.run_hook("Bash", call) == "ask"
+    assert await gate.run_hook("mcp__chief_shell__bash", call) == "ask"
     parked = asyncio.ensure_future(
-        gate.can_use_tool("Bash", call, ToolPermissionContext())
+        gate.can_use_tool("mcp__chief_shell__bash", call, ToolPermissionContext())
     )
     await _settle(lambda: bool(gate.io.cards))
     approval_id = gate.io.cards[0][1].approval_id
@@ -191,7 +195,7 @@ async def test_ask_denied_returns_deny(
     call = {"command": "git push"}
 
     parked = asyncio.ensure_future(
-        gate.can_use_tool("Bash", call, ToolPermissionContext())
+        gate.can_use_tool("mcp__chief_shell__bash", call, ToolPermissionContext())
     )
     await _settle(lambda: bool(gate.io.cards))
     approval_id = gate.io.cards[0][1].approval_id
@@ -213,7 +217,7 @@ async def test_ask_timeout_fails_closed(
     gate = await _gate(session_factory, timeout=0.01)
 
     result = await gate.can_use_tool(
-        "Bash", {"command": "git push"}, ToolPermissionContext()
+        "mcp__chief_shell__bash", {"command": "git push"}, ToolPermissionContext()
     )
 
     assert isinstance(result, PermissionResultDeny)

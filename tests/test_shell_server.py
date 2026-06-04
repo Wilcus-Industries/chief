@@ -143,6 +143,35 @@ async def test_output_truncation_flagged(server_port: int) -> None:
     await client.close()
 
 
+async def test_malformed_command_fails_fast_and_keeps_session(
+    server_port: int,
+) -> None:
+    client = await _client(server_port)
+    # An unterminated quote would otherwise hang to the 2s timeout; instead the parse
+    # check rejects it instantly (exit 2, not 124) and never disturbs the shell.
+    res = await client.run("s1", "echo 'oops")
+
+    assert res["exit_code"] == 2  # SYNTAX_ERROR_EXIT_CODE, not the timeout's 124
+    assert res["stderr"]  # carries bash's parse diagnostic
+    # The session is untouched — state set before and after the typo persists.
+    await client.run("s1", "export K=v")
+    assert (await client.run("s1", "echo $K"))["stdout"] == "v"
+    await client.close()
+
+
+async def test_shell_death_reports_nonzero_not_clean_exit(server_port: int) -> None:
+    client = await _client(server_port)
+    # The shell writes output, then kills itself: EOF arrives before the sentinel, so a
+    # default exit 0 would mask the crash. It must report a distinct non-zero instead.
+    res = await client.run("s1", "echo bye; kill -9 $$")
+
+    assert res["stdout"] == "bye"
+    assert res["exit_code"] != 0
+    # The shell respawns, so the session stays usable for the next command.
+    assert (await client.run("s1", "echo alive"))["stdout"] == "alive"
+    await client.close()
+
+
 async def test_malformed_request_gets_error(server_port: int) -> None:
     reader, writer = await asyncio.open_connection("127.0.0.1", server_port)
     writer.write(b"not json\n")

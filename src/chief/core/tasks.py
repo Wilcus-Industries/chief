@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..gate.approvals import ApprovalManager
 from ..gate.gate import (
+    BUILTIN_SHELL_TOOLS,
     FILE_OP_TOOLS,
     WRITE_OP_TOOLS,
     build_can_use_tool,
@@ -77,6 +78,10 @@ MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
 #: ``allowed_tools`` but confined to the workspace by the gate (writes elsewhere DENY).
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
+#: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
+#: gate's hard DENY) — they run inside core where the Max token lives, so the model can
+#: never reach them; it uses the sandbox shell (``mcp__chief_shell__bash``) instead.
+DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
 #: Read-only web + meta tools the owner agent always gets (the gate treats all three as
 #: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
 WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
@@ -398,11 +403,12 @@ class TaskManager:
                 )
             if mcp_servers:
                 gate_kwargs["mcp_servers"] = mcp_servers
-            if services:
-                disallowed: list[str] = []
-                for svc in services:
-                    disallowed += list(svc.deferred_tools)
-                gate_kwargs["disallowed_tools"] = disallowed
+            # Always refuse the built-in shell at the SDK layer (every tier — guests
+            # never get a shell either); Google deferred ops (delete) are added on top.
+            disallowed = list(DISALLOWED_BUILTINS)
+            for svc in services:
+                disallowed += list(svc.deferred_tools)
+            gate_kwargs["disallowed_tools"] = disallowed
         return gate_kwargs
 
     def _build_gate(
