@@ -1,0 +1,256 @@
+"""Markdown memory backend (DESIGN: markdown + [[wikilinks]], namespaced).
+
+Layout under ``memory_dir``::
+
+    Soul.md            # chief's identity/voice (chief- and owner-editable)
+    User.md            # the owner's profile
+    MEMORY.md          # the index — one pointer line per fact, loaded every session
+    facts/owner/<slug>.md
+    facts/contacts/<id>/<slug>.md   # contact namespace ready, exercised in M6
+
+Each fact file carries hand-rolled ``key: value`` frontmatter (no YAML dependency) and a
+free-text body that may contain ``[[wikilinks]]`` to other facts. Writes overwrite on
+slug collision (DESIGN: "overwrite, don't accumulate"), rewrite the matching
+``MEMORY.md`` pointer line, then commit through the versioner. A single
+:class:`asyncio.Lock` serializes every mutation so concurrent distill/forget/scaffold
+ops can't interleave file + index + commit. ``purge_expired`` drops TTL-expired facts
+(DESIGN: flag time-sensitive facts).
+"""
+
+import asyncio
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .store import OWNER_NAMESPACE, Fact
+from .versioning import Versioner
+
+_FRONTMATTER_KEYS = ("title", "trust", "provenance", "expires", "created")
+
+_STARTER_SOUL = """\
+# Soul
+
+I am chief, a personal assistant. I am candid, concise, and capable. I act on my
+owner's behalf, keep their trust, and say plainly when I am unsure. This file is mine
+to evolve — and the owner's to correct.
+"""
+
+_STARTER_MEMORY = """\
+# Memory index
+
+Pointers to every fact file. Open a file with Read when its line looks relevant.
+"""
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _pointer_prefix(namespace: str, slug: str) -> str:
+    """The stable prefix identifying a fact's index line (for rewrite/remove)."""
+    return f"- facts/{namespace}/{slug}.md"
+
+
+def _pointer_line(fact: Fact) -> str:
+    return f"{_pointer_prefix(fact.namespace, fact.slug)} — {fact.title}"
+
+
+def _render_fact(fact: Fact) -> str:
+    values = {
+        "title": fact.title,
+        "trust": fact.trust,
+        "provenance": fact.provenance,
+        "expires": fact.expires or "",
+        "created": fact.created,
+    }
+    lines = ["---", *(f"{k}: {values[k]}" for k in _FRONTMATTER_KEYS), "---", ""]
+    return "\n".join(lines) + fact.body.rstrip() + "\n"
+
+
+def _parse_fact(path: Path, namespace: str) -> Fact:
+    """Read a fact file back into a :class:`Fact` (inverse of :func:`_render_fact`)."""
+    text = path.read_text(encoding="utf-8")
+    meta: dict[str, str] = {}
+    body = text
+    if text.startswith("---\n"):
+        _, _, rest = text.partition("---\n")
+        block, _, body = rest.partition("---\n")
+        for line in block.splitlines():
+            key, sep, value = line.partition(":")
+            if sep:
+                meta[key.strip()] = value.strip()
+    return Fact(
+        slug=path.stem,
+        title=meta.get("title", path.stem),
+        body=body.strip(),
+        namespace=namespace,
+        provenance=meta.get("provenance", ""),
+        trust=meta.get("trust", ""),
+        expires=meta.get("expires") or None,
+        created=meta.get("created", ""),
+    )
+
+
+def _is_expired(expires: str | None, *, now: datetime) -> bool:
+    if not expires:
+        return False
+    try:
+        when = datetime.fromisoformat(expires)
+    except ValueError:
+        return False  # unparseable TTL: keep the fact rather than guess
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when <= now
+
+
+class MarkdownMemory:
+    """File-backed :class:`~chief.memory.store.MemoryStore` over ``memory_dir``."""
+
+    def __init__(
+        self, root: str | Path, *, versioner: Versioner, owner_name: str
+    ) -> None:
+        self._root = Path(root)
+        self._versioner = versioner
+        self._owner_name = owner_name
+        self._lock = asyncio.Lock()
+
+    # ---- readers (sync; used while assembling a system prompt) -----------
+
+    def index(self) -> str:
+        return self._read(self._root / "MEMORY.md")
+
+    def soul(self) -> str:
+        return self._read(self._root / "Soul.md")
+
+    def user(self) -> str:
+        return self._read(self._root / "User.md")
+
+    def list_facts(self, namespace: str) -> list[Fact]:
+        directory = self._facts_dir(namespace)
+        if not directory.is_dir():
+            return []
+        facts = [_parse_fact(p, namespace) for p in sorted(directory.glob("*.md"))]
+        return facts
+
+    # ---- mutators (async; each commits one version) ----------------------
+
+    async def write_fact(
+        self,
+        *,
+        namespace: str,
+        slug: str,
+        title: str,
+        body: str,
+        provenance: str,
+        trust: str,
+        expires: str | None = None,
+    ) -> Fact:
+        async with self._lock:
+            path = self._facts_dir(namespace) / f"{slug}.md"
+            # Preserve the original learned-at time across an overwrite.
+            created = (
+                _parse_fact(path, namespace).created if path.exists() else _now_iso()
+            ) or _now_iso()
+            fact = Fact(
+                slug=slug, title=title, body=body, namespace=namespace,
+                provenance=provenance, trust=trust, expires=expires, created=created,
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_render_fact(fact), encoding="utf-8")
+            self._upsert_pointer(fact)
+            await self._versioner.commit(f"memory: write {namespace}/{slug}")
+            return fact
+
+    async def forget(self, namespace: str, query: str) -> list[Fact]:
+        async with self._lock:
+            needle = query.strip().lower()
+            removed = [
+                f
+                for f in self.list_facts(namespace)
+                if needle in f.slug.lower() or needle in f.title.lower()
+            ]
+            if not removed:
+                return []
+            for fact in removed:
+                self._remove_fact(fact)
+            await self._versioner.commit(f"memory: forget {namespace}/{query}")
+            return removed
+
+    async def purge_expired(self) -> int:
+        async with self._lock:
+            now = datetime.now(UTC)
+            expired = [
+                f
+                for namespace in self._namespaces()
+                for f in self.list_facts(namespace)
+                if _is_expired(f.expires, now=now)
+            ]
+            if not expired:
+                return 0
+            for fact in expired:
+                self._remove_fact(fact)
+            await self._versioner.commit(f"memory: purge {len(expired)} expired")
+            return len(expired)
+
+    async def ensure_scaffold(self) -> None:
+        async with self._lock:
+            self._root.mkdir(parents=True, exist_ok=True)
+            self._facts_dir(OWNER_NAMESPACE).mkdir(parents=True, exist_ok=True)
+            seeded = self._seed("Soul.md", _STARTER_SOUL)
+            seeded |= self._seed("User.md", f"# {self._owner_name}\n")
+            seeded |= self._seed("MEMORY.md", _STARTER_MEMORY)
+            await self._versioner.init()
+            if seeded:
+                await self._versioner.commit("memory: scaffold")
+
+    # ---- internals -------------------------------------------------------
+
+    def _facts_dir(self, namespace: str) -> Path:
+        return self._root / "facts" / namespace
+
+    def _namespaces(self) -> list[str]:
+        facts_root = self._root / "facts"
+        if not facts_root.is_dir():
+            return []
+        return [
+            str(p.relative_to(facts_root))
+            for p in facts_root.rglob("*")
+            if p.is_dir() and any(p.glob("*.md"))
+        ]
+
+    def _read(self, path: Path) -> str:
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def _seed(self, name: str, content: str) -> bool:
+        """Write a starter file only if absent; return whether it was created."""
+        path = self._root / name
+        if path.exists():
+            return False
+        path.write_text(content, encoding="utf-8")
+        return True
+
+    def _remove_fact(self, fact: Fact) -> None:
+        (self._facts_dir(fact.namespace) / f"{fact.slug}.md").unlink(missing_ok=True)
+        self._drop_pointer(fact.namespace, fact.slug)
+
+    def _upsert_pointer(self, fact: Fact) -> None:
+        """Rewrite the fact's index line in place, or append it if new."""
+        prefix = _pointer_prefix(fact.namespace, fact.slug)
+        lines = self.index().splitlines()
+        line = _pointer_line(fact)
+        for i, existing in enumerate(lines):
+            if existing.startswith(prefix):
+                lines[i] = line
+                break
+        else:
+            lines.append(line)
+        self._write_index(lines)
+
+    def _drop_pointer(self, namespace: str, slug: str) -> None:
+        prefix = _pointer_prefix(namespace, slug)
+        lines = [ln for ln in self.index().splitlines() if not ln.startswith(prefix)]
+        self._write_index(lines)
+
+    def _write_index(self, lines: list[str]) -> None:
+        (self._root / "MEMORY.md").write_text(
+            "\n".join(lines).rstrip() + "\n", encoding="utf-8"
+        )
