@@ -117,15 +117,21 @@ class TaskSession:
         first-message ``ProcessError`` on a resuming turn also restarts fresh; an
         acceptable degradation vs. a hard crash.)
         """
-        emitted = 0
+        streamed = False
         try:
             async for event in self._stream_once(text):
-                emitted += 1
+                streamed = True
                 yield event
-        except ProcessError:
-            if emitted or self._options.resume is None:
+        except ProcessError as exc:
+            if streamed or self._options.resume is None:
                 raise
-            logger.warning("resume failed; retrying on a fresh session")
+            # Log exit/stderr so a benign dead-resume self-heal is distinguishable
+            # from a swallowed real fault (fresh session orphans the prior transcript).
+            logger.warning(
+                "resume failed (exit %s); retrying on a fresh session. stderr: %s",
+                exc.exit_code,
+                exc.stderr,
+            )
             await self._reset_to_fresh()
             async for event in self._stream_once(text):
                 yield event
