@@ -183,6 +183,41 @@ async def test_dead_resume_falls_back_to_fresh_session() -> None:
     assert clients[1].options.resume is None
 
 
+class RaisingClient(FakeClient):
+    """Yields its messages, then raises ``raise_after`` from ``receive_response``."""
+
+    raise_after: Exception
+
+    async def receive_response(self) -> AsyncIterator[Any]:
+        for message in self.messages:
+            yield message
+        raise self.raise_after
+
+
+async def test_process_error_after_partial_stream_propagates() -> None:
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        client = RaisingClient(options)
+        client.messages = [_assistant(ToolUseBlock(id="t1", name="Bash", input={}))]
+        client.raise_after = ProcessError("died mid-turn", exit_code=1)
+        clients.append(client)
+        return client
+
+    session = TaskSession(
+        model="claude-sonnet-4-6", resume="sess-prior", client_factory=factory
+    )
+
+    events: list[Any] = []
+    with pytest.raises(ProcessError):
+        async for event in session.run_turn("hi"):
+            events.append(event)
+
+    # Milestone streamed before the error — no fresh-session replay of a partial turn.
+    assert events == [Milestone(text="using Bash")]
+    assert len(clients) == 1
+
+
 async def test_process_error_without_resume_propagates() -> None:
     def factory(options: ClaudeAgentOptions) -> FakeClient:
         client = FakeClient(options)
