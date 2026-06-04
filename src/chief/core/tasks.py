@@ -350,6 +350,12 @@ class TaskManager:
         gate_kwargs: dict[str, Any] = {}
         if can_use_tool is not None or hooks is not None:
             gate_kwargs = {"can_use_tool": can_use_tool, "hooks": hooks}
+        # Always refuse the built-in shell at the SDK layer — the SDK-side mate of the
+        # gate's hard DENY (see gate.classify), wired independently of memory so a
+        # future memory=None path can't silently restore the in-core shell. Per-service
+        # Google deferred ops (delete) are appended below, where services are in scope.
+        disallowed_tools = list(DISALLOWED_BUILTINS)
+        gate_kwargs["disallowed_tools"] = disallowed_tools
         if self._memory is not None:
             # M4: only owner sessions reach dispatch (telegram short-circuits guests),
             # so cwd + memory tools are owner-scoped in practice. build_system_prompt
@@ -403,12 +409,10 @@ class TaskManager:
                 )
             if mcp_servers:
                 gate_kwargs["mcp_servers"] = mcp_servers
-            # Always refuse the built-in shell at the SDK layer (every tier — guests
-            # never get a shell either); Google deferred ops (delete) are added on top.
-            disallowed = list(DISALLOWED_BUILTINS)
+            # Google deferred ops (delete) refused on top of the always-disallowed
+            # built-in shell wired above.
             for svc in services:
-                disallowed += list(svc.deferred_tools)
-            gate_kwargs["disallowed_tools"] = disallowed
+                disallowed_tools += list(svc.deferred_tools)
         return gate_kwargs
 
     def _build_gate(

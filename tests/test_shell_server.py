@@ -159,6 +159,25 @@ async def test_malformed_command_fails_fast_and_keeps_session(
     await client.close()
 
 
+async def test_trailing_backslash_rejected_and_keeps_session(
+    server_port: int,
+) -> None:
+    client = await _client(server_port)
+    # `bash -n` accepts a dangling line continuation, but writing it to the persistent
+    # shell would splice the sentinel onto the command and garble the output + exit
+    # code. The parse check rejects it up front (exit 2) and leaves the shell untouched.
+    res = await client.run("s1", "echo hi \\")
+
+    assert res["exit_code"] == 2  # SYNTAX_ERROR_EXIT_CODE
+    assert res["stderr"]  # carries the dangling-continuation diagnostic
+    # An even run of trailing backslashes is an escaped literal, not a continuation —
+    # `echo hi\\` prints `hi\` and runs normally.
+    ok = await client.run("s1", "echo hi\\\\")
+    assert ok["exit_code"] == 0
+    assert ok["stdout"] == "hi\\"
+    await client.close()
+
+
 async def test_shell_death_reports_nonzero_not_clean_exit(server_port: int) -> None:
     client = await _client(server_port)
     # The shell writes output, then kills itself: EOF arrives before the sentinel, so a
