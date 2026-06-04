@@ -86,6 +86,7 @@ async def try_decide(
         .where(Approval.id == approval_id, Approval.state.in_(PENDING))
         .values(state=state, decided_by=decided_by, decided_at=_utcnow())
     )
+    # rowcount lives on the CursorResult an UPDATE returns, not the typed Result.
     result = cast(CursorResult[Any], await session.execute(stmt))
     await session.commit()
     return bool(result.rowcount)

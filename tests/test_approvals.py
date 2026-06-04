@@ -299,6 +299,12 @@ async def test_concurrent_resolves_decide_once(
     await parked
 
     assert len(_events(audit, "approval_decided")) == 1
+    # Exactly one tap won and stamped a terminal row; the loser left it untouched.
+    async with session_factory() as session:
+        row = await appr_repo.get(session, approval_id)
+    assert row is not None
+    assert row.state in {appr_repo.APPROVED, appr_repo.DENIED}
+    assert row.decided_by in {"42", "99"}
 
 
 async def test_re_arm_registers_pending_and_resolves(
