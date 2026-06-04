@@ -46,12 +46,15 @@ services:
   # to the host (no `ports:`). Behind the "calendar" profile: opt-in only.
   mcp-gcal:
     profiles: ["calendar"]
-    # No official image — build the pinned community server from source (has a Dockerfile).
-    build: https://github.com/nspady/google-calendar-mcp.git#v2.6.2
+    # No official image. We vendor the pinned community server (docker/mcp-gcal) so we can
+    # apply a one-line patch its HTTP transport needs to survive past the first request —
+    # see that Dockerfile + stateful-transport.patch for the why.
+    build:
+      context: ./docker/mcp-gcal
     restart: unless-stopped
-    # The image runs as uid 1001, but the token store must stay writable (nspady persists
-    # refreshed access tokens). Match the host owner of the minted token file so the
-    # bind-mount stays writable; override on hosts where you aren't uid 1000.
+    # The token store must stay writable (nspady persists refreshed access tokens). Run as
+    # the host owner of the minted token file so the bind-mount stays writable; override on
+    # hosts where you aren't uid 1000.
     user: "${MCP_GCAL_UID:-1000}:${MCP_GCAL_GID:-1000}"
     environment:
       TRANSPORT: http
@@ -68,12 +71,14 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      # Node 18 ships a global fetch, so no curl needed in the alpine image.
+      # Node 18 ships a global fetch, so no curl needed in the alpine image. Use 127.0.0.1,
+      # not localhost: undici resolves localhost to ::1 (IPv6) first, but the server binds
+      # 0.0.0.0 (IPv4 only), so a localhost probe connection-refuses and reports unhealthy.
       test:
         - CMD
         - node
         - -e
-        - "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 10s
       retries: 3
