@@ -190,3 +190,24 @@ def test_zero_owner_id_is_not_configured(
 
     assert not settings.telegram_configured  # id 0 → not configured
     assert settings.discord_configured
+
+
+def test_blank_owner_id_env_is_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # docker-compose passes ${OWNER_TELEGRAM_ID:-} as an *empty string* when the
+    # deployer leaves it unset. That must read as "platform off", not a parse error,
+    # so the Discord-only deploy boots.
+    (tmp_path / "config.yaml").write_text("owner_discord_id: 99\n")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(parents=True, exist_ok=True)
+    (secrets / "discord_bot_token").write_text("dc-secret")
+    (secrets / "claude_code_oauth_token").write_text("oauth-secret")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OWNER_TELEGRAM_ID", "")
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.owner_telegram_id is None
+    assert not settings.telegram_configured
+    assert settings.discord_configured

@@ -174,6 +174,8 @@ class DiscordAdapter(Adapter):
             return None
         channel = message.channel
         if isinstance(channel, discord.Thread):
+            if channel.parent_id is None:
+                return None  # orphaned thread — no channel to route a key through
             thread_key = f"{channel.parent_id}:{channel.id}"
         else:
             thread_key = f"{channel.id}:0"

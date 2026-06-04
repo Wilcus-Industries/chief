@@ -105,3 +105,7 @@ class Adapter(ABC):
         per-task background turns, the semaphore, and idle timers). ``on_ready`` runs
         once the connection is live (used for restart recovery, which must send).
         """
+
+    @abstractmethod
+    async def stop(self) -> None:
+        """Close the platform connection so :meth:`run` returns (shutdown path)."""
