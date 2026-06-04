@@ -1,9 +1,13 @@
-# chief core stack (M0/M1). Outbound-only — Telegram long-poll, no public ingress.
-# Secrets are Docker secrets (files under ./secrets/, mounted at /run/secrets, read by
-# config.py). The sandbox and MCP services arrive at M7/M5.
+# chief core stack (M0/M1) + the mcp-gcal calendar server (M5). Outbound-only —
+# Telegram long-poll, no public ingress. Secrets are Docker secrets (files under
+# ./secrets/, mounted at /run/secrets, read by config.py). The sandbox arrives at M7.
 #
 # Setup:  put your tokens in ./secrets/telegram_bot_token and ./secrets/claude_code_oauth_token
 #         set OWNER_TELEGRAM_ID (env or .env), then:  docker compose up core
+#
+# Calendar (M5, opt-in):  mint the token (python -m chief.tools.calendar.auth), set
+#         calendar_enabled: true in config.yaml, then:  docker compose --profile calendar up
+#         The mcp-gcal service sits behind the "calendar" profile so a plain `up` skips it.
 services:
   core:
     build:
@@ -27,11 +31,51 @@ services:
       retries: 3
       start_period: 20s
 
+  # Google Calendar MCP (nspady/google-calendar-mcp). Its own persistent container,
+  # reached by core over the compose network at http://mcp-gcal:3000/ — never published
+  # to the host (no `ports:`). Behind the "calendar" profile: opt-in only.
+  mcp-gcal:
+    profiles: ["calendar"]
+    # No official image — build the pinned community server from source (has a Dockerfile).
+    build: https://github.com/nspady/google-calendar-mcp.git#v2.6.2
+    restart: unless-stopped
+    # The image runs as uid 1001, but the token store must stay writable (nspady persists
+    # refreshed access tokens). Match the host owner of the minted token file so the
+    # bind-mount stays writable; override on hosts where you aren't uid 1000.
+    user: "${MCP_GCAL_UID:-1000}:${MCP_GCAL_GID:-1000}"
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0  # all interfaces *inside* the compose network — not host-published
+      PORT: "3000"
+      GOOGLE_OAUTH_CREDENTIALS: /run/secrets/google_oauth_client.json
+      GOOGLE_CALENDAR_MCP_TOKEN_PATH: /token/tokens.json
+    secrets:
+      - google_oauth_client.json
+    volumes:
+      # Writable token store. Mint it first (python -m chief.tools.calendar.auth) — if the
+      # file is absent, Docker creates a *directory* here and nspady fails to load tokens.
+      - ./secrets/google_calendar_token.json:/token/tokens.json
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Node 18 ships a global fetch, so no curl needed in the alpine image.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
 secrets:
   telegram_bot_token:
     file: ./secrets/telegram_bot_token
   claude_code_oauth_token:
     file: ./secrets/claude_code_oauth_token
+  google_oauth_client.json:
+    file: ./secrets/google_oauth_client.json
 
 volumes:
   sqlite-data:
