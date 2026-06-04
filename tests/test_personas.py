@@ -47,6 +47,38 @@ def test_owner_prompt_includes_soul_user_and_index() -> None:
     assert "Read" in prompt  # told to open fact files on demand
 
 
+def test_owner_calendar_guidance_included_with_tz_when_enabled() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        calendar_enabled=True,
+        owner_tz="America/New_York",
+    )
+
+    assert "## Calendar" in prompt
+    assert "America/New_York" in prompt  # times stated in the owner's tz
+    assert "free/busy" in prompt  # only book free, in-preference slots
+
+
+def test_owner_calendar_guidance_absent_when_disabled() -> None:
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Calendar" not in prompt
+
+
+def test_guest_never_gets_calendar_guidance() -> None:
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        calendar_enabled=True,
+        owner_tz="America/New_York",
+    )
+
+    assert "## Calendar" not in prompt
+
+
 def test_guest_prompt_is_receptionist_without_user_profile() -> None:
     prompt = build_system_prompt(tier="guest", memory=FakeMemory(), owner_name="Will")
 

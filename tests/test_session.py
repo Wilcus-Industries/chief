@@ -127,3 +127,24 @@ def test_memory_params_flow_into_options() -> None:
     assert options.system_prompt == "# Soul\nI am chief."
     assert options.cwd == "/memory"
     assert options.allowed_tools == ["Read", "Glob", "Grep"]
+
+
+def test_mcp_and_disallowed_tools_flow_into_options() -> None:
+    captured: dict[str, ClaudeAgentOptions] = {}
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        captured["options"] = options
+        return FakeClient(options)
+
+    TaskSession(
+        model="claude-sonnet-4-6",
+        mcp_servers={"gcal": {"type": "http", "url": "http://mcp-gcal:3000/"}},
+        disallowed_tools=["mcp__gcal__delete-event"],
+        client_factory=factory,
+    )
+
+    options = captured["options"]
+    assert options.mcp_servers == {
+        "gcal": {"type": "http", "url": "http://mcp-gcal:3000/"}
+    }
+    assert options.disallowed_tools == ["mcp__gcal__delete-event"]

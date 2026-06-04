@@ -40,3 +40,10 @@ distill_model: claude-sonnet-4-6  # owner model extracts facts from the transcri
 memory_git: true             # version every memory write op with local git
 git_author_name: chief
 git_author_email: chief@localhost
+
+# Google Calendar (M5). Flip calendar_enabled on once the mcp-gcal container is up and
+# the OAuth token is minted (secrets/README.md). Owner sessions then read the calendar
+# freely; create/update post an approval card; delete/batch/RSVP are blocked.
+calendar_enabled: false
+gcal_mcp_url: http://mcp-gcal:3000/   # internal compose address (no public ingress)
+owner_tz: UTC                          # IANA tz for booking times, e.g. America/New_York

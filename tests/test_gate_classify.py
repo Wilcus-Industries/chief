@@ -74,6 +74,53 @@ async def test_unknown_effectful_tool_asks(
     assert "approval" in verdict.reason
 
 
+async def test_extra_read_only_tool_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An MCP read tool the caller declared read-only (e.g. calendar free/busy) ALLOWs.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__gcal__get-freebusy",
+        {},
+        store,
+        extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_calendar_write_not_in_read_set_asks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A write tool absent from extra_read_only falls through to ASK → approval.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__gcal__create-event",
+        {},
+        store,
+        extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
+    )
+
+    assert verdict.decision is GateDecision.ASK
+
+
+async def test_never_wins_over_extra_read_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory, never=[("mcp__gcal__get-freebusy", None)])
+
+    verdict = classify(
+        "mcp__gcal__get-freebusy",
+        {},
+        store,
+        extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
 async def test_file_op_within_memory_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
