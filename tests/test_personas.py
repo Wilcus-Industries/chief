@@ -86,6 +86,51 @@ def test_owner_guidance_absent_when_no_services() -> None:
     assert "## Google Sheets" not in prompt
 
 
+def test_owner_always_gets_web_guidance() -> None:
+    # Web tools are always wired for the owner, so the web block is always present.
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Web" in prompt
+    assert "WebSearch" in prompt
+
+
+def test_owner_shell_and_workspace_guidance_when_enabled() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        workspace_enabled=True,
+        shell_enabled=True,
+    )
+
+    assert "## Workspace" in prompt
+    assert "/workspace" in prompt  # the scratch dir is named
+    assert "## Shell" in prompt
+    assert "internet" in prompt  # sandbox has egress
+    assert "no secrets" in prompt  # the model is told the sandbox is secret-free
+
+
+def test_owner_shell_and_workspace_absent_when_disabled() -> None:
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Workspace" not in prompt
+    assert "## Shell" not in prompt
+
+
+def test_guest_never_gets_shell_workspace_or_web() -> None:
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        workspace_enabled=True,
+        shell_enabled=True,
+    )
+
+    assert "## Web" not in prompt
+    assert "## Workspace" not in prompt
+    assert "## Shell" not in prompt
+
+
 def test_guest_never_gets_service_guidance() -> None:
     prompt = build_system_prompt(
         tier="guest",

@@ -159,6 +159,28 @@ async def test_ask_approved_flips_waiting_then_allows(
     assert gate.status == ["waiting", "running"]  # flipped around the wait
 
 
+async def test_shell_tool_ask_approved_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The sandbox shell tool routes through ASK → approval, like Bash (M7).
+    gate = await _gate(session_factory)
+    call = {"command": "pip install httpx"}
+
+    assert await gate.run_hook("mcp__chief_shell__bash", call) == "ask"
+    parked = asyncio.ensure_future(
+        gate.can_use_tool("mcp__chief_shell__bash", call, ToolPermissionContext())
+    )
+    await _settle(lambda: bool(gate.io.cards))
+    approval_id = gate.io.cards[0][1].approval_id
+    await gate.approvals.resolve(
+        approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+    )
+    result = await parked
+
+    assert isinstance(result, PermissionResultAllow)
+    assert gate.status == ["waiting", "running"]
+
+
 # ---- ASK denied --------------------------------------------------------------
 
 

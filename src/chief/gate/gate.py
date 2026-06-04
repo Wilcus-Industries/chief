@@ -77,30 +77,43 @@ def is_read_only(tool_name: str, tool_input: dict[str, Any]) -> bool:
     return predicate is not None and predicate(tool_input)
 
 
-#: File-op tools chief gets at M4 — read-only, but confined to the memory dir (no
-#: workspace until M7). A relative/absent path resolves against the session ``cwd``
-#: (the memory root), so it is in-bounds; an absolute path that escapes is denied.
+#: Read-only file-op tools (M4). Confined to memory at M4; to memory ∪ workspace at M7.
+#: A relative/absent path resolves against the session ``cwd`` (the memory root), so it
+#: is in-bounds; an absolute path that escapes every allowed root is denied.
 FILE_OP_TOOLS = frozenset({"Read", "Glob", "Grep"})
+#: Write-op tools (M7). Confined to the **workspace** only — writes have a low blast
+#: radius there (DESIGN gate rule #2) and never touch the memory or any other path.
+WRITE_OP_TOOLS = frozenset({"Write", "Edit"})
 
 
-def confined_to_memory(tool_input: dict[str, Any], memory_dir: str) -> bool:
-    """Whether a file-op call's path stays within ``memory_dir``.
+def confined_to(
+    tool_input: dict[str, Any], root: str, *, cwd: str | None = None
+) -> bool:
+    """Whether a file-op call's path stays within ``root``.
 
-    An absent/relative path is in-bounds (it resolves against the memory-root ``cwd``);
-    an absolute or ``..``-escaping path is checked against the resolved memory root.
+    A relative path resolves against ``cwd`` (the session cwd — the memory root) if
+    given, else against ``root`` itself; an absolute or ``..``-escaping path is checked
+    against the resolved ``root``. An absent/empty path is in-bounds.
     """
     raw = tool_input.get("file_path") or tool_input.get("path")
     if not isinstance(raw, str) or not raw:
         return True
-    root = Path(memory_dir)
+    base = Path(cwd) if cwd else Path(root)
     candidate = Path(raw)
     if not candidate.is_absolute():
-        candidate = root / candidate
+        candidate = base / candidate
     try:
-        candidate.resolve().relative_to(root.resolve())
+        candidate.resolve().relative_to(Path(root).resolve())
         return True
     except ValueError:
         return False
+
+
+def confined_to_any(
+    tool_input: dict[str, Any], roots: list[str], *, cwd: str | None = None
+) -> bool:
+    """Whether a file-op call's path stays within *any* of ``roots`` (memory ∪ ws)."""
+    return any(confined_to(tool_input, root, cwd=cwd) for root in roots)
 
 
 def classify(
@@ -109,13 +122,18 @@ def classify(
     policy: PolicyStore,
     *,
     memory_dir: str | None = None,
+    workspace_dir: str | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> Verdict:
     """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK.
 
-    When ``memory_dir`` is set (M4), a file-op tool (Read/Glob/Grep) is ALLOWed only
-    while its path stays inside the memory dir and DENied otherwise — chief's reads are
-    confined to memory until a workspace lands (M7).
+    File scoping (M4/M7), enforced before the read-only/approved rules so a path escape
+    is a hard DENY even on an otherwise-allowed tool:
+
+    - **Read/Glob/Grep** ALLOW only while the path stays inside *memory ∪ workspace*
+      (just memory until the workspace is wired), else DENY.
+    - **Write/Edit** ALLOW only inside the *workspace* (low blast radius, never memory),
+      else DENY. Only consulted once ``workspace_dir`` is set (M7).
 
     ``extra_read_only`` names tools an MCP layer has declared read-only (e.g. the
     calendar list/free-busy tools, M5); they ALLOW like the built-ins, keeping
@@ -124,10 +142,15 @@ def classify(
     listed = policy.classify_against(tool_name, tool_input)
     if listed == NEVER:
         return Verdict(GateDecision.DENY, f"{tool_name} is on the NEVER list")
-    if memory_dir is not None and tool_name in FILE_OP_TOOLS:
-        if confined_to_memory(tool_input, memory_dir):
-            return Verdict(GateDecision.ALLOW, f"{tool_name} reads within memory")
-        return Verdict(GateDecision.DENY, f"{tool_name} path is outside memory")
+    read_roots = [r for r in (memory_dir, workspace_dir) if r is not None]
+    if read_roots and tool_name in FILE_OP_TOOLS:
+        if confined_to_any(tool_input, read_roots, cwd=memory_dir):
+            return Verdict(GateDecision.ALLOW, f"{tool_name} reads within scope")
+        return Verdict(GateDecision.DENY, f"{tool_name} path is outside scope")
+    if workspace_dir is not None and tool_name in WRITE_OP_TOOLS:
+        if confined_to(tool_input, workspace_dir, cwd=memory_dir):
+            return Verdict(GateDecision.ALLOW, f"{tool_name} writes within workspace")
+        return Verdict(GateDecision.DENY, f"{tool_name} write is outside workspace")
     if is_read_only(tool_name, tool_input) or tool_name in extra_read_only:
         return Verdict(GateDecision.ALLOW, f"{tool_name} is read-only")
     if listed is not None:  # APPROVED
@@ -164,6 +187,7 @@ def build_pretool_hook(
     policy: PolicyStore,
     audit: _Audit,
     memory_dir: str | None = None,
+    workspace_dir: str | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> HookCallback:
     """A ``PreToolUse`` hook: classify, audit, return the permission decision."""
@@ -180,6 +204,7 @@ def build_pretool_hook(
             tool_input,
             policy,
             memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
             extra_read_only=extra_read_only,
         )
         audit.log(
@@ -218,6 +243,7 @@ def build_can_use_tool(
     on_waiting: StatusHook | None = None,
     on_running: StatusHook | None = None,
     memory_dir: str | None = None,
+    workspace_dir: str | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext],
@@ -241,6 +267,7 @@ def build_can_use_tool(
             tool_input,
             policy,
             memory_dir=memory_dir,
+            workspace_dir=workspace_dir,
             extra_read_only=extra_read_only,
         )
         if verdict.decision is GateDecision.ALLOW:

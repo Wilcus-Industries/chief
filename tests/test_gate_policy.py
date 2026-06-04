@@ -74,6 +74,23 @@ def test_bash_entry_safety_follows_command() -> None:
     assert gp.is_safe_entry("Bash", {"command": "git status; rm -rf ~"}) is False
 
 
+def test_shell_tool_is_a_command_tool() -> None:
+    # The sandbox shell tool is safe-matched on its `command` arg, exactly like Bash.
+    assert "mcp__chief_shell__bash" in gp.COMMAND_TOOLS
+    assert gp.is_safe_entry("mcp__chief_shell__bash", {"command": "git status"}) is True
+    assert (
+        gp.is_safe_entry("mcp__chief_shell__bash", {"command": "rm -rf ~; reboot"})
+        is False
+    )
+
+
+def test_shell_tool_derive_pattern_canonicalizes() -> None:
+    assert (
+        gp.derive_pattern("mcp__chief_shell__bash", {"command": "ls   -la"})
+        == "ls -la"
+    )
+
+
 def test_derive_pattern_canonicalizes_bash() -> None:
     assert gp.derive_pattern("Bash", {"command": "git   status"}) == "git status"
 

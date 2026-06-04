@@ -65,6 +65,36 @@ _SERVICE_GUIDANCE = {
     "sheets": _SHEETS_GUIDANCE,
 }
 
+#: Owner-only web guidance (M7). Web search/fetch are always wired for the owner.
+_WEB_GUIDANCE = (
+    "## Web\n"
+    "You can search the web (WebSearch) and fetch a specific URL (WebFetch). Both are "
+    "read-only and need no approval — use them freely to look things up, then cite "
+    "what you found. WebFetch only performs GET requests."
+)
+
+#: Owner-only workspace guidance (M7), included when the workspace is enabled.
+_WORKSPACE_GUIDANCE = (
+    "## Workspace\n"
+    "/workspace is a scratch directory you can Read, Write, and Edit freely with no "
+    "approval — it is the only place you can write files, and it is shared with your "
+    "shell (the shell's working directory is /workspace). Keep working files there; "
+    "reads and writes anywhere else are blocked."
+)
+
+#: Owner-only shell guidance (M7), included when the sandbox shell is enabled.
+_SHELL_GUIDANCE = (
+    "## Shell\n"
+    "You can run bash commands in a sandboxed Linux container (the bash tool). Its "
+    "working directory is /workspace and it has internet access (pip, git, curl all "
+    "work). Shell state — environment variables, the current directory, background "
+    "jobs — persists across commands within a task, but not across a restart. There "
+    "are no secrets in this environment. Chain steps with && in a single command "
+    "rather than across separate calls. Running a command needs your owner's approval "
+    "unless they have pre-approved it, so prefer one clear command and let the "
+    "approval card confirm it."
+)
+
 
 def build_system_prompt(
     *,
@@ -73,12 +103,17 @@ def build_system_prompt(
     owner_name: str,
     google_services: frozenset[str] = frozenset(),
     owner_tz: str | None = None,
+    workspace_enabled: bool = False,
+    shell_enabled: bool = False,
 ) -> str:
     """Assemble the system prompt for a ``tier`` session against ``memory``.
 
     ``google_services`` names the wired Google MCP servers (owner only) — e.g.
     ``{"calendar", "drive"}``. Each contributes a guidance block so chief knows the
     service's rules (calendar booking states times in ``owner_tz``).
+    ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + sandbox-shell
+    guidance; the web block is always present for the owner (web tools are always
+    wired). Guests get none of these.
     """
     if tier == "owner":
         sections = [
@@ -93,6 +128,11 @@ def build_system_prompt(
         for name, guidance in _SERVICE_GUIDANCE.items():
             if name in google_services:
                 sections.append(guidance.format(owner=owner_name, tz=tz))
+        sections.append(_WEB_GUIDANCE)
+        if workspace_enabled:
+            sections.append(_WORKSPACE_GUIDANCE)
+        if shell_enabled:
+            sections.append(_SHELL_GUIDANCE)
     else:
         sections = [memory.soul(), _GUEST_FRAMING.format(owner=owner_name)]
     return "\n\n".join(section.strip() for section in sections if section.strip())

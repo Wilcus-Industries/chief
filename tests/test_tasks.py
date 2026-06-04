@@ -29,6 +29,7 @@ from chief.persistence.tasks import (
     set_status,
 )
 from chief.tools.calendar import mcp as calendar_mcp
+from chief.tools.shell import ShellService
 
 Factory = Callable[..., SessionProto]
 
@@ -975,4 +976,94 @@ async def test_calendar_disabled_owner_has_no_mcp_but_keeps_web_tools(
     assert "mcp_servers" not in captured
     # No Google tools, but the owner still gets memory + web/meta tools.
     assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
+    await mgr.shutdown()
+
+
+# ---- shell + workspace wiring (M7) -------------------------------------------
+
+
+def _shell_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    shell: bool = True,
+    workspace: bool = True,
+) -> TaskManager:
+    service = (
+        ShellService(
+            host="sandbox", port=8765, timeout_seconds=120.0, output_limit=64_000
+        )
+        if shell
+        else None
+    )
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        shell_service=service,
+        workspace_dir="/workspace" if workspace else None,
+    )
+
+
+async def test_owner_shell_and_workspace_wired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _shell_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    # The in-process shell server is registered, but the bash tool stays OUT of the
+    # allow-list so it routes through can_use_tool → approval (default-ask).
+    assert "chief_shell" in captured["mcp_servers"]
+    allowed = captured["allowed_tools"]
+    assert "mcp__chief_shell__bash" not in allowed
+    # Workspace write tools are pre-allowed (the gate confines them to /workspace).
+    assert "Write" in allowed and "Edit" in allowed
+    await mgr.shutdown()
+
+
+async def test_workspace_disabled_owner_has_no_write_tools(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _shell_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        shell=False,
+        workspace=False,
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "mcp_servers" not in captured  # no shell server
+    allowed = captured["allowed_tools"]
+    assert "Write" not in allowed and "Edit" not in allowed
+    await mgr.shutdown()
+
+
+async def test_guest_gets_no_shell_or_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _shell_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:9", tier="guest")
+
+    assert "mcp_servers" not in captured  # no shell server for guests
+    # Guests stay narrow: only the memory file tools, no Write/Edit, no shell.
+    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
     await mgr.shutdown()
