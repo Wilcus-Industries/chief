@@ -74,6 +74,9 @@ class TaskSession:
         resume: str | None = None,
         can_use_tool: CanUseTool | None = None,
         hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+        system_prompt: str | None = None,
+        cwd: str | None = None,
+        allowed_tools: list[str] | None = None,
         client_factory: ClientFactory = _default_client,
     ) -> None:
         self._options = ClaudeAgentOptions(
@@ -81,6 +84,9 @@ class TaskSession:
             resume=resume,
             can_use_tool=can_use_tool,
             hooks=hooks,
+            system_prompt=system_prompt,
+            cwd=cwd,
+            allowed_tools=allowed_tools if allowed_tools is not None else [],
         )
         self._client = client_factory(self._options)
         self._connected = False

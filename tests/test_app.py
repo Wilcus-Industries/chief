@@ -51,8 +51,10 @@ def _application() -> Application:  # type: ignore[type-arg]
 def test_build_components_wires_gate_into_engine_and_adapter(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    manager, adapter, policy, approvals = app.build_components(
-        _settings(), application=_application(), session_factory=session_factory
+    manager, adapter, policy, approvals, memory = app.build_components(
+        _settings(memory_git=False),
+        application=_application(),
+        session_factory=session_factory,
     )
 
     assert adapter._engine is manager
@@ -62,6 +64,10 @@ def test_build_components_wires_gate_into_engine_and_adapter(
     assert manager._policy is policy
     assert manager._approvals is approvals
     assert adapter._approvals is approvals
+    # The one memory store is shared by the engine (distill/recall) and the adapter
+    # (/memory, /forget).
+    assert manager._memory is memory
+    assert adapter._memory is memory
 
 
 async def test_seed_on_boot_populates_policy(
@@ -71,7 +77,7 @@ async def test_seed_on_boot_populates_policy(
         never_seed=[PolicySeed(tool="WebFetch")],
         approved_seed=[PolicySeed(tool="Bash", arg_pattern="git status")],
     )
-    _, _, policy, _ = app.build_components(
+    _, _, policy, _, _ = app.build_components(
         settings, application=_application(), session_factory=session_factory
     )
 
@@ -98,8 +104,10 @@ async def test_re_arm_on_boot_recovers_pending(
         )
         await appr_repo.set_state(session, approval, appr_repo.NOTIFIED)
         approval_id = approval.id
-    _, _, _, approvals = app.build_components(
-        _settings(), application=_application(), session_factory=session_factory
+    _, _, _, approvals, _ = app.build_components(
+        _settings(memory_git=False),
+        application=_application(),
+        session_factory=session_factory,
     )
 
     rearmed = await approvals.re_arm()

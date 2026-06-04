@@ -18,6 +18,7 @@ services:
       - claude_code_oauth_token
     volumes:
       - sqlite-data:/data
+      - memory:/memory
     healthcheck:
       # init_db creates the sqlite file on boot, so its presence means the app got past startup.
       test: ["CMD", "test", "-f", "/data/chief.db"]
@@ -34,3 +35,4 @@ secrets:
 
 volumes:
   sqlite-data:
+  memory:
