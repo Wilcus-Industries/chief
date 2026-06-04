@@ -35,6 +35,7 @@ from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.google import GoogleService
 from .tools.sheets import mcp as sheets_mcp
+from .tools.shell import ShellService
 
 logger = logging.getLogger("chief.app")
 
@@ -84,6 +85,18 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
     return services
 
 
+def build_shell_service(settings: Settings) -> ShellService | None:
+    """The sandbox shell client (M7), or ``None`` when the shell is disabled."""
+    if not settings.shell_enabled:
+        return None
+    return ShellService(
+        host=settings.sandbox_host,
+        port=settings.sandbox_port,
+        timeout_seconds=settings.shell_timeout_seconds,
+        output_limit=settings.shell_output_limit,
+    )
+
+
 def build_engine(
     settings: Settings,
     *,
@@ -117,6 +130,10 @@ def build_engine(
         distill_model=settings.distill_model,
         google_services=build_google_services(settings),
         owner_tz=settings.owner_tz,
+        shell_service=build_shell_service(settings),
+        workspace_dir=(
+            settings.workspace_dir if settings.workspace_enabled else None
+        ),
     )
 
 

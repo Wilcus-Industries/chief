@@ -38,7 +38,12 @@ from claude_agent_sdk.types import HookEvent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..gate.approvals import ApprovalManager
-from ..gate.gate import FILE_OP_TOOLS, build_can_use_tool, build_pretool_hook
+from ..gate.gate import (
+    FILE_OP_TOOLS,
+    WRITE_OP_TOOLS,
+    build_can_use_tool,
+    build_pretool_hook,
+)
 from ..gate.policy import PolicyStore
 from ..memory.distill import distill as _distill_default
 from ..memory.store import OWNER_NAMESPACE, FactDraft, MemoryStore
@@ -59,6 +64,7 @@ from ..persistence.tasks import (
     set_status,
 )
 from ..tools.google import GoogleService
+from ..tools.shell import ShellService
 from . import classify
 from .personas import build_system_prompt
 from .session import Final, TaskSession, TurnEvent
@@ -68,6 +74,9 @@ logger = logging.getLogger("chief.core.tasks")
 WORKING_ACK = "working on it…"
 #: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
+#: Write file tools the owner gets at M7 when the workspace is enabled — added to
+#: ``allowed_tools`` but confined to the workspace by the gate (writes elsewhere DENY).
+WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Read-only web + meta tools the owner agent always gets (the gate treats all three as
 #: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
 WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
@@ -188,6 +197,8 @@ class TaskManager:
         distill: DistillFn = _distill_default,
         google_services: Sequence[GoogleService] = (),
         owner_tz: str = "UTC",
+        shell_service: ShellService | None = None,
+        workspace_dir: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -212,6 +223,8 @@ class TaskManager:
         self._distill = distill
         self._google_services = tuple(google_services)
         self._owner_tz = owner_tz
+        self._shell_service = shell_service
+        self._workspace_dir = workspace_dir
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -340,11 +353,17 @@ class TaskManager:
             # gate them per-tier then or a guest gets Read/Glob/Grep over the owner's
             # memory dir.
             owner = tier == "owner"
-            # Google servers + the web/meta tools are owner-only (guests stay narrow).
+            # Google servers, web/meta, shell, and the workspace are owner-only (guests
+            # stay narrow — only the memory file tools).
             services = self._google_services if owner else ()
+            workspace_on = owner and self._workspace_dir is not None
+            shell_on = owner and self._shell_service is not None
             allowed = list(MEMORY_TOOLS)
             if owner:
                 allowed += list(WEB_META_TOOLS)
+            if workspace_on:
+                # Write/Edit join the allow-list; the gate confines them to /workspace.
+                allowed += list(WORKSPACE_TOOLS)
             for svc in services:
                 # Reads only — writes stay off the allow-list so they reach approval.
                 allowed += list(svc.read_tools)
@@ -355,18 +374,31 @@ class TaskManager:
                     owner_name=self._owner_name,
                     google_services=frozenset(svc.name for svc in services),
                     owner_tz=self._owner_tz,
+                    workspace_enabled=workspace_on,
+                    shell_enabled=shell_on,
                 ),
                 cwd=self._memory_dir,
                 allowed_tools=allowed,
             )
+            # Each Google container (docker/mcp-*) + the in-process shell server. Google
+            # writes and the shell tool are absent from allowed_tools, so they reach
+            # can_use_tool → approval; Google deferred ops are blocked. Google reads
+            # are pre-approved above + ALLOWed by the gate's extra_read_only.
+            mcp_servers: dict[str, Any] = {
+                svc.server_name: svc.server_config() for svc in services
+            }
+            if shell_on:
+                shell = self._shell_service
+                assert shell is not None  # narrowed by shell_on
+                # Built per task: the bash closure addresses THIS task's own shell
+                # (keyed by thread_key), since an in-process MCP handler gets no caller
+                # context. Kept out of allowed_tools → routes to can_use_tool → ASK.
+                mcp_servers[shell.server_name] = shell.server_config(
+                    session_key=thread_key
+                )
+            if mcp_servers:
+                gate_kwargs["mcp_servers"] = mcp_servers
             if services:
-                # Each Google container (docker/mcp-*). Writes are absent from
-                # allowed_tools, so they reach can_use_tool → approval; deferred ops are
-                # hard-blocked. Reads are pre-approved above + ALLOWed by the gate's
-                # extra_read_only (see _build_gate).
-                gate_kwargs["mcp_servers"] = {
-                    svc.server_name: svc.server_config() for svc in services
-                }
                 disallowed: list[str] = []
                 for svc in services:
                     disallowed += list(svc.deferred_tools)
@@ -399,12 +431,16 @@ class TaskManager:
             if tier == "owner"
             else (self._front_desk_thread_key or thread_key)
         )
+        # Workspace confinement is owner-only — a guest never reaches the workspace, so
+        # its gate carries no workspace root (its reads stay confined to memory).
+        workspace_dir = self._workspace_dir if tier == "owner" else None
         hook = build_pretool_hook(
             thread_key=thread_key,
             tier=tier,
             policy=self._policy,
             audit=self._audit,
             memory_dir=self._memory_dir,
+            workspace_dir=workspace_dir,
             extra_read_only=extra_read_only,
         )
 
@@ -425,6 +461,7 @@ class TaskManager:
             on_waiting=on_waiting,
             on_running=on_running,
             memory_dir=self._memory_dir,
+            workspace_dir=workspace_dir,
             extra_read_only=extra_read_only,
         )
         hooks: dict[HookEvent, list[HookMatcher]] = {

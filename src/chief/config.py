@@ -100,6 +100,21 @@ class Settings(BaseSettings):
     sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
     owner_tz: str = "UTC"
 
+    # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google
+    # profile pattern). shell_enabled wires the in-process bash tool that forwards to
+    # the secret-free sandbox container at sandbox_host:sandbox_port; every command is
+    # default-ask gated. workspace_enabled adds Write/Edit, gate-confined to
+    # workspace_dir (a volume shared rw with the sandbox). shell_timeout_seconds bounds
+    # one command (the sandbox SIGINTs then respawns a hung shell); shell_output_limit
+    # caps captured bytes.
+    shell_enabled: bool = False
+    workspace_enabled: bool = False
+    workspace_dir: str = "/workspace"
+    sandbox_host: str = "sandbox"
+    sandbox_port: int = 8765
+    shell_timeout_seconds: float = 120.0
+    shell_output_limit: int = 64_000
+
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always
     # required (it authenticates the Claude SDK regardless of chat platform).

@@ -180,3 +180,185 @@ async def test_never_still_wins_over_memory_confinement(
     )
 
     assert verdict.decision is GateDecision.DENY
+
+
+# ---- workspace scoping (M7) --------------------------------------------------
+
+
+async def test_read_in_workspace_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Read",
+        {"file_path": "/workspace/build/out.txt"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_read_in_memory_still_allows_with_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Reads span memory ∪ workspace: a memory path is still in-bounds.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Grep",
+        {"path": "/memory/facts/owner"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_read_outside_memory_and_workspace_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Read",
+        {"file_path": "/etc/shadow"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_write_in_workspace_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/workspace/draft.md", "content": "x"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_edit_in_workspace_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Edit",
+        {"file_path": "/workspace/draft.md"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_write_into_memory_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Writes are workspace-only — even a memory path (readable) is not writable.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/memory/facts/owner/x.md", "content": "x"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_relative_write_resolves_to_memory_cwd_and_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A relative path resolves against the session cwd (memory), so it is NOT in the
+    # workspace → DENY. The model must use absolute /workspace paths to write.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "draft.md", "content": "x"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_write_outside_workspace_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/etc/passwd", "content": "x"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_never_wins_over_workspace_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory, never=[("Write", None)])
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/workspace/x", "content": "y"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_shell_tool_asks_by_default(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The sandbox shell tool is effectful → ASK unless pre-approved (like Bash).
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__chief_shell__bash",
+        {"command": "ls /workspace"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ASK
+
+
+async def test_shell_tool_approved_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(
+        session_factory, approved=[("mcp__chief_shell__bash", "git status")]
+    )
+
+    verdict = classify(
+        "mcp__chief_shell__bash", {"command": "git status"}, store
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
