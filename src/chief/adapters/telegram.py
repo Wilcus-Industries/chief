@@ -298,9 +298,14 @@ class TelegramAdapter(Adapter):
         """
         thread_key = self._owner_thread(update)
         message = update.effective_message
-        if thread_key is None or message is None:
+        chat = update.effective_chat
+        if thread_key is None or message is None or chat is None:
             return
-        if not thread_key.endswith(":0"):
+        # The casual lane is the forum's General topic — the same is_forum AND :0
+        # predicate _on_message uses for is_general. A flat DM also keys to :0 but runs
+        # as a normal archiving task, so /branch must not treat it as casual.
+        is_casual = bool(getattr(chat, "is_forum", False)) and thread_key.endswith(":0")
+        if not is_casual:
             await message.reply_text("/branch only works in the casual channel.")
             return
         title = (message.text or "").partition(" ")[2].strip() or default_branch_title()

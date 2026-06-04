@@ -634,7 +634,52 @@ async def test_branch_forks_casual_into_a_tracked_thread(
     await mgr.shutdown()
 
 
-# ---- distillation (M4) -------------------------------------------------------
+async def test_branch_empty_casual_starts_fresh(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO(next_thread="-100:88")
+    calls: list[dict[str, Any]] = []
+
+    def factory(**kwargs: Any) -> SessionProto:
+        calls.append(kwargs)
+        return FakeSession(model=kwargs["model"], resume=kwargs.get("resume"))
+
+    mgr = _manager(session_factory, io, factory=factory)
+
+    # No casual turn has ever run, so there is no session to fork — the new thread
+    # starts fresh (resume=None, fork_session=False) rather than forking nothing.
+    new_key = await mgr.branch("-100:0", "Fresh topic")
+
+    assert new_key == "-100:88"
+    fork_call = calls[-1]
+    assert fork_call["resume"] is None
+    assert fork_call["fork_session"] is False
+    await mgr.shutdown()
+
+
+async def test_branch_prefers_live_session_id_over_db(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO(next_thread="-100:88")
+    calls: list[dict[str, Any]] = []
+
+    def factory(**kwargs: Any) -> SessionProto:
+        calls.append(kwargs)
+        return FakeSession(model=kwargs["model"], resume=kwargs.get("resume"))
+
+    mgr = _manager(session_factory, io, factory=factory, warrants=_no)
+
+    await mgr.dispatch(thread_key="-100:0", text="chat", is_general=True)
+    await _until(lambda: ("-100:0", "reply:chat") in io.sends)
+    # Simulate a fresher live id than the persisted one (a mid-flight capture): branch
+    # must fork from the live session, not the lagging DB row.
+    mgr._tasks["-100:0"].session.session_id = "sess-live"
+
+    await mgr.branch("-100:0", "Promoted")
+
+    assert calls[-1]["resume"] == "sess-live"
+    assert calls[-1]["fork_session"] is True
+    await mgr.shutdown()
 
 
 def _mem_factory(sessions: list[FakeSession]) -> Factory:
