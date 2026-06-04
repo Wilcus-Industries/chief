@@ -59,9 +59,12 @@ services:
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
-      OWNER_TZ: ${OWNER_TZ:-UTC}
+      # Unset → falls through to owner_tz in the mounted config.yaml (the source of truth);
+      # set it here or in .env only to override per-deploy.
+      OWNER_TZ: ${OWNER_TZ:-}
     volumes:
       - ./secrets/google_token.json:/token/google_token.json:ro
+      - ./config.yaml:/config/config.yaml:ro
     security_opt:
       - no-new-privileges:true
     healthcheck:

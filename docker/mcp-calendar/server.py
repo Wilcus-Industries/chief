@@ -20,6 +20,7 @@ from ``chief`` and ships in its own image with its own requirements.
 import asyncio
 import datetime as dt
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -29,12 +30,20 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from mcp.server.fastmcp import FastMCP
+from owner_tz import resolve_owner_tz
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+)
+log = logging.getLogger("calendar.server")
+
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 TOKEN_PATH = os.environ.get("GOOGLE_TOKEN_PATH", "/token/google_token.json")
-OWNER_TZ = os.environ.get("OWNER_TZ", "UTC")
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/config.yaml")
+# config.yaml (mounted read-only) is the source of truth; OWNER_TZ env overrides it.
+OWNER_TZ = resolve_owner_tz(os.environ.get("OWNER_TZ"), CONFIG_PATH)
 PORT = int(os.environ.get("PORT", "8003"))
 
 _creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
@@ -42,6 +51,7 @@ if _creds.expired and _creds.refresh_token:
     _creds.refresh(Request())  # in memory only — no write-back (single-writer policy)
 # google-api-python-client refreshes the access token in memory on subsequent calls.
 _service = build("calendar", "v3", credentials=_creds, cache_discovery=False)
+log.info("Calendar MCP authenticated | token=%s tz=%s", TOKEN_PATH, OWNER_TZ)
 
 mcp = FastMCP("calendar", host="0.0.0.0", port=PORT)
 
