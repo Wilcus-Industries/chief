@@ -2,9 +2,12 @@
 
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.gate import approvals as appr_mod
 from chief.gate.approvals import ApprovalAction, ApprovalCard, ApprovalManager
 from chief.gate.policy import PolicyStore
 from chief.persistence import approvals as appr_repo
@@ -305,6 +308,47 @@ async def test_concurrent_resolves_decide_once(
     assert row is not None
     assert row.state in {appr_repo.APPROVED, appr_repo.DENIED}
     assert row.decided_by in {"42", "99"}
+
+
+async def test_resolve_in_post_card_pre_future_window_still_wakes(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tap landing after the card posts but before the future arms must still wake.
+
+    The card is the only place a resolver learns the approval id, so a tap can only
+    arrive once ``send_card`` has returned. Holding that post-card window open (a slow
+    ``set_state``) and tapping inside it would — if the future were armed last — strand
+    the parked turn until the fail-closed timeout; arming the future *before* the card
+    closes the race.
+    """
+    io, audit = FakeIO(), RecordingAudit()
+    manager, _ = await _manager(session_factory, io=io, audit=audit, timeout=0.5)
+
+    real_set_state = appr_repo.set_state  # the fn re-bound in appr_mod's namespace
+
+    async def slow_set_state(*a: Any, **k: Any) -> Any:
+        await asyncio.sleep(0.05)  # hold the post-card window open
+        return await real_set_state(*a, **k)
+
+    monkeypatch.setattr(appr_mod, "set_state", slow_set_state)
+
+    parked = asyncio.ensure_future(
+        manager.request(
+            task_id=None,
+            thread_key="-100:5",
+            tier="owner",
+            tool_name="Bash",
+            tool_input={"command": "git push"},
+            route="-100:5",
+        )
+    )
+    await _settle(lambda: bool(io.cards))
+    approval_id = io.cards[0][1].approval_id
+    await manager.resolve(approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42")
+
+    # Woken by the tap, not the 0.5s fail-closed timeout.
+    assert await asyncio.wait_for(parked, 2.0) is True
 
 
 async def test_re_arm_registers_pending_and_resolves(
