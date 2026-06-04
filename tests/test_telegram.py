@@ -380,7 +380,9 @@ async def test_branch_owner_casual_uses_default_title(
 ) -> None:
     engine = FakeEngine()
     adapter = _adapter(session_factory, engine)
-    update = _fake_update(user_id=OWNER_ID, text="/branch", thread_id=0)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/branch", thread_id=0, is_forum=True
+    )
 
     await adapter._on_branch(update, _CTX)
 
@@ -398,7 +400,9 @@ async def test_branch_owner_casual_uses_argument_title(
 ) -> None:
     engine = FakeEngine()
     adapter = _adapter(session_factory, engine)
-    update = _fake_update(user_id=OWNER_ID, text="/branch Trip planning", thread_id=0)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/branch Trip planning", thread_id=0, is_forum=True
+    )
 
     await adapter._on_branch(update, _CTX)
 
@@ -413,11 +417,33 @@ async def test_branch_rejected_in_task_thread(
 ) -> None:
     engine = FakeEngine()
     adapter = _adapter(session_factory, engine)
-    update = _fake_update(user_id=OWNER_ID, text="/branch", thread_id=5)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/branch", thread_id=5, is_forum=True
+    )
 
     await adapter._on_branch(update, _CTX)
 
     assert engine.branched == []  # a tracked topic is already full-memory
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "/branch only works in the casual channel."
+    )
+
+
+async def test_branch_rejected_in_flat_dm(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A non-forum flat DM keys to :0 but runs as a normal archiving task, not the
+    # self-compacting casual lane — so /branch must reject it, matching dispatch's
+    # is_forum AND :0 predicate for is_general.
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/branch", thread_id=0, is_forum=False
+    )
+
+    await adapter._on_branch(update, _CTX)
+
+    assert engine.branched == []
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
         "/branch only works in the casual channel."
     )

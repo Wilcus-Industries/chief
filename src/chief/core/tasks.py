@@ -601,11 +601,7 @@ class TaskManager:
         The forked session's new id is captured + persisted on the new thread's first
         turn (like any session). Returns the new ``thread_key``.
         """
-        async with self._session_factory() as session:
-            casual = await get_task(
-                session, platform=self._platform, thread_key=thread_key
-            )
-            casual_resume = casual.sdk_session_id if casual is not None else None
+        casual_resume = await self._casual_session_id(thread_key)
         new_key = await self._io.create_thread(
             like_thread_key=thread_key, title=title
         )
@@ -627,7 +623,9 @@ class TaskManager:
             session=self._session_factory_sdk(
                 model=self._owner_model,
                 resume=casual_resume,
-                fork_session=True,
+                # Fork only when there's a session to fork; an empty casual (no turn
+                # yet) has no context to carry, so the new thread just starts fresh.
+                fork_session=casual_resume is not None,
                 **gate_kwargs,
             ),
             queue=asyncio.Queue(),
@@ -635,6 +633,22 @@ class TaskManager:
         )
         self._tasks[new_key] = rt
         return new_key
+
+    async def _casual_session_id(self, thread_key: str) -> str | None:
+        """The casual channel's freshest resumable id: live session over the DB row.
+
+        A live ``_RunningTask`` carries the id from its last turn's stream, at least as
+        fresh as the DB (written post-turn), so a fork mid-flight doesn't use a stale
+        id. Falls back to the persisted id when no task is live (e.g. post-compaction).
+        """
+        live = self._tasks.get(thread_key)
+        if live is not None and live.session.session_id is not None:
+            return live.session.session_id
+        async with self._session_factory() as session:
+            casual = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            return casual.sdk_session_id if casual is not None else None
 
     # ---- distillation (auto-learning; mirrors the idle-archive trio) ------
 
