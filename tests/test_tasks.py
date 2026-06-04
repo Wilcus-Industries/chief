@@ -176,6 +176,7 @@ def _manager(
     concurrency: int = 3,
     grace: float = 5.0,
     idle: float = 1000.0,
+    compaction: float = 1000.0,
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -185,6 +186,7 @@ def _manager(
         concurrency=concurrency,
         grace_seconds=grace,
         idle_archive_seconds=idle,
+        compaction_idle_seconds=compaction,
         session_factory_sdk=factory,
         stop_intent=stop,
         warrants_task=warrants,
@@ -521,6 +523,114 @@ async def test_cancel_interrupts_and_marks_cancelled(
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == CANCELLED
+    await mgr.shutdown()
+
+
+# ---- casual self-compaction + /branch ----------------------------------------
+
+
+async def test_casual_general_message_is_marked_casual(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess), warrants=_no)
+
+    await mgr.dispatch(thread_key="-100:0", text="hey", is_general=True)
+    await _until(lambda: ("-100:0", "reply:hey") in io.sends)
+
+    assert mgr._tasks["-100:0"].is_casual is True  # casual lane → self-compacts
+    await mgr.shutdown()
+
+
+async def test_spawned_topic_is_not_casual(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO(next_thread="-100:77")
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess), warrants=_yes)
+
+    await mgr.dispatch(thread_key="-100:0", text="build a thing", is_general=True)
+    await _until(lambda: ("-100:77", "reply:build a thing") in io.sends)
+
+    # A spawned topic is a real, full-memory task — it archives, never compacts.
+    assert mgr._tasks["-100:77"].is_casual is False
+    await mgr.shutdown()
+
+
+async def test_casual_idle_compacts_and_reseeds(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+
+    def factory(*, model: str, resume: str | None = None) -> SessionProto:
+        sess = FakeSession(model=model, resume=resume)
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(
+        session_factory, io, factory=factory, idle=1000.0, compaction=0.02
+    )
+
+    await mgr.dispatch(thread_key="-100:0", text="hi", is_general=True)
+    await _until(lambda: ("-100:0", "reply:hi") in io.sends)
+    # Casual idle fires _idle_then_compact: brief the live session, reseed a fresh one
+    # from that brief, persist its new id. (old + reseed = two sessions built.)
+    await _until(lambda: len(sessions) >= 2 and sessions[0].closed)
+
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:0")
+    assert db is not None
+    assert db.status == OPEN  # casual stays OPEN — never marked DONE
+    assert "-100:0" not in io.archived  # the :0 channel is never archived
+    reseeded = db.sdk_session_id
+    assert reseeded is not None and reseeded != "sess-hi"  # id swapped to the brief
+
+    # The next message reopens the casual lane resumed from the small reseeded session.
+    mgr._compaction_idle_seconds = 1000.0  # don't re-compact before we assert
+    await mgr.dispatch(thread_key="-100:0", text="again", is_general=True)
+    await _until(lambda: ("-100:0", "reply:again") in io.sends)
+    assert sessions[-1].resume == reseeded
+    await mgr.shutdown()
+
+
+async def test_branch_forks_casual_into_a_tracked_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO(next_thread="-100:88")
+    calls: list[dict[str, Any]] = []
+    sessions: list[FakeSession] = []
+
+    def factory(**kwargs: Any) -> SessionProto:
+        calls.append(kwargs)
+        sess = FakeSession(model=kwargs["model"], resume=kwargs.get("resume"))
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(session_factory, io, factory=factory, warrants=_no)
+
+    # Establish a casual session with a persisted sdk_session_id.
+    await mgr.dispatch(thread_key="-100:0", text="chat", is_general=True)
+    await _until(lambda: ("-100:0", "reply:chat") in io.sends)
+
+    new_key = await mgr.branch("-100:0", "Promoted chat")
+
+    assert new_key == "-100:88"
+    assert io.created == [("-100:0", "Promoted chat")]
+    fork_call = calls[-1]  # the branched thread's session forks from the casual id
+    assert fork_call["resume"] == "sess-chat"
+    assert fork_call["fork_session"] is True
+
+    # The forked session's new id is captured + persisted on its first turn; the casual
+    # channel's own id is untouched (it keeps compacting independently).
+    await mgr.dispatch(thread_key="-100:88", text="keep going")
+    await _until(lambda: ("-100:88", "reply:keep going") in io.sends)
+    async with session_factory() as session:
+        new_db = await get_task(session, platform="telegram", thread_key="-100:88")
+        casual = await get_task(session, platform="telegram", thread_key="-100:0")
+    assert new_db is not None and new_db.sdk_session_id == "sess-keep going"
+    assert casual is not None and casual.sdk_session_id == "sess-chat"
     await mgr.shutdown()
 
 

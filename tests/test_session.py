@@ -114,6 +114,27 @@ def test_resume_passes_session_id_into_options() -> None:
     assert session.session_id == "sess-prior"
 
 
+def test_fork_session_flag_flows_into_options() -> None:
+    captured: dict[str, ClaudeAgentOptions] = {}
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        captured["options"] = options
+        return FakeClient(options)
+
+    session = TaskSession(
+        model="claude-sonnet-4-6",
+        resume="sess-casual",
+        fork_session=True,
+        client_factory=factory,
+    )
+
+    # /branch forks the casual session into a new thread: resume the casual id but fork
+    # to a fresh one so the casual channel keeps compacting independently.
+    assert captured["options"].fork_session is True
+    assert captured["options"].resume == "sess-casual"
+    assert session.session_id == "sess-casual"
+
+
 def test_memory_params_flow_into_options() -> None:
     captured: dict[str, ClaudeAgentOptions] = {}
 

@@ -23,6 +23,7 @@ class FakeEngine:
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
         self.cancelled: list[str] = []
+        self.branched: list[tuple[str, str]] = []
         self._active = active or []
         self._cancel = cancel
 
@@ -37,6 +38,10 @@ class FakeEngine:
 
     async def active_tasks(self) -> list[Task]:
         return self._active
+
+    async def branch(self, thread_key: str, title: str) -> str:
+        self.branched.append((thread_key, title))
+        return f"{thread_key.split(':')[0]}:88"
 
 
 class FakeResolver:
@@ -434,6 +439,57 @@ async def test_forget_no_match(
     )
 
     channel.send.assert_awaited_once_with("Nothing matched.")
+
+
+# ---- /branch -----------------------------------------------------------------
+
+
+async def test_branch_owner_casual_uses_default_title(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _text_channel(100)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/branch", channel=channel)
+    )
+
+    assert len(engine.branched) == 1
+    thread_key, title = engine.branched[0]
+    assert thread_key == "100:0"
+    assert title.startswith("Branched chat ")  # timestamped default
+    channel.send.assert_awaited_once_with(f'→ Branched into "{title}".')
+
+
+async def test_branch_owner_casual_uses_argument_title(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _text_channel(100)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/branch Trip planning", channel=channel)
+    )
+
+    assert engine.branched == [("100:0", "Trip planning")]
+    channel.send.assert_awaited_once_with('→ Branched into "Trip planning".')
+
+
+async def test_branch_rejected_in_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/branch", channel=channel)
+    )
+
+    assert engine.branched == []  # a tracked thread is already full-memory
+    channel.send.assert_awaited_once_with("/branch only works in the casual channel.")
 
 
 # ---- DiscordTaskIO -----------------------------------------------------------

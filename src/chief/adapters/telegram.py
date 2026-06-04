@@ -39,6 +39,7 @@ from .base import (
     ReadyHook,
     Tier,
     classify_tier,
+    default_branch_title,
     parse_callback,
 )
 from .base import (
@@ -160,6 +161,7 @@ class TelegramAdapter(Adapter):
         self._app.add_handler(CommandHandler("tasks", self._on_tasks))
         self._app.add_handler(CommandHandler("memory", self._on_memory))
         self._app.add_handler(CommandHandler("forget", self._on_forget))
+        self._app.add_handler(CommandHandler("branch", self._on_branch))
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=f"^{CALLBACK_PREFIX}:")
         )
@@ -284,6 +286,26 @@ class TelegramAdapter(Adapter):
             await message.reply_text("Nothing matched.")
             return
         await message.reply_text("Forgot: " + ", ".join(f.title for f in removed))
+
+    async def _on_branch(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Promote the casual channel into a tracked thread (owner + casual only).
+
+        Only the General/``:0`` channel carries the lossy self-compacting context worth
+        promoting; a real topic is already tracked, so ``/branch`` there is a no-op
+        reply. The optional argument names the new thread; otherwise a timestamp does.
+        """
+        thread_key = self._owner_thread(update)
+        message = update.effective_message
+        if thread_key is None or message is None:
+            return
+        if not thread_key.endswith(":0"):
+            await message.reply_text("/branch only works in the casual channel.")
+            return
+        title = (message.text or "").partition(" ")[2].strip() or default_branch_title()
+        await self._engine.branch(thread_key, title)
+        await message.reply_text(f'→ Branched into "{title}".')
 
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

@@ -37,6 +37,7 @@ from .base import (
     ReadyHook,
     Tier,
     classify_tier,
+    default_branch_title,
     parse_callback,
     split_message,
 )
@@ -272,6 +273,15 @@ class DiscordAdapter(Adapter):
                     await channel.send(
                         "Forgot: " + ", ".join(f.title for f in removed)
                     )
+            case "branch":
+                # Only the casual inbox (``:0``) carries lossy context worth promoting;
+                # a thread is already a tracked task. Optional arg names the new thread.
+                if not message.thread_key.endswith(":0"):
+                    await channel.send("/branch only works in the casual channel.")
+                    return
+                title = arg.strip() or default_branch_title()
+                await self._engine.branch(message.thread_key, title)
+                await channel.send(f'→ Branched into "{title}".')
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Resolve an approval card button tap (owner only)."""
