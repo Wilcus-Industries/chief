@@ -35,6 +35,10 @@ packages = ["src/chief"]
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
+# docker/mcp-*/server.py are standalone vendored MCP server images with their own
+# requirements (googleapiclient, weasyprint, mcp-google-sheets) — not part of the chief
+# package and not installed in this venv, so they are linted/typed inside their images.
+extend-exclude = ["docker"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -43,6 +47,8 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 packages = ["chief"]
 strict = true
+# Skip the vendored MCP server images (see the ruff note above) when invoked as `mypy .`.
+exclude = ['^docker/']
 
 # google-auth-oauthlib ships no py.typed; the Google OAuth helper imports it lazily.
 [[tool.mypy.overrides]]

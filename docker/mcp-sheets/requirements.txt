@@ -1,0 +1,2 @@
+# Pinned to the version whose tool names chief's tools/sheets/mcp.py catalog tracks.
+mcp-google-sheets==0.6.3

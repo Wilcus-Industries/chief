@@ -1,4 +1,4 @@
-# chief core stack (M0/M1) + the mcp-gcal calendar server (M5). Outbound-only —
+# chief core stack (M0/M1) + chief's own Google MCP servers (M5/M8). Outbound-only —
 # Telegram long-poll / Discord gateway, no public ingress. Secrets are Docker secrets
 # (files under ./secrets/, mounted at /run/secrets, read by config.py). Sandbox at M7.
 #
@@ -11,9 +11,13 @@
 #         `touch` its empty token file (e.g. `touch secrets/discord_bot_token`). Then:
 #           docker compose up core
 #
-# Calendar (M5, opt-in):  mint the token (python -m chief.tools.calendar.auth), set
-#         calendar_enabled: true in config.yaml, then:  docker compose --profile calendar up
-#         The mcp-gcal service sits behind the "calendar" profile so a plain `up` skips it.
+# Google (M5/M8, opt-in):  chief's own FastMCP servers — calendar (:8003), drive (:8001),
+#         sheets (:8002) — each a separate container on the internal compose network,
+#         reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp (never
+#         host-published). Mint the shared token (python -m chief.tools.google.auth),
+#         flip the matching *_enabled in config.yaml, then:
+#           docker compose --profile google up
+#         The three sit behind the "google" profile, so a plain `up` skips them.
 services:
   core:
     build:
@@ -41,48 +45,83 @@ services:
       retries: 3
       start_period: 20s
 
-  # Google Calendar MCP (nspady/google-calendar-mcp). Its own persistent container,
-  # reached by core over the compose network at http://mcp-gcal:3000/ — never published
-  # to the host (no `ports:`). Behind the "calendar" profile: opt-in only.
-  mcp-gcal:
-    profiles: ["calendar"]
-    # No official image. We vendor the pinned community server (docker/mcp-gcal) so we can
-    # apply a one-line patch its HTTP transport needs to survive past the first request —
-    # see that Dockerfile + stateful-transport.patch for the why.
+  # chief's own Google Calendar MCP server (docker/mcp-calendar). FastMCP, streamable-HTTP
+  # at http://mcp-calendar:8003/mcp on the internal network (no host ports). Replaces the
+  # nspady mcp-gcal: FastMCP gives each connection its own transport, so the per-task MCP
+  # connections chief opens don't collide ("Server already initialized").
+  mcp-calendar:
+    profiles: ["google"]
     build:
-      context: ./docker/mcp-gcal
+      context: ./docker/mcp-calendar
     restart: unless-stopped
-    # The token store must stay writable (nspady persists refreshed access tokens). Run as
-    # the host owner of the minted token file so the bind-mount stays writable; override on
-    # hosts where you aren't uid 1000.
-    user: "${MCP_GCAL_UID:-1000}:${MCP_GCAL_GID:-1000}"
+    # Refreshes the access token in memory only — never writes the shared token file, so
+    # a read-only mount is correct (the sheets container is the sole writer).
+    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     environment:
-      TRANSPORT: http
-      HOST: 0.0.0.0  # all interfaces *inside* the compose network — not host-published
-      PORT: "3000"
-      GOOGLE_OAUTH_CREDENTIALS: /run/secrets/google_oauth_client.json
-      GOOGLE_CALENDAR_MCP_TOKEN_PATH: /token/tokens.json
-    secrets:
-      - google_oauth_client.json
+      GOOGLE_TOKEN_PATH: /token/google_token.json
+      OWNER_TZ: ${OWNER_TZ:-UTC}
     volumes:
-      # Writable token store. Mint it first (python -m chief.tools.calendar.auth) — if the
-      # file is absent, Docker creates a *directory* here and nspady fails to load tokens.
-      - ./secrets/google_calendar_token.json:/token/tokens.json
+      - ./secrets/google_token.json:/token/google_token.json:ro
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      # Node 18 ships a global fetch, so no curl needed in the alpine image. Use 127.0.0.1,
-      # not localhost: undici resolves localhost to ::1 (IPv6) first, but the server binds
-      # 0.0.0.0 (IPv4 only), so a localhost probe connection-refuses and reports unhealthy.
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8003/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 20s
+
+  # chief's Google Drive MCP server (docker/mcp-drive, ported from genesis-x). FastMCP,
+  # streamable-HTTP at http://mcp-drive:8001/mcp. Read a Doc/PDF/Office file; render +
+  # upload a Markdown file as PDF (approval-gated).
+  mcp-drive:
+    profiles: ["google"]
+    build:
+      context: ./docker/mcp-drive
+    restart: unless-stopped
+    # Read-only token: refreshes in memory only (sheets is the sole token writer).
+    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    environment:
+      GOOGLE_TOKEN_PATH: /token/google_token.json
+    volumes:
+      - ./secrets/google_token.json:/token/google_token.json:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # chief's Google Sheets MCP server (docker/mcp-sheets). Wraps third-party
+  # mcp-google-sheets with a row-1 (header) write guard. FastMCP, streamable-HTTP at
+  # http://mcp-sheets:8002/mcp. The sole writer of the shared token file (writable mount).
+  mcp-sheets:
+    profiles: ["google"]
+    build:
+      context: ./docker/mcp-sheets
+    restart: unless-stopped
+    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    environment:
+      # The package's own auth: OAuth client + the shared minted token.
+      CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
+      TOKEN_PATH: /token/google_token.json
+    secrets:
+      - google_oauth_client.json
+    volumes:
+      # Writable — mcp-google-sheets persists a refreshed token here. Mint it first
+      # (python -m chief.tools.google.auth); if the file is absent Docker creates a
+      # *directory* at this path and the server fails to load the token.
+      - ./secrets/google_token.json:/token/google_token.json
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
 secrets:
   telegram_bot_token:
