@@ -43,7 +43,7 @@ Tracking the full surface so "done designing" is well-defined. ✅ settled · �
 
 **Design status: complete + technically de-risked.** All product decisions made; the three
 build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to verify" items
-(Google MCP, TG topics API, websearch-on-credit, STT) are routine build-time spikes.
+(TG topics API, websearch-on-credit, STT) are routine build-time spikes.
 
 ## Decisions so far
 
@@ -72,7 +72,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Restart | Interrupted tasks: notify + ask before resuming. Approvals survive restart |
 | Transcripts | Keep, auto-prune after 90 days; distilled memory persists |
 | Transport / ingress | Telegram long-polling; outbound-only, no public HTTP ingress |
-| MCP servers | Separate containers (HTTP/SSE), one per service |
+| MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
 | Deploy | CI/CD: GH Actions → GHCR → SSH `compose pull && up` |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
@@ -88,7 +88,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Media | In: images (vision) + PDFs/docs; voice deferred. Out: smart split + file attachments |
 | Group chats | Mention-activated; tier by sender ID; lightweight flat sessions |
 | Onboarding | Agent-followed `BOOTSTRAP.md`; auth scripts bundled with MCP servers |
-| Google scope (v1) | Calendar R/W, Gmail R/W, Drive R/W |
+| Google scope (v1) | Calendar R/W, Gmail R/W, Drive R/W, Sheets R/W (row-1 header guard) |
 | Web (v1) | Search + fetch (GET un-gated, POST gated) |
 | Timezone | Single configured owner TZ |
 | Booking | Negotiate within free/busy + memory prefs (hours/buffer/cap); video link only if asked; final owner approval; confirm guest |
@@ -457,18 +457,22 @@ Single VPS, one `docker compose`. **Outbound-only** (no public HTTP ingress); Te
 
 **Services:**
 
-- **`core`** — chat adapters (Telegram long-poll; Discord later), agent orchestrator, memory,
-  permission gate, sqlite. Holds the secrets. `restart: unless-stopped`, healthcheck.
+- **`core`** — chat adapters (Telegram long-poll + Discord gateway), agent orchestrator,
+  memory, permission gate, sqlite. Holds the secrets. `restart: unless-stopped`, healthcheck.
 - **`sandbox`** — locked-down shell/code worker: no secrets, restricted FS (scratch
-  workspace only), limited/no network. Talks to `core` over a narrow RPC.
-- **`mcp-google`** — Google Workspace MCP server (HTTP/SSE), uses a mounted Google refresh
-  token. Future tools = more MCP containers (one per service).
+  workspace only), limited/no network. Talks to `core` over a narrow RPC. *(M7.)*
+- **`mcp-calendar` / `mcp-drive` / `mcp-sheets`** — chief's own FastMCP servers, one per
+  service (streamable-HTTP at `http://mcp-<svc>:<port>/mcp`, :8003/:8001/:8002, never
+  host-published), behind the **`google` compose profile** (a plain `up` skips them). One
+  shared Google token is bind-mounted into all three: `mcp-sheets` is the sole writer (it
+  persists refreshed tokens), calendar + drive mount it read-only and refresh in memory.
 
 **Volumes:** `sqlite-data`, `memory` (git repo), `workspace` (scratch — shared core↔sandbox),
 `transcripts`. **Docker secrets** for all tokens.
 
-**Google OAuth with no ingress:** run the consent dance **once locally**, mount the
-resulting refresh token as a Docker secret — no callback server on the VPS.
+**Google OAuth with no ingress:** run the consent dance **once locally**
+(`python -m chief.tools.google.auth`), mounting the resulting refresh token for the MCP
+containers — no callback server on the VPS.
 
 **Deploy = CI/CD.** Push to main → GitHub Actions builds images, pushes to a private
 registry (GHCR), then deploys over SSH (`compose pull && up -d`). Deploy restarts are
@@ -571,11 +575,18 @@ script) — rather than silently erroring.
 
 ## Tools & integrations (draft)
 
-**Owner toolset (v1):**
+**Owner toolset (v1).** Google services are chief's **own per-service FastMCP servers**
+(`docker/mcp-*`), each pre-approving its reads and routing its writes through the approval
+card:
 
-- **Google Calendar** — read + write (free/busy, list, create/update events).
-- **Gmail** — read (triage/search/summarize) + **send** (as owner, approval-gated).
-- **Drive** — read + write (search, read, create files).
+- **Google Calendar** — read (free/busy, list, get-event, current-time) + write
+  (create/update events). Delete is deferred (hard-blocked). *Live.*
+- **Gmail** — read (triage/search/summarize) + **send** (as owner, approval-gated). *M8.*
+- **Drive** — read a Doc/PDF/Office file, and render+upload a Markdown file as PDF
+  (approval-gated). *Server built (M5), disabled until M8.*
+- **Google Sheets** — read (ranges/formulas/listings) + write (cells/rows/sheets, share),
+  with a server-side **row-1 (header) write guard**; wraps pinned
+  `xing5/mcp-google-sheets` 0.6.3. *Server built (M5), disabled until M8.*
 - **Web** — search + fetch (read-only GET is un-gated; POST/forms are effectful → gated).
 - **Shell/code** — sandbox container, permission-gated.
 - **File workspace** — scratch dir (Read/Write/Edit), un-gated inside the workspace.
@@ -652,10 +663,12 @@ chief/
       store.py               # interface: recall/write/overwrite/expire (namespaced)
       markdown_backend.py    # md + [[wikilinks]] impl
       distill.py             # staleness reflection → facts
+      versioning.py          # git-versions every memory write (reversibility)
     tools/
-      google/                # calendar / gmail / drive MCP clients
-      web.py  workspace.py  shell.py   # gate-wrapped; shell → sandbox RPC
-      guest.py               # take-message / availability / booking
+      google/auth.py         # host-only one-time OAuth → shared token (cal+drive+sheets)
+      calendar/mcp.py  drive/mcp.py  sheets/mcp.py   # per-server tool catalogs (read/write split)
+      web.py  workspace.py  shell.py   # gate-wrapped; shell → sandbox RPC (M7)
+      guest.py               # take-message / availability / booking (M6)
     scheduler/scheduler.py   # reminders / recurring / monitors
     skills/                  # registry + setup_morning_brief/
     usage/budget.py          # own-share accounting + citizenship backoff
@@ -700,6 +713,12 @@ chief/
   own cumulative `total_cost_usd` and reacts to `RateLimitEvent`. [cost-tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
 - **Session resume ✅** — `session_id` from `ResultMessage`; pass to `resume`. Matches the
   notify-and-ask restart recovery.
+- **Google MCP choice ✅ (resolved at M5)** — chief builds its **own per-service FastMCP
+  servers** (calendar/drive/sheets) instead of a single community/Workspace server. FastMCP
+  gives each connection its own transport, so the per-task MCP connections chief opens don't
+  collide ("Server already initialized" — the failure mode of the vendored nspady `mcp-gcal`,
+  now replaced). Reads pre-approved, writes approval-gated; one shared OAuth token, minted
+  locally, covers all three scopes.
 
 ### ⚠️ Billing model change — June 15, 2026 (drives the usage design)
 
@@ -712,8 +731,6 @@ See reworked "Usage budgeting" — and the guest-billing fork it raises.
 
 ## Still to verify
 
-- **Google MCP choice** — community Google Workspace MCP vs. per-service; OAuth + refresh;
-  free/busy without exposing event details.
 - **Telegram forum-topics via bot** — `createForumTopic`, `can_manage_topics`, routing by
   `message_thread_id` in `python-telegram-bot`.
 - **Built-in WebSearch on subscription** — does SDK web search work on the OAuth credit, or
@@ -768,18 +785,33 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   - **Semaphore re-arm on restart:** the ~3-slot cap bounds only *actively-generating*
     turns; recovered tasks start idle and acquire a slot only when they next generate, so
     the semaphore starts empty — no pre-acquire needed.
-- **M3 gate + approvals:** default-ask permission gate (NEVER/APPROVED, safe-matching) +
-  approval flow (in-context + Front Desk, always-allow buttons). Reused everywhere.
-- **M4 memory:** markdown + wikilinks, namespaced, `MEMORY.md` index, distill-on-staleness,
-  auto-save+notify, `/memory`+`/forget`, `Soul.md`/`User.md`.
+- **M3 gate + approvals — ✅ done.** Default-ask permission gate (`PreToolUse` hook) +
+  `canUseTool` approval flow, NEVER/APPROVED **safe-matching** (argument-aware,
+  metacharacter-rejecting), in-context + Front Desk routing, 4-button always-allow/deny
+  cards (`gate/{gate,policy,approvals}.py`; runtime mutations persist to the sqlite
+  `policy`/`approvals` tables in `persistence/`). Reused everywhere.
+- **M4 memory — ✅ done.** Markdown + `[[wikilinks]]`, namespaced, `MEMORY.md` index,
+  distill-on-staleness, auto-save+notify, `Soul.md`/`User.md` persona assembly
+  (`memory/{store,markdown_backend,distill}.py`, `core/personas.py`). Every memory write is
+  **git-versioned** for reversibility (`memory/versioning.py`; config `memory_git` /
+  `git_author_*`; git installed in the core image).
 
 **Phase 2 — Tools & people**
-- **M5 calendar:** Google Calendar MCP; owner free/busy + create/update.
+- **M5 calendar — ✅ done (scope widened).** Rather than vendor a community Google MCP,
+  chief builds its **own three FastMCP servers** — calendar (`docker/mcp-calendar`, :8003),
+  drive (:8001), sheets (:8002) — each a separate container behind the `google` compose
+  profile, reached over streamable-HTTP at `http://mcp-<svc>:<port>/mcp` (no host ingress).
+  One shared OAuth token, minted once locally (`python -m chief.tools.google.auth`), covers
+  all three scopes. **Wiring (`tools/{calendar,drive,sheets}/mcp.py`): reads ALLOW
+  (pre-approved), writes ASK (approval card)**; `delete-event` is deferred (hard-blocked).
+  Calendar is live (`calendar_enabled: true`); **Drive + Sheets servers are built but
+  disabled** (`drive_enabled`/`sheets_enabled: false`) — flipping them on, plus Gmail, is M8.
 - **M6 guest mode:** tier isolation by construction, 3 guest tools, notify-on-first-contact
   admission, booking flow, rate limits, block/mute.
 - **M7 shell + workspace + web:** sandbox worker container behind the gate; file workspace;
   web search/fetch.
-- **M8 Gmail + Drive + media:** Gmail R/W (transparent signature), Drive R/W; image + PDF
+- **M8 Gmail + Drive/Sheets + media:** add Gmail R/W (transparent signature); **enable the
+  Drive + Sheets servers built in M5** (flip `drive_enabled`/`sheets_enabled`); image + PDF
   intake; smart-split/file output.
 
 **Phase 3 — Proactivity & extensibility**
