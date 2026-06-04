@@ -1,9 +1,11 @@
 """TaskManager: hybrid grace, steering, interrupt, semaphore, idle, recovery, spawn."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.core.session import Final, Milestone, TurnEvent
@@ -658,4 +660,61 @@ async def test_new_message_cancels_pending_distill(
         ("chief", "reply:second"),
     ]
     assert memory.written == []  # the pending distill was cancelled, none fired
+    await mgr.shutdown()
+
+
+async def test_distill_cancelled_mid_flush_keeps_transcript(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    memory = FakeMemory()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
+        entered.set()
+        await release.wait()  # park inside the flush, holding the cancel window open
+        return [FactDraft(slug="s", title="T", body="b")]
+
+    mgr = _mem_manager(
+        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    task = mgr._tasks["-100:5"]
+    await entered.wait()  # distiller is now parked mid-flush
+
+    # The cancel-during-flush race: a new turn cancels the timer while distilling.
+    mgr._cancel_distill(task)
+    await asyncio.sleep(0)  # let the CancelledError propagate into the parked task
+
+    # The transcript survives for the next pass instead of being silently lost.
+    assert task.transcript == [("owner", "hi"), ("chief", "reply:hi")]
+    assert memory.written == []
+    await mgr.shutdown()
+
+
+async def test_distill_failure_is_logged_with_thread_key(
+    session_factory: async_sessionmaker[AsyncSession],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    io = FakeIO()
+    memory = FakeMemory()
+
+    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
+        raise RuntimeError("boom")
+
+    mgr = _mem_manager(
+        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
+    )
+
+    with caplog.at_level(logging.ERROR, logger="chief.core.tasks"):
+        await mgr.dispatch(thread_key="-100:5", text="hi")
+        await _until(
+            lambda: any(r.msg == "distillation failed" for r in caplog.records)
+        )
+
+    rec = next(r for r in caplog.records if r.msg == "distillation failed")
+    assert rec.__dict__.get("thread_key") == "-100:5"  # context, not a bare traceback
+    assert memory.written == []
     await mgr.shutdown()
