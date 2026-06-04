@@ -35,6 +35,10 @@ services:
       - discord_bot_token
       - claude_code_oauth_token
     volumes:
+      # Mounted read-only over the image's baked copy (Dockerfile COPYs it as a fallback)
+      # so a config.yaml edit takes effect on `up -d` with no rebuild. config.py reads
+      # ./config.yaml relative to WORKDIR /app, so this is the exact path it loads.
+      - ./config.yaml:/app/config.yaml:ro
       - sqlite-data:/data
       - memory:/memory
     healthcheck:
