@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application
 
+from chief.adapters.base import parse_callback
 from chief.adapters.telegram import (
     TelegramAdapter,
     TelegramTaskIO,
-    parse_callback,
     split_message,
 )
 from chief.gate.approvals import ApprovalAction, ApprovalCard
