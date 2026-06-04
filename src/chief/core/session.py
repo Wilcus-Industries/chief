@@ -11,6 +11,7 @@ M2 wires **no tools** — owner sessions are plain chat — so ``Milestone`` eve
 tool-use) rarely fire yet; the machinery lights up when the gate + tools land (M3+).
 """
 
+import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -21,12 +22,15 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    ProcessError,
     TextBlock,
     ToolUseBlock,
 )
 from claude_agent_sdk.types import HookEvent, McpServerConfig
 
 from .agent import NO_REPLY
+
+logger = logging.getLogger("chief.core.session")
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class TaskSession:
             disallowed_tools=disallowed_tools if disallowed_tools is not None else [],
             mcp_servers=mcp_servers if mcp_servers is not None else {},
         )
+        self._client_factory = client_factory
         self._client = client_factory(self._options)
         self._connected = False
         #: Resumable SDK session id, populated from the first turn's stream.
@@ -103,7 +108,30 @@ class TaskSession:
             self._connected = True
 
     async def run_turn(self, text: str) -> AsyncIterator[TurnEvent]:
-        """Send ``text`` and stream the response as milestone/final events."""
+        """Send ``text`` and stream the response as milestone/final events.
+
+        A dead/expired resume id makes the CLI exit non-zero on the turn's first
+        message. If nothing has streamed yet and we were resuming, drop the resume and
+        retry once on a fresh session rather than crashing the whole turn — the new id
+        is then persisted by the engine, healing the stale pointer. (A genuine
+        first-message ``ProcessError`` on a resuming turn also restarts fresh; an
+        acceptable degradation vs. a hard crash.)
+        """
+        emitted = 0
+        try:
+            async for event in self._stream_once(text):
+                emitted += 1
+                yield event
+        except ProcessError:
+            if emitted or self._options.resume is None:
+                raise
+            logger.warning("resume failed; retrying on a fresh session")
+            await self._reset_to_fresh()
+            async for event in self._stream_once(text):
+                yield event
+
+    async def _stream_once(self, text: str) -> AsyncIterator[TurnEvent]:
+        """One streamed turn against the current client (no resume fallback)."""
         await self._ensure_connected()
         await self._client.query(text)
         parts: list[str] = []
@@ -118,6 +146,17 @@ class TaskSession:
                     elif isinstance(block, ToolUseBlock):
                         yield Milestone(text=f"using {block.name}")
         yield Final(text="".join(parts).strip() or NO_REPLY)
+
+    async def _reset_to_fresh(self) -> None:
+        """Tear down the failed resuming client and rebuild one with no resume."""
+        try:
+            await self.aclose()
+        except Exception:  # the subprocess is already dead; disconnect may error
+            logger.debug("aclose during resume reset failed", exc_info=True)
+        self._options.resume = None  # ClaudeAgentOptions is a mutable dataclass
+        self._client = self._client_factory(self._options)
+        self._connected = False
+        self.session_id = None
 
     async def interrupt(self) -> None:
         """Abort the in-flight turn (steering 'stop / do X instead')."""

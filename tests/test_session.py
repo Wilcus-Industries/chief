@@ -3,9 +3,11 @@
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ProcessError,
     TextBlock,
     ToolUseBlock,
 )
@@ -23,8 +25,12 @@ class FakeClient:
         self.interrupted = False
         self.model: str | None = None
         self.messages: list[Any] = []
+        #: When set, ``connect`` raises it — a stand-in for a dead resume id (exit 1).
+        self.fail_on_connect: Exception | None = None
 
     async def connect(self) -> None:
+        if self.fail_on_connect is not None:
+            raise self.fail_on_connect
         self.connected = True
 
     async def query(self, prompt: str, session_id: str = "default") -> None:
@@ -148,3 +154,42 @@ def test_mcp_and_disallowed_tools_flow_into_options() -> None:
         "gcal": {"type": "http", "url": "http://mcp-gcal:3000/"}
     }
     assert options.disallowed_tools == ["mcp__gcal__delete-event"]
+
+
+async def test_dead_resume_falls_back_to_fresh_session() -> None:
+    clients: list[FakeClient] = []
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        client = FakeClient(options)
+        if options.resume is not None:
+            # A dead resume id makes the CLI exit 1 on the turn's first message.
+            client.fail_on_connect = ProcessError("session not found", exit_code=1)
+        else:
+            client.messages = [
+                _assistant(TextBlock(text="fresh"), session_id="sess-new")
+            ]
+        clients.append(client)
+        return client
+
+    session = TaskSession(
+        model="claude-sonnet-4-6", resume="dead-sess", client_factory=factory
+    )
+
+    events = [event async for event in session.run_turn("hi")]
+
+    assert events == [Final(text="fresh")]
+    assert session.session_id == "sess-new"
+    assert len(clients) == 2  # rebuilt once after the dead resume
+    assert clients[1].options.resume is None
+
+
+async def test_process_error_without_resume_propagates() -> None:
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        client = FakeClient(options)
+        client.fail_on_connect = ProcessError("boom", exit_code=1)
+        return client
+
+    session = TaskSession(model="claude-sonnet-4-6", client_factory=factory)
+
+    with pytest.raises(ProcessError):
+        [event async for event in session.run_turn("hi")]
