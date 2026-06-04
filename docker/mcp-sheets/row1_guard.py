@@ -16,10 +16,28 @@ normalizes the rectangle and writes the header anyway. Column-only endpoints (``
 import re
 from typing import Any
 
+from mcp.types import CallToolResult, TextContent
+
 ROW_1_ERROR = (
     "You cannot edit the first row of a Google Sheet. "
     "Ask a human to perform this edit for you if it was intentional."
 )
+
+
+def blocked_result(message: str) -> CallToolResult:
+    """Build the refusal a blocked write returns from the patched ``call_tool``.
+
+    The guarded tools declare a ``Dict[str, Any]`` return, so FastMCP builds an
+    ``outputSchema`` for each. The mcp 1.27.2 lowlevel handler treats a bare content list
+    as "no structured output" and — because an ``outputSchema`` is present — discards it
+    for a generic ``"Output validation error: ..."``, losing ``ROW_1_ERROR``. The same
+    handler short-circuits on a ``CallToolResult`` (returns it verbatim, no output
+    validation), so returning one preserves the actionable message and is robust to future
+    schema changes. ``isError=True`` so a refused write reads as a failed call.
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)], isError=True
+    )
 
 
 def _a1_includes_row_1(range_str: str) -> bool:
@@ -59,6 +77,9 @@ def _check_row_1(tool_name: str, arguments: dict[str, Any]) -> str | None:
             return ROW_1_ERROR
 
     elif tool_name == "add_chart":
+        # A chart only *reads* data_range; it doesn't write the header. Blocking a chart
+        # sourced from row 1 is intentionally conservative — the guard treats any row-1
+        # touch uniformly rather than special-casing read-only consumers.
         r = arguments.get("data_range", "")
         if r and _a1_includes_row_1(r):
             return ROW_1_ERROR

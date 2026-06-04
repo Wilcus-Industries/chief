@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from drive_query import _escape_drive_query
 from markitdown import MarkItDown
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request as StarletteRequest
@@ -96,16 +97,6 @@ _MIME_EXT = {
     "text/html": ".html",
     "text/csv": ".csv",
 }
-
-
-def _escape_drive_query(value: str) -> str:
-    """Escape a value for safe interpolation into a Drive ``q=`` string literal.
-
-    Drive query string literals are single-quoted; an unescaped quote (e.g. a name like
-    ``it's.pdf``) would break out of the literal and alter the query. Backslash first so
-    we don't double-escape the quote escapes we add.
-    """
-    return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _extract_file_id(url: str) -> str:
