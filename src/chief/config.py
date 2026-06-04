@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     audit_log_path: str = "/data/audit.jsonl"
     front_desk_thread_key: str | None = None
 
+    # Long-term memory (M4). memory_dir holds Soul/User/MEMORY + facts/ (a persisted
+    # volume in the container); distill_idle_seconds is the quiet window before a task's
+    # chatter is distilled into facts (Sonnet, distill_model). memory_git versions every
+    # write op via subprocess git under the configured author identity.
+    memory_dir: str = "/memory"
+    distill_idle_seconds: float = 1200.0
+    distill_model: str = "claude-sonnet-4-6"
+    memory_git: bool = True
+    git_author_name: str = "chief"
+    git_author_email: str = "chief@localhost"
+
     # Secrets (secrets_dir / env).
     telegram_bot_token: str
     claude_code_oauth_token: str

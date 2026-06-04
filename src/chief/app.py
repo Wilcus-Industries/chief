@@ -17,6 +17,9 @@ from .config import Settings
 from .core.tasks import TaskManager
 from .gate.approvals import ApprovalManager
 from .gate.policy import PolicyStore
+from .memory.markdown_backend import MarkdownMemory
+from .memory.store import MemoryStore
+from .memory.versioning import GitVersioner, NullVersioner, Versioner
 from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
@@ -35,17 +38,34 @@ def load_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
 
 
+def build_memory(settings: Settings) -> MemoryStore:
+    """Construct the markdown memory store + its versioner from settings."""
+    versioner: Versioner = (
+        GitVersioner(
+            settings.memory_dir,
+            author_name=settings.git_author_name,
+            author_email=settings.git_author_email,
+        )
+        if settings.memory_git
+        else NullVersioner()
+    )
+    return MarkdownMemory(
+        settings.memory_dir, versioner=versioner, owner_name=settings.owner_name
+    )
+
+
 def build_components(
     settings: Settings,
     *,
     application: Application,  # type: ignore[type-arg]
     session_factory: async_sessionmaker[AsyncSession],
-) -> tuple[TaskManager, TelegramAdapter, PolicyStore, ApprovalManager]:
-    """Wire the gate, engine, and adapter against a built ``application`` (shared bot).
+) -> tuple[TaskManager, TelegramAdapter, PolicyStore, ApprovalManager, MemoryStore]:
+    """Wire the gate, memory, engine, and adapter against a built ``application``.
 
     The one ``TelegramTaskIO`` doubles as the engine's ``TaskIO`` and the approval
     ``ApprovalIO`` (it implements both), so cards post through the same bot. Policy
-    seeding and pending-approval re-arming are async and happen in :func:`serve`.
+    seeding, memory scaffolding, and pending-approval re-arming are async and happen in
+    :func:`serve`.
     """
     io = TelegramTaskIO(application.bot)
     audit = AuditLog(settings.audit_log_path)
@@ -57,6 +77,7 @@ def build_components(
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
     )
+    memory = build_memory(settings)
     manager = TaskManager(
         session_factory=session_factory,
         io=io,
@@ -69,6 +90,11 @@ def build_components(
         approvals=approvals,
         audit=audit,
         front_desk_thread_key=settings.front_desk_thread_key,
+        memory=memory,
+        memory_dir=settings.memory_dir,
+        owner_name=settings.owner_name,
+        distill_idle_seconds=settings.distill_idle_seconds,
+        distill_model=settings.distill_model,
     )
     adapter = TelegramAdapter(
         application=application,
@@ -77,8 +103,9 @@ def build_components(
         guest_ack=settings.guest_ack,
         session_factory=session_factory,
         approvals=approvals,
+        memory=memory,
     )
-    return manager, adapter, policy, approvals
+    return manager, adapter, policy, approvals, memory
 
 
 async def serve(settings: Settings) -> None:
@@ -87,7 +114,7 @@ async def serve(settings: Settings) -> None:
     await init_db(engine)
     factory = session_factory(engine)
     application = Application.builder().token(settings.telegram_bot_token).build()
-    manager, adapter, policy, approvals = build_components(
+    manager, adapter, policy, approvals, memory = build_components(
         settings, application=application, session_factory=factory
     )
     # Seed NEVER/APPROVED before serving so the gate is correct from the first message.
@@ -97,6 +124,8 @@ async def serve(settings: Settings) -> None:
     )
 
     async def on_ready() -> None:
+        await memory.ensure_scaffold()
+        await memory.purge_expired()
         await manager.recover()
         await approvals.re_arm()
 

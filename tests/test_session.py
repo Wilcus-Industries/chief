@@ -106,3 +106,24 @@ def test_resume_passes_session_id_into_options() -> None:
 
     assert captured["options"].resume == "sess-prior"
     assert session.session_id == "sess-prior"
+
+
+def test_memory_params_flow_into_options() -> None:
+    captured: dict[str, ClaudeAgentOptions] = {}
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        captured["options"] = options
+        return FakeClient(options)
+
+    TaskSession(
+        model="claude-sonnet-4-6",
+        system_prompt="# Soul\nI am chief.",
+        cwd="/memory",
+        allowed_tools=["Read", "Glob", "Grep"],
+        client_factory=factory,
+    )
+
+    options = captured["options"]
+    assert options.system_prompt == "# Soul\nI am chief."
+    assert options.cwd == "/memory"
+    assert options.allowed_tools == ["Read", "Glob", "Grep"]

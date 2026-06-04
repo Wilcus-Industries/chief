@@ -16,6 +16,7 @@ from chief.adapters.telegram import (
     split_message,
 )
 from chief.gate.approvals import ApprovalAction, ApprovalCard
+from chief.memory.store import Fact
 from chief.persistence.models import Contact, Task
 
 OWNER_ID = 42
@@ -54,11 +55,40 @@ class FakeResolver:
         self.resolved.append((approval_id, action, decided_by))
 
 
+def _fact(slug: str, title: str) -> Fact:
+    return Fact(
+        slug=slug,
+        title=title,
+        body="b",
+        namespace="owner",
+        provenance="inferred",
+        trust="medium",
+        expires=None,
+        created="2026-06-03T00:00:00+00:00",
+    )
+
+
+class FakeMemory:
+    def __init__(self, facts: list[Fact] | None = None) -> None:
+        self._facts = facts or []
+        self.forgot: list[tuple[str, str]] = []
+
+    def list_facts(self, namespace: str) -> list[Fact]:
+        return [f for f in self._facts if f.namespace == namespace]
+
+    async def forget(self, namespace: str, query: str) -> list[Fact]:
+        self.forgot.append((namespace, query))
+        removed = [f for f in self._facts if query.lower() in f.title.lower()]
+        self._facts = [f for f in self._facts if f not in removed]
+        return removed
+
+
 def _adapter(
     session_factory: async_sessionmaker[AsyncSession],
     engine: FakeEngine,
     *,
     approvals: FakeResolver | None = None,
+    memory: FakeMemory | None = None,
 ) -> TelegramAdapter:
     app = cast(Application, SimpleNamespace(add_handler=Mock()))  # type: ignore[type-arg]
     return TelegramAdapter(
@@ -68,6 +98,7 @@ def _adapter(
         guest_ack="noted, thanks",
         session_factory=session_factory,
         approvals=approvals,
+        memory=memory,
     )
 
 
@@ -255,6 +286,85 @@ async def test_tasks_empty(
     await adapter._on_tasks(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with("No active tasks.")  # type: ignore[union-attr]
+
+
+async def test_memory_lists_owner_facts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    memory = FakeMemory([_fact("mornings", "Prefers mornings")])
+    adapter = _adapter(session_factory, FakeEngine(), memory=memory)
+    update = _fake_update(user_id=OWNER_ID, text="/memory", thread_id=0)
+
+    await adapter._on_memory(update, _CTX)
+
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "• Prefers mornings"
+    )
+
+
+async def test_memory_empty(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine(), memory=FakeMemory())
+    update = _fake_update(user_id=OWNER_ID, text="/memory", thread_id=0)
+
+    await adapter._on_memory(update, _CTX)
+
+    update.effective_message.reply_text.assert_awaited_once_with("No memories yet.")  # type: ignore[union-attr]
+
+
+async def test_memory_ignores_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    memory = FakeMemory([_fact("mornings", "Prefers mornings")])
+    adapter = _adapter(session_factory, FakeEngine(), memory=memory)
+    update = _fake_update(user_id=7, text="/memory", thread_id=0)
+
+    await adapter._on_memory(update, _CTX)
+
+    update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_forget_removes_matching_fact(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    memory = FakeMemory([_fact("mornings", "Prefers mornings")])
+    adapter = _adapter(session_factory, FakeEngine(), memory=memory)
+    update = _fake_update(user_id=OWNER_ID, text="/forget mornings", thread_id=0)
+
+    await adapter._on_forget(update, _CTX)
+
+    assert memory.forgot == [("owner", "mornings")]
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "Forgot: Prefers mornings"
+    )
+
+
+async def test_forget_no_argument_shows_usage(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    memory = FakeMemory([_fact("mornings", "Prefers mornings")])
+    adapter = _adapter(session_factory, FakeEngine(), memory=memory)
+    update = _fake_update(user_id=OWNER_ID, text="/forget", thread_id=0)
+
+    await adapter._on_forget(update, _CTX)
+
+    assert memory.forgot == []
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "Usage: /forget <text>"
+    )
+
+
+async def test_forget_no_match(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    memory = FakeMemory([_fact("mornings", "Prefers mornings")])
+    adapter = _adapter(session_factory, FakeEngine(), memory=memory)
+    update = _fake_update(user_id=OWNER_ID, text="/forget nonsense", thread_id=0)
+
+    await adapter._on_forget(update, _CTX)
+
+    update.effective_message.reply_text.assert_awaited_once_with("Nothing matched.")  # type: ignore[union-attr]
 
 
 # ---- TelegramTaskIO ----------------------------------------------------------

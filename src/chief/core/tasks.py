@@ -25,7 +25,7 @@ The engine is platform-neutral: speaks only :class:`TaskIO` (provided by the ada
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from claude_agent_sdk import CanUseTool, HookMatcher
@@ -33,8 +33,10 @@ from claude_agent_sdk.types import HookEvent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..gate.approvals import ApprovalManager
-from ..gate.gate import build_can_use_tool, build_pretool_hook
+from ..gate.gate import FILE_OP_TOOLS, build_can_use_tool, build_pretool_hook
 from ..gate.policy import PolicyStore
+from ..memory.distill import distill as _distill_default
+from ..memory.store import OWNER_NAMESPACE, FactDraft, MemoryStore
 from ..obs.audit import AuditLog
 from ..persistence.models import Task
 from ..persistence.tasks import (
@@ -52,11 +54,16 @@ from ..persistence.tasks import (
     set_status,
 )
 from . import classify
+from .personas import build_system_prompt
 from .session import Final, TaskSession, TurnEvent
 
 logger = logging.getLogger("chief.core.tasks")
 
 WORKING_ACK = "working on it…"
+#: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
+MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
+#: A distiller: turn a transcript + the current index into candidate facts.
+DistillFn = Callable[..., Awaitable[list[FactDraft]]]
 
 
 class TaskIO(Protocol):
@@ -87,9 +94,18 @@ def _default_session(
     resume: str | None = None,
     can_use_tool: CanUseTool | None = None,
     hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+    system_prompt: str | None = None,
+    cwd: str | None = None,
+    allowed_tools: list[str] | None = None,
 ) -> SessionProto:
     return TaskSession(
-        model=model, resume=resume, can_use_tool=can_use_tool, hooks=hooks
+        model=model,
+        resume=resume,
+        can_use_tool=can_use_tool,
+        hooks=hooks,
+        system_prompt=system_prompt,
+        cwd=cwd,
+        allowed_tools=allowed_tools,
     )
 
 
@@ -109,6 +125,8 @@ class _RunningTask:
     cancelled: bool = False
     consumer: "asyncio.Task[None] | None" = None
     idle_handle: "asyncio.Task[None] | None" = None
+    distill_handle: "asyncio.Task[None] | None" = None
+    transcript: list[tuple[str, str]] = field(default_factory=list)
 
 
 class TaskManager:
@@ -132,6 +150,12 @@ class TaskManager:
         approvals: ApprovalManager | None = None,
         audit: AuditLog | None = None,
         front_desk_thread_key: str | None = None,
+        memory: MemoryStore | None = None,
+        memory_dir: str | None = None,
+        owner_name: str = "the owner",
+        distill_idle_seconds: float = 1200.0,
+        distill_model: str = "claude-sonnet-4-6",
+        distill: DistillFn = _distill_default,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -147,6 +171,12 @@ class TaskManager:
         self._approvals = approvals
         self._audit = audit
         self._front_desk_thread_key = front_desk_thread_key
+        self._memory = memory
+        self._memory_dir = memory_dir
+        self._owner_name = owner_name
+        self._distill_idle_seconds = distill_idle_seconds
+        self._distill_model = distill_model
+        self._distill = distill
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -240,6 +270,14 @@ class TaskManager:
         gate_kwargs: dict[str, Any] = {}
         if can_use_tool is not None or hooks is not None:
             gate_kwargs = {"can_use_tool": can_use_tool, "hooks": hooks}
+        if self._memory is not None:
+            gate_kwargs.update(
+                system_prompt=build_system_prompt(
+                    tier=tier, memory=self._memory, owner_name=self._owner_name
+                ),
+                cwd=self._memory_dir,
+                allowed_tools=list(MEMORY_TOOLS),
+            )
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
@@ -273,7 +311,11 @@ class TaskManager:
             else (self._front_desk_thread_key or thread_key)
         )
         hook = build_pretool_hook(
-            thread_key=thread_key, tier=tier, policy=self._policy, audit=self._audit
+            thread_key=thread_key,
+            tier=tier,
+            policy=self._policy,
+            audit=self._audit,
+            memory_dir=self._memory_dir,
         )
 
         async def on_waiting() -> None:
@@ -292,6 +334,7 @@ class TaskManager:
             audit=self._audit,
             on_waiting=on_waiting,
             on_running=on_running,
+            memory_dir=self._memory_dir,
         )
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "PreToolUse": [HookMatcher(hooks=[hook])]
@@ -300,6 +343,7 @@ class TaskManager:
 
     async def _submit(self, task: _RunningTask, text: str) -> None:
         self._cancel_idle(task)
+        self._cancel_distill(task)
         if task.generating:
             if (
                 await self._stop_intent(text, model=self._classifier_model)
@@ -317,6 +361,7 @@ class TaskManager:
 
     async def _run_turn(self, task: _RunningTask, text: str) -> None:
         ack = asyncio.create_task(self._ack_after_grace(task))
+        task.transcript.append(("owner", text))
         try:
             async with self._semaphore:
                 task.generating = True
@@ -334,10 +379,13 @@ class TaskManager:
                     return
                 if final is not None:
                     await self._io.send(task.thread_key, final.text)
+                    task.transcript.append(("chief", final.text))
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
                 await self._set_status(task, OPEN)
-                self._arm_idle(task)  # only a clean turn re-arms the idle→archive timer
+                # Only a clean turn re-arms the idle→archive and distill timers.
+                self._arm_idle(task)
+                self._arm_distill(task)
         except Exception:
             logger.exception("task turn failed", extra={"thread_key": task.thread_key})
             await self._set_status(task, FAILED)
@@ -376,15 +424,83 @@ class TaskManager:
         await self._io.archive_thread(task.thread_key)
         await self._cancel_consumer(task)
         await task.session.aclose()
+        self._cancel_distill(task)
         # Pop last: keep the slot (cancelled, idle_handle live) so a reopening
         # message awaits this teardown in _ensure_task instead of racing it.
         self._tasks.pop(task.thread_key, None)
         logger.info("task archived on idle", extra={"thread_key": task.thread_key})
 
+    # ---- distillation (auto-learning; mirrors the idle-archive trio) ------
+
+    def _arm_distill(self, task: _RunningTask) -> None:
+        if (
+            self._memory is None
+            or task.cancelled
+            or self._tasks.get(task.thread_key) is not task
+        ):
+            return  # no memory wired, or torn down/cancelled — don't arm
+        self._cancel_distill(task)
+        task.distill_handle = asyncio.create_task(self._distill_then_notify(task))
+
+    def _cancel_distill(self, task: _RunningTask) -> None:
+        if task.distill_handle is not None:
+            task.distill_handle.cancel()
+            task.distill_handle = None
+
+    async def _distill_then_notify(self, task: _RunningTask) -> None:
+        """After a quiet spell, distill the transcript into facts and save them.
+
+        Unlike idle-archive this leaves the task OPEN: learning is a side effect, not an
+        end of life. The distill window (~20m) is shorter than the archive one (~60m),
+        so a task's chatter is captured before it is archived.
+        """
+        try:
+            await asyncio.sleep(self._distill_idle_seconds)
+        except asyncio.CancelledError:
+            return
+        if (
+            self._memory is None
+            or task.cancelled
+            or self._tasks.get(task.thread_key) is not task
+        ):
+            return
+        transcript = task.transcript
+        task.transcript = []
+        if not transcript:
+            return
+        drafts = await self._distill(
+            transcript, self._memory.index(), model=self._distill_model
+        )
+        written = [
+            await self._memory.write_fact(
+                namespace=OWNER_NAMESPACE,
+                slug=draft.slug,
+                title=draft.title,
+                body=draft.body,
+                provenance="inferred",
+                trust=draft.trust,
+                expires=draft.expires,
+            )
+            for draft in drafts
+        ]
+        if not written:
+            return
+        lines = "\n".join(f"• {fact.title}" for fact in written)
+        await self._io.send(task.thread_key, f"📝 Saved to memory:\n{lines}")
+        if self._audit is not None:
+            self._audit.log(
+                {
+                    "event": "memory_write",
+                    "thread_key": task.thread_key,
+                    "count": len(written),
+                }
+            )
+
     async def _stop_task(self, task: _RunningTask) -> None:
-        """Tear down: cancel the timer + consumer (awaited) and close the session."""
+        """Tear down: cancel the timers + consumer (awaited) and close the session."""
         task.cancelled = True
         self._cancel_idle(task)
+        self._cancel_distill(task)
         self._tasks.pop(task.thread_key, None)
         await self._cancel_consumer(task)
         await task.session.aclose()

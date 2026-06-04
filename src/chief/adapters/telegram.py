@@ -28,6 +28,7 @@ from telegram.ext import (
 )
 
 from ..gate.approvals import ApprovalAction, ApprovalCard
+from ..memory.store import OWNER_NAMESPACE, Fact
 from ..persistence.contacts import get_or_create_contact
 from ..persistence.models import Task
 from .base import Adapter, Message, ReadyHook, Tier, classify_tier
@@ -56,6 +57,13 @@ class ApprovalResolver(Protocol):
     async def resolve(
         self, approval_id: int, action: ApprovalAction, *, decided_by: str
     ) -> None: ...
+
+
+class MemoryReader(Protocol):
+    """The slice of :class:`~chief.memory.store.MemoryStore` the commands touch."""
+
+    def list_facts(self, namespace: str) -> list[Fact]: ...
+    async def forget(self, namespace: str, query: str) -> list[Fact]: ...
 
 
 def _approval_keyboard(approval_id: int) -> InlineKeyboardMarkup:
@@ -165,6 +173,7 @@ class TelegramAdapter(Adapter):
         guest_ack: str,
         session_factory: async_sessionmaker[AsyncSession],
         approvals: ApprovalResolver | None = None,
+        memory: MemoryReader | None = None,
     ) -> None:
         self._app = application
         self._engine = engine
@@ -172,12 +181,15 @@ class TelegramAdapter(Adapter):
         self._guest_ack = guest_ack
         self._session_factory = session_factory
         self._approvals = approvals
+        self._memory = memory
         self._stop = asyncio.Event()
         self._register()
 
     def _register(self) -> None:
         self._app.add_handler(CommandHandler("cancel", self._on_cancel))
         self._app.add_handler(CommandHandler("tasks", self._on_tasks))
+        self._app.add_handler(CommandHandler("memory", self._on_memory))
+        self._app.add_handler(CommandHandler("forget", self._on_forget))
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=f"^{CALLBACK_PREFIX}:")
         )
@@ -266,6 +278,42 @@ class TelegramAdapter(Adapter):
             return
         lines = [f"• {t.title or t.thread_key} — {t.status}" for t in tasks]
         await update.effective_message.reply_text("\n".join(lines))
+
+    async def _on_memory(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """List the owner's stored facts (owner only)."""
+        message = update.effective_message
+        if self._owner_thread(update) is None or message is None:
+            return
+        if self._memory is None:
+            await message.reply_text("Memory isn't enabled.")
+            return
+        facts = self._memory.list_facts(OWNER_NAMESPACE)
+        if not facts:
+            await message.reply_text("No memories yet.")
+            return
+        await message.reply_text("\n".join(f"• {f.title}" for f in facts))
+
+    async def _on_forget(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Forget owner facts matching the command argument (owner only)."""
+        message = update.effective_message
+        if self._owner_thread(update) is None or message is None:
+            return
+        if self._memory is None:
+            await message.reply_text("Memory isn't enabled.")
+            return
+        query = (message.text or "").partition(" ")[2].strip()
+        if not query:
+            await message.reply_text("Usage: /forget <text>")
+            return
+        removed = await self._memory.forget(OWNER_NAMESPACE, query)
+        if not removed:
+            await message.reply_text("Nothing matched.")
+            return
+        await message.reply_text("Forgot: " + ", ".join(f.title for f in removed))
 
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

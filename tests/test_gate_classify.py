@@ -72,3 +72,64 @@ async def test_unknown_effectful_tool_asks(
 
     assert verdict.decision is GateDecision.ASK
     assert "approval" in verdict.reason
+
+
+async def test_file_op_within_memory_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Read", {"file_path": "/memory/facts/owner/x.md"}, store, memory_dir="/memory"
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_relative_file_op_resolves_under_memory(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A relative path resolves against the session cwd (the memory root) → in-bounds.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Glob", {"path": "facts/owner"}, store, memory_dir="/memory"
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_file_op_outside_memory_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Read", {"file_path": "/etc/shadow"}, store, memory_dir="/memory"
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_file_op_traversal_escape_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Read", {"file_path": "/memory/../etc/shadow"}, store, memory_dir="/memory"
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_never_still_wins_over_memory_confinement(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory, never=[("Read", None)])
+
+    verdict = classify(
+        "Read", {"file_path": "/memory/x.md"}, store, memory_dir="/memory"
+    )
+
+    assert verdict.decision is GateDecision.DENY

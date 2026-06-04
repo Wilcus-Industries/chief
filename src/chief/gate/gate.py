@@ -20,6 +20,7 @@ Both factories bind to one session's ``(thread_key, tier, policy, audit)`` plus,
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from claude_agent_sdk import (
@@ -73,13 +74,52 @@ def is_read_only(tool_name: str, tool_input: dict[str, Any]) -> bool:
     return predicate is not None and predicate(tool_input)
 
 
+#: File-op tools chief gets at M4 — read-only, but confined to the memory dir (no
+#: workspace until M7). A relative/absent path resolves against the session ``cwd``
+#: (the memory root), so it is in-bounds; an absolute path that escapes is denied.
+FILE_OP_TOOLS = frozenset({"Read", "Glob", "Grep"})
+
+
+def confined_to_memory(tool_input: dict[str, Any], memory_dir: str) -> bool:
+    """Whether a file-op call's path stays within ``memory_dir``.
+
+    An absent/relative path is in-bounds (it resolves against the memory-root ``cwd``);
+    an absolute or ``..``-escaping path is checked against the resolved memory root.
+    """
+    raw = tool_input.get("file_path") or tool_input.get("path")
+    if not isinstance(raw, str) or not raw:
+        return True
+    root = Path(memory_dir)
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def classify(
-    tool_name: str, tool_input: dict[str, Any], policy: PolicyStore
+    tool_name: str,
+    tool_input: dict[str, Any],
+    policy: PolicyStore,
+    *,
+    memory_dir: str | None = None,
 ) -> Verdict:
-    """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK."""
+    """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK.
+
+    When ``memory_dir`` is set (M4), a file-op tool (Read/Glob/Grep) is ALLOWed only
+    while its path stays inside the memory dir and DENied otherwise — chief's reads are
+    confined to memory until a workspace lands (M7).
+    """
     listed = policy.classify_against(tool_name, tool_input)
     if listed == NEVER:
         return Verdict(GateDecision.DENY, f"{tool_name} is on the NEVER list")
+    if memory_dir is not None and tool_name in FILE_OP_TOOLS:
+        if confined_to_memory(tool_input, memory_dir):
+            return Verdict(GateDecision.ALLOW, f"{tool_name} reads within memory")
+        return Verdict(GateDecision.DENY, f"{tool_name} path is outside memory")
     if is_read_only(tool_name, tool_input):
         return Verdict(GateDecision.ALLOW, f"{tool_name} is read-only")
     if listed is not None:  # APPROVED
@@ -115,6 +155,7 @@ def build_pretool_hook(
     tier: str,
     policy: PolicyStore,
     audit: _Audit,
+    memory_dir: str | None = None,
 ) -> HookCallback:
     """A ``PreToolUse`` hook: classify, audit, return the permission decision."""
 
@@ -125,7 +166,7 @@ def build_pretool_hook(
     ) -> dict[str, Any]:
         tool_name = input_data.get("tool_name", "")
         tool_input = input_data.get("tool_input", {}) or {}
-        verdict = classify(tool_name, tool_input, policy)
+        verdict = classify(tool_name, tool_input, policy, memory_dir=memory_dir)
         audit.log(
             {
                 "event": "tool_call",
@@ -161,6 +202,7 @@ def build_can_use_tool(
     audit: _Audit,
     on_waiting: StatusHook | None = None,
     on_running: StatusHook | None = None,
+    memory_dir: str | None = None,
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext],
     Awaitable[PermissionResultAllow | PermissionResultDeny],
@@ -178,7 +220,7 @@ def build_can_use_tool(
         tool_input: dict[str, Any],
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
-        verdict = classify(tool_name, tool_input, policy)
+        verdict = classify(tool_name, tool_input, policy, memory_dir=memory_dir)
         if verdict.decision is GateDecision.ALLOW:
             return PermissionResultAllow()
         if verdict.decision is GateDecision.DENY:
