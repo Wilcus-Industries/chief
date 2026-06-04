@@ -41,6 +41,11 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - sqlite-data:/data
       - memory:/memory
+      # The claude CLI writes each session's transcript under /root/.claude (container
+      # runs as root). Without this volume a `compose up`/recreate wipes every stored
+      # session, leaving sqlite's sdk_session_ids pointing at sessions that no longer
+      # exist → the CLI exits 1 on resume. Persist it so recreates keep conversations.
+      - claude-home:/root/.claude
     healthcheck:
       # init_db creates the sqlite file on boot, so its presence means the app got past startup.
       test: ["CMD", "test", "-f", "/data/chief.db"]
@@ -143,3 +148,4 @@ secrets:
 volumes:
   sqlite-data:
   memory:
+  claude-home:
