@@ -200,7 +200,11 @@ class ApprovalManager:
             return  # unknown or already decided — the atomic UPDATE settled the race
 
         live = self._live.get(approval_id)
-        note = await self._persist_rule(action, live) if action.is_always else ""
+        # Decision is durably committed: wake the parked turn and audit before the
+        # fallible side-effects, so a rule-persist or card-edit error can't strand the
+        # turn until timeout (it surfaces, but the turn already proceeded).
+        if live is not None and live.future is not None and not live.future.done():
+            live.future.set_result(action.allowed)
         self._audit.log(
             {
                 "event": "approval_decided",
@@ -210,10 +214,9 @@ class ApprovalManager:
                 "decided_by": decided_by,
             }
         )
+        note = await self._persist_rule(action, live) if action.is_always else ""
         if live is not None and live.msg_ref is not None:
             await self._io.edit_card(live.msg_ref, _VERB[action] + note)
-        if live is not None and live.future is not None and not live.future.done():
-            live.future.set_result(action.allowed)
 
     async def re_arm(self) -> list[int]:
         """Re-register pending approvals on boot so a late tap still records a decision.
