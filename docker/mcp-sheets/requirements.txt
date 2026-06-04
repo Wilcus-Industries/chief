@@ -1,2 +1,5 @@
 # Pinned to the version whose tool names chief's tools/sheets/mcp.py catalog tracks.
 mcp-google-sheets==0.6.3
+# row1_guard monkeypatches the internal mcp._tool_manager.call_tool; pin mcp so a base-
+# image rebuild can't silently change that contract. (0.6.3 already resolves this version.)
+mcp==1.27.2

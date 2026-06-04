@@ -98,6 +98,16 @@ _MIME_EXT = {
 }
 
 
+def _escape_drive_query(value: str) -> str:
+    """Escape a value for safe interpolation into a Drive ``q=`` string literal.
+
+    Drive query string literals are single-quoted; an unescaped quote (e.g. a name like
+    ``it's.pdf``) would break out of the literal and alter the query. Backslash first so
+    we don't double-escape the quote escapes we add.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _extract_file_id(url: str) -> str:
     for pattern in _FILE_ID_PATTERNS:
         m = re.search(pattern, url)
@@ -192,10 +202,12 @@ async def UploadMarkdownAsPDF(file_path: str, folder_id: str) -> str:
             io.BytesIO(pdf_bytes), mimetype="application/pdf", resumable=False
         )
 
+        q_name = _escape_drive_query(pdf_name)
+        q_folder = _escape_drive_query(folder_id)
         existing = (
             _service.files()
             .list(
-                q=f"name='{pdf_name}' and '{folder_id}' in parents and trashed=false",
+                q=f"name='{q_name}' and '{q_folder}' in parents and trashed=false",
                 fields="files(id)",
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
