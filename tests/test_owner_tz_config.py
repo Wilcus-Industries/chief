@@ -27,6 +27,7 @@ _spec.loader.exec_module(owner_tz)
     [
         ("owner_tz: America/Los_Angeles\n", "America/Los_Angeles"),
         ("owner_tz: America/Los_Angeles   # IANA tz\n", "America/Los_Angeles"),
+        ("owner_tz: UTC# no space before comment\n", "UTC"),
         ("owner_tz: 'America/New_York'\n", "America/New_York"),
         ('owner_tz: "UTC"\n', "UTC"),
         ("other: 1\nowner_tz: Europe/Paris\n", "Europe/Paris"),
