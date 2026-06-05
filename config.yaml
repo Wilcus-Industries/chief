@@ -85,3 +85,18 @@ sandbox_host: sandbox                # internal compose service name (no host po
 sandbox_port: 8765
 shell_timeout_seconds: 120           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
+
+# Scheduler (M9a, opt-in). With scheduler_enabled on, a long-running tick fires the
+# reminders, recurring jobs, and self-cron the owner sets up. It needs primary_thread_key
+# (the owner inbox those land in — prefer a real topic over the casual General channel)
+# and primary_platform (which chat stack owns the loop) — both required when enabled.
+# owner_tz (above) frames cron + quiet hours. Bash schedules also need shell_enabled and
+# the sandbox up. Scheduling a shell command is approval-gated at creation time.
+scheduler_enabled: false
+# scheduler_tick_seconds: 30         # how often the tick scans for due schedules
+primary_platform: telegram           # which configured stack the scheduler delivers through
+# primary_thread_key: "-100:7"       # required by scheduler_enabled — reminders/alerts land here
+# quiet_hours_start: "22:00"         # HH:MM (owner_tz); a non-urgent fire inside the window defers
+# quiet_hours_end: "07:00"           # HH:MM (owner_tz); deferred fires release here
+# heartbeat_url:                     # dead-man's-switch GET pinged on the interval; unset disables
+# heartbeat_interval_seconds: 300    # seconds between heartbeat pings
