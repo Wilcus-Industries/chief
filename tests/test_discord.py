@@ -8,9 +8,12 @@ import discord
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.base import AdmissionCard
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
+from chief.persistence import contacts as contact_repo
+from chief.persistence.contacts import get_or_create_contact
 from chief.persistence.models import Contact, Task
 
 OWNER_ID = 42
@@ -22,6 +25,7 @@ class FakeEngine:
         self, *, active: list[Task] | None = None, cancel: bool = True
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
+        self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
         self._active = active or []
@@ -31,6 +35,11 @@ class FakeEngine:
         self, *, thread_key: str, text: str, is_general: bool = False
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
+
+    async def dispatch_guest(
+        self, *, thread_key: str, text: str, from_label: str | None = None
+    ) -> None:
+        self.dispatched_guests.append((thread_key, text, from_label))
 
     async def cancel(self, thread_key: str) -> bool:
         self.cancelled.append(thread_key)
@@ -89,12 +98,30 @@ def _client() -> Any:
     return client
 
 
+class FakeIO:
+    """Records Front Desk sends + admission cards (the guest gate's output channel)."""
+
+    def __init__(self) -> None:
+        self.sends: list[tuple[str, str]] = []
+        self.cards: list[tuple[str, AdmissionCard]] = []
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sends.append((thread_key, text))
+
+    async def send_admission_card(self, route: str, card: AdmissionCard) -> None:
+        self.cards.append((route, card))
+
+
 def _adapter(
     session_factory: async_sessionmaker[AsyncSession],
     engine: FakeEngine,
     *,
     approvals: FakeResolver | None = None,
     memory: FakeMemory | None = None,
+    guest_enabled: bool = False,
+    io: FakeIO | None = None,
+    front_desk: str | None = "100:1",
+    guest_rate: int = 10,
 ) -> DiscordAdapter:
     return DiscordAdapter(
         client=cast(discord.Client, _client()),
@@ -105,6 +132,10 @@ def _adapter(
         session_factory=session_factory,
         approvals=approvals,
         memory=memory,
+        io=cast(Any, io),
+        guest_enabled=guest_enabled,
+        front_desk_thread_key=front_desk,
+        guest_rate=guest_rate,
     )
 
 
@@ -146,7 +177,11 @@ def _interaction(
         type=itype,
         data={"custom_id": custom_id},
         user=SimpleNamespace(id=user_id),
-        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        response=SimpleNamespace(
+            defer=AsyncMock(),
+            send_message=AsyncMock(),
+            edit_message=AsyncMock(),
+        ),
     )
     return cast(discord.Interaction, interaction)
 
@@ -244,7 +279,7 @@ async def test_owner_channel_message_flags_is_general(
     assert engine.dispatched == [("100:0", "hey", True)]
 
 
-async def test_guest_message_acks_without_dispatch(
+async def test_guest_message_acks_without_dispatch_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     engine = FakeEngine()
@@ -259,6 +294,119 @@ async def test_guest_message_acks_without_dispatch(
     channel.send.assert_awaited_once_with("noted, thanks")
     contacts = await _contacts(session_factory)
     assert contacts[0].tier == "guest"
+
+
+async def _set_state(
+    session_factory: async_sessionmaker[AsyncSession], user_id: int, state: str
+) -> int:
+    async with session_factory() as session:
+        contact = await get_or_create_contact(
+            session,
+            platform="discord",
+            user_id=str(user_id),
+            tier="guest",
+            display_name="Someone",
+        )
+        await contact_repo.set_contact_state(session, contact, state)
+        return contact.id
+
+
+async def test_guest_first_contact_cards_owner_and_acks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    channel = _text_channel(7)
+
+    await adapter.on_message(_message(user_id=7, content="hello?", channel=channel))
+
+    assert engine.dispatched_guests == []
+    assert any("hello?" in text for _, text in io.sends)
+    assert len(io.cards) == 1
+    channel.send.assert_awaited_once_with("noted, thanks")
+
+
+async def test_guest_admitted_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_ADMITTED)
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=FakeIO())
+    channel = _text_channel(7)
+
+    await adapter.on_message(
+        _message(user_id=7, content="free thursday?", channel=channel)
+    )
+
+    assert engine.dispatched_guests == [("7:0", "free thursday?", "Someone")]
+
+
+async def test_guest_blocked_ignored(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_BLOCKED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    channel = _text_channel(7)
+
+    await adapter.on_message(_message(user_id=7, content="spam", channel=channel))
+
+    assert engine.dispatched_guests == [] and io.sends == [] and io.cards == []
+    channel.send.assert_not_awaited()
+
+
+async def test_guest_muted_relays_silently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_MUTED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    channel = _text_channel(7)
+
+    await adapter.on_message(_message(user_id=7, content="still here", channel=channel))
+
+    assert engine.dispatched_guests == []
+    assert len(io.sends) == 1 and "still here" in io.sends[0][1]
+    channel.send.assert_not_awaited()
+
+
+async def test_admission_interaction_tap_admits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    contact_id = await _set_state(session_factory, 7, contact_repo.STATE_PENDING)
+    adapter = _adapter(session_factory, FakeEngine(), guest_enabled=True, io=FakeIO())
+    interaction = _interaction(user_id=OWNER_ID, custom_id=f"adm:{contact_id}:admit")
+
+    await adapter.on_interaction(interaction)
+
+    async with session_factory() as session:
+        contact = await contact_repo.get_contact(
+            session, platform="discord", user_id="7"
+        )
+    assert contact is not None and contact.state == contact_repo.STATE_ADMITTED
+    interaction.response.edit_message.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_admission_interaction_ignored_for_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    contact_id = await _set_state(session_factory, 7, contact_repo.STATE_PENDING)
+    adapter = _adapter(session_factory, FakeEngine(), guest_enabled=True, io=FakeIO())
+    interaction = _interaction(user_id=7, custom_id=f"adm:{contact_id}:block")
+
+    await adapter.on_interaction(interaction)
+
+    async with session_factory() as session:
+        contact = await contact_repo.get_contact(
+            session, platform="discord", user_id="7"
+        )
+    assert contact is not None and contact.state == contact_repo.STATE_PENDING
+    interaction.response.send_message.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "Not allowed.", ephemeral=True
+    )
 
 
 async def test_bot_message_is_ignored(

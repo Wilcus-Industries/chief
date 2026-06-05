@@ -38,6 +38,16 @@ WRITE_TOOLS: tuple[str, ...] = qualified(SERVER_NAME, "create-event", "update-ev
 DEFERRED_TOOLS: tuple[str, ...] = qualified(SERVER_NAME, "delete-event")
 
 
+#: The guest receptionist's narrowed calendar surface (M6): free/busy + the clock only
+#: (never event details — no list/get), and booking via create only (approval-gated).
+#: ``list-events``/``get-event``/``update-event``/``delete-event`` are physically absent
+#: from a guest session, so tier isolation holds by construction.
+GUEST_READ_TOOLS: tuple[str, ...] = qualified(
+    SERVER_NAME, "get-freebusy", "get-current-time"
+)
+GUEST_WRITE_TOOLS: tuple[str, ...] = qualified(SERVER_NAME, "create-event")
+
+
 def service(url: str) -> GoogleService:
     """The :class:`GoogleService` for the calendar container at ``url``."""
     return GoogleService(
@@ -47,4 +57,16 @@ def service(url: str) -> GoogleService:
         read_tools=READ_TOOLS,
         write_tools=WRITE_TOOLS,
         deferred_tools=DEFERRED_TOOLS,
+    )
+
+
+def guest_service(url: str) -> GoogleService:
+    """The narrowed calendar service wired into guest sessions (free/busy + booking)."""
+    return GoogleService(
+        name="calendar",
+        server_name=SERVER_NAME,
+        url=url,
+        read_tools=GUEST_READ_TOOLS,
+        write_tools=GUEST_WRITE_TOOLS,
+        deferred_tools=(),
     )

@@ -29,6 +29,7 @@ from chief.persistence.tasks import (
     set_status,
 )
 from chief.tools.calendar import mcp as calendar_mcp
+from chief.tools.guest import GuestAdminService
 from chief.tools.shell import ShellService
 
 Factory = Callable[..., SessionProto]
@@ -958,8 +959,167 @@ async def test_guest_gets_no_calendar_or_web_tools(
     await mgr._ensure_task("-100:9", tier="guest")
 
     assert "mcp_servers" not in captured  # no Google container for guests
-    # Guests stay narrow: only the memory file tools, no web/meta, no Google.
-    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    # Security keystone: a guest gets NONE of the owner's memory file tools and no
+    # memory cwd — only its constructed receptionist tools (none wired in this manager).
+    assert captured["allowed_tools"] == []
+    assert captured.get("cwd") is None
+    await mgr.shutdown()
+
+
+def _guest_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    memory: FakeMemory,
+    calendar: bool = True,
+    front_desk: str | None = "-100:1",
+    distill: Callable[..., Any] | None = None,
+    distill_idle: float = 1000.0,
+) -> TaskManager:
+    guest_cal = (
+        calendar_mcp.guest_service("http://mcp-calendar:8003/mcp")
+        if calendar
+        else None
+    )
+    admin = GuestAdminService(session_factory=session_factory, platform="telegram")
+
+    async def _distill_none(*_a: Any, **_k: Any) -> list[FactDraft]:
+        return []
+
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="owner-model",
+        guest_model="guest-model",
+        classifier_model="claude-haiku-4-5",
+        idle_archive_seconds=1000.0,
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=memory,
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        owner_tz="America/New_York",
+        front_desk_thread_key=front_desk,
+        guest_calendar_service=guest_cal,
+        guest_admin_service=admin,
+        distill=distill or _distill_none,
+        distill_idle_seconds=distill_idle,
+    )
+
+
+async def test_guest_session_isolated_and_wires_only_guest_tools(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _guest_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        memory=FakeMemory(),
+    )
+
+    await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
+
+    allowed = captured["allowed_tools"]
+    # Leak fix: zero owner-memory/web tools, no memory cwd.
+    for forbidden in (
+        "Read",
+        "Glob",
+        "Grep",
+        "Write",
+        "Edit",
+        "WebSearch",
+        "WebFetch",
+        "ToolSearch",
+    ):
+        assert forbidden not in allowed
+    assert captured.get("cwd") is None
+    # Only the guest surface: relay + calendar free/busy (read), booking absent.
+    assert "mcp__chief_guest__leave_message" in allowed
+    assert "mcp__calendar__get-freebusy" in allowed
+    assert "mcp__calendar__create-event" not in allowed  # write → approval card
+    assert set(captured["mcp_servers"]) == {"chief_guest", "calendar"}
+    assert "chief_guest_admin" not in captured["mcp_servers"]  # owner-only, never guest
+    assert "chief_shell" not in captured["mcp_servers"]
+    # Guest = guest model, never the owner's.
+    assert captured["model"] == "guest-model"
+    await mgr.shutdown()
+
+
+async def test_owner_session_gets_guest_admin_tool(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _guest_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        memory=FakeMemory(),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "mcp__chief_guest_admin__manage_guest" in captured["allowed_tools"]
+    assert "chief_guest_admin" in captured["mcp_servers"]
+    assert "Read" in captured["allowed_tools"]  # owner keeps memory tools
+    assert captured["model"] == "owner-model"
+    await mgr.shutdown()
+
+
+async def test_guest_session_without_front_desk_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # With the gate wired, a guest approval with nowhere to route is a hard error
+    # (belt-and-braces over the config validator) — never silently self-route to the DM.
+    sentinel: Any = object()
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=FakeIO(),
+        owner_model="owner-model",
+        guest_model="guest-model",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=_one(FakeSession(model="m")),
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        policy=sentinel,
+        approvals=sentinel,
+        audit=sentinel,
+        front_desk_thread_key=None,
+    )
+
+    with pytest.raises(RuntimeError, match="front_desk"):
+        await mgr._ensure_task("555:0", tier="guest")
+    await mgr.shutdown()
+
+
+async def test_guest_turn_is_not_distilled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    memory = FakeMemory()
+
+    async def _distill_yes(*_a: Any, **_k: Any) -> list[FactDraft]:
+        return [FactDraft(slug="x", title="X", body="b")]
+
+    mgr = _guest_manager(
+        session_factory,
+        io,
+        factory=_mem_factory([]),
+        memory=memory,
+        distill=_distill_yes,
+        distill_idle=0.02,
+    )
+
+    await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
+    await _until(lambda: ("555:0", "reply:hi") in io.sends)
+    await asyncio.sleep(0.05)  # past the distill window
+
+    assert memory.written == []  # a guest's low-trust chatter never enters owner memory
     await mgr.shutdown()
 
 
@@ -1066,8 +1226,8 @@ async def test_guest_gets_no_shell_or_workspace(
     await mgr._ensure_task("-100:9", tier="guest")
 
     assert "mcp_servers" not in captured  # no shell server for guests
-    # Guests stay narrow: only the memory file tools, no Write/Edit, no shell.
-    assert captured["allowed_tools"] == sorted(["Read", "Glob", "Grep"])
+    # Guests stay narrow: no memory tools, no Write/Edit, no shell (none wired here).
+    assert captured["allowed_tools"] == []
     # The built-in shell is refused at the SDK layer for guests too.
     assert "Bash" in captured["disallowed_tools"]
     await mgr.shutdown()

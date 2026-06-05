@@ -113,6 +113,41 @@ def test_m3_gate_defaults_and_seed_parsing(
     assert settings.approved_seed[0].as_pair() == ("Bash", "git status")
 
 
+def test_guest_enabled_requires_front_desk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Guests on, but no Front Desk thread for their approvals/relays to land in.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nguest_enabled: true\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="front_desk_thread_key"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_guest_enabled_with_front_desk_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "guest_enabled: true\n"
+        'front_desk_thread_key: "-100:9"\n'
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.guest_enabled
+    assert settings.front_desk_thread_key == "-100:9"
+    assert settings.guest_rate_per_window == 10
+    assert settings.guest_global_rate_per_window == 60
+
+
 def test_no_platform_configured_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

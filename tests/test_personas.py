@@ -131,7 +131,7 @@ def test_guest_never_gets_shell_workspace_or_web() -> None:
     assert "## Shell" not in prompt
 
 
-def test_guest_never_gets_service_guidance() -> None:
+def test_guest_never_gets_drive_sheets_or_owner_calendar_block() -> None:
     prompt = build_system_prompt(
         tier="guest",
         memory=FakeMemory(),
@@ -140,9 +140,47 @@ def test_guest_never_gets_service_guidance() -> None:
         owner_tz="America/New_York",
     )
 
+    # A guest never gets Drive/Sheets, nor the owner's broad read/create/update calendar
+    # block — only the narrow Scheduling block (free/busy + propose-with-approval).
     assert "## Calendar" not in prompt
     assert "## Google Drive" not in prompt
     assert "## Google Sheets" not in prompt
+
+
+def test_guest_gets_narrow_scheduling_guidance_when_calendar_wired() -> None:
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        google_services=frozenset({"calendar"}),
+        owner_tz="America/New_York",
+    )
+
+    assert "## Scheduling" in prompt
+    assert "free/busy" in prompt  # never event details
+    assert "approval" in prompt  # booking is a proposal the owner confirms
+    assert "America/New_York" in prompt
+
+
+def test_guest_without_calendar_has_no_scheduling_guidance() -> None:
+    prompt = build_system_prompt(tier="guest", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Scheduling" not in prompt
+
+
+def test_owner_gets_guest_admin_guidance_when_enabled() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        guest_admin_enabled=True,
+    )
+
+    assert "## Managing guests" in prompt
+    assert "manage_guest" in prompt
+    # Off by default.
+    plain = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+    assert "## Managing guests" not in plain
 
 
 def test_guest_prompt_is_receptionist_without_user_profile() -> None:

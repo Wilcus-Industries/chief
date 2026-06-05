@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application
 
-from chief.adapters.base import parse_callback
+from chief.adapters.base import AdmissionCard, parse_callback
 from chief.adapters.telegram import (
     TelegramAdapter,
     TelegramTaskIO,
@@ -17,6 +17,8 @@ from chief.adapters.telegram import (
 )
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
+from chief.persistence import contacts as contact_repo
+from chief.persistence.contacts import get_or_create_contact
 from chief.persistence.models import Contact, Task
 
 OWNER_ID = 42
@@ -28,6 +30,7 @@ class FakeEngine:
         self, *, active: list[Task] | None = None, cancel: bool = True
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
+        self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
         self._active = active or []
@@ -37,6 +40,11 @@ class FakeEngine:
         self, *, thread_key: str, text: str, is_general: bool = False
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
+
+    async def dispatch_guest(
+        self, *, thread_key: str, text: str, from_label: str | None = None
+    ) -> None:
+        self.dispatched_guests.append((thread_key, text, from_label))
 
     async def cancel(self, thread_key: str) -> bool:
         self.cancelled.append(thread_key)
@@ -88,12 +96,31 @@ class FakeMemory:
         return removed
 
 
+class FakeIO:
+    """Records Front Desk sends + admission cards (the guest gate's output channel)."""
+
+    def __init__(self) -> None:
+        self.sends: list[tuple[str, str]] = []
+        self.cards: list[tuple[str, AdmissionCard]] = []
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sends.append((thread_key, text))
+
+    async def send_admission_card(self, route: str, card: AdmissionCard) -> None:
+        self.cards.append((route, card))
+
+
 def _adapter(
     session_factory: async_sessionmaker[AsyncSession],
     engine: FakeEngine,
     *,
     approvals: FakeResolver | None = None,
     memory: FakeMemory | None = None,
+    guest_enabled: bool = False,
+    io: FakeIO | None = None,
+    front_desk: str | None = "-100:1",
+    guest_rate: int = 10,
+    guest_global_rate: int = 60,
 ) -> TelegramAdapter:
     app = cast(Application, SimpleNamespace(add_handler=Mock()))  # type: ignore[type-arg]
     return TelegramAdapter(
@@ -104,12 +131,19 @@ def _adapter(
         session_factory=session_factory,
         approvals=approvals,
         memory=memory,
+        io=cast(Any, io),
+        guest_enabled=guest_enabled,
+        front_desk_thread_key=front_desk,
+        guest_rate=guest_rate,
+        guest_global_rate=guest_global_rate,
     )
 
 
 def _callback_update(*, user_id: int, data: str) -> Update:
     update = SimpleNamespace(
-        callback_query=SimpleNamespace(data=data, answer=AsyncMock()),
+        callback_query=SimpleNamespace(
+            data=data, answer=AsyncMock(), edit_message_text=AsyncMock()
+        ),
         effective_user=SimpleNamespace(id=user_id, full_name="Someone"),
     )
     return cast(Update, update)
@@ -205,9 +239,10 @@ async def test_flat_dm_is_not_general(
     assert engine.dispatched == [("-100:0", "hi", False)]
 
 
-async def test_guest_message_acks_without_dispatch(
+async def test_guest_message_acks_without_dispatch_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    # guest_enabled=False (default) preserves the pre-M6 canned-ack behavior.
     engine = FakeEngine()
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=7, text="hello", thread_id=None)
@@ -218,6 +253,139 @@ async def test_guest_message_acks_without_dispatch(
     update.effective_message.reply_text.assert_awaited_once_with("noted, thanks")  # type: ignore[union-attr]
     contacts = await _contacts(session_factory)
     assert contacts[0].tier == "guest"
+
+
+async def _set_state(
+    session_factory: async_sessionmaker[AsyncSession], user_id: int, state: str
+) -> int:
+    async with session_factory() as session:
+        contact = await get_or_create_contact(
+            session,
+            platform="telegram",
+            user_id=str(user_id),
+            tier="guest",
+            display_name="Someone",
+        )
+        await contact_repo.set_contact_state(session, contact, state)
+        return contact.id
+
+
+async def test_guest_first_contact_cards_owner_relays_and_acks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    update = _fake_update(user_id=7, text="hello?", thread_id=None, chat_id=7)
+
+    await adapter._on_message(update, _CTX)
+
+    # Pending first contact: relay to Front Desk + admission card + holding ack, no
+    # dispatch into a full session yet.
+    assert engine.dispatched_guests == []
+    assert any("-100:1" == route and "hello?" in text for route, text in io.sends)
+    assert len(io.cards) == 1 and io.cards[0][0] == "-100:1"
+    update.effective_message.reply_text.assert_awaited_once_with("noted, thanks")  # type: ignore[union-attr]
+
+
+async def test_guest_admitted_dispatches_to_engine(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_ADMITTED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    update = _fake_update(
+        user_id=7, text="are you free thursday?", thread_id=None, chat_id=7
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched_guests == [("7:0", "are you free thursday?", "Someone")]
+    assert io.cards == []  # no admission card for an admitted guest
+
+
+async def test_guest_blocked_is_ignored(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_BLOCKED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    update = _fake_update(user_id=7, text="spam", thread_id=None, chat_id=7)
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched_guests == [] and io.sends == [] and io.cards == []
+    update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_guest_muted_relays_silently(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_MUTED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io)
+    update = _fake_update(user_id=7, text="still here", thread_id=None, chat_id=7)
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched_guests == []
+    assert len(io.sends) == 1 and "still here" in io.sends[0][1]
+    assert io.cards == []  # muted: no card
+    update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_guest_over_rate_limit_dropped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _set_state(session_factory, 7, contact_repo.STATE_ADMITTED)
+    engine = FakeEngine()
+    io = FakeIO()
+    adapter = _adapter(session_factory, engine, guest_enabled=True, io=io, guest_rate=2)
+
+    for _ in range(3):
+        await adapter._on_message(
+            _fake_update(user_id=7, text="hi", thread_id=None, chat_id=7), _CTX
+        )
+
+    # Cap is 2 → only the first two dispatch; the third is dropped silently.
+    assert len(engine.dispatched_guests) == 2
+
+
+async def test_admission_card_tap_admits(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    contact_id = await _set_state(session_factory, 7, contact_repo.STATE_PENDING)
+    adapter = _adapter(session_factory, FakeEngine(), guest_enabled=True, io=FakeIO())
+    update = _callback_update(user_id=OWNER_ID, data=f"adm:{contact_id}:admit")
+
+    await adapter._on_callback(update, _CTX)
+
+    async with session_factory() as session:
+        contact = await contact_repo.get_contact(
+            session, platform="telegram", user_id="7"
+        )
+    assert contact is not None and contact.state == contact_repo.STATE_ADMITTED
+    update.callback_query.edit_message_text.assert_awaited_once()  # type: ignore[union-attr]
+
+
+async def test_admission_card_tap_ignored_for_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    contact_id = await _set_state(session_factory, 7, contact_repo.STATE_PENDING)
+    adapter = _adapter(session_factory, FakeEngine(), guest_enabled=True, io=FakeIO())
+    update = _callback_update(user_id=7, data=f"adm:{contact_id}:admit")
+
+    await adapter._on_callback(update, _CTX)
+
+    async with session_factory() as session:
+        contact = await contact_repo.get_contact(
+            session, platform="telegram", user_id="7"
+        )
+    assert contact is not None and contact.state == contact_repo.STATE_PENDING
+    update.callback_query.answer.assert_awaited_once_with("Not allowed.")  # type: ignore[union-attr]
 
 
 # ---- commands ----------------------------------------------------------------

@@ -34,6 +34,7 @@ from .persistence.db import create_engine, init_db, session_factory
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.google import GoogleService
+from .tools.guest import GuestAdminService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
 
@@ -97,6 +98,17 @@ def build_shell_service(settings: Settings) -> ShellService | None:
     )
 
 
+def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
+    """The narrowed calendar service for guest sessions (M6), or ``None``.
+
+    Guests get free/busy + an approval-gated booking only when both guests and the
+    calendar are enabled; otherwise the receptionist degrades to take-a-message.
+    """
+    if not (settings.guest_enabled and settings.calendar_enabled):
+        return None
+    return calendar_mcp.guest_service(settings.calendar_mcp_url)
+
+
 def build_engine(
     settings: Settings,
     *,
@@ -109,6 +121,11 @@ def build_engine(
     memory: MemoryStore,
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
+    guest_admin = (
+        GuestAdminService(session_factory=session_factory, platform=platform)
+        if settings.guest_enabled
+        else None
+    )
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -134,6 +151,9 @@ def build_engine(
         workspace_dir=(
             settings.workspace_dir if settings.workspace_enabled else None
         ),
+        guest_model=settings.guest_model,
+        guest_calendar_service=build_guest_calendar_service(settings),
+        guest_admin_service=guest_admin,
     )
 
 
@@ -180,6 +200,12 @@ def build_telegram_stack(
         session_factory=session_factory,
         approvals=approvals,
         memory=memory,
+        io=io,
+        guest_enabled=settings.guest_enabled,
+        front_desk_thread_key=settings.front_desk_thread_key,
+        guest_rate=settings.guest_rate_per_window,
+        guest_rate_window=settings.guest_rate_window_seconds,
+        guest_global_rate=settings.guest_global_rate_per_window,
     )
     return manager, adapter, approvals
 
@@ -229,6 +255,12 @@ def build_discord_stack(
         session_factory=session_factory,
         approvals=approvals,
         memory=memory,
+        io=io,
+        guest_enabled=settings.guest_enabled,
+        front_desk_thread_key=settings.front_desk_thread_key,
+        guest_rate=settings.guest_rate_per_window,
+        guest_rate_window=settings.guest_rate_window_seconds,
+        guest_global_rate=settings.guest_global_rate_per_window,
     )
     return manager, adapter, approvals
 

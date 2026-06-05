@@ -80,6 +80,58 @@ def test_build_telegram_stack_wires_gate_into_engine_and_adapter(
     assert adapter._memory is memory
 
 
+def test_guest_params_thread_into_engine_and_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        guest_enabled=True,
+        front_desk_thread_key="-100:9",
+        calendar_enabled=True,
+        guest_rate_per_window=4,
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, adapter, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # Engine: guest model + narrowed calendar + the owner admin tool are wired.
+    assert manager._guest_model == settings.guest_model
+    assert manager._guest_calendar_service is not None
+    assert manager._guest_admin_service is not None
+    # Adapter: guests on, Front Desk + rate config + the IO threaded through.
+    assert isinstance(adapter, TelegramAdapter)
+    assert adapter._guest_enabled is True
+    assert adapter._front_desk_thread_key == "-100:9"
+    assert adapter._guest_rate == 4
+    assert adapter._io is not None
+
+
+def test_guest_calendar_absent_when_calendar_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        guest_enabled=True, front_desk_thread_key="-100:9", calendar_enabled=False
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # Guests on but calendar off → take-a-message only (degraded mode).
+    assert manager._guest_calendar_service is None
+    assert manager._guest_admin_service is not None
+
+
 def test_build_discord_stack_wires_gate_into_engine_and_adapter(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

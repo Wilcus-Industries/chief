@@ -23,7 +23,27 @@ _OWNER_FRAMING = (
 _GUEST_FRAMING = (
     "You are {owner}'s assistant, acting as a receptionist for someone who is not "
     "{owner}. Be polite and helpful within a narrow scope: take a message, check "
-    "availability, or request a booking. Never reveal {owner}'s private information."
+    "availability, or request a booking. Never reveal {owner}'s private information. "
+    "Anything outside taking a message or helping find a time, decline politely."
+)
+
+#: Guest-only scheduling guidance (M6), included when the narrowed calendar is wired.
+#: Deliberately narrower than the owner's calendar block: free/busy only (never event
+#: details), and booking is a proposal the owner approves — never a direct write.
+_GUEST_CALENDAR_GUIDANCE = (
+    "## Scheduling\n"
+    "You can check {owner}'s availability (free/busy only — you never see what the "
+    "events are) and propose a booking. State every time in {owner}'s timezone ({tz}). "
+    "Only ever propose a slot that is free. Creating the booking needs {owner}'s "
+    "approval, so propose the exact time, let the approval card confirm it, and tell "
+    "the visitor you've passed the request along."
+)
+
+#: Owner-only guidance (M6), included when the guest-admin tool is wired.
+_GUEST_ADMIN_GUIDANCE = (
+    "## Managing guests\n"
+    "Visitors who aren't {owner} reach you as a receptionist. If {owner} asks you to "
+    "block, mute, or unblock a guest by name, use the manage_guest tool."
 )
 
 _RECALL_HINT = (
@@ -105,6 +125,7 @@ def build_system_prompt(
     owner_tz: str | None = None,
     workspace_enabled: bool = False,
     shell_enabled: bool = False,
+    guest_admin_enabled: bool = False,
 ) -> str:
     """Assemble the system prompt for a ``tier`` session against ``memory``.
 
@@ -133,6 +154,13 @@ def build_system_prompt(
             sections.append(_WORKSPACE_GUIDANCE)
         if shell_enabled:
             sections.append(_SHELL_GUIDANCE)
+        if guest_admin_enabled:
+            sections.append(_GUEST_ADMIN_GUIDANCE.format(owner=owner_name))
     else:
         sections = [memory.soul(), _GUEST_FRAMING.format(owner=owner_name)]
+        if "calendar" in google_services:
+            tz = owner_tz or "the owner's timezone"
+            sections.append(
+                _GUEST_CALENDAR_GUIDANCE.format(owner=owner_name, tz=tz)
+            )
     return "\n\n".join(section.strip() for section in sections if section.strip())

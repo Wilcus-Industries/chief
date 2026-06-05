@@ -34,6 +34,9 @@ class Contact(Base):
     display_name: Mapped[str | None]
     tier: Mapped[str]
     admitted: Mapped[bool] = mapped_column(default=False)
+    # Admission/abuse state (M6): pending → admitted, or blocked/muted by the owner.
+    # ``admitted`` is kept for back-compat; ``state`` is authoritative.
+    state: Mapped[str] = mapped_column(default="pending")
     namespace: Mapped[str]
     first_seen: Mapped[datetime] = mapped_column(default=_utcnow)
 

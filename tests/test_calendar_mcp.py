@@ -26,6 +26,18 @@ def test_freebusy_is_a_read_tool() -> None:
     assert "mcp__calendar__get-freebusy" in mcp.READ_TOOLS
 
 
+def test_guest_service_exposes_only_freebusy_and_create() -> None:
+    # The guest receptionist (M6) gets free/busy + booking only — never event details.
+    svc = mcp.guest_service("http://mcp-calendar:8003/mcp")
+
+    assert "mcp__calendar__get-freebusy" in svc.read_tools
+    assert "mcp__calendar__list-events" not in svc.read_tools
+    assert "mcp__calendar__get-event" not in svc.read_tools
+    assert svc.write_tools == ("mcp__calendar__create-event",)
+    assert "mcp__calendar__update-event" not in svc.write_tools
+    assert svc.deferred_tools == ()
+
+
 def test_service_bundles_url_and_streamable_http_config() -> None:
     svc = mcp.service("http://mcp-calendar:8003/mcp")
 

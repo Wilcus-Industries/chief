@@ -68,13 +68,24 @@ class Settings(BaseSettings):
 
     # Permission gate + approval flow (M3). approval_timeout_seconds is the fail-closed
     # deny window; never_seed/approved_seed prime the NEVER/APPROVED lists on boot;
-    # audit_log_path is the append-only JSONL sink; front_desk_thread_key is the M6
-    # routing stub (guest-originated approvals post there once guests exist).
+    # audit_log_path is the append-only JSONL sink; front_desk_thread_key is the thread
+    # guest-originated approvals, admission cards, and relayed messages post to (M6).
     approval_timeout_seconds: float = 600.0
     never_seed: list[PolicySeed] = []
     approved_seed: list[PolicySeed] = []
     audit_log_path: str = "/data/audit.jsonl"
     front_desk_thread_key: str | None = None
+
+    # Guest receptionist (M6), default off. When enabled, guests route into a tight,
+    # tier-isolated session (take-a-message + calendar free/busy + owner-approved
+    # booking) instead of the canned ack — and front_desk_thread_key MUST be set (the
+    # after-validator enforces it). The rate limits guard the owner's Max limits: each
+    # guest message counts against a per-guest cap and a global guest budget over a
+    # shared window (seconds). guest_model pins guests to Sonnet (never Opus).
+    guest_enabled: bool = False
+    guest_rate_per_window: int = 10
+    guest_rate_window_seconds: int = 3600
+    guest_global_rate_per_window: int = 60
 
     # Long-term memory (M4). memory_dir holds Soul/User/MEMORY + facts/ (a persisted
     # volume in the container); distill_idle_seconds is the quiet window before a task's
@@ -157,6 +168,21 @@ class Settings(BaseSettings):
             raise ValueError(
                 "no chat platform configured — set owner_telegram_id + "
                 "telegram_bot_token and/or owner_discord_id + discord_bot_token."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_front_desk_for_guests(self) -> "Settings":
+        """Guests need a Front Desk: their approvals/admissions/relays route there.
+
+        Without it, a guest booking card or admission prompt would have nowhere to land
+        (and the gate would otherwise self-route a guest approval back into the guest's
+        own DM — exactly the leak M6 forbids).
+        """
+        if self.guest_enabled and not self.front_desk_thread_key:
+            raise ValueError(
+                "guest_enabled requires front_desk_thread_key — guest approvals, "
+                "admission prompts, and relayed messages have nowhere to route."
             )
         return self
 
