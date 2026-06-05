@@ -317,6 +317,82 @@ def test_scheduler_rejects_bad_quiet_hours_format(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+def test_m9_budget_defaults_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.budget_enabled is False
+    assert settings.monthly_credit_usd == 200.0
+    assert settings.budget_warn_fractions == (0.75, 0.90)
+    assert settings.budget_exhaust_fraction == 1.0
+    assert settings.budget_downgrade_model == "claude-haiku-4-5-20251001"
+    assert settings.budget_cycle_anchor_day == 1
+
+
+def test_budget_warn_fractions_sorted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An out-of-order list is normalized to ascending so each tier warns in turn.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nbudget_warn_fractions: [0.9, 0.5, 0.75]\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.budget_warn_fractions == (0.5, 0.75, 0.9)
+
+
+def test_budget_rejects_out_of_range_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nbudget_warn_fractions: [0.75, 1.5]\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match=r"\(0, 1\]"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_budget_rejects_zero_exhaust_fraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nbudget_exhaust_fraction: 0\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match=r"\(0, 1\]"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_budget_rejects_bad_anchor_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nbudget_cycle_anchor_day: 31\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="1.*28"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_blank_owner_id_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

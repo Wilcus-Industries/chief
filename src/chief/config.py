@@ -152,6 +152,22 @@ class Settings(BaseSettings):
     # enforced at create time so an agent monitor can't poll every tick (Haiku budget).
     monitor_min_interval_seconds: int = 300
 
+    # Usage budgeting (M9), default off. After the June-15 billing change chief draws
+    # from a fixed monthly credit, so the risk is silently blowing it early. When
+    # enabled, per-turn SDK cost rolls into a month-to-date total; crossing a
+    # budget_warn_fractions tier warns the owner once, and reaching
+    # budget_exhaust_fraction pauses the owner's turns and posts a choice card
+    # (downgrade to budget_downgrade_model / continue full-quality / approve overflow).
+    # All warnings + the card route to primary_thread_key, so budget_enabled wants it
+    # set (shared with the scheduler). budget_cycle_anchor_day (1–28) picks the billing
+    # cycle's reset day in owner_tz. Inert when disabled — no model-validator needed.
+    budget_enabled: bool = False
+    monthly_credit_usd: float = 200.0
+    budget_warn_fractions: tuple[float, ...] = (0.75, 0.90)
+    budget_exhaust_fraction: float = 1.0
+    budget_downgrade_model: str = "claude-haiku-4-5-20251001"
+    budget_cycle_anchor_day: int = 1
+
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always
     # required (it authenticates the Claude SDK regardless of chat platform).
@@ -189,6 +205,41 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"quiet hours must be 24-hour HH:MM, got {value!r}"
             ) from exc
+        return value
+
+    @field_validator("budget_warn_fractions")
+    @classmethod
+    def _validate_warn_fractions(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        """Each warn threshold must be a fraction in ``(0, 1]``; return them sorted.
+
+        Sorting ascending lets :class:`BudgetGate` warn each tier once in turn (the
+        high-water mark only ever moves up). An out-of-range tier is a config typo.
+        """
+        for fraction in value:
+            if not 0 < fraction <= 1:
+                raise ValueError(
+                    f"budget warn fractions must each be in (0, 1], got {fraction!r}"
+                )
+        return tuple(sorted(value))
+
+    @field_validator("budget_exhaust_fraction")
+    @classmethod
+    def _validate_exhaust_fraction(cls, value: float) -> float:
+        """The pause+ask trigger: a fraction in ``(0, 1]`` (1.0 = full credit)."""
+        if not 0 < value <= 1:
+            raise ValueError(
+                f"budget_exhaust_fraction must be in (0, 1], got {value!r}"
+            )
+        return value
+
+    @field_validator("budget_cycle_anchor_day")
+    @classmethod
+    def _validate_anchor_day(cls, value: int) -> int:
+        """Cap the cycle reset day at 28 so every month has it (no Feb-30 gap)."""
+        if not 1 <= value <= 28:
+            raise ValueError(
+                f"budget_cycle_anchor_day must be 1–28, got {value!r}"
+            )
         return value
 
     @property
