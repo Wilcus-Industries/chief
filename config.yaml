@@ -58,13 +58,19 @@ git_author_email: chief@localhost
 # Google services (M5/M8). Flip each *_enabled on once its MCP container is up and the
 # shared OAuth token is minted (secrets/README.md). Owner sessions then read freely;
 # writes post an approval card. URLs are internal compose addresses (no public ingress);
-# the MCP endpoint is mounted at /mcp.
+# the MCP endpoint is mounted at /mcp. Enabling drive/sheets/gmail needs the token
+# re-minted with their scopes (M8) — see secrets/README.md.
 calendar_enabled: true    # mcp-calendar container up; token is calendar-scope only
 calendar_mcp_url: http://mcp-calendar:8003/mcp
 drive_enabled: false
 drive_mcp_url: http://mcp-drive:8001/mcp
 sheets_enabled: false
 sheets_mcp_url: http://mcp-sheets:8002/mcp
+gmail_enabled: false
+gmail_mcp_url: http://mcp-gmail:8004/mcp
+# Transparent signature appended server-side to every message chief sends. {owner} fills
+# from owner_name. Set GMAIL_SIGNATURE in the environment to override per-deploy.
+# gmail_signature: "—\nSent by {owner}'s assistant on their behalf."
 owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America/New_York
 
 # Shell sandbox + file workspace (M7, owner-only, opt-in). Bring up the secret-free

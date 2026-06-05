@@ -40,11 +40,12 @@ def _fake_consent(captured: dict[str, object]) -> auth.ConsentFn:
     return consent
 
 
-def test_scopes_cover_calendar_drive_sheets() -> None:
+def test_scopes_cover_calendar_drive_sheets_gmail() -> None:
     joined = " ".join(auth.SCOPES)
     assert "auth/calendar" in joined
     assert "auth/drive" in joined
     assert "auth/spreadsheets" in joined
+    assert "auth/gmail.modify" in joined
 
 
 def test_mint_token_writes_google_auth_token(tmp_path: Path) -> None:

@@ -78,12 +78,37 @@ def test_owner_drive_and_sheets_guidance_included_when_enabled() -> None:
     assert "## Calendar" not in prompt
 
 
+def test_owner_gmail_guidance_included_when_enabled() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        google_services=frozenset({"gmail"}),
+    )
+
+    assert "## Gmail" in prompt
+    assert "approval" in prompt  # sending is approval-gated
+    assert "## Calendar" not in prompt
+
+
 def test_owner_guidance_absent_when_no_services() -> None:
     prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
 
     assert "## Calendar" not in prompt
     assert "## Google Drive" not in prompt
     assert "## Google Sheets" not in prompt
+    assert "## Gmail" not in prompt
+
+
+def test_guest_never_gets_gmail_guidance() -> None:
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        google_services=frozenset({"gmail"}),
+    )
+
+    assert "## Gmail" not in prompt
 
 
 def test_owner_always_gets_web_guidance() -> None:

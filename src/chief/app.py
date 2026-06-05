@@ -33,6 +33,7 @@ from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
+from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
 from .tools.guest import GuestAdminService
 from .tools.sheets import mcp as sheets_mcp
@@ -83,6 +84,8 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
         services.append(drive_mcp.service(settings.drive_mcp_url))
     if settings.sheets_enabled:
         services.append(sheets_mcp.service(settings.sheets_mcp_url))
+    if settings.gmail_enabled:
+        services.append(gmail_mcp.service(settings.gmail_mcp_url))
     return services
 
 

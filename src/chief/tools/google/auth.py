@@ -1,16 +1,16 @@
-"""One-time Google OAuth consent → a mountable refresh token (Calendar+Drive+Sheets).
+"""One-time Google OAuth consent → a mountable token (Calendar/Drive/Sheets/Gmail).
 
 The only interactive piece of the Google integration: the operator runs this once on
 their dev machine (``python -m chief.tools.google.auth``), completes the loopback
 consent in a browser, and gets a **google-auth Python credential** written to
-``./secrets/google_token.json``. That single token is bind-mounted into all three Google
+``./secrets/google_token.json``. That single token is bind-mounted into all four Google
 MCP containers — so the VPS never runs a consent callback server (DESIGN: "run the
 consent dance once locally, mount the resulting refresh token — no VPS callback").
 
 The output is ``Credentials.to_json()`` (the native google-auth shape: ``refresh_token``
 / ``token`` / ``scopes`` / ``token_uri`` / ``client_id`` / ``client_secret``), which
 every server reads with ``Credentials.from_authorized_user_file`` and refreshes in
-memory. One token, three scopes — no per-service files, no Node-shape remap.
+memory. One token, four scopes — no per-service files, no Node-shape remap.
 
 ``google-auth-oauthlib`` is a **dev/host-only** dependency (imported lazily): the
 runtime containers reach Google through the MCP servers, not through this helper, so the
@@ -22,12 +22,14 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
-#: Calendar R/W, Drive (read + upload), Sheets R/W — the union the three servers need.
-#: Delete is permitted by the calendar scope but the calendar server keeps it deferred.
+#: Calendar R/W, Drive (read + upload), Sheets R/W, Gmail R/W (read + send/modify) — the
+#: union the four servers need. Delete is permitted by the calendar/gmail scopes but
+#: each server keeps its permanent-delete tools deferred.
 SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/gmail.modify",
 )
 
 #: Where the operator drops the Google Cloud "Desktop app" OAuth client, and where the
@@ -104,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(
         f"Wrote {out}. docker-compose bind-mounts it into the mcp-calendar, mcp-drive, "
-        "and mcp-sheets containers as their shared token store."
+        "mcp-sheets, and mcp-gmail containers as their shared token store."
     )
     return 0
 

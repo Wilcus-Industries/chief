@@ -18,12 +18,12 @@
 #           docker compose up core
 #
 # Google (M5/M8, opt-in):  chief's own FastMCP servers — calendar (:8003), drive (:8001),
-#         sheets (:8002) — each a separate container on the internal compose network,
-#         reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp (never
-#         host-published). Mint the shared token (python -m chief.tools.google.auth),
+#         sheets (:8002), gmail (:8004) — each a separate container on the internal compose
+#         network, reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp
+#         (never host-published). Mint the shared token (python -m chief.tools.google.auth),
 #         flip the matching *_enabled in config.yaml, then:
 #           docker compose --profile google up
-#         The three sit behind the "google" profile, so a plain `up` skips them.
+#         The four sit behind the "google" profile, so a plain `up` skips them.
 services:
   core:
     build:
@@ -139,6 +139,43 @@ services:
       - no-new-privileges:true
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # chief's Google Gmail MCP server (docker/mcp-gmail). Wraps third-party
+  # mcp-google-gmail with a transparent "sent by an assistant" signature appended to
+  # every outbound message. FastMCP, streamable-HTTP at http://mcp-gmail:8004/mcp.
+  # The shared token is mounted READ-ONLY (sheets is the sole writer): mcp-google-gmail
+  # rewrites the token on refresh, so server.py seeds a writable per-container copy at
+  # /tmp from the :ro seed mount and points GMAIL_TOKEN_PATH there — one writer upheld.
+  mcp-gmail:
+    profiles: ["google"]
+    build:
+      context: ./docker/mcp-gmail
+    restart: unless-stopped
+    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    environment:
+      PORT: 8004
+      # The package's own auth: OAuth client + the seeded (writable) token copy.
+      GMAIL_CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
+      GMAIL_SEED_TOKEN_PATH: /seed/google_token.json
+      GMAIL_TOKEN_PATH: /tmp/gmail_token.json
+      # Transparent signature appended to every outbound message. Empty → server uses its
+      # own multi-line default. {owner} is filled from OWNER_NAME (else "the owner").
+      GMAIL_SIGNATURE: ${GMAIL_SIGNATURE:-}
+      OWNER_NAME: ${OWNER_NAME:-}
+    secrets:
+      - google_oauth_client.json
+    volumes:
+      # Read-only: the gmail package refreshes the token in a writable /tmp copy (seeded
+      # from here at startup), never this shared file — sheets stays the sole writer.
+      - ./secrets/google_token.json:/seed/google_token.json:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8004/health"]
       interval: 30s
       timeout: 10s
       retries: 3

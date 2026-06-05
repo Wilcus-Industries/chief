@@ -29,6 +29,7 @@ from chief.persistence.tasks import (
     set_status,
 )
 from chief.tools.calendar import mcp as calendar_mcp
+from chief.tools.gmail import mcp as gmail_mcp
 from chief.tools.guest import GuestAdminService
 from chief.tools.shell import ShellService
 
@@ -945,6 +946,40 @@ async def test_owner_calendar_session_wires_mcp_and_partitions_tools(
     assert "ToolSearch" in allowed
     # deferred (delete) hard-blocked; reads/writes never land in disallowed
     assert "mcp__calendar__delete-event" in captured["disallowed_tools"]
+    await mgr.shutdown()
+
+
+async def test_owner_gmail_session_partitions_reads_writes_and_deletes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=FakeIO(),
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=_capture_factory(captured),
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        google_services=(gmail_mcp.service("http://mcp-gmail:8004/mcp"),),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["mcp_servers"] == {
+        "gmail": {"type": "http", "url": "http://mcp-gmail:8004/mcp"}
+    }
+    allowed = captured["allowed_tools"]
+    assert "mcp__gmail__gmail_search_messages" in allowed  # reads pre-approved
+    assert "mcp__gmail__gmail_send_message" not in allowed  # send reaches approval
+    disallowed = captured["disallowed_tools"]
+    # Permanent deletes hard-blocked; reads/writes never land in disallowed.
+    assert "mcp__gmail__gmail_delete_draft" in disallowed
+    assert "mcp__gmail__gmail_delete_label" in disallowed
+    assert "mcp__gmail__gmail_send_message" not in disallowed
     await mgr.shutdown()
 
 
