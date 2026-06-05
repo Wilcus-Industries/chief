@@ -119,9 +119,18 @@ class ShellService:
         """The SDK-qualified ``mcp__chief_shell__bash`` name (gate/policy wiring)."""
         return f"mcp__{self.server_name}__bash"
 
+    @property
+    def read_timeout(self) -> float:
+        """Per-command client read budget: the sandbox's own timeout plus grace.
+
+        Shared by the bash tool closure and the scheduler's bash fires
+        (:mod:`chief.core.scheduler`) so the grace is computed in exactly one place.
+        """
+        return self.timeout_seconds + _CLIENT_GRACE_SECONDS
+
     def _build_bash_tool(self, session_key: str) -> SdkMcpTool[Any]:
         host, port = self.host, self.port
-        read_timeout = self.timeout_seconds + _CLIENT_GRACE_SECONDS
+        read_timeout = self.read_timeout
 
         @tool("bash", _BASH_DESCRIPTION, {"command": str})
         async def bash(args: dict[str, Any]) -> dict[str, Any]:

@@ -51,6 +51,17 @@ def test_next_fire_recurring_crosses_dst_spring_forward() -> None:
     assert out == datetime(2026, 3, 8, 16, 0, tzinfo=UTC)
 
 
+def test_next_fire_recurring_bad_spec_returns_none() -> None:
+    # A malformed cron expression → None, so the scheduler disables instead of looping.
+    after = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    assert next_fire(KIND_RECURRING, "not a cron", after=after, tz=NY) is None
+
+
+def test_next_fire_unknown_kind_returns_none() -> None:
+    after = datetime(2026, 6, 4, 12, 0, tzinfo=UTC)
+    assert next_fire("monitor", "whatever", after=after, tz=NY) is None
+
+
 def test_in_quiet_hours_overnight_inside_late_night() -> None:
     # 23:00 EDT Jun 4 = 03:00 UTC Jun 5; window 22:00→07:00 NY → inside.
     now = datetime(2026, 6, 5, 3, 0, tzinfo=UTC)

@@ -38,8 +38,10 @@ def next_fire(
     a past ``next_run`` as due then disables it (``list_due`` is ``<=`` now).
 
     ``recurring`` reads ``spec`` as a cron expression evaluated in ``tz`` from ``after``
-    (so DST shifts land on the right wall clock). ``after`` must be UTC-aware; an
-    unknown ``kind`` returns ``None``.
+    (so DST shifts land on the right wall clock). A malformed/unsatisfiable ``spec`` or
+    an unknown ``kind`` returns ``None`` — the caller disables the schedule rather than
+    hot-looping (the schedule tool validates specs up front; this is defense in depth).
+    ``after`` must be UTC-aware.
     """
     if kind == KIND_ONCE:
         fire = datetime.fromisoformat(spec)
@@ -48,8 +50,13 @@ def next_fire(
         return fire.astimezone(UTC)
     if kind == KIND_RECURRING:
         local_after = after.astimezone(tz)
-        # croniter is untyped (get_next returns Any) — annotate to keep mypy strict.
-        nxt: datetime = croniter(spec, local_after).get_next(datetime)
+        try:
+            # croniter is untyped (get_next returns Any) — annotate to keep mypy strict.
+            nxt: datetime = croniter(spec, local_after).get_next(datetime)
+        except ValueError:
+            # croniter raises CroniterBadCronError/BadDateError (ValueError subclasses)
+            # for a bad expression or an unsatisfiable date.
+            return None
         return nxt.astimezone(UTC)
     return None
 
