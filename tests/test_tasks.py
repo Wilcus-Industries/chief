@@ -1357,3 +1357,29 @@ async def test_builtin_shell_tools_disallowed_at_sdk_layer(
     disallowed = captured["disallowed_tools"]
     assert {"Bash", "BashOutput", "KillShell"} <= set(disallowed)
     await mgr.shutdown()
+
+
+async def test_wake_runs_a_turn_in_the_target_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.wake(thread_key="-100:7", text="what time is it?")
+
+    # A scheduled wakeup boots a normal turn: same run_turn → Final → io.send path.
+    await _until(lambda: ("-100:7", "reply:what time is it?") in io.sends)
+    assert sess.queries == ["what time is it?"]
+    await mgr.shutdown()
+
+
+def test_io_and_platform_properties_expose_wiring(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    mgr = _manager(session_factory, io, factory=_one(FakeSession(model="m")))
+
+    # The scheduler is built against a stack's manager and reads these to target fires.
+    assert mgr.io is io
+    assert mgr.platform == "telegram"
