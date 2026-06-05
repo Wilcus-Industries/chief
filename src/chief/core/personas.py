@@ -79,11 +79,23 @@ _SHEETS_GUIDANCE = (
     "header row) — it is blocked server-side."
 )
 
+#: Owner-only Gmail guidance (M8), included when the gmail server is wired.
+_GMAIL_GUIDANCE = (
+    "## Gmail\n"
+    "You can read, search, and triage {owner}'s Gmail, and send mail, reply, draft, "
+    "label, and trash messages on their behalf. Reading and searching is free; "
+    "sending, replying, drafting, labelling, and trashing need {owner}'s approval. "
+    "Every message you send carries a transparent line noting an assistant sent it "
+    "(appended server-side — you don't write it). You cannot permanently delete "
+    "drafts or labels."
+)
+
 #: service name → its owner guidance block. Appended in this order when each is enabled.
 _SERVICE_GUIDANCE = {
     "calendar": _CALENDAR_BOOKING_GUIDANCE,
     "drive": _DRIVE_GUIDANCE,
     "sheets": _SHEETS_GUIDANCE,
+    "gmail": _GMAIL_GUIDANCE,
 }
 
 #: Owner-only web guidance (M7). Web search/fetch are always wired for the owner.

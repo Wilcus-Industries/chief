@@ -53,6 +53,21 @@ def _shared(
     return policy, audit, memory
 
 
+def test_build_google_services_includes_gmail_only_when_enabled() -> None:
+    def names(s: Settings) -> set[str]:
+        return {svc.name for svc in app.build_google_services(s)}
+
+    assert "gmail" not in names(_settings())  # default off
+    assert "gmail" in names(_settings(gmail_enabled=True))
+    # The gmail service carries its configured URL through to the SDK config.
+    (gmail,) = [
+        svc
+        for svc in app.build_google_services(_settings(gmail_enabled=True))
+        if svc.name == "gmail"
+    ]
+    assert gmail.server_config()["url"] == "http://mcp-gmail:8004/mcp"
+
+
 def test_build_telegram_stack_wires_gate_into_engine_and_adapter(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -10,7 +10,7 @@ files** — `.gitignore` keeps everything in this directory except this README o
 | `discord_bot_token` | Bot token from the Discord Developer Portal (Bot → Reset Token) |
 | `claude_code_oauth_token` | Output of `claude setup-token` (1-year Max OAuth token) |
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
-| `google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets |
+| `google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 
 ## Chat platforms (Telegram and/or Discord)
 
@@ -30,16 +30,16 @@ Intents in the Developer Portal, or Discord delivers empty message content.
 Do **not** create an `ANTHROPIC_API_KEY` — it outranks the OAuth token and would bill the
 API instead of the Max subscription. The app refuses to start if it is set.
 
-## Google OAuth (M5/M8) — Calendar + Drive + Sheets
+## Google OAuth (M5/M8) — Calendar + Drive + Sheets + Gmail
 
 `google_token.json` is **one** refresh token minted **once, locally** (no callback server
-on the VPS — DESIGN), covering all three scopes (`calendar`, `drive`, `spreadsheets`). It
-is bind-mounted into every Google MCP container — `mcp-calendar`, `mcp-drive`,
-`mcp-sheets` (the `google` compose profile). Producing it:
+on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`, `spreadsheets`,
+`gmail.modify`). It is bind-mounted into every Google MCP container — `mcp-calendar`,
+`mcp-drive`, `mcp-sheets`, `mcp-gmail` (the `google` compose profile). Producing it:
 
 1. **Project** — <https://console.cloud.google.com> → create/pick a project.
 2. **Enable APIs** — APIs & Services → Library → **Enable** each of: "Google Calendar
-   API", "Google Drive API", "Google Sheets API".
+   API", "Google Drive API", "Google Sheets API", "Gmail API".
 3. **Consent screen** — APIs & Services → OAuth consent screen. User type **External**
    (or **Internal** with Workspace). Set app name + your email; add yourself as a
    **Test user**.
@@ -51,9 +51,17 @@ is bind-mounted into every Google MCP container — `mcp-calendar`, `mcp-drive`,
    scopes → the token is written to `secrets/google_token.json`.
 
 The bind-mount must stay writable for the **mcp-sheets** container (the sole writer — it
-persists the refreshed token; calendar + drive refresh in memory only). Run the
-containers as the host owner of the file: `MCP_GOOGLE_UID`/`MCP_GOOGLE_GID` default to
+persists the refreshed token; calendar + drive refresh in memory only, and **mcp-gmail**
+mounts it read-only and refreshes into a throwaway `/tmp` copy it seeds at startup). Run
+the containers as the host owner of the file: `MCP_GOOGLE_UID`/`MCP_GOOGLE_GID` default to
 `1000`, override if you aren't uid 1000.
+
+**Adding Gmail/Drive/Sheets to an existing deploy (M8).** If you minted the token before
+M8 (calendar scope only) or before Drive/Sheets were enabled, **re-mint** it so the new
+scopes are granted: flip `drive_enabled`/`sheets_enabled`/`gmail_enabled` in `config.yaml`,
+re-run `python -m chief.tools.google.auth` (re-consent, now including Gmail), then
+`docker compose --profile google up -d`. The signature on outbound mail comes from
+`GMAIL_SIGNATURE` (env, optional) with `{owner}` filled from `OWNER_NAME`.
 
 ⚠️ **Refresh-token expiry.** An External app left in **Testing** mode expires the refresh
 token after **7 days** — fatal for an always-on assistant. On the consent screen,
