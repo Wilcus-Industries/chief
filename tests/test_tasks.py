@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import Attachment
+from chief.adapters.base import FILE_REPLY_NOTE, Attachment
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
@@ -142,12 +142,22 @@ class FakeSession:
 class FakeIO:
     def __init__(self, next_thread: str = "-100:99") -> None:
         self.sends: list[tuple[str, str]] = []
+        self.files: list[tuple[str, str, bytes, str | None]] = []
         self.created: list[tuple[str, str]] = []
         self.archived: list[str] = []
         self._next = next_thread
 
     async def send(self, thread_key: str, text: str) -> None:
         self.sends.append((thread_key, text))
+
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None:
+        self.files.append((thread_key, filename, data, caption))
 
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         self.created.append((like_thread_key, title))
@@ -185,6 +195,7 @@ def _manager(
     grace: float = 5.0,
     idle: float = 1000.0,
     compaction: float = 1000.0,
+    message_limit: int = 4096,
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -195,6 +206,7 @@ def _manager(
         grace_seconds=grace,
         idle_archive_seconds=idle,
         compaction_idle_seconds=compaction,
+        message_limit=message_limit,
         session_factory_sdk=factory,
         stop_intent=stop,
         warrants_task=warrants,
@@ -239,6 +251,39 @@ async def test_dispatch_threads_attachments_into_run_turn(
 
     # The owner's media rides the queued Turn through to the session's run_turn.
     assert sess.attachments_seen == [(att,)]
+    await mgr.shutdown()
+
+
+async def test_long_reply_sent_as_file(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess), message_limit=20)
+
+    await mgr.dispatch(thread_key="-100:5", text="x" * 100)
+    await _until(lambda: len(io.files) == 1)
+
+    thread_key, filename, data, caption = io.files[0]
+    assert thread_key == "-100:5"
+    assert filename.endswith(".md")
+    assert data == f"reply:{'x' * 100}".encode()
+    assert caption == FILE_REPLY_NOTE
+    assert io.sends == []  # delivered as a file, not also as text
+    await mgr.shutdown()
+
+
+async def test_short_reply_sent_as_text_not_file(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess), message_limit=4096)
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    assert io.files == []  # short reply stays inline
     await mgr.shutdown()
 
 

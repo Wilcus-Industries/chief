@@ -20,6 +20,7 @@ Discord otherwise delivers empty ``content`` and every message looks blank.
 
 import logging
 from dataclasses import replace
+from io import BytesIO
 from typing import Any, cast
 
 import discord
@@ -139,6 +140,21 @@ class DiscordTaskIO:
         )
         for chunk in split_message(text, DISCORD_LIMIT):
             await target.send(chunk)
+
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None:
+        """Upload ``data`` as a file to the thread (long-reply file output, M8)."""
+        channel_id, thread_id = _parse(thread_key)
+        target = cast(
+            discord.abc.Messageable, await self._resolve(thread_id or channel_id)
+        )
+        file = discord.File(BytesIO(data), filename=filename)
+        await target.send(content=caption, file=file)
 
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         channel_id, _ = _parse(like_thread_key)

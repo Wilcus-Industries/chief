@@ -37,7 +37,12 @@ from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..adapters.base import Attachment
+from ..adapters.base import (
+    FILE_REPLY_NOTE,
+    Attachment,
+    reply_filename,
+    should_send_as_file,
+)
 from ..gate.approvals import ApprovalManager
 from ..gate.gate import (
     BUILTIN_SHELL_TOOLS,
@@ -120,6 +125,13 @@ class TaskIO(Protocol):
     """How the engine talks back to a platform (implemented by the adapter)."""
 
     async def send(self, thread_key: str, text: str) -> None: ...
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None: ...
     async def create_thread(self, *, like_thread_key: str, title: str) -> str: ...
     async def archive_thread(self, thread_key: str) -> None: ...
 
@@ -203,6 +215,7 @@ class TaskManager:
         grace_seconds: float = 6.0,
         idle_archive_seconds: float = 3600.0,
         compaction_idle_seconds: float = 3600.0,
+        message_limit: int = 4096,
         session_factory_sdk: SessionFactory = _default_session,
         stop_intent: Classifier = classify.stop_intent,
         warrants_task: Classifier = classify.warrants_task,
@@ -232,6 +245,7 @@ class TaskManager:
         self._grace_seconds = grace_seconds
         self._idle_archive_seconds = idle_archive_seconds
         self._compaction_idle_seconds = compaction_idle_seconds
+        self._message_limit = message_limit
         self._session_factory_sdk = session_factory_sdk
         self._stop_intent = stop_intent
         self._warrants_task = warrants_task
@@ -639,8 +653,7 @@ class TaskManager:
                 if task.cancelled:
                     return
                 if final is not None:
-                    await self._io.send(task.thread_key, final.text)
-                    task.transcript.append(("chief", final.text))
+                    await self._emit_final(task, final.text)
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
                 await self._set_status(task, OPEN)
@@ -654,6 +667,24 @@ class TaskManager:
         finally:
             ack.cancel()
             task.generating = False
+
+    async def _emit_final(self, task: _RunningTask, text: str) -> None:
+        """Deliver the final reply: a Markdown file when long, else split messages (M8).
+
+        Long or code-heavy replies go out as a timestamped ``.md`` attachment with a
+        short note, instead of a wall of mid-token hard cuts; everything else flows
+        through :meth:`TaskIO.send`, which boundary-splits to the platform cap.
+        """
+        if should_send_as_file(text, self._message_limit):
+            await self._io.send_file(
+                task.thread_key,
+                reply_filename(),
+                text.encode("utf-8"),
+                caption=FILE_REPLY_NOTE,
+            )
+        else:
+            await self._io.send(task.thread_key, text)
+        task.transcript.append(("chief", text))
 
     async def _ack_after_grace(self, task: _RunningTask) -> None:
         try:

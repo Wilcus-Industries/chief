@@ -6,6 +6,7 @@ match, no fuzzy matching — DESIGN: Identity & access). Outbound replies go thr
 engine's :class:`~chief.core.tasks.TaskIO`, which the adapter implements.
 """
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -243,14 +244,115 @@ def default_branch_title() -> str:
     return "Branched chat " + datetime.now(UTC).strftime("%m-%d %H:%M")
 
 
-def split_message(text: str, limit: int) -> list[str]:
-    """Split ``text`` into chunks no longer than ``limit`` (platform message cap).
+#: Matches a Markdown fenced code block (``` … ```), spanning newlines. Such blocks are
+#: kept whole when splitting so a code sample never breaks across two messages.
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
-    Minimal hard split (M2); smart/file-aware splitting is M8.
+#: Boundary hierarchy for :func:`split_message`: paragraphs, then lines, then words,
+#: then (last resort) a hard character cut.
+_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ", "")
+
+#: A reply longer than ``limit × this`` is delivered as a file, not many messages.
+FILE_THRESHOLD_FACTOR = 4
+
+#: The note posted alongside a reply sent as a file attachment.
+FILE_REPLY_NOTE = "📄 Full reply attached."
+
+
+def _hard_split(text: str, limit: int) -> list[str]:
+    """Last-resort fixed-width slice (an oversized word or un-fenceable code block)."""
+    return [text[i : i + limit] for i in range(0, len(text), limit)]
+
+
+def _fenced_segments(text: str) -> list[tuple[bool, str]]:
+    """Split ``text`` into ``(is_code, part)`` parts that concatenate back to ``text``.
+
+    Code parts are whole fenced blocks (atomic — never split inside); everything else is
+    a regular-text part split further on paragraph/line/word boundaries.
+    """
+    segments: list[tuple[bool, str]] = []
+    pos = 0
+    for match in _CODE_FENCE_RE.finditer(text):
+        if match.start() > pos:
+            segments.append((False, text[pos : match.start()]))
+        segments.append((True, match.group()))
+        pos = match.end()
+    if pos < len(text):
+        segments.append((False, text[pos:]))
+    return segments
+
+
+def _greedy_split(text: str, limit: int, seps: tuple[str, ...]) -> list[str]:
+    """Pack ``text`` into ≤ ``limit`` chunks, breaking on the coarsest fitting sep."""
+    if len(text) <= limit:
+        return [text]
+    sep, rest = seps[0], seps[1:]
+    if sep == "":
+        return _hard_split(text, limit)
+    chunks: list[str] = []
+    current = ""
+    for piece in text.split(sep):
+        candidate = current + sep + piece if current else piece
+        if len(candidate) <= limit:
+            current = candidate
+        elif len(piece) <= limit:
+            if current:
+                chunks.append(current)
+            current = piece
+        else:  # a single piece overflows — recurse onto finer separators
+            if current:
+                chunks.append(current)
+            sub = _greedy_split(piece, limit, rest)
+            chunks.extend(sub[:-1])
+            current = sub[-1]
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def split_message(text: str, limit: int) -> list[str]:
+    """Split ``text`` into chunks ≤ ``limit`` on paragraph/line/word breaks (M8).
+
+    Fenced ``` code blocks ``` stay intact (never split mid-block) when a block fits in
+    ``limit``; an oversized block is char-split only as a last resort — the engine sends
+    such replies as a file instead (see :func:`should_send_as_file`).
     """
     if len(text) <= limit:
         return [text]
-    return [text[i : i + limit] for i in range(0, len(text), limit)]
+    chunks: list[str] = []
+    current = ""
+    for is_code, segment in _fenced_segments(text):
+        if is_code:
+            pieces = [segment] if len(segment) <= limit else _hard_split(segment, limit)
+        else:
+            pieces = _greedy_split(segment, limit, _SEPARATORS)
+        for piece in pieces:
+            if current and len(current) + len(piece) <= limit:
+                current += piece
+            else:
+                if current:
+                    chunks.append(current)
+                current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def should_send_as_file(text: str, limit: int) -> bool:
+    """True if ``text`` is better delivered as a file than as split messages (M8).
+
+    Two deterministic triggers: a very long reply (over ``limit ×
+    FILE_THRESHOLD_FACTOR``), or a fenced code block that alone exceeds ``limit`` and so
+    can't be split without breaking the fence. No model round-trip.
+    """
+    if len(text) > limit * FILE_THRESHOLD_FACTOR:
+        return True
+    return any(len(m.group()) > limit for m in _CODE_FENCE_RE.finditer(text))
+
+
+def reply_filename() -> str:
+    """A timestamped Markdown filename for a long reply delivered as a file (M8)."""
+    return "reply-" + datetime.now(UTC).strftime("%Y%m%d-%H%M%S") + ".md"
 
 
 class Tier(Enum):

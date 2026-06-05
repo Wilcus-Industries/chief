@@ -794,6 +794,20 @@ async def test_taskio_send_splits_long_text() -> None:
     assert channel.send.await_count == 3  # 2000-char cap → 2000 + 2000 + 1000
 
 
+async def test_taskio_send_file_sends_file() -> None:
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    io = DiscordTaskIO(cast(discord.Client, _io_client(channel)))
+
+    await io.send_file("100:0", "reply.md", b"data", caption="note")
+
+    kwargs = channel.send.await_args.kwargs
+    assert kwargs["content"] == "note"
+    file = kwargs["file"]
+    assert isinstance(file, discord.File)
+    assert file.filename == "reply.md"
+
+
 async def test_taskio_create_thread_returns_key() -> None:
     channel = MagicMock()
     channel.create_thread = AsyncMock(return_value=SimpleNamespace(id=88))
