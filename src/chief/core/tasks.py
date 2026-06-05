@@ -86,6 +86,10 @@ DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
 #: Read-only web + meta tools the owner agent always gets (the gate treats all three as
 #: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
 WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
+#: The owner-only built-ins a guest must never reach. The gate classifies these as
+#: read-only (ALLOW), so absence from a guest's allowed_tools is not enough — they are
+#: refused at the SDK layer (disallowed_tools), the same hard-deny used for the shell.
+GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS) | set(WEB_META_TOOLS))
 #: A distiller: turn a transcript + the current index into candidate facts.
 DistillFn = Callable[..., Awaitable[list[FactDraft]]]
 #: One-shot prompt that asks the casual session to brief its own history (the live
@@ -491,6 +495,10 @@ class TaskManager:
             ),
             allowed_tools=allowed,
         )
+        # Hard-deny the owner's built-in file/web/write tools at the SDK layer too — not
+        # just absent from allowed_tools but refused outright (like the built-in shell),
+        # so a guest can never read files or the web even if a call reaches the gate.
+        gate_kwargs["disallowed_tools"] = gate_kwargs["disallowed_tools"] + GUEST_DENIED
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
 

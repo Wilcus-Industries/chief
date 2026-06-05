@@ -1043,6 +1043,12 @@ async def test_guest_session_isolated_and_wires_only_guest_tools(
     assert set(captured["mcp_servers"]) == {"chief_guest", "calendar"}
     assert "chief_guest_admin" not in captured["mcp_servers"]  # owner-only, never guest
     assert "chief_shell" not in captured["mcp_servers"]
+    # The owner's built-in file/web/write tools are hard-denied at the SDK layer (not
+    # merely absent from allowed_tools — the gate would otherwise classify them ALLOW).
+    denied = captured["disallowed_tools"]
+    for forbidden in ("Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch"):
+        assert forbidden in denied
+    assert "Bash" in denied  # the built-in shell stays denied too
     # Guest = guest model, never the owner's.
     assert captured["model"] == "guest-model"
     await mgr.shutdown()

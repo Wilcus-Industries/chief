@@ -163,8 +163,11 @@ def classify(
             f"{tool_name} (built-in shell) is disabled — use the sandbox shell",
         )
     read_roots = [r for r in (memory_dir, workspace_dir) if r is not None]
-    if read_roots and tool_name in FILE_OP_TOOLS:
-        if confined_to_any(tool_input, read_roots, cwd=memory_dir):
+    if tool_name in FILE_OP_TOOLS:
+        # A file read needs a configured root to be inside. No root (e.g. a guest, who
+        # gets no file tools) ⇒ DENY — never fall through to the read-only ALLOW below,
+        # which would grant reads anywhere on the host.
+        if read_roots and confined_to_any(tool_input, read_roots, cwd=memory_dir):
             return Verdict(GateDecision.ALLOW, f"{tool_name} reads within scope")
         return Verdict(GateDecision.DENY, f"{tool_name} path is outside scope")
     if workspace_dir is not None and tool_name in WRITE_OP_TOOLS:

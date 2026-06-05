@@ -50,11 +50,28 @@ async def test_never_wins_over_read_only(
 async def test_read_only_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    # A non-file read-only tool ALLOWs with no card and needs no configured root.
     store = await _store(session_factory)
 
-    verdict = classify("Grep", {"pattern": "x"}, store)
+    verdict = classify("WebSearch", {"query": "x"}, store)
 
     assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_file_op_with_no_root_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A file read with no configured root (e.g. a guest, who gets no file tools) must
+    # DENY — never fall through to the read-only ALLOW, which would read anywhere.
+    store = await _store(session_factory)
+
+    for tool, args in (
+        ("Read", {"file_path": "/etc/passwd"}),
+        ("Glob", {"pattern": "**/*"}),
+        ("Grep", {"pattern": "x"}),
+    ):
+        verdict = classify(tool, args, store)
+        assert verdict.decision is GateDecision.DENY
 
 
 async def test_builtin_shell_denied_over_approved(
