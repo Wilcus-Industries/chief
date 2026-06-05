@@ -269,6 +269,34 @@ class TaskManager:
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
+    # ---- scheduler hooks -------------------------------------------------
+
+    @property
+    def io(self) -> TaskIO:
+        """The platform IO this manager drives (the scheduler delivers through it)."""
+        return self._io
+
+    @property
+    def platform(self) -> str:
+        """This manager's platform — the scheduler is built against the primary one."""
+        return self._platform
+
+    async def wake(self, *, thread_key: str, text: str) -> None:
+        """Boot an agent turn from a scheduled wakeup (M9) — like an owner message.
+
+        Reuses the whole machinery (gate, tool surface, approval cards, idle/distill
+        timers): a woken turn re-passes the permission gate, so any effectful tool
+        it reaches still raises an approval card — unattended, that card fail-closed
+        denies. That is what lets the scheduler treat ``wakeup`` creation as benign.
+        """
+        # is_casual=False (the _ensure_task default): a wakeup targets a real topic —
+        # the primary inbox or a tracked thread, not the lossy casual General channel
+        # (whose casual flag needs the adapter's is_forum, unavailable here). A cold
+        # wake onto General (":0") just runs as a normal task; its idle-archive no-ops
+        # there (archive_thread guards thread_id==0), so nothing is wrongly closed.
+        task = await self._ensure_task(thread_key)
+        await self._submit(task, Turn(text=text))
+
     # ---- inbound routing -------------------------------------------------
 
     async def dispatch(
