@@ -227,6 +227,96 @@ def test_zero_owner_id_is_not_configured(
     assert settings.discord_configured
 
 
+def test_m9_scheduler_defaults_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.scheduler_enabled is False
+    assert settings.scheduler_tick_seconds == 30.0
+    assert settings.primary_platform == "telegram"
+    assert settings.primary_thread_key is None
+    assert settings.quiet_hours_start is None
+    assert settings.quiet_hours_end == "07:00"
+    assert settings.heartbeat_url is None
+    assert settings.heartbeat_interval_seconds == 300
+
+
+def test_scheduler_enabled_requires_primary_thread_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Scheduler on, but no inbox for reminders/heartbeat alerts to land in.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nscheduler_enabled: true\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="primary_thread_key"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_scheduler_enabled_requires_configured_primary_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # primary_platform points at Discord, but only Telegram is configured.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "scheduler_enabled: true\n"
+        'primary_thread_key: "-100:7"\n'
+        "primary_platform: discord\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="primary_platform"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_scheduler_enabled_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "scheduler_enabled: true\n"
+        'primary_thread_key: "-100:7"\n'
+        "quiet_hours_start: '22:00'\n"
+        "heartbeat_url: https://hc-ping.com/abc\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.scheduler_enabled
+    assert settings.primary_thread_key == "-100:7"
+    assert settings.primary_platform == "telegram"
+    assert settings.quiet_hours_start == "22:00"
+    assert settings.heartbeat_url == "https://hc-ping.com/abc"
+
+
+def test_scheduler_rejects_bad_quiet_hours_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nquiet_hours_start: 9am\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="HH:MM"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_blank_owner_id_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

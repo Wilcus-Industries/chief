@@ -8,6 +8,7 @@ files. At least one chat platform (Telegram and/or Discord) must be fully config
 """
 
 import os
+from datetime import time
 from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -130,6 +131,23 @@ class Settings(BaseSettings):
     shell_timeout_seconds: float = 120.0
     shell_output_limit: int = 64_000
 
+    # Scheduler (M9a), default off (mirror the opt-in subsystem pattern). When enabled,
+    # the long-running tick fires reminders, recurring jobs, and self-cron the owner set
+    # up. primary_thread_key is the owner inbox they land in and primary_platform picks
+    # which chat stack owns the loop — both required by the after-validator. owner_tz
+    # (above) frames cron + quiet hours. quiet_hours_* ("HH:MM" in owner_tz) defer a
+    # non-urgent fire caught overnight to quiet_hours_end; a None start disables quiet
+    # hours. heartbeat_url is an optional dead-man's-switch GET, pinged every
+    # heartbeat_interval_seconds; None disables it.
+    scheduler_enabled: bool = False
+    scheduler_tick_seconds: float = 30.0
+    primary_platform: str = "telegram"
+    primary_thread_key: str | None = None
+    quiet_hours_start: str | None = None
+    quiet_hours_end: str = "07:00"
+    heartbeat_url: str | None = None
+    heartbeat_interval_seconds: int = 300
+
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always
     # required (it authenticates the Claude SDK regardless of chat platform).
@@ -148,6 +166,25 @@ class Settings(BaseSettings):
         """
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("quiet_hours_start", "quiet_hours_end")
+    @classmethod
+    def _validate_hhmm(cls, value: str | None) -> str | None:
+        """Reject a quiet-hours bound that is not a 24-hour ``"HH:MM"`` wall clock.
+
+        Validated at load time so a typo (e.g. ``"9am"``) fails the boot rather than the
+        first tick. ``None`` (start only) disables quiet hours and passes through.
+        """
+        if value is None:
+            return None
+        try:
+            hour, minute = value.split(":")
+            time(int(hour), int(minute))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"quiet hours must be 24-hour HH:MM, got {value!r}"
+            ) from exc
         return value
 
     @property
@@ -187,6 +224,32 @@ class Settings(BaseSettings):
             raise ValueError(
                 "guest_enabled requires front_desk_thread_key — guest approvals, "
                 "admission prompts, and relayed messages have nowhere to route."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_primary_for_scheduler(self) -> "Settings":
+        """The scheduler needs an inbox on a live platform to deliver into.
+
+        A reminder, wakeup, or heartbeat alert with no ``primary_thread_key`` has
+        nowhere to land; and ``primary_platform`` must be a fully configured chat
+        platform (owner id + token), since :mod:`chief.app` builds the loop on that one.
+        """
+        if not self.scheduler_enabled:
+            return self
+        if not self.primary_thread_key:
+            raise ValueError(
+                "scheduler_enabled requires primary_thread_key — reminders, wakeups, "
+                "and heartbeat alerts have no inbox to land in."
+            )
+        configured = {
+            "telegram": self.telegram_configured,
+            "discord": self.discord_configured,
+        }
+        if not configured.get(self.primary_platform):
+            raise ValueError(
+                f"scheduler_enabled needs primary_platform={self.primary_platform!r} "
+                "to be a fully configured chat platform (owner id + bot token)."
             )
         return self
 
