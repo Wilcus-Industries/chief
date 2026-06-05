@@ -11,8 +11,9 @@ M2 wires **no tools** — owner sessions are plain chat — so ``Milestone`` eve
 tool-use) rarely fire yet; the machinery lights up when the gate + tools land (M3+).
 """
 
+import base64
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -28,6 +29,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import HookEvent, McpServerConfig
 
+from ..adapters.base import Attachment
 from .agent import NO_REPLY
 
 logger = logging.getLogger("chief.core.session")
@@ -54,7 +56,11 @@ class _Client(Protocol):
     """The slice of :class:`ClaudeSDKClient` the session uses (structural)."""
 
     async def connect(self) -> None: ...
-    async def query(self, prompt: str, session_id: str = ...) -> None: ...
+    async def query(
+        self,
+        prompt: str | AsyncIterable[dict[str, Any]],
+        session_id: str = ...,
+    ) -> None: ...
     def receive_response(self) -> AsyncIterator[Any]: ...
     async def interrupt(self) -> None: ...
     async def set_model(self, model: str | None = ...) -> None: ...
@@ -66,6 +72,38 @@ ClientFactory = Callable[[ClaudeAgentOptions], _Client]
 
 def _default_client(options: ClaudeAgentOptions) -> _Client:
     return ClaudeSDKClient(options)
+
+
+def _build_user_message(
+    text: str, attachments: Sequence[Attachment]
+) -> dict[str, Any]:
+    """The streaming user envelope carrying media as content blocks (Anthropic shape).
+
+    Mirrors the SDK's string path (``client.py``: ``type=user`` /
+    ``parent_tool_use_id=None`` / ``session_id="default"``) but with ``content`` as a
+    block list: a leading ``text`` block, then a ``document`` block per PDF and an
+    ``image`` block per image, each base64-encoded. The text block is kept even when
+    empty so a media-only turn (a bare photo) still has a prompt slot.
+    """
+    content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for att in attachments:
+        block_type = "document" if att.media_type == "application/pdf" else "image"
+        content.append(
+            {
+                "type": block_type,
+                "source": {
+                    "type": "base64",
+                    "media_type": att.media_type,
+                    "data": base64.b64encode(att.data).decode("ascii"),
+                },
+            }
+        )
+    return {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+        "session_id": "default",
+    }
 
 
 class TaskSession:
@@ -109,8 +147,10 @@ class TaskSession:
             await self._client.connect()
             self._connected = True
 
-    async def run_turn(self, text: str) -> AsyncIterator[TurnEvent]:
-        """Send ``text`` and stream the response as milestone/final events.
+    async def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        """Send ``text`` (+ any media), stream the response as milestone/final events.
 
         A dead/expired resume id makes the CLI exit non-zero on the turn's first
         message. If nothing has streamed yet and we were resuming, drop the resume and
@@ -121,7 +161,7 @@ class TaskSession:
         """
         streamed = False
         try:
-            async for event in self._stream_once(text):
+            async for event in self._stream_once(text, attachments):
                 streamed = True
                 yield event
         except ProcessError as exc:
@@ -135,13 +175,19 @@ class TaskSession:
                 exc.stderr,
             )
             await self._reset_to_fresh()
-            async for event in self._stream_once(text):
+            async for event in self._stream_once(text, attachments):
                 yield event
 
-    async def _stream_once(self, text: str) -> AsyncIterator[TurnEvent]:
-        """One streamed turn against the current client (no resume fallback)."""
+    async def _stream_once(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        """One streamed turn against the current client (no resume fallback).
+
+        No media → the SDK's plain ``str`` path. With media → a one-item async-iterable
+        of the user envelope (the only way to carry content blocks into ``query``).
+        """
         await self._ensure_connected()
-        await self._client.query(text)
+        await self._client.query(self._prompt(text, attachments))
         parts: list[str] = []
         async for message in self._client.receive_response():
             session_id = getattr(message, "session_id", None)
@@ -154,6 +200,20 @@ class TaskSession:
                     elif isinstance(block, ToolUseBlock):
                         yield Milestone(text=f"using {block.name}")
         yield Final(text="".join(parts).strip() or NO_REPLY)
+
+    @staticmethod
+    def _prompt(
+        text: str, attachments: Sequence[Attachment]
+    ) -> str | AsyncIterable[dict[str, Any]]:
+        """The ``query`` payload: a plain string, or a one-item envelope stream."""
+        if not attachments:
+            return text
+        envelope = _build_user_message(text, attachments)
+
+        async def _stream() -> AsyncIterator[dict[str, Any]]:
+            yield envelope
+
+        return _stream()
 
     async def _reset_to_fresh(self) -> None:
         """Tear down the failed resuming client and rebuild one with no resume."""

@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.base import Attachment
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
@@ -105,6 +106,7 @@ class FakeSession:
         self.resume = resume
         self.session_id = resume
         self.queries: list[str] = []
+        self.attachments_seen: list[tuple[Attachment, ...]] = []
         self.interrupted = False
         self.closed = False
         self._gate = gate
@@ -112,8 +114,11 @@ class FakeSession:
         self._milestones = milestones or []
         self._after_gate = after_gate or []
 
-    async def run_turn(self, text: str) -> AsyncIterator[TurnEvent]:
+    async def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
         self.queries.append(text)
+        self.attachments_seen.append(tuple(attachments))
         if self._on_start is not None:
             self._on_start()
         for milestone in self._milestones:
@@ -218,6 +223,22 @@ async def test_fast_turn_replies_inline_without_ack(
 
     assert ("-100:5", "· using Bash") in io.sends  # milestone posted
     assert ("-100:5", WORKING_ACK) not in io.sends  # fast → no working ack
+    await mgr.shutdown()
+
+
+async def test_dispatch_threads_attachments_into_run_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+    att = Attachment(media_type="image/png", data=b"PNG", filename=None)
+
+    await mgr.dispatch(thread_key="-100:5", text="what is this?", attachments=(att,))
+    await _until(lambda: ("-100:5", "reply:what is this?") in io.sends)
+
+    # The owner's media rides the queued Turn through to the session's run_turn.
+    assert sess.attachments_seen == [(att,)]
     await mgr.shutdown()
 
 
@@ -423,7 +444,9 @@ async def test_failed_turn_does_not_arm_idle(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     class BoomSession(FakeSession):
-        async def run_turn(self, text: str) -> AsyncIterator[TurnEvent]:
+        async def run_turn(
+            self, text: str, attachments: Sequence[Attachment] = ()
+        ) -> AsyncIterator[TurnEvent]:
             self.queries.append(text)
             for _ in ():  # never iterates — keeps this an async generator
                 yield Final(text="")

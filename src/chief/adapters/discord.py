@@ -19,6 +19,7 @@ Discord otherwise delivers empty ``content`` and every message looks blank.
 """
 
 import logging
+from dataclasses import replace
 from typing import Any, cast
 
 import discord
@@ -29,10 +30,13 @@ from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
     CALLBACK_PREFIX,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS,
     Adapter,
     AdmissionAction,
     AdmissionCard,
     ApprovalResolver,
+    Attachment,
     Engine,
     MemoryReader,
     Message,
@@ -44,6 +48,7 @@ from .base import (
     classify_tier,
     default_branch_title,
     handle_guest_message,
+    is_supported_media,
     parse_admission,
     parse_callback,
     split_message,
@@ -222,8 +227,12 @@ class DiscordAdapter(Adapter):
         self._client.event(self.on_ready)
 
     def to_message(self, message: discord.Message) -> Message | None:
-        """Normalize a Discord message into a :class:`Message`, or ``None`` to skip."""
-        if not message.content:
+        """Normalize a Discord message into a :class:`Message`, or ``None`` to skip.
+
+        A media-only message (image/PDF, no text) is kept so owner intake (M8) reaches
+        the engine; the attachments themselves are read in :meth:`on_message`.
+        """
+        if not message.content and not message.attachments:
             return None
         channel = message.channel
         if isinstance(channel, discord.Thread):
@@ -277,11 +286,42 @@ class DiscordAdapter(Adapter):
         if text.startswith("/"):
             await self._run_command(message, normalized, text)
             return
+        attachments = await self._owner_attachments(message)
+        if attachments:
+            normalized = replace(normalized, attachments=attachments)
         is_general = not isinstance(message.channel, discord.Thread)
         logger.info("owner message", extra={"thread_key": normalized.thread_key})
         await self._engine.dispatch(
-            thread_key=normalized.thread_key, text=text, is_general=is_general
+            thread_key=normalized.thread_key,
+            text=text,
+            attachments=normalized.attachments,
+            is_general=is_general,
         )
+
+    @staticmethod
+    async def _owner_attachments(
+        message: discord.Message,
+    ) -> tuple[Attachment, ...]:
+        """Read the owner's image/PDF attachments (≤ caps); skip everything else (M8).
+
+        Discord hands each attachment a ``content_type`` and ``size``; non-image/PDF or
+        over-cap files are dropped silently, and the count is capped to bound memory.
+        """
+        items: list[Attachment] = []
+        for att in message.attachments:
+            content_type = att.content_type or ""
+            if not is_supported_media(content_type) or att.size > MAX_ATTACHMENT_BYTES:
+                continue
+            data = await att.read()
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                continue
+            media_type = content_type.split(";")[0].strip()
+            items.append(
+                Attachment(media_type=media_type, data=data, filename=att.filename)
+            )
+            if len(items) >= MAX_ATTACHMENTS:
+                break
+        return tuple(items)
 
     async def _handle_guest(self, message: Message, reply: ReplyFn) -> None:
         """Run the shared guest gate (block / rate / mute / admit / dispatch, M6)."""

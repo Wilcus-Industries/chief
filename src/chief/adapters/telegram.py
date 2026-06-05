@@ -15,6 +15,7 @@ map to forum topics.
 
 import asyncio
 import logging
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,10 +35,13 @@ from ..persistence.contacts import get_or_create_contact
 from .base import (
     ADMISSION_PREFIX,
     CALLBACK_PREFIX,
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS,
     Adapter,
     AdmissionAction,
     AdmissionCard,
     ApprovalResolver,
+    Attachment,
     Engine,
     MemoryReader,
     Message,
@@ -49,6 +53,7 @@ from .base import (
     classify_tier,
     default_branch_title,
     handle_guest_message,
+    is_supported_media,
     parse_admission,
     parse_callback,
 )
@@ -120,6 +125,11 @@ def _admission_keyboard(contact_id: int) -> InlineKeyboardMarkup:
 def _parse(thread_key: str) -> tuple[int, int]:
     chat_str, thread_str = thread_key.split(":")
     return int(chat_str), int(thread_str)
+
+
+def _has_media(message: Any) -> bool:
+    """True if the Telegram message carries a photo or a document (M8 intake)."""
+    return bool(message.photo) or message.document is not None
 
 
 class TelegramTaskIO:
@@ -227,22 +237,36 @@ class TelegramAdapter(Adapter):
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=CALLBACK_QUERY_PATTERN)
         )
+        # Photos/documents join text so owner image+PDF intake (M8) reaches _on_message;
+        # a bare photo carries no TEXT, so the old TEXT-only filter would drop it.
         self._app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
+            MessageHandler(
+                (filters.TEXT | filters.PHOTO | filters.Document.ALL)
+                & ~filters.COMMAND,
+                self._on_message,
+            )
         )
 
     def to_message(self, update: Update) -> Message | None:
-        """Normalize an update into a :class:`Message`, or ``None`` to ignore it."""
+        """Normalize an update into a :class:`Message`, or ``None`` to ignore it.
+
+        Attachments are *not* downloaded here (this is sync) — :meth:`_on_message`
+        pulls owner media before dispatch. A media-only message (no text) is kept; its
+        caption, if any, becomes the text.
+        """
         message = update.effective_message
         user = update.effective_user
         chat = update.effective_chat
-        if message is None or user is None or chat is None or not message.text:
+        if message is None or user is None or chat is None:
+            return None
+        text = message.text or message.caption or ""
+        if not text and not _has_media(message):
             return None
         thread_id = message.message_thread_id or 0
         return Message(
             platform=PLATFORM,
             sender_id=user.id,
-            text=message.text,
+            text=text,
             thread_key=f"{chat.id}:{thread_id}",
             tier=classify_tier(sender_id=user.id, owner_id=self._owner_id),
             sender_name=user.full_name,
@@ -279,14 +303,54 @@ class TelegramAdapter(Adapter):
 
             await self._handle_guest(message, reply)
             return
+        tg_message = update.effective_message
+        if tg_message is not None:
+            attachments = await self._owner_attachments(tg_message)
+            if attachments:
+                message = replace(message, attachments=attachments)
         chat = update.effective_chat
         is_general = bool(getattr(chat, "is_forum", False)) and (
             message.thread_key.endswith(":0")
         )
         logger.info("owner message", extra={"thread_key": message.thread_key})
         await self._engine.dispatch(
-            thread_key=message.thread_key, text=message.text, is_general=is_general
+            thread_key=message.thread_key,
+            text=message.text,
+            attachments=message.attachments,
+            is_general=is_general,
         )
+
+    async def _owner_attachments(self, tg_message: Any) -> tuple[Attachment, ...]:
+        """Download the owner's image/PDF files (≤ caps); skip anything else (M8).
+
+        Photos arrive as ascending ``PhotoSize``s — the last is the highest-res, the one
+        worth sending. Documents keep their declared mime/filename. Over-cap files are
+        dropped silently rather than failing the whole turn.
+        """
+        items: list[Attachment] = []
+        if tg_message.photo:
+            att = await self._download_tg(tg_message.photo[-1], "image/jpeg", None)
+            if att is not None:
+                items.append(att)
+        doc = tg_message.document
+        if doc is not None and doc.mime_type and is_supported_media(doc.mime_type):
+            att = await self._download_tg(doc, doc.mime_type, doc.file_name)
+            if att is not None:
+                items.append(att)
+        return tuple(items[:MAX_ATTACHMENTS])
+
+    @staticmethod
+    async def _download_tg(
+        source: Any, media_type: str, filename: str | None
+    ) -> Attachment | None:
+        """Fetch a Telegram file's bytes, or ``None`` if it is over the size cap."""
+        if (getattr(source, "file_size", None) or 0) > MAX_ATTACHMENT_BYTES:
+            return None
+        handle = await source.get_file()
+        data = bytes(await handle.download_as_bytearray())
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            return None
+        return Attachment(media_type=media_type, data=data, filename=filename)
 
     async def _handle_guest(self, message: Message, reply: ReplyFn) -> None:
         """Run the shared guest gate (block / rate / mute / admit / dispatch, M6)."""
