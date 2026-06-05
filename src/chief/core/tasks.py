@@ -72,6 +72,7 @@ from ..persistence.tasks import (
 )
 from ..tools.google import GoogleService
 from ..tools.guest import GuestAdminService, GuestService
+from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.shell import ShellService
 from . import classify
 from .personas import build_system_prompt
@@ -236,6 +237,8 @@ class TaskManager:
         guest_model: str | None = None,
         guest_calendar_service: GoogleService | None = None,
         guest_admin_service: GuestAdminService | None = None,
+        schedule_service: ScheduleService | None = None,
+        schedule_bash_service: ScheduleBashService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -266,6 +269,8 @@ class TaskManager:
         self._guest_model = guest_model
         self._guest_calendar_service = guest_calendar_service
         self._guest_admin_service = guest_admin_service
+        self._schedule_service = schedule_service
+        self._schedule_bash_service = schedule_bash_service
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -480,6 +485,12 @@ class TaskManager:
         if admin is not None:
             # Owner-initiated, reversible → pre-approved (no card) to block/mute guests.
             allowed.append(admin.tool_name)
+        schedule = self._schedule_service
+        if schedule is not None:
+            # The benign schedule tools (message/wakeup + list/cancel) only mint safe
+            # actions, so they're pre-approved (no card) — extra_read_only in
+            # _build_gate keeps the gate hook from carding them despite the allow entry.
+            allowed += list(schedule.tool_names)
         gate_kwargs.update(
             system_prompt=build_system_prompt(
                 tier="owner",
@@ -510,6 +521,14 @@ class TaskManager:
             mcp_servers[shell.server_name] = shell.server_config(session_key=thread_key)
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
+        if schedule is not None:
+            mcp_servers[schedule.server_name] = schedule.server_config()
+        bash_schedule = self._schedule_bash_service
+        if bash_schedule is not None:
+            # Gated: register the server but keep its tool_names OFF the allow-list, so
+            # each mint routes through can_use_tool → ASK (same as the shell tool — the
+            # ungated fire it sets up is the gated act).
+            mcp_servers[bash_schedule.server_name] = bash_schedule.server_config()
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
         # Google deferred ops (delete) refused on top of the always-disallowed built-in
@@ -592,6 +611,14 @@ class TaskManager:
             extra_read_only = extra_read_only | {
                 self._guest_admin_service.tool_name
             }
+        # The benign schedule tools are owner-initiated and only mint safe actions →
+        # ALLOW with no card. Like guest-admin, reuse the gate's "allow without a card"
+        # lever so the PreToolUse hook doesn't card them despite their allow-list entry.
+        # The gated schedule_bash tools are deliberately absent here → they reach ASK.
+        if tier == "owner" and self._schedule_service is not None:
+            extra_read_only = extra_read_only | set(
+                self._schedule_service.tool_names
+            )
         # Owner work approves in-thread; a guest-originated approval routes to the Front
         # Desk. A guest with no Front Desk configured is a hard error — never silently
         # self-route a card back into the guest's own DM (config also guards this).

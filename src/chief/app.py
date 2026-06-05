@@ -15,6 +15,7 @@ import logging
 import os
 
 import discord
+import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram.ext import Application
 
@@ -22,6 +23,7 @@ from .adapters.base import Adapter, ReadyHook
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
+from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
 from .gate.policy import PolicyStore
@@ -36,6 +38,7 @@ from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
 from .tools.guest import GuestAdminService
+from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
 
@@ -129,6 +132,26 @@ def build_engine(
         if settings.guest_enabled
         else None
     )
+    # The owner's schedule tools are platform-agnostic, so every stack's owner session
+    # gets them when the scheduler is on; only the *loop* (built in serve) is singular.
+    schedule = (
+        ScheduleService(
+            session_factory=session_factory,
+            owner_tz=settings.owner_tz,
+            monitor_min_interval_seconds=settings.monitor_min_interval_seconds,
+        )
+        if settings.scheduler_enabled
+        else None
+    )
+    schedule_bash = (
+        ScheduleBashService(
+            session_factory=session_factory,
+            owner_tz=settings.owner_tz,
+            monitor_min_interval_seconds=settings.monitor_min_interval_seconds,
+        )
+        if settings.scheduler_enabled
+        else None
+    )
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -159,6 +182,8 @@ def build_engine(
         guest_model=settings.guest_model,
         guest_calendar_service=build_guest_calendar_service(settings),
         guest_admin_service=guest_admin,
+        schedule_service=schedule,
+        schedule_bash_service=schedule_bash,
     )
 
 
@@ -303,6 +328,55 @@ def build_stacks(
     return stacks
 
 
+def build_scheduler(
+    settings: Settings,
+    *,
+    stacks: list[Stack],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[Scheduler | None, httpx.AsyncClient | None]:
+    """Build the single scheduler loop, bound to the primary platform's stack.
+
+    Returns ``(None, None)`` when the scheduler is disabled. The scheduler is singular
+    (one tick loop), so it binds to the one stack whose manager drives
+    ``settings.primary_platform`` — that manager's IO is where reminders, wakeups, and
+    heartbeat alerts land, and it is the :class:`Waker` a ``wakeup`` fire boots a turn
+    through. The owned heartbeat http client (a dead-man's-switch GET) is returned
+    alongside so ``serve`` can close it on teardown; ``None`` when no ``heartbeat_url``.
+    """
+    if not settings.scheduler_enabled:
+        return None, None
+    # Both guaranteed by the scheduler config validator (config._require_primary_*).
+    assert settings.primary_thread_key is not None
+    primary = next(
+        (s for s in stacks if s[0].platform == settings.primary_platform), None
+    )
+    assert primary is not None, (
+        f"scheduler_enabled but no stack for primary_platform="
+        f"{settings.primary_platform!r}"
+    )
+    manager = primary[0]
+    # Only build the client when there's a url to ping — else the engine no-ops the
+    # heartbeat. httpx.AsyncClient.get(url, timeout=) satisfies the HttpClient Protocol.
+    http = httpx.AsyncClient() if settings.heartbeat_url else None
+    scheduler = Scheduler(
+        session_factory=session_factory,
+        io=manager.io,
+        waker=manager,
+        primary_thread_key=settings.primary_thread_key,
+        shell_service=build_shell_service(settings),
+        google_services=build_google_services(settings),
+        classifier_model=settings.classifier_model,
+        owner_tz=settings.owner_tz,
+        quiet_hours_start=settings.quiet_hours_start,
+        quiet_hours_end=settings.quiet_hours_end,
+        tick_seconds=settings.scheduler_tick_seconds,
+        heartbeat_url=settings.heartbeat_url,
+        heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
+        http=http,
+    )
+    return scheduler, http
+
+
 async def serve(settings: Settings) -> None:
     """Bring up db + gate + memory + every configured platform stack, then run.
 
@@ -334,6 +408,11 @@ async def serve(settings: Settings) -> None:
         audit=audit,
         memory=memory,
     )
+    # One scheduler loop across all stacks (it binds to the primary platform's manager),
+    # owning an http client for the heartbeat when configured. None when disabled.
+    scheduler, http = build_scheduler(
+        settings, stacks=stacks, session_factory=factory
+    )
 
     def make_ready(manager: TaskManager, approvals: ApprovalManager) -> ReadyHook:
         async def on_ready() -> None:
@@ -342,13 +421,15 @@ async def serve(settings: Settings) -> None:
 
         return on_ready
 
+    coros = [
+        adapter.run(on_ready=make_ready(manager, approvals))
+        for manager, adapter, approvals in stacks
+    ]
+    if scheduler is not None:
+        coros.append(scheduler.run())
+
     try:
-        await asyncio.gather(
-            *(
-                adapter.run(on_ready=make_ready(manager, approvals))
-                for manager, adapter, approvals in stacks
-            )
-        )
+        await asyncio.gather(*coros)
     finally:
         # gather propagates the first failure without cancelling its siblings, so one
         # adapter crashing leaves the others' connections live — close every adapter
@@ -360,6 +441,13 @@ async def serve(settings: Settings) -> None:
             except Exception:
                 logger.exception("adapter stop failed during shutdown")
             await manager.shutdown()
+        # The Scheduler owns no closable resource but the heartbeat http client; close
+        # it (guarded, like the adapter stops) before disposing the engine.
+        if http is not None:
+            try:
+                await http.aclose()
+            except Exception:
+                logger.exception("heartbeat http close failed during shutdown")
         await engine.dispose()
 
 
