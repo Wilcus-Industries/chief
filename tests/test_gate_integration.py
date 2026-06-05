@@ -117,11 +117,12 @@ def _events(audit: RecordingAudit, name: str) -> list[dict[str, object]]:
 async def test_read_only_allows_through_both_callbacks(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    # A non-file read-only tool (no root needed) allows through both callbacks.
     gate = await _gate(session_factory)
 
-    decision = await gate.run_hook("Read", {"file_path": "/x"})
+    decision = await gate.run_hook("WebSearch", {"query": "x"})
     result = await gate.can_use_tool(
-        "Read", {"file_path": "/x"}, ToolPermissionContext()
+        "WebSearch", {"query": "x"}, ToolPermissionContext()
     )
 
     assert decision == "allow"
