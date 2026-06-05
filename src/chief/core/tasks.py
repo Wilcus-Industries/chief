@@ -37,6 +37,7 @@ from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..adapters.base import Attachment
 from ..gate.approvals import ApprovalManager
 from ..gate.gate import (
     BUILTIN_SHELL_TOOLS,
@@ -107,6 +108,14 @@ PRIME_TEMPLATE = (
 )
 
 
+@dataclass(frozen=True)
+class Turn:
+    """One queued unit of owner work: the message text plus any inbound media (M8)."""
+
+    text: str
+    attachments: tuple[Attachment, ...] = ()
+
+
 class TaskIO(Protocol):
     """How the engine talks back to a platform (implemented by the adapter)."""
 
@@ -120,7 +129,9 @@ class SessionProto(Protocol):
 
     session_id: str | None
 
-    def run_turn(self, text: str) -> AsyncIterator[TurnEvent]: ...
+    def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]: ...
     async def interrupt(self) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -166,7 +177,7 @@ class _RunningTask:
     thread_key: str
     db_id: int
     session: SessionProto
-    queue: "asyncio.Queue[str]"
+    queue: "asyncio.Queue[Turn]"
     tier: str
     is_casual: bool = False
     generating: bool = False
@@ -247,9 +258,14 @@ class TaskManager:
     # ---- inbound routing -------------------------------------------------
 
     async def dispatch(
-        self, *, thread_key: str, text: str, is_general: bool = False
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        attachments: tuple[Attachment, ...] = (),
+        is_general: bool = False,
     ) -> None:
-        """Route an owner message into its task, spawning a topic when warranted."""
+        """Route an owner message (+ media) into its task, spawning a topic when due."""
         is_casual = is_general
         if is_general and await self._warrants_task(
             text, model=self._classifier_model
@@ -261,7 +277,7 @@ class TaskManager:
             thread_key = new_key
             is_casual = False  # a spawned topic is a real, full-memory task
         task = await self._ensure_task(thread_key, is_casual=is_casual)
-        await self._submit(task, text)
+        await self._submit(task, Turn(text=text, attachments=attachments))
 
     async def dispatch_guest(
         self, *, thread_key: str, text: str, from_label: str | None = None
@@ -275,7 +291,8 @@ class TaskManager:
         task = await self._ensure_task(
             thread_key, tier="guest", from_label=from_label
         )
-        await self._submit(task, text)
+        # Guests stay text-only — media intake is owner-only (tier isolation, M8).
+        await self._submit(task, Turn(text=text))
 
     async def cancel(self, thread_key: str) -> bool:
         """Stop the task in ``thread_key``; False if there was nothing to stop."""
@@ -585,33 +602,33 @@ class TaskManager:
         }
         return can_use_tool, hooks
 
-    async def _submit(self, task: _RunningTask, text: str) -> None:
+    async def _submit(self, task: _RunningTask, turn: Turn) -> None:
         self._cancel_idle(task)
         self._cancel_distill(task)
         if task.generating:
             if (
-                await self._stop_intent(text, model=self._classifier_model)
+                await self._stop_intent(turn.text, model=self._classifier_model)
                 and task.generating
             ):
                 await task.session.interrupt()
         elif task.consumer is None or task.consumer.done():
             task.consumer = asyncio.create_task(self._consume(task))
-        task.queue.put_nowait(text)
+        task.queue.put_nowait(turn)
 
     async def _consume(self, task: _RunningTask) -> None:
         while True:
-            text = await task.queue.get()
-            await self._run_turn(task, text)
+            turn = await task.queue.get()
+            await self._run_turn(task, turn)
 
-    async def _run_turn(self, task: _RunningTask, text: str) -> None:
+    async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
         ack = asyncio.create_task(self._ack_after_grace(task))
-        task.transcript.append(("owner", text))
+        task.transcript.append(("owner", turn.text))
         try:
             async with self._semaphore:
                 task.generating = True
                 await self._set_status(task, RUNNING)
                 final: Final | None = None
-                async for event in task.session.run_turn(text):
+                async for event in task.session.run_turn(turn.text, turn.attachments):
                     if task.cancelled:
                         break  # interrupted — stop streaming its milestones
                     if isinstance(event, Final):

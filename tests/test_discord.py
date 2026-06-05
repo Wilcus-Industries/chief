@@ -8,7 +8,7 @@ import discord
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import AdmissionCard
+from chief.adapters.base import AdmissionCard, Attachment
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
@@ -25,6 +25,7 @@ class FakeEngine:
         self, *, active: list[Task] | None = None, cancel: bool = True
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
+        self.dispatched_attachments: list[tuple[Attachment, ...]] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
@@ -32,9 +33,15 @@ class FakeEngine:
         self._cancel = cancel
 
     async def dispatch(
-        self, *, thread_key: str, text: str, is_general: bool = False
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        attachments: tuple[Attachment, ...] = (),
+        is_general: bool = False,
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
+        self.dispatched_attachments.append(attachments)
 
     async def dispatch_guest(
         self, *, thread_key: str, text: str, from_label: str | None = None
@@ -157,14 +164,30 @@ def _thread(parent_id: int | None = 100, thread_id: int = 5) -> Any:
 
 
 def _message(
-    *, user_id: int, content: str, channel: Any, bot: bool = False
+    *,
+    user_id: int,
+    content: str,
+    channel: Any,
+    bot: bool = False,
+    attachments: list[Any] | None = None,
 ) -> discord.Message:
     message = SimpleNamespace(
         content=content,
         author=SimpleNamespace(id=user_id, bot=bot, display_name="Someone"),
         channel=channel,
+        attachments=attachments or [],
     )
     return cast(discord.Message, message)
+
+
+def _attachment(data: bytes, *, content_type: str, filename: str = "f") -> Any:
+    """A discord.Attachment stand-in: ``read`` yields ``data`` (size from len)."""
+    return SimpleNamespace(
+        content_type=content_type,
+        size=len(data),
+        filename=filename,
+        read=AsyncMock(return_value=data),
+    )
 
 
 def _interaction(
@@ -279,6 +302,87 @@ async def test_owner_channel_message_flags_is_general(
     assert engine.dispatched == [("100:0", "hey", True)]
 
 
+# ---- media intake (M8, owner only) -------------------------------------------
+
+
+def test_to_message_keeps_attachment_only_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine())
+
+    message = adapter.to_message(
+        _message(
+            user_id=OWNER_ID,
+            content="",
+            channel=_text_channel(100),
+            attachments=[_attachment(b"x", content_type="image/png")],
+        )
+    )
+
+    assert message is not None and message.text == ""
+
+
+async def test_owner_image_and_pdf_download(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _message(
+        user_id=OWNER_ID,
+        content="see these",
+        channel=_text_channel(100),
+        attachments=[
+            _attachment(b"PNGDATA", content_type="image/png", filename="a.png"),
+            _attachment(b"%PDF", content_type="application/pdf", filename="b.pdf"),
+        ],
+    )
+
+    await adapter.on_message(update)
+
+    (attachments,) = engine.dispatched_attachments
+    assert attachments == (
+        Attachment(media_type="image/png", data=b"PNGDATA", filename="a.png"),
+        Attachment(media_type="application/pdf", data=b"%PDF", filename="b.pdf"),
+    )
+
+
+async def test_owner_unsupported_attachment_skipped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _message(
+        user_id=OWNER_ID,
+        content="a zip",
+        channel=_text_channel(100),
+        attachments=[_attachment(b"PK", content_type="application/zip")],
+    )
+
+    await adapter.on_message(update)
+
+    assert engine.dispatched_attachments == [()]
+
+
+async def test_owner_attachments_capped_at_five(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _message(
+        user_id=OWNER_ID,
+        content="lots",
+        channel=_text_channel(100),
+        attachments=[
+            _attachment(b"x", content_type="image/png") for _ in range(6)
+        ],
+    )
+
+    await adapter.on_message(update)
+
+    (attachments,) = engine.dispatched_attachments
+    assert len(attachments) == 5  # MAX_ATTACHMENTS
+
+
 async def test_guest_message_acks_without_dispatch_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -294,6 +398,27 @@ async def test_guest_message_acks_without_dispatch_when_disabled(
     channel.send.assert_awaited_once_with("noted, thanks")
     contacts = await _contacts(session_factory)
     assert contacts[0].tier == "guest"
+
+
+async def test_guest_image_is_not_ingested(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Media is owner-only: a guest's image never reaches dispatch / read.
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _text_channel(100)
+
+    await adapter.on_message(
+        _message(
+            user_id=7,
+            content="",
+            channel=channel,
+            attachments=[_attachment(b"x", content_type="image/png")],
+        )
+    )
+
+    assert engine.dispatched == [] and engine.dispatched_attachments == []
+    channel.send.assert_awaited_once_with("noted, thanks")
 
 
 async def _set_state(

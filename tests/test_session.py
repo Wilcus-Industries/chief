@@ -1,6 +1,6 @@
 """TaskSession streaming, interrupt, and resume (ClaudeSDKClient faked)."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 
 import pytest
@@ -21,7 +21,7 @@ class FakeClient:
     def __init__(self, options: ClaudeAgentOptions) -> None:
         self.options = options
         self.connected = False
-        self.queries: list[str] = []
+        self.queries: list[Any] = []
         self.interrupted = False
         self.model: str | None = None
         self.messages: list[Any] = []
@@ -33,7 +33,9 @@ class FakeClient:
             raise self.fail_on_connect
         self.connected = True
 
-    async def query(self, prompt: str, session_id: str = "default") -> None:
+    async def query(
+        self, prompt: str | AsyncIterable[dict[str, Any]], session_id: str = "default"
+    ) -> None:
         self.queries.append(prompt)
 
     async def receive_response(self) -> AsyncIterator[Any]:

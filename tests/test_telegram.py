@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application
 
-from chief.adapters.base import AdmissionCard, parse_callback
+from chief.adapters.base import AdmissionCard, Attachment, parse_callback
 from chief.adapters.telegram import (
     CALLBACK_QUERY_PATTERN,
     TelegramAdapter,
@@ -32,6 +32,7 @@ class FakeEngine:
         self, *, active: list[Task] | None = None, cancel: bool = True
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
+        self.dispatched_attachments: list[tuple[Attachment, ...]] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
@@ -39,9 +40,15 @@ class FakeEngine:
         self._cancel = cancel
 
     async def dispatch(
-        self, *, thread_key: str, text: str, is_general: bool = False
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        attachments: tuple[Attachment, ...] = (),
+        is_general: bool = False,
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
+        self.dispatched_attachments.append(attachments)
 
     async def dispatch_guest(
         self, *, thread_key: str, text: str, from_label: str | None = None
@@ -158,15 +165,48 @@ def _fake_update(
     thread_id: int | None = None,
     is_forum: bool = False,
     chat_id: int = -100,
+    caption: str | None = None,
+    photo: list[Any] | None = None,
+    document: Any | None = None,
 ) -> Update:
     update = SimpleNamespace(
         effective_message=SimpleNamespace(
-            text=text, message_thread_id=thread_id, reply_text=AsyncMock()
+            text=text,
+            message_thread_id=thread_id,
+            reply_text=AsyncMock(),
+            caption=caption,
+            photo=photo or [],
+            document=document,
         ),
         effective_user=SimpleNamespace(id=user_id, full_name="Someone"),
         effective_chat=SimpleNamespace(id=chat_id, is_forum=is_forum),
     )
     return cast(Update, update)
+
+
+def _tg_file(data: bytes) -> Any:
+    """A Telegram file handle whose ``download_as_bytearray`` yields ``data``."""
+    return SimpleNamespace(
+        download_as_bytearray=AsyncMock(return_value=bytearray(data))
+    )
+
+
+def _photo(data: bytes, *, file_size: int | None = None) -> Any:
+    """A PhotoSize stand-in: ``get_file`` returns a handle over ``data``."""
+    return SimpleNamespace(
+        file_size=file_size if file_size is not None else len(data),
+        get_file=AsyncMock(return_value=_tg_file(data)),
+    )
+
+
+def _document(data: bytes, *, mime_type: str, file_name: str = "f") -> Any:
+    """A Telegram Document stand-in (PDF/image) over ``data``."""
+    return SimpleNamespace(
+        mime_type=mime_type,
+        file_name=file_name,
+        file_size=len(data),
+        get_file=AsyncMock(return_value=_tg_file(data)),
+    )
 
 
 async def _contacts(session_factory: async_sessionmaker[AsyncSession]) -> list[Contact]:
@@ -195,6 +235,108 @@ def test_to_message_ignores_non_text(
     adapter = _adapter(session_factory, FakeEngine())
 
     assert adapter.to_message(_fake_update(user_id=OWNER_ID, text=None)) is None
+
+
+def test_to_message_keeps_media_only_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A bare photo (no text, no caption) is still a message — _on_message reads its
+    # bytes. The caption, when present, becomes the text.
+    adapter = _adapter(session_factory, FakeEngine())
+
+    message = adapter.to_message(
+        _fake_update(user_id=OWNER_ID, text=None, photo=[_photo(b"x")])
+    )
+
+    assert message is not None and message.text == ""
+
+
+# ---- media intake (M8, owner only) -------------------------------------------
+
+
+async def test_owner_photo_downloads_attachment(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID, text=None, caption="look", photo=[_photo(b"JPEGBYTES")]
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched == [("-100:0", "look", False)]
+    (attachments,) = engine.dispatched_attachments
+    assert attachments == (
+        Attachment(media_type="image/jpeg", data=b"JPEGBYTES", filename=None),
+    )
+
+
+async def test_owner_pdf_document_downloads_attachment(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID,
+        text="read this",
+        document=_document(b"%PDF-1.7", mime_type="application/pdf", file_name="r.pdf"),
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    (attachments,) = engine.dispatched_attachments
+    assert attachments == (
+        Attachment(media_type="application/pdf", data=b"%PDF-1.7", filename="r.pdf"),
+    )
+
+
+async def test_owner_unsupported_document_is_skipped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID,
+        text="a zip",
+        document=_document(b"PK\x03\x04", mime_type="application/zip"),
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched_attachments == [()]  # non-image/PDF dropped
+
+
+async def test_owner_oversized_photo_is_dropped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from chief.adapters.base import MAX_ATTACHMENT_BYTES
+
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID,
+        text="huge",
+        photo=[_photo(b"x", file_size=MAX_ATTACHMENT_BYTES + 1)],
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched_attachments == [()]  # over the 20 MB cap → dropped
+
+
+async def test_guest_photo_is_not_ingested(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Media is owner-only: a guest's photo never reaches dispatch / download.
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(user_id=7, text=None, photo=[_photo(b"JPEGBYTES")])
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched == [] and engine.dispatched_attachments == []
+    update.effective_message.reply_text.assert_awaited_once_with("noted, thanks")  # type: ignore[union-attr]
 
 
 # ---- inbound routing ---------------------------------------------------------

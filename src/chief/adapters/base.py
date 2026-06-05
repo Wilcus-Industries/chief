@@ -265,6 +265,31 @@ def classify_tier(*, sender_id: int, owner_id: int) -> Tier:
     return Tier.OWNER if sender_id == owner_id else Tier.GUEST
 
 
+#: Inbound media caps (owner-only image/PDF intake, M8) — bound the bytes a single
+#: turn pulls into memory. A message over either cap drops the offending file silently.
+MAX_ATTACHMENTS = 5
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+def is_supported_media(media_type: str) -> bool:
+    """True for media chief ingests natively — images and PDFs (DESIGN M8: no OCR)."""
+    base = media_type.split(";")[0].strip().lower()
+    return base.startswith("image/") or base == "application/pdf"
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """An inbound binary file (an owner image or PDF) carried with a message.
+
+    ``data`` is the raw bytes; the model sees them natively (vision / PDF), so there is
+    no text-extraction step. Kept frozen so :class:`Message` stays hashable.
+    """
+
+    media_type: str
+    data: bytes
+    filename: str | None = None
+
+
 @dataclass(frozen=True)
 class Message:
     """A normalized inbound message from any platform."""
@@ -275,13 +300,20 @@ class Message:
     thread_key: str
     tier: Tier
     sender_name: str | None = None
+    #: Owner-only image/PDF files (M8). A tuple keeps the dataclass frozen/hashable.
+    attachments: tuple[Attachment, ...] = ()
 
 
 class Engine(Protocol):
     """The slice of :class:`~chief.core.tasks.TaskManager` an adapter drives."""
 
     async def dispatch(
-        self, *, thread_key: str, text: str, is_general: bool = False
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        attachments: tuple[Attachment, ...] = (),
+        is_general: bool = False,
     ) -> None: ...
     async def dispatch_guest(
         self, *, thread_key: str, text: str, from_label: str | None = None
