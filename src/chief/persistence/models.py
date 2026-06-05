@@ -93,6 +93,10 @@ class RateLimit(Base):
     """Per-guest and global rate-limit counters (owned by M6)."""
 
     __tablename__ = "rate_limits"
+    # One row per scope: the counter is read-modify-write, so the constraint stops a
+    # racing insert from creating a duplicate row (which would later break the
+    # single-row read). check_and_increment also serializes under a lock.
+    __table_args__ = (UniqueConstraint("scope", name="uq_rate_limit_scope"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     scope: Mapped[str]  # "global" or a contact namespace

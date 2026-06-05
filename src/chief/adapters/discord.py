@@ -3,8 +3,8 @@
 Mirrors :mod:`chief.adapters.telegram` so both platforms run at once off one DB: a text
 channel is the casual inbox (the engine spawns a *thread* when a message warrants its
 own task, matching Telegram's General-topic model), an in-channel thread *is* a task,
-and the owner is the one id routed into the engine. Guests get the canned ack (full
-receptionist scope is M6).
+and the owner is the one id routed into the engine. Guests run through the shared M6
+receptionist gate when ``guest_enabled``; otherwise they get the canned ack.
 
 Outbound text flows back through :class:`DiscordTaskIO` (the engine's
 :class:`~chief.core.tasks.TaskIO` *and* the gate's
