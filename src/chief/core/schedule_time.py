@@ -18,7 +18,7 @@ from datetime import UTC, datetime, time, timedelta, tzinfo
 
 from croniter import croniter
 
-from ..persistence.schedules import KIND_ONCE, KIND_RECURRING
+from ..persistence.schedules import KIND_MONITOR, KIND_ONCE, KIND_RECURRING
 
 
 def _parse_hhmm(value: str) -> time:
@@ -37,18 +37,18 @@ def next_fire(
     ``after`` (even if already past) — a one-off never re-advances, so the tick treats
     a past ``next_run`` as due then disables it (``list_due`` is ``<=`` now).
 
-    ``recurring`` reads ``spec`` as a cron expression evaluated in ``tz`` from ``after``
-    (so DST shifts land on the right wall clock). A malformed/unsatisfiable ``spec`` or
-    an unknown ``kind`` returns ``None`` — the caller disables the schedule rather than
-    hot-looping (the schedule tool validates specs up front; this is defense in depth).
-    ``after`` must be UTC-aware.
+    ``recurring`` and ``monitor`` read ``spec`` as a cron expression evaluated in ``tz``
+    from ``after`` (so DST shifts land on the right wall clock); a monitor's cron is its
+    check *cadence*. A malformed/unsatisfiable ``spec`` or an unknown ``kind`` returns
+    ``None`` — the caller disables the schedule rather than hot-loop (the schedule tool
+    validates specs up front; this is defense in depth). ``after`` must be UTC-aware.
     """
     if kind == KIND_ONCE:
         fire = datetime.fromisoformat(spec)
         if fire.tzinfo is None:
             fire = fire.replace(tzinfo=tz)
         return fire.astimezone(UTC)
-    if kind == KIND_RECURRING:
+    if kind in (KIND_RECURRING, KIND_MONITOR):
         local_after = after.astimezone(tz)
         try:
             # croniter is untyped (get_next returns Any) — annotate to keep mypy strict.
