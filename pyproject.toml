@@ -11,6 +11,7 @@ dependencies = [
     "pydantic-settings>=2",
     "pyyaml>=6",
     "discord-py>=2",
+    "croniter>=3",
 ]
 
 [dependency-groups]
@@ -53,6 +54,11 @@ exclude = ['^docker/']
 # google-auth-oauthlib ships no py.typed; the Google OAuth helper imports it lazily.
 [[tool.mypy.overrides]]
 module = ["google_auth_oauthlib.*"]
+ignore_missing_imports = true
+
+# croniter ships no py.typed; used by chief.core.schedule_time for cron next-fire.
+[[tool.mypy.overrides]]
+module = ["croniter.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
