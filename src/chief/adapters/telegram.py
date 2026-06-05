@@ -16,6 +16,7 @@ map to forum topics.
 import asyncio
 import logging
 from dataclasses import replace
+from io import BytesIO
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -144,6 +145,25 @@ class TelegramTaskIO:
             await self._bot.send_message(
                 chat_id=chat_id, text=chunk, message_thread_id=thread_id or None
             )
+
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None:
+        """Upload ``data`` as a document to the thread (long-reply file output, M8)."""
+        chat_id, thread_id = _parse(thread_key)
+        document = BytesIO(data)
+        document.name = filename
+        await self._bot.send_document(
+            chat_id=chat_id,
+            document=document,
+            filename=filename,
+            caption=caption,
+            message_thread_id=thread_id or None,
+        )
 
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         chat_id, _ = _parse(like_thread_key)

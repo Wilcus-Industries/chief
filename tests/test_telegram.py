@@ -809,6 +809,19 @@ async def test_taskio_send_splits_long_text() -> None:
     assert bot.send_message.await_count == 3
 
 
+async def test_taskio_send_file_uploads_document() -> None:
+    bot = AsyncMock()
+
+    await TelegramTaskIO(bot).send_file("-100:7", "reply.md", b"data", caption="note")
+
+    kwargs = bot.send_document.await_args.kwargs
+    assert kwargs["chat_id"] == -100
+    assert kwargs["filename"] == "reply.md"
+    assert kwargs["caption"] == "note"
+    assert kwargs["message_thread_id"] == 7
+    assert kwargs["document"].read() == b"data"
+
+
 async def test_taskio_create_thread_returns_key() -> None:
     bot = AsyncMock()
     bot.create_forum_topic.return_value = SimpleNamespace(message_thread_id=88)

@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram.ext import Application
 
 from .adapters.base import Adapter, ReadyHook
-from .adapters.discord import DiscordAdapter, DiscordTaskIO
-from .adapters.telegram import TelegramAdapter, TelegramTaskIO
+from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
+from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
@@ -139,6 +139,8 @@ def build_engine(
         grace_seconds=settings.grace_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
         compaction_idle_seconds=settings.compaction_idle_seconds,
+        # The cap that decides split-vs-file output differs per platform (M8).
+        message_limit=TELEGRAM_LIMIT if platform == "telegram" else DISCORD_LIMIT,
         policy=policy,
         approvals=approvals,
         audit=audit,
