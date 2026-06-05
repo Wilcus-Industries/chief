@@ -835,9 +835,18 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   **Web** = the SDK built-ins WebSearch + WebFetch (GET-only), wired owner-only and un-gated
   (read-only). Shell + workspace ship **opt-in** (`shell_enabled`/`workspace_enabled` default
   off, mirroring the Google profile); web is live.
-- **M8 Gmail + Drive/Sheets + media:** add Gmail R/W (transparent signature); **enable the
-  Drive + Sheets servers built in M5** (flip `drive_enabled`/`sheets_enabled`); image + PDF
-  intake; smart-split/file output.
+- **M8 Gmail + Drive/Sheets + media — ✅ done.** Last Phase-2 milestone, four parts.
+  **Gmail R/W** (`tools/gmail/mcp.py`, compose svc behind the `google` profile): read/search/
+  summarize ALLOW, **send** ASK (approval card) as the owner with a transparent signature;
+  same one-token OAuth as calendar/drive/sheets. **Drive + Sheets** servers (built M5) are
+  now wired config-ready — owner activates the trio by flipping `gmail_enabled`/`drive_enabled`/
+  `sheets_enabled` on and re-minting the token over the widened scopes (no code change).
+  **Media intake** (owner-only, ≤5 attachments, ≤20 MB each): image + PDF are downloaded by
+  the adapter and threaded into the SDK turn as content blocks (`adapters/base.py:Attachment`,
+  `core/session.py`); guests stay text-only by construction. **Smart output**: replies that
+  overflow the per-platform limit are boundary-split (fenced code stays whole) or, when very
+  long / a single code block won't fit, sent as a timestamped `.md` file
+  (`split_message`/`should_send_as_file`, `core/tasks.py:_emit_final`).
 
 **Phase 3 — Proactivity & extensibility**
 - **M9 scheduler:** reminders + recurring + monitors, quiet hours, usage budgeting, uptime
