@@ -460,7 +460,7 @@ Single VPS, one `docker compose`. **Outbound-only** (no public HTTP ingress); Te
 - **`core`** — chat adapters (Telegram long-poll + Discord gateway), agent orchestrator,
   memory, permission gate, sqlite. Holds the secrets. `restart: unless-stopped`, healthcheck.
 - **`sandbox`** — locked-down shell/code worker: no secrets, restricted FS (scratch
-  workspace only), limited/no network. Talks to `core` over a narrow RPC. *(M7.)*
+  workspace only), limited/no network. Talks to `core` over a narrow RPC. *Built (M7).*
 - **`mcp-calendar` / `mcp-drive` / `mcp-sheets`** — chief's own FastMCP servers, one per
   service (streamable-HTTP at `http://mcp-<svc>:<port>/mcp`, :8003/:8001/:8002, never
   host-published), behind the **`google` compose profile** (a plain `up` skips them). One
@@ -588,8 +588,11 @@ card:
   with a server-side **row-1 (header) write guard**; wraps pinned
   `xing5/mcp-google-sheets` 0.6.3. *Server built (M5), disabled until M8.*
 - **Web** — search + fetch (read-only GET is un-gated; POST/forms are effectful → gated).
-- **Shell/code** — sandbox container, permission-gated.
-- **File workspace** — scratch dir (Read/Write/Edit), un-gated inside the workspace.
+  SDK built-ins (WebSearch/WebFetch). *Live (M7).*
+- **Shell/code** — sandbox container, permission-gated (default-ask per command). *Built M7,
+  opt-in (`shell_enabled`).*
+- **File workspace** — scratch dir (Read/Write/Edit), gate-confined to the workspace. *Built
+  M7, opt-in (`workspace_enabled`).*
 - **Memory, scheduler/monitors** — owner-tier management tools.
 
 **Guest toolset (v1):** take-a-message, check-availability (free/busy only), request-booking.
@@ -640,7 +643,7 @@ permission gate, command-policy safe-matching, the scheduler/monitors, and tier 
 chief/
   config.yaml                # non-secret config
   docker-compose.yml
-  Dockerfile.core  Dockerfile.sandbox
+  Dockerfile.core            # core image; per-service images live under docker/ (mcp-*, sandbox)
   BOOTSTRAP.md               # agent-followed setup runbook
   src/chief/
     config.py                # pydantic-settings
@@ -667,14 +670,14 @@ chief/
     tools/
       google/auth.py         # host-only one-time OAuth → shared token (cal+drive+sheets)
       calendar/mcp.py  drive/mcp.py  sheets/mcp.py   # per-server tool catalogs (read/write split)
-      web.py  workspace.py  shell.py   # gate-wrapped; shell → sandbox RPC (M7)
+      shell.py               # owner bash → sandbox RPC (M7); web=SDK WebSearch/WebFetch, workspace=gate-confined dir (no module)
       guest.py               # take-message / availability / booking (M6)
     scheduler/scheduler.py   # reminders / recurring / monitors
     skills/                  # registry + setup_morning_brief/
     usage/budget.py          # own-share accounting + citizenship backoff
     persistence/             # sqlite (tasks/contacts/approvals/policy/limits/schedules)
     obs/                     # logging / audit / uptime heartbeat
-  sandbox/                   # locked-down worker image (RPC server runs shell)
+  docker/sandbox/            # locked-down worker image; RPC server = src/chief/sandbox/shell_server.py
   tests/
 ```
 
@@ -808,8 +811,16 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   disabled** (`drive_enabled`/`sheets_enabled: false`) — flipping them on, plus Gmail, is M8.
 - **M6 guest mode:** tier isolation by construction, 3 guest tools, notify-on-first-contact
   admission, booking flow, rate limits, block/mute.
-- **M7 shell + workspace + web:** sandbox worker container behind the gate; file workspace;
-  web search/fetch.
+- **M7 shell + workspace + web — ✅ done.** Secret-free **sandbox** worker container
+  (`docker/sandbox`, compose profile `sandbox`): read-only rootfs + tmpfs, no secrets, mem/
+  PID/CPU caps, a long-lived bash per task over a narrow stdlib-asyncio TCP RPC
+  (`src/chief/sandbox/shell_server.py` ← `tools/shell.py`). The owner bash tool is
+  **default-ask gated** — every command routes through the approval card unless pre-blessed.
+  **File workspace** = a `/workspace` volume shared core↔sandbox; the gate widens Read/Glob/
+  Grep to memory ∪ workspace and hard-confines Write/Edit to the workspace (`gate/gate.py`).
+  **Web** = the SDK built-ins WebSearch + WebFetch (GET-only), wired owner-only and un-gated
+  (read-only). Shell + workspace ship **opt-in** (`shell_enabled`/`workspace_enabled` default
+  off, mirroring the Google profile); web is live.
 - **M8 Gmail + Drive/Sheets + media:** add Gmail R/W (transparent signature); **enable the
   Drive + Sheets servers built in M5** (flip `drive_enabled`/`sheets_enabled`); image + PDF
   intake; smart-split/file output.
