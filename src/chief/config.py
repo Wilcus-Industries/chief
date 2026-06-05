@@ -102,10 +102,9 @@ class Settings(BaseSettings):
     # streamable HTTP at <svc>_mcp_url (MCP at /mcp) into owner sessions: reads ALLOWed,
     # writes approval-gated, deferred ops blocked. One shared OAuth token covers all
     # four (see secrets/README.md). owner_tz frames calendar booking times (an IANA
-    # name, e.g. America/New_York). gmail_signature is the transparent "sent by an
-    # assistant" line the gmail container appends to every outbound message ({owner} is
-    # filled with owner_name); it reaches the container via compose env, not this
-    # object. Each defaults off until its token + container exist.
+    # name, e.g. America/New_York). The gmail container's transparent signature is not a
+    # Settings field: it reads the GMAIL_SIGNATURE compose env at its own startup (see
+    # secrets/README.md). Each defaults off until its token + container exist.
     calendar_enabled: bool = False
     calendar_mcp_url: str = "http://mcp-calendar:8003/mcp"
     drive_enabled: bool = False
@@ -114,7 +113,6 @@ class Settings(BaseSettings):
     sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
     gmail_enabled: bool = False
     gmail_mcp_url: str = "http://mcp-gmail:8004/mcp"
-    gmail_signature: str = "—\nSent by {owner}'s assistant on their behalf."
     owner_tz: str = "UTC"
 
     # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google

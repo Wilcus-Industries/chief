@@ -68,9 +68,9 @@ sheets_enabled: false
 sheets_mcp_url: http://mcp-sheets:8002/mcp
 gmail_enabled: false
 gmail_mcp_url: http://mcp-gmail:8004/mcp
-# Transparent signature appended server-side to every message chief sends. {owner} fills
-# from owner_name. Set GMAIL_SIGNATURE in the environment to override per-deploy.
-# gmail_signature: "—\nSent by {owner}'s assistant on their behalf."
+# Transparent signature appended server-side to every message chief sends. Not a config
+# key — set the GMAIL_SIGNATURE environment variable (see secrets/README.md); {owner}
+# fills from OWNER_NAME. Default: "Sent by {owner}'s assistant on their behalf."
 owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America/New_York
 
 # Shell sandbox + file workspace (M7, owner-only, opt-in). Bring up the secret-free
