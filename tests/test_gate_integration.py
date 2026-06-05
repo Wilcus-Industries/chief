@@ -32,6 +32,7 @@ class _Gate:
         approvals: ApprovalManager,
         audit: RecordingAudit,
         io: FakeIO,
+        extra_read_only: frozenset[str] = frozenset(),
     ) -> None:
         self.policy = policy
         self.approvals = approvals
@@ -46,7 +47,11 @@ class _Gate:
             self.status.append("running")
 
         self.hook = build_pretool_hook(
-            thread_key="-100:5", tier="owner", policy=policy, audit=audit
+            thread_key="-100:5",
+            tier="owner",
+            policy=policy,
+            audit=audit,
+            extra_read_only=extra_read_only,
         )
         self.can_use_tool = build_can_use_tool(
             task_id=1,
@@ -58,6 +63,7 @@ class _Gate:
             audit=audit,
             on_waiting=on_waiting,
             on_running=on_running,
+            extra_read_only=extra_read_only,
         )
 
     async def run_hook(self, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -80,6 +86,7 @@ async def _gate(
     never: list[tuple[str, str | None]] | None = None,
     approved: list[tuple[str, str | None]] | None = None,
     timeout: float = 600.0,
+    extra_read_only: frozenset[str] = frozenset(),
 ) -> _Gate:
     io, audit = FakeIO(), RecordingAudit()
     policy = PolicyStore(session_factory, audit=audit)
@@ -91,7 +98,13 @@ async def _gate(
         audit=audit,
         timeout_seconds=timeout,
     )
-    return _Gate(policy=policy, approvals=approvals, audit=audit, io=io)
+    return _Gate(
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        io=io,
+        extra_read_only=extra_read_only,
+    )
 
 
 def _events(audit: RecordingAudit, name: str) -> list[dict[str, object]]:
@@ -115,6 +128,25 @@ async def test_read_only_allows_through_both_callbacks(
     assert isinstance(result, PermissionResultAllow)
     assert gate.status == []  # no approval round-trip
     assert _events(gate.audit, "tool_call")[0]["decision"] == "allow"
+
+
+async def test_guest_admin_tool_allows_with_no_card(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The owner's manage_guest tool mutates state but is owner-initiated + reversible —
+    # the engine puts it in extra_read_only so it ALLOWs with no approval card.
+    admin = "mcp__chief_guest_admin__manage_guest"
+    gate = await _gate(session_factory, extra_read_only=frozenset({admin}))
+
+    decision = await gate.run_hook(admin, {"name": "alice", "action": "block"})
+    result = await gate.can_use_tool(
+        admin, {"name": "alice", "action": "block"}, ToolPermissionContext()
+    )
+
+    assert decision == "allow"
+    assert isinstance(result, PermissionResultAllow)
+    assert gate.io.cards == []  # never prompted the owner for their own command
+    assert gate.status == []
 
 
 # ---- NEVER -------------------------------------------------------------------

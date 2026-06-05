@@ -30,14 +30,21 @@ from ..persistence.contacts import get_or_create_contact
 from .base import (
     CALLBACK_PREFIX,
     Adapter,
+    AdmissionAction,
+    AdmissionCard,
     ApprovalResolver,
     Engine,
     MemoryReader,
     Message,
     ReadyHook,
+    ReplyFn,
     Tier,
+    admission_payload,
+    apply_admission,
     classify_tier,
     default_branch_title,
+    handle_guest_message,
+    parse_admission,
     parse_callback,
     split_message,
 )
@@ -80,6 +87,30 @@ def _approval_view(approval_id: int) -> discord.ui.View:
                 custom_id=f"{CALLBACK_PREFIX}:{approval_id}:{action.value}",
             )
         )
+    return view
+
+
+def _admission_view(contact_id: int) -> discord.ui.View:
+    """The two-button first-contact card (M6): admit the guest, or block them.
+
+    Like the approval view, the decision rides in each button's ``custom_id``, so a tap
+    resolves centrally in :meth:`DiscordAdapter.on_interaction` with no per-view state.
+    """
+    view = discord.ui.View(timeout=None)
+    view.add_item(
+        discord.ui.Button(
+            label="✅ Admit",
+            style=discord.ButtonStyle.success,
+            custom_id=admission_payload(contact_id, AdmissionAction.ADMIT),
+        )
+    )
+    view.add_item(
+        discord.ui.Button(
+            label="🚫 Block",
+            style=discord.ButtonStyle.secondary,
+            custom_id=admission_payload(contact_id, AdmissionAction.BLOCK),
+        )
+    )
     return view
 
 
@@ -134,6 +165,13 @@ class DiscordTaskIO:
         message = await channel.fetch_message(int(message_str))
         await message.edit(content=text, view=None)
 
+    async def send_admission_card(self, route: str, card: AdmissionCard) -> None:
+        """Post a first-contact admit/block card to ``route`` (M6, no ref tracked)."""
+        channel_id, thread_id = _parse(route)
+        target_id = thread_id or channel_id
+        target = cast(discord.abc.Messageable, await self._resolve(target_id))
+        await target.send(card.text, view=_admission_view(card.contact_id))
+
 
 class DiscordAdapter(Adapter):
     """Owner-aware Discord adapter that routes messages into the task engine."""
@@ -149,6 +187,12 @@ class DiscordAdapter(Adapter):
         session_factory: async_sessionmaker[AsyncSession],
         approvals: ApprovalResolver | None = None,
         memory: MemoryReader | None = None,
+        io: DiscordTaskIO | None = None,
+        guest_enabled: bool = False,
+        front_desk_thread_key: str | None = None,
+        guest_rate: int = 10,
+        guest_rate_window: int = 3600,
+        guest_global_rate: int = 60,
     ) -> None:
         self._client = client
         self._token = token
@@ -158,6 +202,14 @@ class DiscordAdapter(Adapter):
         self._session_factory = session_factory
         self._approvals = approvals
         self._memory = memory
+        self._io = io
+        self._guest_enabled = guest_enabled
+        self._front_desk_thread_key = front_desk_thread_key
+        self._guest_rate = guest_rate
+        self._guest_rate_window = guest_rate_window
+        self._guest_global_rate = guest_global_rate
+        # Contacts already prompted this run — dedupe the admission card (see Telegram).
+        self._prompted_admission: set[int] = set()
         self._ready_hook: ReadyHook | None = None
         self._ready_fired = False
         self._register()
@@ -212,7 +264,14 @@ class DiscordAdapter(Adapter):
         await self._record(normalized)
         if normalized.tier is not Tier.OWNER:
             logger.info("guest message", extra={"sender_id": normalized.sender_id})
-            await message.channel.send(self._guest_ack)
+            if not self._guest_enabled or self._io is None:
+                await message.channel.send(self._guest_ack)
+                return
+
+            async def reply(text: str) -> None:
+                await message.channel.send(text)
+
+            await self._handle_guest(normalized, reply)
             return
         text = normalized.text
         if text.startswith("/"):
@@ -222,6 +281,25 @@ class DiscordAdapter(Adapter):
         logger.info("owner message", extra={"thread_key": normalized.thread_key})
         await self._engine.dispatch(
             thread_key=normalized.thread_key, text=text, is_general=is_general
+        )
+
+    async def _handle_guest(self, message: Message, reply: ReplyFn) -> None:
+        """Run the shared guest gate (block / rate / mute / admit / dispatch, M6)."""
+        assert self._io is not None  # narrowed by the caller's guest_enabled check
+        if self._front_desk_thread_key is None:
+            return  # never relay/admit with nowhere to route (config also guards this)
+        await handle_guest_message(
+            message=message,
+            io=self._io,
+            engine=self._engine,
+            session_factory=self._session_factory,
+            reply=reply,
+            front_desk=self._front_desk_thread_key,
+            guest_ack=self._guest_ack,
+            rate_limit=self._guest_rate,
+            rate_window_seconds=self._guest_rate_window,
+            global_limit=self._guest_global_rate,
+            prompted=self._prompted_admission,
         )
 
     async def _run_command(
@@ -284,23 +362,47 @@ class DiscordAdapter(Adapter):
                 await channel.send(f'→ Branched into "{title}".')
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Resolve an approval card button tap (owner only)."""
+        """Resolve an approval or admission card button tap (owner only)."""
         if interaction.type is not discord.InteractionType.component:
             return
         data = cast(dict[str, Any], interaction.data or {})
         custom_id = data.get("custom_id")
         if not isinstance(custom_id, str):
             return
-        parsed = parse_callback(custom_id)
-        if parsed is None or self._approvals is None:
+        approval = parse_callback(custom_id)
+        admission = parse_admission(custom_id)
+        if approval is None and admission is None:
             return
         user = interaction.user
         if classify_tier(sender_id=user.id, owner_id=self._owner_id) is not Tier.OWNER:
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
-        approval_id, action = parsed
-        await self._approvals.resolve(approval_id, action, decided_by=str(user.id))
-        await interaction.response.defer()
+        if approval is not None and self._approvals is not None:
+            approval_id, action = approval
+            await self._approvals.resolve(approval_id, action, decided_by=str(user.id))
+            await interaction.response.defer()
+            return
+        if admission is not None:
+            await self._resolve_admission(interaction, *admission)
+
+    async def _resolve_admission(
+        self,
+        interaction: discord.Interaction,
+        contact_id: int,
+        action: AdmissionAction,
+    ) -> None:
+        """Apply an admit/block tap and rewrite the card to its outcome (owner only)."""
+        contact = await apply_admission(
+            self._session_factory, contact_id=contact_id, action=action
+        )
+        self._prompted_admission.discard(contact_id)
+        who = contact.display_name if contact and contact.display_name else "the guest"
+        outcome = (
+            f"✅ Admitted {who}."
+            if action is AdmissionAction.ADMIT
+            else f"🚫 Blocked {who}."
+        )
+        await interaction.response.edit_message(content=outcome, view=None)
 
     async def on_ready(self) -> None:
         """Fire the ready hook once (the gateway event re-fires on reconnect)."""

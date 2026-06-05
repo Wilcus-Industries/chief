@@ -15,8 +15,19 @@ guest_model: claude-sonnet-4-6
 # sqlite file path (inside the container this is on the persisted volume).
 db_path: /data/chief.db
 
-# What a guest hears back for now (full receptionist scope is M6).
+# What a guest hears back: the canned ack when guest mode is off, and the holding ack
+# while a new contact awaits admission when it's on.
 guest_ack: Thanks for reaching out — I'm an assistant and I've passed your message along.
+
+# Guest receptionist (M6, opt-in). With guest_enabled on, guests route into a tight,
+# tier-isolated session (leave-a-message + — when calendar_enabled — free/busy +
+# owner-approved booking) instead of the canned ack. Requires front_desk_thread_key
+# (where admissions, relays, and guest approvals land). The rate limits guard the owner's
+# Max limits: a per-guest cap and a global guest budget over a shared window.
+guest_enabled: false
+# guest_rate_per_window: 10
+# guest_rate_window_seconds: 3600
+# guest_global_rate_per_window: 60
 
 # Task engine (M2).
 concurrency: 3              # max tasks actively generating a turn at once
@@ -28,7 +39,7 @@ classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgme
 # an approval card and blocks until a button tap or this timeout (then fail-closed deny).
 approval_timeout_seconds: 600  # no decision within this window = deny
 audit_log_path: /data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
-# front_desk_thread_key:           # M6 stub — guest-originated approvals route here
+# front_desk_thread_key:           # required by guest_enabled — admissions/relays/approvals land here
 # Boot-seeded policy rules (idempotent). Each item: {tool, arg_pattern?}; arg_pattern
 # omitted = whole-tool rule. Real entries arrive with the tools they guard (M5/M7/M8).
 never_seed: []      # tools/commands hard-denied with no prompt

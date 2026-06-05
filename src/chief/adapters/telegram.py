@@ -14,6 +14,7 @@ map to forum topics.
 
 import asyncio
 import logging
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -32,14 +33,21 @@ from ..persistence.contacts import get_or_create_contact
 from .base import (
     CALLBACK_PREFIX,
     Adapter,
+    AdmissionAction,
+    AdmissionCard,
     ApprovalResolver,
     Engine,
     MemoryReader,
     Message,
     ReadyHook,
+    ReplyFn,
     Tier,
+    admission_payload,
+    apply_admission,
     classify_tier,
     default_branch_title,
+    handle_guest_message,
+    parse_admission,
     parse_callback,
 )
 from .base import (
@@ -76,6 +84,28 @@ def _approval_keyboard(approval_id: int) -> InlineKeyboardMarkup:
                 button("⭐ Always allow", ApprovalAction.ALWAYS_ALLOW),
                 button("🚫 Always deny", ApprovalAction.ALWAYS_DENY),
             ],
+        ]
+    )
+
+
+def _admission_keyboard(contact_id: int) -> InlineKeyboardMarkup:
+    """The two-button first-contact card (M6): admit the guest, or block them."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Admit",
+                    callback_data=admission_payload(
+                        contact_id, AdmissionAction.ADMIT
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "🚫 Block",
+                    callback_data=admission_payload(
+                        contact_id, AdmissionAction.BLOCK
+                    ),
+                ),
+            ]
         ]
     )
 
@@ -131,6 +161,16 @@ class TelegramTaskIO:
             text=text, chat_id=int(chat_str), message_id=int(message_str)
         )
 
+    async def send_admission_card(self, route: str, card: AdmissionCard) -> None:
+        """Post a first-contact admit/block card to ``route`` (M6, no ref tracked)."""
+        chat_id, thread_id = _parse(route)
+        await self._bot.send_message(
+            chat_id=chat_id,
+            text=card.text,
+            message_thread_id=thread_id or None,
+            reply_markup=_admission_keyboard(card.contact_id),
+        )
+
 
 class TelegramAdapter(Adapter):
     """Owner-aware Telegram adapter that routes messages into the task engine."""
@@ -145,6 +185,12 @@ class TelegramAdapter(Adapter):
         session_factory: async_sessionmaker[AsyncSession],
         approvals: ApprovalResolver | None = None,
         memory: MemoryReader | None = None,
+        io: TelegramTaskIO | None = None,
+        guest_enabled: bool = False,
+        front_desk_thread_key: str | None = None,
+        guest_rate: int = 10,
+        guest_rate_window: int = 3600,
+        guest_global_rate: int = 60,
     ) -> None:
         self._app = application
         self._engine = engine
@@ -153,6 +199,15 @@ class TelegramAdapter(Adapter):
         self._session_factory = session_factory
         self._approvals = approvals
         self._memory = memory
+        self._io = io
+        self._guest_enabled = guest_enabled
+        self._front_desk_thread_key = front_desk_thread_key
+        self._guest_rate = guest_rate
+        self._guest_rate_window = guest_rate_window
+        self._guest_global_rate = guest_global_rate
+        # Contacts already prompted this run — dedupe the admission card so a pending
+        # guest who keeps messaging doesn't re-card the owner (their notes still relay).
+        self._prompted_admission: set[int] = set()
         self._stop = asyncio.Event()
         self._register()
 
@@ -205,8 +260,17 @@ class TelegramAdapter(Adapter):
         await self._record(message)
         if message.tier is not Tier.OWNER:
             logger.info("guest message", extra={"sender_id": message.sender_id})
-            if update.effective_message is not None:
-                await update.effective_message.reply_text(self._guest_ack)
+            tg_message = update.effective_message
+            if not self._guest_enabled or self._io is None:
+                if tg_message is not None:
+                    await tg_message.reply_text(self._guest_ack)
+                return
+
+            async def reply(text: str) -> None:
+                if tg_message is not None:
+                    await tg_message.reply_text(text)
+
+            await self._handle_guest(message, reply)
             return
         chat = update.effective_chat
         is_general = bool(getattr(chat, "is_forum", False)) and (
@@ -215,6 +279,25 @@ class TelegramAdapter(Adapter):
         logger.info("owner message", extra={"thread_key": message.thread_key})
         await self._engine.dispatch(
             thread_key=message.thread_key, text=message.text, is_general=is_general
+        )
+
+    async def _handle_guest(self, message: Message, reply: ReplyFn) -> None:
+        """Run the shared guest gate (block / rate / mute / admit / dispatch, M6)."""
+        assert self._io is not None  # narrowed by the caller's guest_enabled check
+        if self._front_desk_thread_key is None:
+            return  # never relay/admit with nowhere to route (config also guards this)
+        await handle_guest_message(
+            message=message,
+            io=self._io,
+            engine=self._engine,
+            session_factory=self._session_factory,
+            reply=reply,
+            front_desk=self._front_desk_thread_key,
+            guest_ack=self._guest_ack,
+            rate_limit=self._guest_rate,
+            rate_window_seconds=self._guest_rate_window,
+            global_limit=self._guest_global_rate,
+            prompted=self._prompted_admission,
         )
 
     def _owner_thread(self, update: Update) -> str | None:
@@ -324,13 +407,35 @@ class TelegramAdapter(Adapter):
             await query.answer("Not allowed.")
             return
         parsed = parse_callback(query.data)
-        if parsed is None or self._approvals is None:
+        if parsed is not None and self._approvals is not None:
+            approval_id, action = parsed
+            await self._approvals.resolve(approval_id, action, decided_by=str(user.id))
             await query.answer()
             return
-        approval_id, action = parsed
-        await self._approvals.resolve(
-            approval_id, action, decided_by=str(user.id)
+        admission = parse_admission(query.data)
+        if admission is not None:
+            await self._resolve_admission(query, *admission)
+            return
+        await query.answer()
+
+    async def _resolve_admission(
+        self, query: Any, contact_id: int, action: AdmissionAction
+    ) -> None:
+        """Apply an admit/block tap and rewrite the card to its outcome (owner only)."""
+        contact = await apply_admission(
+            self._session_factory, contact_id=contact_id, action=action
         )
+        self._prompted_admission.discard(contact_id)
+        who = contact.display_name if contact and contact.display_name else "the guest"
+        outcome = (
+            f"✅ Admitted {who}."
+            if action is AdmissionAction.ADMIT
+            else f"🚫 Blocked {who}."
+        )
+        try:
+            await query.edit_message_text(outcome)
+        except Exception:  # editing is best-effort; the decision already persisted
+            logger.debug("admission card edit failed", exc_info=True)
         await query.answer()
 
     async def run(self, on_ready: ReadyHook | None = None) -> None:

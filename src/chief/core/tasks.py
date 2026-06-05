@@ -65,6 +65,7 @@ from ..persistence.tasks import (
     set_status,
 )
 from ..tools.google import GoogleService
+from ..tools.guest import GuestAdminService, GuestService
 from ..tools.shell import ShellService
 from . import classify
 from .personas import build_system_prompt
@@ -204,6 +205,9 @@ class TaskManager:
         owner_tz: str = "UTC",
         shell_service: ShellService | None = None,
         workspace_dir: str | None = None,
+        guest_model: str | None = None,
+        guest_calendar_service: GoogleService | None = None,
+        guest_admin_service: GuestAdminService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -230,6 +234,9 @@ class TaskManager:
         self._owner_tz = owner_tz
         self._shell_service = shell_service
         self._workspace_dir = workspace_dir
+        self._guest_model = guest_model
+        self._guest_calendar_service = guest_calendar_service
+        self._guest_admin_service = guest_admin_service
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -250,6 +257,20 @@ class TaskManager:
             thread_key = new_key
             is_casual = False  # a spawned topic is a real, full-memory task
         task = await self._ensure_task(thread_key, is_casual=is_casual)
+        await self._submit(task, text)
+
+    async def dispatch_guest(
+        self, *, thread_key: str, text: str, from_label: str | None = None
+    ) -> None:
+        """Route a guest DM into its flat per-DM session (no topic spawn, guest model).
+
+        Unlike :meth:`dispatch`, a guest never spawns a forum topic: a 1:1 DM is one
+        flat session keyed by its ``thread_key``. ``from_label`` is the sender's display
+        name, baked into the relay tool so the owner sees who left a message.
+        """
+        task = await self._ensure_task(
+            thread_key, tier="guest", from_label=from_label
+        )
         await self._submit(task, text)
 
     async def cancel(self, thread_key: str) -> bool:
@@ -301,7 +322,12 @@ class TaskManager:
     # ---- per-task machinery ---------------------------------------------
 
     async def _ensure_task(
-        self, thread_key: str, *, tier: str = "owner", is_casual: bool = False
+        self,
+        thread_key: str,
+        *,
+        tier: str = "owner",
+        is_casual: bool = False,
+        from_label: str | None = None,
     ) -> _RunningTask:
         existing = self._tasks.get(thread_key)
         if existing is not None:
@@ -320,13 +346,19 @@ class TaskManager:
             )
             db_id, resume = db.id, db.sdk_session_id
         gate_kwargs = self._session_kwargs(
-            thread_key=thread_key, tier=tier, db_id=db_id
+            thread_key=thread_key, tier=tier, db_id=db_id, from_label=from_label
+        )
+        # Guests run on the guest model (Sonnet, never Opus); the owner on theirs.
+        model = (
+            self._owner_model
+            if tier == "owner"
+            else (self._guest_model or self._owner_model)
         )
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
             session=self._session_factory_sdk(
-                model=self._owner_model, resume=resume, **gate_kwargs
+                model=model, resume=resume, **gate_kwargs
             ),
             queue=asyncio.Queue(),
             tier=tier,
@@ -336,13 +368,15 @@ class TaskManager:
         return rt
 
     def _session_kwargs(
-        self, *, thread_key: str, tier: str, db_id: int
+        self, *, thread_key: str, tier: str, db_id: int, from_label: str | None = None
     ) -> dict[str, Any]:
         """Assemble the SDK session kwargs (gate + memory/tool scoping) for a thread.
 
         Shared by :meth:`_ensure_task`, casual reseed, and :meth:`branch` so a session
         is built the same way wherever it originates (no per-call drift). ``resume`` /
-        ``fork_session`` are layered on by the caller — they vary per origin.
+        ``fork_session`` are layered on by the caller — they vary per origin. The owner
+        and guest tool surfaces diverge sharply (tier isolation by construction), so
+        each is wired by its own helper; ``from_label`` is the guest's display name.
         """
         can_use_tool, hooks = self._build_gate(
             task_id=db_id, thread_key=thread_key, tier=tier
@@ -356,64 +390,109 @@ class TaskManager:
         # Google deferred ops (delete) are appended below, where services are in scope.
         disallowed_tools = list(DISALLOWED_BUILTINS)
         gate_kwargs["disallowed_tools"] = disallowed_tools
-        if self._memory is not None:
-            # M4: only owner sessions reach dispatch (telegram short-circuits guests),
-            # so cwd + memory tools are owner-scoped in practice. build_system_prompt
-            # already withholds the owner index from a guest prompt — but M6 will route
-            # guests through here, and cwd/allowed_tools below are *not* tier-scoped, so
-            # gate them per-tier then or a guest gets Read/Glob/Grep over the owner's
-            # memory dir.
-            owner = tier == "owner"
-            # Google servers, web/meta, shell, and the workspace are owner-only (guests
-            # stay narrow — only the memory file tools).
-            services = self._google_services if owner else ()
-            workspace_on = owner and self._workspace_dir is not None
-            shell_on = owner and self._shell_service is not None
-            allowed = list(MEMORY_TOOLS)
-            if owner:
-                allowed += list(WEB_META_TOOLS)
-            if workspace_on:
-                # Write/Edit join the allow-list; the gate confines them to /workspace.
-                allowed += list(WORKSPACE_TOOLS)
-            for svc in services:
-                # Reads only — writes stay off the allow-list so they reach approval.
-                allowed += list(svc.read_tools)
-            gate_kwargs.update(
-                system_prompt=build_system_prompt(
-                    tier=tier,
-                    memory=self._memory,
-                    owner_name=self._owner_name,
-                    google_services=frozenset(svc.name for svc in services),
-                    owner_tz=self._owner_tz,
-                    workspace_enabled=workspace_on,
-                    shell_enabled=shell_on,
-                ),
-                cwd=self._memory_dir,
-                allowed_tools=allowed,
-            )
-            # Each Google container (docker/mcp-*) + the in-process shell server. Google
-            # writes and the shell tool are absent from allowed_tools, so they reach
-            # can_use_tool → approval; Google deferred ops are blocked. Google reads
-            # are pre-approved above + ALLOWed by the gate's extra_read_only.
-            mcp_servers: dict[str, Any] = {
-                svc.server_name: svc.server_config() for svc in services
-            }
-            if shell_on:
-                shell = self._shell_service
-                assert shell is not None  # narrowed by shell_on
-                # Built per task: the bash closure addresses THIS task's own shell
-                # (keyed by thread_key), since an in-process MCP handler gets no caller
-                # context. Kept out of allowed_tools → routes to can_use_tool → ASK.
-                mcp_servers[shell.server_name] = shell.server_config(
-                    session_key=thread_key
-                )
-            if mcp_servers:
-                gate_kwargs["mcp_servers"] = mcp_servers
-            # Google deferred ops (delete) refused on top of the always-disallowed
-            # built-in shell wired above.
-            for svc in services:
-                disallowed_tools += list(svc.deferred_tools)
+        if self._memory is None:
+            return gate_kwargs
+        if tier == "owner":
+            self._wire_owner_session(gate_kwargs, thread_key, disallowed_tools)
+        else:
+            self._wire_guest_session(gate_kwargs, from_label)
         return gate_kwargs
+
+    def _wire_owner_session(
+        self, gate_kwargs: dict[str, Any], thread_key: str, disallowed_tools: list[str]
+    ) -> None:
+        """Wire the owner's full surface: memory + web + Google + shell + admin."""
+        assert self._memory is not None
+        services = self._google_services
+        workspace_on = self._workspace_dir is not None
+        shell_on = self._shell_service is not None
+        admin = self._guest_admin_service
+        allowed = list(MEMORY_TOOLS) + list(WEB_META_TOOLS)
+        if workspace_on:
+            # Write/Edit join the allow-list; the gate confines them to /workspace.
+            allowed += list(WORKSPACE_TOOLS)
+        for svc in services:
+            # Reads only — writes stay off the allow-list so they reach approval.
+            allowed += list(svc.read_tools)
+        if admin is not None:
+            # Owner-initiated, reversible → pre-approved (no card) to block/mute guests.
+            allowed.append(admin.tool_name)
+        gate_kwargs.update(
+            system_prompt=build_system_prompt(
+                tier="owner",
+                memory=self._memory,
+                owner_name=self._owner_name,
+                google_services=frozenset(svc.name for svc in services),
+                owner_tz=self._owner_tz,
+                workspace_enabled=workspace_on,
+                shell_enabled=shell_on,
+                guest_admin_enabled=admin is not None,
+            ),
+            cwd=self._memory_dir,
+            allowed_tools=allowed,
+        )
+        # Each Google container (docker/mcp-*) + the in-process shell server. Google
+        # writes and the shell tool are absent from allowed_tools, so they reach
+        # can_use_tool → approval; Google deferred ops are blocked. Google reads are
+        # pre-approved above + ALLOWed by the gate's extra_read_only.
+        mcp_servers: dict[str, Any] = {
+            svc.server_name: svc.server_config() for svc in services
+        }
+        if shell_on:
+            shell = self._shell_service
+            assert shell is not None  # narrowed by shell_on
+            # Built per task: the bash closure addresses THIS task's own shell (keyed by
+            # thread_key), since an in-process MCP handler gets no caller context. Kept
+            # out of allowed_tools → routes to can_use_tool → ASK.
+            mcp_servers[shell.server_name] = shell.server_config(session_key=thread_key)
+        if admin is not None:
+            mcp_servers[admin.server_name] = admin.server_config()
+        if mcp_servers:
+            gate_kwargs["mcp_servers"] = mcp_servers
+        # Google deferred ops (delete) refused on top of the always-disallowed built-in
+        # shell wired above.
+        for svc in services:
+            disallowed_tools += list(svc.deferred_tools)
+
+    def _wire_guest_session(
+        self, gate_kwargs: dict[str, Any], from_label: str | None
+    ) -> None:
+        """Wire ONLY the guest receptionist surface — never the owner's memory or cwd.
+
+        take-a-message relays to the Front Desk; the narrowed calendar (when wired) adds
+        free/busy reads + an approval-gated booking. No memory file tools, no memory
+        cwd, no web/shell/workspace — tier isolation by construction.
+        """
+        assert self._memory is not None
+        front_desk = self._front_desk_thread_key
+        allowed: list[str] = []
+        mcp_servers: dict[str, Any] = {}
+        if front_desk is not None:
+
+            async def relay(text: str) -> None:
+                await self._io.send(front_desk, text)
+
+            guest_svc = GuestService(relay=relay, from_label=from_label or "a visitor")
+            allowed.append(guest_svc.tool_name)
+            mcp_servers[guest_svc.server_name] = guest_svc.server_config()
+        cal = self._guest_calendar_service
+        if cal is not None:
+            allowed += list(cal.read_tools)  # free/busy pre-approved; create-event ASKs
+            mcp_servers[cal.server_name] = cal.server_config()
+        gate_kwargs.update(
+            system_prompt=build_system_prompt(
+                tier="guest",
+                memory=self._memory,
+                owner_name=self._owner_name,
+                google_services=(
+                    frozenset({cal.name}) if cal is not None else frozenset()
+                ),
+                owner_tz=self._owner_tz,
+            ),
+            allowed_tools=allowed,
+        )
+        if mcp_servers:
+            gate_kwargs["mcp_servers"] = mcp_servers
 
     def _build_gate(
         self, *, task_id: int, thread_key: str, tier: str
@@ -426,21 +505,37 @@ class TaskManager:
         """
         if self._policy is None or self._approvals is None or self._audit is None:
             return None, None
-        # Google reads ALLOW with no card; the names live with each MCP catalog so the
-        # gate stays MCP-agnostic. Owner-only — guests get no Google tools.
-        services = self._google_services if tier == "owner" else ()
+        # Calendar reads ALLOW with no card; the names live with each MCP catalog so the
+        # gate stays MCP-agnostic. The owner sees the full Google set; a guest sees only
+        # the narrowed calendar (free/busy), so its booking write still reaches a card.
+        if tier == "owner":
+            services: tuple[GoogleService, ...] = self._google_services
+        elif self._guest_calendar_service is not None:
+            services = (self._guest_calendar_service,)
+        else:
+            services = ()
         extra_read_only = frozenset(
             tool for svc in services for tool in svc.read_tools
         )
-        # Owner work approves in-thread. A guest-originated approval must route to the
-        # Front Desk; until M6 wires it (and the first guest-facing effectful tool), no
-        # such call exists, so the ``or thread_key`` fallback is unreachable — M6 should
-        # make a missing front_desk_thread_key a hard error rather than self-route.
-        route = (
-            thread_key
-            if tier == "owner"
-            else (self._front_desk_thread_key or thread_key)
-        )
+        # The owner's guest-admin tool (block/mute/unblock) is owner-initiated and
+        # reversible → ALLOW with no card. The gate's extra_read_only set is its "allow
+        # without a card" lever, so reuse it (the tool mutates state, but it's the
+        # owner's own command — never an approval prompt to themselves).
+        if tier == "owner" and self._guest_admin_service is not None:
+            extra_read_only = extra_read_only | {
+                self._guest_admin_service.tool_name
+            }
+        # Owner work approves in-thread; a guest-originated approval routes to the Front
+        # Desk. A guest with no Front Desk configured is a hard error — never silently
+        # self-route a card back into the guest's own DM (config also guards this).
+        if tier == "owner":
+            route = thread_key
+        elif self._front_desk_thread_key is not None:
+            route = self._front_desk_thread_key
+        else:
+            raise RuntimeError(
+                "guest approval has no Front Desk route — set front_desk_thread_key"
+            )
         # Workspace confinement is owner-only — a guest never reaches the workspace, so
         # its gate carries no workspace root (its reads stay confined to memory).
         workspace_dir = self._workspace_dir if tier == "owner" else None
@@ -702,10 +797,11 @@ class TaskManager:
     def _arm_distill(self, task: _RunningTask) -> None:
         if (
             self._memory is None
+            or task.tier != "owner"
             or task.cancelled
             or self._tasks.get(task.thread_key) is not task
         ):
-            return  # no memory wired, or torn down/cancelled — don't arm
+            return  # no memory, a guest (low-trust), or torn down/cancelled — don't arm
         self._cancel_distill(task)
         task.distill_handle = asyncio.create_task(self._distill_then_notify(task))
 

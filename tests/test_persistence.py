@@ -3,6 +3,7 @@
 from sqlalchemy import Connection, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from chief.persistence import contacts as contact_repo
 from chief.persistence import tasks as task_repo
 from chief.persistence.contacts import get_or_create_contact
 
@@ -31,7 +32,72 @@ async def test_get_or_create_contact_inserts(db_session: AsyncSession) -> None:
     assert contact.id is not None
     assert contact.namespace == "telegram:42"
     assert contact.admitted is False
+    assert contact.state == contact_repo.STATE_PENDING
     assert contact.first_seen is not None
+
+
+async def test_new_contact_is_pending(db_session: AsyncSession) -> None:
+    contact = await get_or_create_contact(
+        db_session, platform="telegram", user_id="7", tier="guest"
+    )
+
+    assert contact.state == contact_repo.STATE_PENDING
+
+
+async def test_get_contact_returns_none_when_absent(db_session: AsyncSession) -> None:
+    assert (
+        await contact_repo.get_contact(db_session, platform="telegram", user_id="x")
+        is None
+    )
+
+
+async def test_set_contact_state_persists(db_session: AsyncSession) -> None:
+    contact = await get_or_create_contact(
+        db_session, platform="telegram", user_id="55", tier="guest"
+    )
+
+    await contact_repo.set_contact_state(
+        db_session, contact, contact_repo.STATE_BLOCKED
+    )
+
+    reloaded = await contact_repo.get_contact(
+        db_session, platform="telegram", user_id="55"
+    )
+    assert reloaded is not None
+    assert reloaded.state == contact_repo.STATE_BLOCKED
+
+
+async def test_find_contacts_by_name_matches_substring_case_insensitively(
+    db_session: AsyncSession,
+) -> None:
+    await get_or_create_contact(
+        db_session,
+        platform="telegram",
+        user_id="1",
+        tier="guest",
+        display_name="Alice Smith",
+    )
+    await get_or_create_contact(
+        db_session,
+        platform="telegram",
+        user_id="2",
+        tier="guest",
+        display_name="Bob Jones",
+    )
+    # Different platform — must not match.
+    await get_or_create_contact(
+        db_session,
+        platform="discord",
+        user_id="3",
+        tier="guest",
+        display_name="Alice Other",
+    )
+
+    matches = await contact_repo.find_contacts_by_name(
+        db_session, platform="telegram", name="alice"
+    )
+
+    assert [c.user_id for c in matches] == ["1"]
 
 
 async def test_get_or_create_contact_is_idempotent(db_session: AsyncSession) -> None:

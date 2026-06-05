@@ -671,7 +671,7 @@ chief/
       google/auth.py         # host-only one-time OAuth → shared token (cal+drive+sheets)
       calendar/mcp.py  drive/mcp.py  sheets/mcp.py   # per-server tool catalogs (read/write split)
       shell.py               # owner bash → sandbox RPC (M7); web=SDK WebSearch/WebFetch, workspace=gate-confined dir (no module)
-      guest.py               # take-message / availability / booking (M6)
+      guest.py               # M6: GuestService (leave_message relay) + GuestAdminService (manage_guest); availability/booking reuse calendar/mcp.guest_service
     scheduler/scheduler.py   # reminders / recurring / monitors
     skills/                  # registry + setup_morning_brief/
     usage/budget.py          # own-share accounting + citizenship backoff
@@ -809,8 +809,22 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (pre-approved), writes ASK (approval card)**; `delete-event` is deferred (hard-blocked).
   Calendar is live (`calendar_enabled: true`); **Drive + Sheets servers are built but
   disabled** (`drive_enabled`/`sheets_enabled: false`) — flipping them on, plus Gmail, is M8.
-- **M6 guest mode:** tier isolation by construction, 3 guest tools, notify-on-first-contact
-  admission, booking flow, rate limits, block/mute.
+- **M6 guest mode — ✅ done.** Tier isolation by construction: a guest session is built
+  with **only** its receptionist tools — the leak where guests inherited the owner's
+  memory file tools + cwd is closed (`core/tasks.py` `_wire_guest_session`, `cwd=None`,
+  `allowed_tools` carries no `Read/Glob/Grep`). The **3 guest tools** are `leave_message`
+  (in-process relay to the Front Desk, `tools/guest.py:GuestService`) plus the **narrowed
+  calendar** (`tools/calendar/mcp.guest_service` — `get-freebusy` ALLOW, `create-event`
+  ASK→Front-Desk card; event details never exposed). **Notify-on-first-contact admission**
+  is a dedicated, stateless Admit/Block card (`adapters/base.py`; the button payload
+  carries `contact_id`+action, so taps resolve restart-proof with no re-arm). **Rate
+  limits** are a fixed-window per-guest + global counter (`persistence/rate_limits.py`),
+  enforced in the shared adapter gate (`base.py:handle_guest_message`: block → rate →
+  mute → admit → dispatch). **Block/mute/unblock** is owner natural-language via the
+  owner-only `manage_guest` tool (`GuestAdminService`). Guests run on `guest_model`
+  (Sonnet, never Opus); guest transcripts are never distilled into owner memory. Opt-in
+  (`guest_enabled` default off; requires `front_desk_thread_key`). DM-only — group
+  @mention stays M11.
 - **M7 shell + workspace + web — ✅ done.** Secret-free **sandbox** worker container
   (`docker/sandbox`, compose profile `sandbox`): read-only rootfs + tmpfs, no secrets, mem/
   PID/CPU caps, a long-lived bash per task over a narrow stdlib-asyncio TCP RPC
