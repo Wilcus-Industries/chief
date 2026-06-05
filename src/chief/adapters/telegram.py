@@ -3,8 +3,9 @@
 Normalizes inbound updates into :class:`Message`, classifies the sender's tier by id,
 and records the contact. Owner messages are routed into the task engine (M2): a forum
 topic *is* a task, the General topic is the casual inbox, and the engine decides whether
-a casual message warrants its own tracked topic. Guests still get the minimal canned ack
-(the full receptionist scope is M6).
+a casual message warrants its own tracked topic. Guests run through the M6 receptionist
+gate (admission, rate limits, block/mute, dispatch) when ``guest_enabled``; otherwise
+they get the canned ack.
 
 Outbound text flows back through :class:`TelegramTaskIO`, the engine's
 :class:`~chief.core.tasks.TaskIO` implementation: ``thread_key`` is
@@ -31,6 +32,7 @@ from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
+    ADMISSION_PREFIX,
     CALLBACK_PREFIX,
     Adapter,
     AdmissionAction,
@@ -59,6 +61,11 @@ logger = logging.getLogger("chief.adapters.telegram")
 PLATFORM = "telegram"
 TELEGRAM_LIMIT = 4096
 TOPIC_NAME_LIMIT = 128
+
+#: Button payloads ``_on_callback`` claims: approval cards (``appr:``) AND admission
+#: cards (``adm:``). python-telegram-bot only dispatches callbacks matching this regex,
+#: so it must cover both prefixes or one card's taps are silently dropped.
+CALLBACK_QUERY_PATTERN = rf"^(?:{CALLBACK_PREFIX}|{ADMISSION_PREFIX}):"
 
 
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -218,7 +225,7 @@ class TelegramAdapter(Adapter):
         self._app.add_handler(CommandHandler("forget", self._on_forget))
         self._app.add_handler(CommandHandler("branch", self._on_branch))
         self._app.add_handler(
-            CallbackQueryHandler(self._on_callback, pattern=f"^{CALLBACK_PREFIX}:")
+            CallbackQueryHandler(self._on_callback, pattern=CALLBACK_QUERY_PATTERN)
         )
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)

@@ -7,12 +7,18 @@ and good enough for spam protection. The caller supplies the window size + cap; 
 is injected so the window logic is testable without sleeping.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import RateLimit
+
+#: Serializes the read-modify-write across the one event loop, so two concurrent guest
+#: messages can't both miss the row and double-insert (the ``"global"`` scope is shared
+#: by every guest). The DB unique constraint on ``scope`` is the belt-and-braces guard.
+_lock = asyncio.Lock()
 
 
 async def check_and_increment(
@@ -28,6 +34,20 @@ async def check_and_increment(
     A missing or expired window resets to a fresh count of 1. Once at the cap the call
     is rejected and not counted (the stored count stays a clean "calls in this window").
     """
+    async with _lock:
+        return await _check_and_increment(
+            session, scope=scope, window_seconds=window_seconds, limit=limit, now=now
+        )
+
+
+async def _check_and_increment(
+    session: AsyncSession,
+    *,
+    scope: str,
+    window_seconds: int,
+    limit: int,
+    now: datetime | None,
+) -> bool:
     moment = now or datetime.now(UTC)
     row = (
         await session.execute(select(RateLimit).where(RateLimit.scope == scope))

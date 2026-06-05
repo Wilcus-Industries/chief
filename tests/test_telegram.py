@@ -1,5 +1,6 @@
 """Telegram adapter: routing into the engine, commands, and TaskIO output."""
 
+import re
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -11,6 +12,7 @@ from telegram.ext import Application
 
 from chief.adapters.base import AdmissionCard, parse_callback
 from chief.adapters.telegram import (
+    CALLBACK_QUERY_PATTERN,
     TelegramAdapter,
     TelegramTaskIO,
     split_message,
@@ -352,6 +354,16 @@ async def test_guest_over_rate_limit_dropped(
 
     # Cap is 2 → only the first two dispatch; the third is dropped silently.
     assert len(engine.dispatched_guests) == 2
+
+
+def test_callback_handler_pattern_covers_both_card_kinds() -> None:
+    # The registered CallbackQueryHandler only dispatches payloads matching this regex;
+    # it MUST cover both approval (appr:) and admission (adm:) cards, or the owner's
+    # Admit/Block taps are silently dropped before reaching _on_callback.
+    assert re.match(CALLBACK_QUERY_PATTERN, "appr:9:approve_once")
+    assert re.match(CALLBACK_QUERY_PATTERN, "adm:5:admit")
+    assert re.match(CALLBACK_QUERY_PATTERN, "adm:5:block")
+    assert not re.match(CALLBACK_QUERY_PATTERN, "other:1:x")
 
 
 async def test_admission_card_tap_admits(
