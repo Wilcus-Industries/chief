@@ -32,15 +32,21 @@ def test_servers_split_and_bash_is_off_the_benign_list() -> None:
     assert set(svc.tool_names) == {
         "mcp__chief_schedule__schedule_once",
         "mcp__chief_schedule__schedule_recurring",
+        "mcp__chief_schedule__create_monitor",
         "mcp__chief_schedule__list_schedules",
         "mcp__chief_schedule__cancel_schedule",
     }
     bash = ScheduleBashService(session_factory=None, owner_tz="UTC")  # type: ignore[arg-type]
     assert bash.server_name == "chief_schedule_bash"
     assert bash.tool_name == "mcp__chief_schedule_bash__schedule_bash"
-    # Security: the gated bash tool must never appear on the benign allow-list, or
-    # setting up an unattended ungated shell run would skip its approval card.
-    assert bash.tool_name not in svc.tool_names
+    assert set(bash.tool_names) == {
+        "mcp__chief_schedule_bash__schedule_bash",
+        "mcp__chief_schedule_bash__create_monitor",
+    }
+    # Security: the gated bash tools must never appear on the benign allow-list, or
+    # setting up an unattended ungated shell run would skip its approval card. The
+    # benign create_monitor and the gated one share a bare name but differ by server.
+    assert not set(bash.tool_names) & set(svc.tool_names)
 
 
 async def test_schedule_once_creates_message_row(

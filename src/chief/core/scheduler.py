@@ -13,6 +13,11 @@ no locking needed.
 - **Fire, then advance.** ``recurring`` advances to the next cron occurrence *after now*
   — so a slot missed during downtime fires once on restart rather than replaying every
   miss — while ``once`` is disabled.
+- **Monitor.** A ``monitor`` row treats its cron ``spec`` as a check *cadence*: each due
+  tick evaluates its predicate (a sandbox command, or a read-only Haiku yes/no) and
+  fires the action only on a false→true flip, then advances like ``recurring``. A
+  non-urgent flip caught inside quiet hours is deferred coarsely (noticed at the next
+  ``quiet_end``), so a transient quiet-window flip can be missed.
 
 Delivery is **at-least-once**: a fire happens before ``next_run`` advances, so a crash
 in the window between them re-fires the row on the next tick (a rare owner-visible
@@ -38,7 +43,7 @@ sqlite connection while it runs.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -55,15 +60,21 @@ from ..persistence.schedules import (
     ACTION_BASH,
     ACTION_MESSAGE,
     ACTION_WAKEUP,
+    KIND_MONITOR,
     KIND_RECURRING,
+    PREDICATE_AGENT,
+    PREDICATE_BASH,
     disable_schedule,
     get_schedule,
     list_due,
+    set_last_result,
     set_last_run,
     set_next_run,
 )
+from ..tools.google import GoogleService
 from ..tools.shell import ShellService, format_result
 from ..tools.shell import run_command as _run_command
+from . import classify
 from .schedule_time import defer_target, in_quiet_hours, next_fire
 
 logger = logging.getLogger("chief.core.scheduler")
@@ -71,7 +82,13 @@ logger = logging.getLogger("chief.core.scheduler")
 #: Per-ping request budget for the dead-man's-switch GET (short; a slow ping is a fail).
 _HEARTBEAT_TIMEOUT = 10.0
 
+#: Read-only web tools an agent monitor always gets (plus the owner's Google reads).
+_WEB_READ_TOOLS = ("WebFetch", "WebSearch")
+
 RunCommand = Callable[..., Awaitable[dict[str, Any]]]
+#: An agent monitor's predicate: judge whether ``question`` holds now (injectable so
+#: tests skip the live model; the default builds a read-only Haiku call in __init__).
+AgentPredicate = Callable[[str], Awaitable[bool]]
 
 
 class SchedulerIO(Protocol):
@@ -115,6 +132,9 @@ class Scheduler:
         primary_thread_key: str,
         shell_service: ShellService | None = None,
         run_command: RunCommand = _run_command,
+        google_services: Sequence[GoogleService] = (),
+        classifier_model: str = "claude-haiku-4-5",
+        agent_predicate: AgentPredicate | None = None,
         owner_tz: str = "UTC",
         quiet_hours_start: str | None = None,
         quiet_hours_end: str = "07:00",
@@ -131,6 +151,9 @@ class Scheduler:
         self._primary_thread_key = primary_thread_key
         self._shell_service = shell_service
         self._run_command = run_command
+        self._google_services = tuple(google_services)
+        self._classifier_model = classifier_model
+        self._agent_predicate = agent_predicate
         self._tz = ZoneInfo(owner_tz)
         self._quiet_start = quiet_hours_start
         self._quiet_end = quiet_hours_end
@@ -189,13 +212,80 @@ class Scheduler:
         if not schedule.urgent and in_quiet_hours(
             now, self._quiet_start, self._quiet_end, self._tz
         ):
-            # Defer without firing — released at the next quiet_end.
+            # Defer without firing — released at the next quiet_end. A monitor gets the
+            # same coarse treatment: a flip inside quiet hours is noticed at quiet_end.
             await self._update_next_run(
                 schedule.id, defer_target(now, self._quiet_end, self._tz)
             )
             return
-        await self._fire(schedule)
+        if schedule.kind == KIND_MONITOR:
+            await self._evaluate_monitor(schedule)
+        else:
+            await self._fire(schedule)
         await self._record_run(schedule.id, schedule.kind, schedule.spec, now)
+
+    async def _evaluate_monitor(self, schedule: Schedule) -> None:
+        """Check a monitor's predicate; fire its action only on a false→true flip."""
+        result = await self._evaluate_predicate(schedule)
+        # Flip = the condition is true now and was not last time (None counts as "not
+        # true", so the first true after creation fires). A standing true won't re-fire.
+        if result and schedule.last_result is not True:
+            await self._fire(schedule)
+        await self._set_last_result(schedule.id, result)
+
+    async def _evaluate_predicate(self, schedule: Schedule) -> bool:
+        """Resolve a monitor's predicate to a bool (fail-safe ``False`` on error)."""
+        predicate = schedule.predicate or ""
+        if schedule.predicate_type == PREDICATE_BASH:
+            return await self._evaluate_bash_predicate(schedule.id, predicate)
+        if schedule.predicate_type == PREDICATE_AGENT:
+            return await self._evaluate_agent_predicate(predicate)
+        logger.warning(
+            "monitor %s has unknown predicate_type %r",
+            schedule.id,
+            schedule.predicate_type,
+        )
+        return False
+
+    async def _evaluate_bash_predicate(self, schedule_id: int, command: str) -> bool:
+        """True iff the sandbox command exits 0; ``False`` if the shell is off/down."""
+        shell = self._shell_service
+        if shell is None:
+            logger.warning(
+                "monitor %s predicate is bash but the shell is disabled; skipping",
+                schedule_id,
+            )
+            return False
+        try:
+            result = await self._run_command(
+                shell.host,
+                shell.port,
+                f"monitor:{schedule_id}",
+                command,
+                read_timeout=shell.read_timeout,
+            )
+        except Exception as exc:  # sandbox down/unreachable — treat as "not true"
+            logger.warning(
+                "monitor %s predicate failed: %s (treating as false)", schedule_id, exc
+            )
+            return False
+        return int(result.get("exit_code", 0)) == 0
+
+    async def _evaluate_agent_predicate(self, question: str) -> bool:
+        """A read-only Haiku yes/no over the owner's web + Google read surface."""
+        if self._agent_predicate is not None:  # injected (tests) — skip the live model
+            return await self._agent_predicate(question)
+        allowed = list(_WEB_READ_TOOLS)
+        mcp_servers: dict[str, Any] = {}
+        for svc in self._google_services:
+            allowed += list(svc.read_tools)  # reads only (this turn bypasses the gate)
+            mcp_servers[svc.server_name] = svc.server_config()
+        return await classify.ask_condition(
+            question,
+            model=self._classifier_model,
+            allowed_tools=allowed,
+            mcp_servers=mcp_servers,
+        )
 
     async def _fire(self, schedule: Schedule) -> None:
         target = schedule.thread_key or self._primary_thread_key
@@ -247,20 +337,31 @@ class Scheduler:
     async def _record_run(
         self, schedule_id: int, kind: str, spec: str, now: datetime
     ) -> None:
-        """Stamp last_run and advance: recurring → next cron, once → disabled."""
+        """Stamp last_run and advance: any cron cadence → next occurrence, once → off.
+
+        ``recurring`` and ``monitor`` share the cron-cadence advance (a monitor's
+        ``now`` is its last *check*); an unparseable cadence disables, never loops.
+        ``once`` always disables after its single fire.
+        """
         async with self._session_factory() as session:
             schedule = await get_schedule(session, schedule_id)
             if schedule is None:
                 return
             await set_last_run(session, schedule, now)
-            if kind == KIND_RECURRING:
-                nxt = next_fire(KIND_RECURRING, spec, after=now, tz=self._tz)
+            if kind in (KIND_RECURRING, KIND_MONITOR):
+                nxt = next_fire(kind, spec, after=now, tz=self._tz)
                 if nxt is None:  # unparseable cron — disable rather than loop
                     await disable_schedule(session, schedule)
                 else:
                     await set_next_run(session, schedule, nxt)
             else:
                 await disable_schedule(session, schedule)
+
+    async def _set_last_result(self, schedule_id: int, result: bool) -> None:
+        async with self._session_factory() as session:
+            schedule = await get_schedule(session, schedule_id)
+            if schedule is not None:
+                await set_last_result(session, schedule, result)
 
     async def _update_next_run(self, schedule_id: int, next_run: datetime) -> None:
         async with self._session_factory() as session:

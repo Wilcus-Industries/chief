@@ -21,11 +21,16 @@ from .models import Schedule
 #: Trigger kinds — how :func:`next_run` advances after a fire.
 KIND_ONCE = "once"  # fires once at an ISO timestamp, then disables
 KIND_RECURRING = "recurring"  # fires on a cron expression, re-advancing each time
+KIND_MONITOR = "monitor"  # checks a predicate on a cron cadence, fires on a flip
 
 #: Action types — what a fire does (the dispatch path in the scheduler).
 ACTION_MESSAGE = "message"  # direct text send, no model, free
 ACTION_WAKEUP = "wakeup"  # inject a full agent turn (gate + tools apply)
 ACTION_BASH = "bash"  # run a command in the sandbox, no agent
+
+#: Predicate types — how a monitor evaluates its watched condition each cadence tick.
+PREDICATE_BASH = "bash"  # a sandbox command; exit 0 ⇒ true
+PREDICATE_AGENT = "agent"  # a read-only Haiku yes/no judgment
 
 
 async def create_schedule(
@@ -38,8 +43,14 @@ async def create_schedule(
     next_run: datetime,
     thread_key: str | None = None,
     urgent: bool = False,
+    predicate: str | None = None,
+    predicate_type: str | None = None,
 ) -> Schedule:
-    """Insert a schedule and return it (enabled, ``next_run`` set)."""
+    """Insert a schedule and return it (enabled, ``next_run`` set).
+
+    ``predicate`` / ``predicate_type`` are set only for ``monitor`` rows (the watched
+    condition); they stay ``None`` for ``once`` / ``recurring``.
+    """
     schedule = Schedule(
         kind=kind,
         spec=spec,
@@ -48,6 +59,8 @@ async def create_schedule(
         next_run=next_run,
         thread_key=thread_key,
         urgent=urgent,
+        predicate=predicate,
+        predicate_type=predicate_type,
     )
     session.add(schedule)
     await session.commit()
@@ -105,6 +118,14 @@ async def set_last_run(
 ) -> None:
     """Record the most recent fire time for ``schedule``."""
     schedule.last_run = last_run
+    await session.commit()
+
+
+async def set_last_result(
+    session: AsyncSession, schedule: Schedule, result: bool
+) -> None:
+    """Persist a monitor's latest predicate truth (drives false→true flip detection)."""
+    schedule.last_result = result
     await session.commit()
 
 

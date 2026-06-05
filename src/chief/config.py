@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     quiet_hours_end: str = "07:00"
     heartbeat_url: str | None = None
     heartbeat_interval_seconds: int = 300
+    # Monitors (M9b) reuse the scheduler. A monitor checks a predicate on a cron cadence
+    # and fires only on a false→true flip. This floor (seconds between checks) is
+    # enforced at create time so an agent monitor can't poll every tick (Haiku budget).
+    monitor_min_interval_seconds: int = 300
 
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always

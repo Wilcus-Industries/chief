@@ -105,13 +105,20 @@ class RateLimit(Base):
 
 
 class Schedule(Base):
-    """A one-off reminder or a recurring job (owned by M9; monitors land in M9b)."""
+    """A one-off reminder, a recurring job, or a monitor (owned by M9).
+
+    A ``monitor`` row reuses ``spec`` as its check **cadence** (a cron expression) and
+    adds a predicate: each cadence tick checks ``predicate`` (``predicate_type`` picks
+    bash-vs-agent) and fires only on a false→true flip (``last_result`` is the last
+    evaluated truth, ``None`` until first checked). The predicate columns are NULL for
+    ``once``/``recurring`` rows.
+    """
 
     __tablename__ = "schedules"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str]  # "once" | "recurring" — picks the next_run advance logic
-    spec: Mapped[str]  # ISO-8601 timestamp ("once") or a cron expression ("recurring")
+    kind: Mapped[str]  # "once" | "recurring" | "monitor" — picks next_run advance logic
+    spec: Mapped[str]  # ISO ts ("once"), or a cron expression ("recurring"/"monitor")
     action: Mapped[str | None]  # reminder text, wakeup prompt, or bash command
     action_type: Mapped[str]  # "message" | "wakeup" | "bash" — the fire path
     thread_key: Mapped[str | None]  # delivery/wake target; None ⇒ primary inbox
@@ -120,3 +127,7 @@ class Schedule(Base):
     last_run: Mapped[datetime | None]  # last fire (catch-up + /schedules listing)
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # Monitor-only (NULL for once/recurring): the watched condition + flip-detect state.
+    predicate: Mapped[str | None] = mapped_column(default=None)  # bash cmd / agent ask
+    predicate_type: Mapped[str | None] = mapped_column(default=None)  # "bash" | "agent"
+    last_result: Mapped[bool | None] = mapped_column(default=None)  # None ⇒ never run
