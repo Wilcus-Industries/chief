@@ -32,6 +32,7 @@ from chief.persistence.tasks import (
 from chief.tools.calendar import mcp as calendar_mcp
 from chief.tools.gmail import mcp as gmail_mcp
 from chief.tools.guest import GuestAdminService
+from chief.tools.schedule import ScheduleBashService, ScheduleService
 from chief.tools.shell import ShellService
 
 Factory = Callable[..., SessionProto]
@@ -1356,6 +1357,72 @@ async def test_builtin_shell_tools_disallowed_at_sdk_layer(
     # outright, so the model can't run a command where the Max token lives.
     disallowed = captured["disallowed_tools"]
     assert {"Bash", "BashOutput", "KillShell"} <= set(disallowed)
+    await mgr.shutdown()
+
+
+def _schedule_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    benign: bool = True,
+    bash: bool = True,
+) -> TaskManager:
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        schedule_service=(
+            ScheduleService(session_factory=session_factory) if benign else None
+        ),
+        schedule_bash_service=(
+            ScheduleBashService(session_factory=session_factory) if bash else None
+        ),
+    )
+
+
+async def test_owner_schedule_tools_pre_approved_and_server_wired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _schedule_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), bash=False
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    # The benign schedule tools land on the allow-list (pre-approved, no card) and their
+    # server is registered.
+    allowed = captured["allowed_tools"]
+    for name in ScheduleService(session_factory=session_factory).tool_names:
+        assert name in allowed
+    assert "chief_schedule" in captured["mcp_servers"]
+    await mgr.shutdown()
+
+
+async def test_owner_schedule_bash_server_wired_but_tools_gated(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _schedule_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), benign=False
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    # The gated bash server is registered, but its tools stay OFF the allow-list so each
+    # mint routes through can_use_tool → an approval card (like the shell tool).
+    assert "chief_schedule_bash" in captured["mcp_servers"]
+    allowed = captured["allowed_tools"]
+    for name in ScheduleBashService(session_factory=session_factory).tool_names:
+        assert name not in allowed
     await mgr.shutdown()
 
 

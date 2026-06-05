@@ -197,6 +197,121 @@ def test_build_stacks_selects_configured_platforms(
     assert platforms(discord_only) == {"discord"}
 
 
+def test_build_engine_wires_schedule_services_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(scheduler_enabled=True, primary_thread_key="-100:1")
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # Enabled → both the benign + gated schedule services thread into the engine.
+    assert manager._schedule_service is not None
+    assert manager._schedule_bash_service is not None
+
+
+def test_build_engine_no_schedule_services_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings()  # scheduler_enabled defaults off
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert manager._schedule_service is None
+    assert manager._schedule_bash_service is None
+
+
+async def test_build_scheduler_binds_to_primary_platform_stack(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        owner_discord_id=99,
+        discord_bot_token="dc",
+        scheduler_enabled=True,
+        primary_platform="discord",
+        primary_thread_key="-100:1",
+        heartbeat_url="https://hc.example/ping",
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+    stacks = app.build_stacks(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+    (discord,) = [s for s in stacks if s[0].platform == "discord"]
+
+    scheduler, http = app.build_scheduler(
+        settings, stacks=stacks, session_factory=session_factory
+    )
+
+    assert scheduler is not None
+    # The single loop binds to the primary platform's manager (its IO + waker).
+    assert scheduler._io is discord[0].io
+    assert scheduler._waker is discord[0]
+    assert scheduler._primary_thread_key == "-100:1"
+    # A heartbeat_url → a real http client is built + handed in for the dead-man switch.
+    assert http is not None
+    assert scheduler._http is http
+    await http.aclose()
+
+
+async def test_build_scheduler_no_http_without_heartbeat(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(scheduler_enabled=True, primary_thread_key="-100:1")
+    policy, audit, memory = _shared(settings, session_factory)
+    stacks = app.build_stacks(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    scheduler, http = app.build_scheduler(
+        settings, stacks=stacks, session_factory=session_factory
+    )
+
+    assert scheduler is not None
+    assert http is None
+    assert scheduler._http is None
+
+
+def test_build_scheduler_none_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings()  # scheduler_enabled defaults off
+    policy, audit, memory = _shared(settings, session_factory)
+    stacks = app.build_stacks(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    scheduler, http = app.build_scheduler(
+        settings, stacks=stacks, session_factory=session_factory
+    )
+
+    assert scheduler is None and http is None
+
+
 async def test_seed_on_boot_populates_policy(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

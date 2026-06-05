@@ -12,6 +12,7 @@ dependencies = [
     "pyyaml>=6",
     "discord-py>=2",
     "croniter>=3",
+    "httpx>=0.28",
 ]
 
 [dependency-groups]
