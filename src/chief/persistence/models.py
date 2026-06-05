@@ -105,14 +105,18 @@ class RateLimit(Base):
 
 
 class Schedule(Base):
-    """A reminder, recurring job, or monitor (owned by M9)."""
+    """A one-off reminder or a recurring job (owned by M9; monitors land in M9b)."""
 
     __tablename__ = "schedules"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str]  # "reminder" | "recurring" | "monitor"
-    spec: Mapped[str]
-    action: Mapped[str | None]
+    kind: Mapped[str]  # "once" | "recurring" — picks the next_run advance logic
+    spec: Mapped[str]  # ISO-8601 timestamp ("once") or a cron expression ("recurring")
+    action: Mapped[str | None]  # reminder text, wakeup prompt, or bash command
+    action_type: Mapped[str]  # "message" | "wakeup" | "bash" — the fire path
+    thread_key: Mapped[str | None]  # delivery/wake target; None ⇒ primary inbox
+    urgent: Mapped[bool] = mapped_column(default=False)  # True breaks quiet hours
     next_run: Mapped[datetime | None]
+    last_run: Mapped[datetime | None]  # last fire (catch-up + /schedules listing)
     enabled: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
