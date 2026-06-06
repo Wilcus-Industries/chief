@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
-from chief.adapters.discord import DiscordAdapter
+from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.adapters.telegram import TelegramAdapter, TelegramTaskIO
 from chief.config import PolicySeed, Settings
 from chief.core.budget import BudgetGate
@@ -263,6 +263,32 @@ def test_build_engine_wires_budget_when_enabled(
     assert manager._budget_downgrade_model == settings.budget_downgrade_model
 
 
+def test_build_discord_stack_wires_budget_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The Discord builder got the same build_budget line — assert its twin so a
+    # copy-paste regression (wrong io / dropped arg) can't slip through uncaught.
+    settings = _settings(
+        owner_discord_id=99,
+        discord_bot_token="dc",
+        budget_enabled=True,
+        primary_thread_key="-100:1",
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_discord_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert isinstance(manager._budget, BudgetGate)
+    assert isinstance(manager._budget._io, DiscordTaskIO)  # this platform's IO
+    assert manager._budget._owner_inbox == "-100:1"
+
+
 def test_build_engine_no_budget_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -280,6 +306,24 @@ def test_build_engine_no_budget_when_disabled(
     assert manager._budget is None
     assert manager._owner_inbox is None
     assert manager._budget_downgrade_model is None
+
+
+def test_build_budget_requires_primary_thread_key(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # budget_enabled without a primary_thread_key has nowhere to route warnings or
+    # the choice card; there is no config validator, so build asserts loud (not silent).
+    settings = _settings(budget_enabled=True)  # primary_thread_key defaults None
+    policy, audit, memory = _shared(settings, session_factory)
+
+    with pytest.raises(AssertionError, match="primary_thread_key"):
+        app.build_telegram_stack(
+            settings,
+            session_factory=session_factory,
+            policy=policy,
+            audit=audit,
+            memory=memory,
+        )
 
 
 async def test_build_scheduler_binds_to_primary_platform_stack(
