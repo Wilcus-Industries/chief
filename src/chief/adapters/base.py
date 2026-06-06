@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..gate.approvals import ApprovalAction
 from ..memory.store import Fact
 from ..persistence import contacts as contact_repo
+from ..persistence import usage
 from ..persistence.models import Contact, Task
 from ..persistence.rate_limits import check_and_increment
 
@@ -33,6 +34,11 @@ CALLBACK_PREFIX = "appr"
 #: self-contained — the payload carries the contact id + decision, so a tap resolves
 #: with no live in-memory state (restart-proof, no re-arm needed).
 ADMISSION_PREFIX = "adm"
+
+#: Wire prefix for the budget choice-card buttons (M9). Self-contained like admission:
+#: the payload carries the billing cycle + decision, so a tap flips the persisted mode
+#: with no parked future — restart-proof.
+BUDGET_PREFIX = "bud"
 
 
 def parse_callback(data: str) -> tuple[int, ApprovalAction] | None:
@@ -95,6 +101,82 @@ async def apply_admission(
         )
         await contact_repo.set_contact_state(session, contact, state)
         return contact
+
+
+class BudgetAction(Enum):
+    """An owner budget-card choice. Values double as the button payload token."""
+
+    DOWNGRADE = "downgrade"  # keep running, but on the cheaper model
+    CONTINUE = "continue"  # keep full-quality despite (near-)exhaustion
+    OVERFLOW = "overflow"  # approve pay-as-you-go spend past the credit
+
+
+#: Maps a card choice to the persisted ``MonthlyCost.mode`` it flips the cycle into.
+_BUDGET_MODE = {
+    BudgetAction.DOWNGRADE: usage.MODE_DOWNGRADED,
+    BudgetAction.CONTINUE: usage.MODE_CONTINUE,
+    BudgetAction.OVERFLOW: usage.MODE_OVERFLOW,
+}
+
+#: Button labels for the choice card, shared by both adapters (each builds its own
+#: platform widget around them, so the wording lives in one place).
+BUDGET_BUTTON_LABELS = {
+    BudgetAction.DOWNGRADE: "⚡ Downgrade",
+    BudgetAction.CONTINUE: "▶️ Continue",
+    BudgetAction.OVERFLOW: "💳 Overflow",
+}
+
+#: Card-edit text confirming an applied choice (replaces the buttons after a tap).
+_BUDGET_OUTCOME = {
+    BudgetAction.DOWNGRADE: "⚡ Switched to the budget model for this cycle.",
+    BudgetAction.CONTINUE: "▶️ Continuing at full quality despite the budget.",
+    BudgetAction.OVERFLOW: "💳 Approved pay-as-you-go overflow for this cycle.",
+}
+
+
+def budget_outcome_text(action: BudgetAction) -> str:
+    """The card-edit text confirming an applied budget choice."""
+    return _BUDGET_OUTCOME[action]
+
+
+@dataclass(frozen=True)
+class BudgetCard:
+    """A budget choice posted to the owner inbox when the cycle hits exhaustion."""
+
+    cycle: str
+    text: str
+
+
+def budget_payload(cycle: str, action: BudgetAction) -> str:
+    """The button payload for a budget choice (``bud:{cycle}:{action}``)."""
+    return f"{BUDGET_PREFIX}:{cycle}:{action.value}"
+
+
+def parse_budget(data: str) -> tuple[str, BudgetAction] | None:
+    """Decode a budget button payload, or ``None`` if not ours / malformed.
+
+    The cycle key (``"2026-06"``) carries no ``":"``, so a 3-field split is exact.
+    """
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != BUDGET_PREFIX:
+        return None
+    try:
+        return parts[1], BudgetAction(parts[2])
+    except ValueError:
+        return None
+
+
+async def apply_budget_decision(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    cycle: str,
+    action: BudgetAction,
+) -> str:
+    """Flip ``cycle`` into the mode the owner's choice picks; return that new mode."""
+    mode = _BUDGET_MODE[action]
+    async with session_factory() as session:
+        await usage.set_mode(session, cycle=cycle, mode=mode)
+    return mode
 
 
 class GuestAction(Enum):

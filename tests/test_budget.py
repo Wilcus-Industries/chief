@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.base import BudgetCard
 from chief.core.budget import BudgetGate, cycle_key
 from chief.persistence import usage
 
@@ -16,15 +17,13 @@ class FakeBudgetIO:
 
     def __init__(self) -> None:
         self.sends: list[tuple[str, str]] = []
-        self.cards: list[tuple[str, str]] = []  # (thread_key, cycle)
+        self.cards: list[tuple[str, str]] = []  # (route, cycle)
 
     async def send(self, thread_key: str, text: str) -> None:
         self.sends.append((thread_key, text))
 
-    async def send_budget_card(
-        self, thread_key: str, *, cycle: str, text: str
-    ) -> None:
-        self.cards.append((thread_key, cycle))
+    async def send_budget_card(self, route: str, card: BudgetCard) -> None:
+        self.cards.append((route, card.cycle))
 
 
 def _at(*, year: int, month: int, day: int) -> datetime:

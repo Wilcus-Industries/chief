@@ -8,11 +8,12 @@ import discord
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import AdmissionCard, Attachment
+from chief.adapters.base import AdmissionCard, Attachment, BudgetCard
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
 from chief.persistence import contacts as contact_repo
+from chief.persistence import usage
 from chief.persistence.contacts import get_or_create_contact
 from chief.persistence.models import Contact, Task
 
@@ -534,6 +535,35 @@ async def test_admission_interaction_ignored_for_guest(
     )
 
 
+async def test_budget_interaction_tap_flips_mode(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine())
+    interaction = _interaction(user_id=OWNER_ID, custom_id="bud:2026-06:overflow")
+
+    await adapter.on_interaction(interaction)
+
+    async with session_factory() as session:
+        row = await usage.get_row(session, "2026-06")
+    assert row is not None and row.mode == usage.MODE_OVERFLOW
+    interaction.response.edit_message.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_budget_interaction_ignored_for_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine())
+    interaction = _interaction(user_id=7, custom_id="bud:2026-06:downgrade")
+
+    await adapter.on_interaction(interaction)
+
+    async with session_factory() as session:
+        assert await usage.get_row(session, "2026-06") is None
+    interaction.response.send_message.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "Not allowed.", ephemeral=True
+    )
+
+
 async def test_bot_message_is_ignored(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -872,6 +902,27 @@ async def test_edit_card_rewrites_outcome_and_drops_view() -> None:
 
     channel.fetch_message.assert_awaited_once_with(77)
     message.edit.assert_awaited_once_with(content="✅ Approved (once)", view=None)
+
+
+async def test_send_budget_card_posts_three_choice_buttons() -> None:
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=77))
+    io = DiscordTaskIO(cast(discord.Client, _io_client(channel)))
+
+    await io.send_budget_card(
+        "100:5", BudgetCard(cycle="2026-06", text="🛑 Budget reached. Pick:")
+    )
+
+    args, kwargs = channel.send.call_args
+    assert args[0] == "🛑 Budget reached. Pick:"
+    payloads = [
+        cast("discord.ui.Button[Any]", b).custom_id for b in kwargs["view"].children
+    ]
+    assert payloads == [
+        "bud:2026-06:downgrade",
+        "bud:2026-06:continue",
+        "bud:2026-06:overflow",
+    ]
 
 
 # ---- on_interaction (approval button taps) -----------------------------------

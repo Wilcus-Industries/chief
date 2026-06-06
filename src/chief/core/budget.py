@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..adapters.base import BudgetCard
 from ..persistence import usage
 
 logger = logging.getLogger("chief.core.budget")
@@ -29,9 +30,7 @@ class BudgetIO(Protocol):
     """The slice of the platform IO the budget gate delivers to (owner inbox only)."""
 
     async def send(self, thread_key: str, text: str) -> None: ...
-    async def send_budget_card(
-        self, thread_key: str, *, cycle: str, text: str
-    ) -> None: ...
+    async def send_budget_card(self, route: str, card: BudgetCard) -> None: ...
 
 
 def _utcnow() -> datetime:
@@ -147,9 +146,8 @@ class BudgetGate:
         await usage.set_mode(session, cycle=cycle, mode=usage.MODE_PAUSED)
         # Mark every tier as warned so no stale threshold warning fires after the card.
         await usage.mark_warned(session, cycle=cycle, fraction=1.0)
-        await self._io.send_budget_card(
-            self._owner_inbox, cycle=cycle, text=self._card_text(total, rate_limited)
-        )
+        card = BudgetCard(cycle=cycle, text=self._card_text(total, rate_limited))
+        await self._io.send_budget_card(self._owner_inbox, card)
 
     def _warn_text(self, total: float, fraction: float) -> str:
         return (
