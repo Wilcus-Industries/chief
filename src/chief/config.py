@@ -222,6 +222,14 @@ class Settings(BaseSettings):
                 )
         return tuple(sorted(value))
 
+    @field_validator("monthly_credit_usd")
+    @classmethod
+    def _validate_credit(cls, value: float) -> float:
+        """The credit ceiling must be positive — :class:`BudgetGate` divides by it."""
+        if value <= 0:
+            raise ValueError(f"monthly_credit_usd must be > 0, got {value!r}")
+        return value
+
     @field_validator("budget_exhaust_fraction")
     @classmethod
     def _validate_exhaust_fraction(cls, value: float) -> float:

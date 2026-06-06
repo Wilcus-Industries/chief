@@ -393,6 +393,22 @@ def test_budget_rejects_bad_anchor_day(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+def test_budget_rejects_nonpositive_credit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The BudgetGate divides spend by the credit, so a zero/negative ceiling is a
+    # config error, not a degenerate "everything is over budget".
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nmonthly_credit_usd: 0\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="monthly_credit_usd"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_blank_owner_id_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
