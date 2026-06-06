@@ -24,6 +24,8 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     HookMatcher,
     ProcessError,
+    RateLimitEvent,
+    ResultMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -141,6 +143,13 @@ class TaskSession:
         self._connected = False
         #: Resumable SDK session id, populated from the first turn's stream.
         self.session_id: str | None = resume
+        #: Last turn's SDK cost (``ResultMessage.total_cost_usd``); reset each turn so
+        #: the engine can roll exactly this turn's spend into the monthly total (M9).
+        self.last_cost_usd: float = 0.0
+        #: Latest ``RateLimitEvent`` status seen (``allowed``/``allowed_warning``/
+        #: ``rejected``); ``rejected`` lets the budget gate back off (M9). Sticky across
+        #: turns — the CLI only re-emits on a transition.
+        self.last_rate_limit_status: str | None = None
 
     async def _ensure_connected(self) -> None:
         if not self._connected:
@@ -188,6 +197,7 @@ class TaskSession:
         """
         await self._ensure_connected()
         await self._client.query(self._prompt(text, attachments))
+        self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
         parts: list[str] = []
         async for message in self._client.receive_response():
             session_id = getattr(message, "session_id", None)
@@ -199,6 +209,10 @@ class TaskSession:
                         parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         yield Milestone(text=f"using {block.name}")
+            elif isinstance(message, ResultMessage):
+                self.last_cost_usd = message.total_cost_usd or 0.0
+            elif isinstance(message, RateLimitEvent):
+                self.last_rate_limit_status = message.rate_limit_info.status
         yield Final(text="".join(parts).strip() or NO_REPLY)
 
     @staticmethod
