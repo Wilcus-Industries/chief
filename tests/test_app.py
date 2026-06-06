@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
 from chief.adapters.discord import DiscordAdapter
-from chief.adapters.telegram import TelegramAdapter
+from chief.adapters.telegram import TelegramAdapter, TelegramTaskIO
 from chief.config import PolicySeed, Settings
+from chief.core.budget import BudgetGate
 from chief.gate.policy import PolicyStore
 from chief.memory.store import MemoryStore
 from chief.obs.audit import AuditLog
@@ -232,6 +233,53 @@ def test_build_engine_no_schedule_services_when_disabled(
 
     assert manager._schedule_service is None
     assert manager._schedule_bash_service is None
+
+
+def test_build_engine_wires_budget_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        budget_enabled=True,
+        primary_thread_key="-100:1",
+        monthly_credit_usd=50.0,
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # The gate is built against this platform's IO, routes to the owner inbox, and
+    # carries the configured credit; the downgrade model + inbox thread into the engine.
+    assert isinstance(manager._budget, BudgetGate)
+    assert isinstance(manager._budget._io, TelegramTaskIO)  # this platform's IO
+    assert manager._budget._owner_inbox == "-100:1"
+    assert manager._budget._credit == 50.0
+    assert manager._owner_inbox == "-100:1"
+    assert manager._budget_downgrade_model == settings.budget_downgrade_model
+
+
+def test_build_engine_no_budget_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings()  # budget_enabled defaults off
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert manager._budget is None
+    assert manager._owner_inbox is None
+    assert manager._budget_downgrade_model is None
 
 
 async def test_build_scheduler_binds_to_primary_platform_stack(
