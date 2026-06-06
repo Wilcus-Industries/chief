@@ -275,7 +275,7 @@ def test_plugins_and_skills_flow_into_options() -> None:
 
 def test_plugins_and_skills_default_empty() -> None:
     # A plain session (every guest, and an owner with skills off) carries no plugin and
-    # leaves skills unset, so the SDK discovers nothing — tier isolation by construction.
+    # leaves skills unset, so the SDK discovers nothing (tier isolation by design).
     captured: dict[str, ClaudeAgentOptions] = {}
 
     def factory(options: ClaudeAgentOptions) -> FakeClient:

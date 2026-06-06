@@ -142,6 +142,37 @@ def test_owner_shell_and_workspace_absent_when_disabled() -> None:
     assert "## Shell" not in prompt
 
 
+def test_owner_skills_guidance_lists_enabled_skills() -> None:
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        skills=("docx", "claude-api"),
+    )
+
+    assert "## Skills" in prompt
+    assert "docx" in prompt
+    assert "claude-api" in prompt
+
+
+def test_owner_skills_guidance_absent_when_none_enabled() -> None:
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "## Skills" not in prompt
+
+
+def test_guest_never_gets_skills_block() -> None:
+    # Skills are owner-only; the guest branch never reads the argument.
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        skills=("docx",),
+    )
+
+    assert "## Skills" not in prompt
+
+
 def test_guest_never_gets_shell_workspace_or_web() -> None:
     prompt = build_system_prompt(
         tier="guest",

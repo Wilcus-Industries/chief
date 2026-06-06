@@ -183,6 +183,8 @@ def _default_session(
     allowed_tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
     mcp_servers: dict[str, Any] | None = None,
+    plugins: list[Any] | None = None,
+    skills: list[str] | None = None,
 ) -> SessionProto:
     return TaskSession(
         model=model,
@@ -195,6 +197,8 @@ def _default_session(
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         mcp_servers=mcp_servers,
+        plugins=plugins,
+        skills=skills,
     )
 
 
@@ -260,6 +264,9 @@ class TaskManager:
         budget: BudgetProto | None = None,
         owner_inbox: str | None = None,
         budget_downgrade_model: str | None = None,
+        skills_enabled: bool = False,
+        skills_plugin_path: str | None = None,
+        default_skills: tuple[str, ...] = (),
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -295,6 +302,12 @@ class TaskManager:
         self._budget = budget
         self._owner_inbox = owner_inbox
         self._budget_downgrade_model = budget_downgrade_model
+        # Skills (M10), owner-only. When enabled, owner sessions load the plugin
+        # manifest at skills_plugin_path and enable exactly default_skills; guests get
+        # neither.
+        self._skills_enabled = skills_enabled
+        self._skills_plugin_path = skills_plugin_path
+        self._default_skills = default_skills
         #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
         #: next time the budget reports a non-paused mode, so each pause acks once.
         self._paused_ack_sent = False
@@ -496,12 +509,16 @@ class TaskManager:
     def _wire_owner_session(
         self, gate_kwargs: dict[str, Any], thread_key: str, disallowed_tools: list[str]
     ) -> None:
-        """Wire the owner's full surface: memory + web + Google + shell + admin."""
+        """Wire the owner's full surface: memory, web, Google, shell, admin, skills."""
         assert self._memory is not None
         services = self._google_services
         workspace_on = self._workspace_dir is not None
         shell_on = self._shell_service is not None
         admin = self._guest_admin_service
+        # Packaged skills are owner-only (M10): a guest session never reaches here, so
+        # the plugin + enable-list ride only the owner's options. Both guard on a
+        # configured plugin path so an enabled-but-unwired flag stays inert (no error).
+        skills_on = self._skills_enabled and self._skills_plugin_path is not None
         allowed = list(MEMORY_TOOLS) + list(WEB_META_TOOLS)
         if workspace_on:
             # Write/Edit join the allow-list; the gate confines them to /workspace.
@@ -528,10 +545,18 @@ class TaskManager:
                 workspace_enabled=workspace_on,
                 shell_enabled=shell_on,
                 guest_admin_enabled=admin is not None,
+                skills=self._default_skills if skills_on else (),
             ),
             cwd=self._memory_dir,
             allowed_tools=allowed,
         )
+        if skills_on:
+            # The plugin manifest provides the SKILL.md dirs; the skills= filter scopes
+            # exactly the curated set on (the SDK turns on the Skill tool itself).
+            gate_kwargs["plugins"] = [
+                {"type": "local", "path": self._skills_plugin_path}
+            ]
+            gate_kwargs["skills"] = list(self._default_skills)
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
         # writes and the shell tool are absent from allowed_tools, so they reach
         # can_use_tool → approval; Google deferred ops are blocked. Google reads are
