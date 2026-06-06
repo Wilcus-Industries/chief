@@ -12,6 +12,7 @@ Mostly pure + a thin IO seam, so it is testable without the SDK: :func:`cycle_ke
 pure, and everything else flows through ``session_factory`` + a small :class:`BudgetIO`.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -79,31 +80,41 @@ class BudgetGate:
         self._tz = ZoneInfo(owner_tz)
         self._anchor_day = anchor_day
         self._now = now
+        #: Serializes the whole read-decide-write of record/note_rate_limited across the
+        #: one event loop. The usage repo's per-op lock only guards each get-or-create;
+        #: the warn-once / pause-once decision spans several ops, so without this two
+        #: concurrent turns crossing a threshold could both read mode==normal and both
+        #: card. (Distinct from usage._lock — acquired before it, never re-entered.)
+        self._lock = asyncio.Lock()
 
     def _cycle(self) -> str:
         return cycle_key(self._now(), self._tz, self._anchor_day)
 
     async def record(self, cost: float) -> None:
         """Roll ``cost`` into the cycle total, then warn or pause+card as it crosses."""
-        cycle = self._cycle()
-        async with self._session_factory() as session:
-            total = await usage.add_cost(session, cycle=cycle, amount=cost)
-            row = await usage.get_row(session, cycle)
-            assert row is not None  # add_cost just created/updated it
-            fraction = total / self._credit
-            if fraction >= self._exhaust_fraction:
-                await self._exhaust(session, cycle, row.mode, total)
-            else:
-                await self._warn(session, cycle, row.warned_fraction, total, fraction)
+        async with self._lock:
+            cycle = self._cycle()
+            async with self._session_factory() as session:
+                total = await usage.add_cost(session, cycle=cycle, amount=cost)
+                row = await usage.get_row(session, cycle)
+                assert row is not None  # add_cost just created/updated it
+                fraction = total / self._credit
+                if fraction >= self._exhaust_fraction:
+                    await self._exhaust(session, cycle, row.mode, total)
+                else:
+                    await self._warn(
+                        session, cycle, row.warned_fraction, total, fraction
+                    )
 
     async def note_rate_limited(self) -> None:
         """A hard ``rejected`` rate limit — treat like exhaustion: pause + ask."""
-        cycle = self._cycle()
-        async with self._session_factory() as session:
-            row = await usage.get_row(session, cycle)
-            mode = row.mode if row is not None else usage.MODE_NORMAL
-            total = row.total_cost_usd if row is not None else 0.0
-            await self._exhaust(session, cycle, mode, total, rate_limited=True)
+        async with self._lock:
+            cycle = self._cycle()
+            async with self._session_factory() as session:
+                row = await usage.get_row(session, cycle)
+                mode = row.mode if row is not None else usage.MODE_NORMAL
+                total = row.total_cost_usd if row is not None else 0.0
+                await self._exhaust(session, cycle, mode, total, rate_limited=True)
 
     async def mode(self) -> str:
         """The cycle's persisted budget mode (``MODE_NORMAL`` when no row yet)."""

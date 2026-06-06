@@ -458,7 +458,7 @@ class DiscordAdapter(Adapter):
                 await channel.send(f'→ Branched into "{title}".')
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Resolve an approval or admission card button tap (owner only)."""
+        """Resolve an approval, admission, or budget card button tap (owner only)."""
         if interaction.type is not discord.InteractionType.component:
             return
         data = cast(dict[str, Any], interaction.data or {})

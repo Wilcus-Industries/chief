@@ -525,7 +525,7 @@ class TelegramAdapter(Adapter):
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Resolve an approval or admission card button tap (owner only)."""
+        """Resolve an approval, admission, or budget card button tap (owner only)."""
         query = update.callback_query
         user = update.effective_user
         if query is None or user is None or query.data is None:
