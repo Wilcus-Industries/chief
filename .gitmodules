@@ -1,0 +1,3 @@
+[submodule "vendor/skills"]
+	path = vendor/chief-skills/upstream
+	url = https://github.com/anthropics/skills
