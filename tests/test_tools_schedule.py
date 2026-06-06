@@ -142,6 +142,31 @@ async def test_schedule_recurring_creates_row_and_computes_next(
     assert row.next_run.replace(tzinfo=UTC) == datetime(2026, 6, 5, 13, 0, tzinfo=UTC)
 
 
+async def test_schedule_recurring_wakeup_registers_morning_brief(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The setup-morning-brief skill drives exactly this: a daily recurring *wakeup* (not
+    # the default message), so each morning boots a full agent turn to write the brief.
+    out = await _svc(session_factory)._build_recurring().handler(
+        {
+            "cron": "0 7 * * *",
+            "action": "Assemble and send the owner's morning brief.",
+            "action_type": "wakeup",
+            "thread_key": "-100:7",
+        }
+    )
+    assert out["is_error"] is False
+    async with session_factory() as s:
+        row = (await repo.list_enabled(s))[0]
+    assert row.kind == repo.KIND_RECURRING
+    assert row.spec == "0 7 * * *"
+    assert row.action_type == repo.ACTION_WAKEUP
+    assert row.thread_key == "-100:7"
+    # Next 07:00 EDT after 12:00 EDT Jun 4 → Jun 5 07:00 EDT = 11:00 UTC.
+    assert row.next_run is not None
+    assert row.next_run.replace(tzinfo=UTC) == datetime(2026, 6, 5, 11, 0, tzinfo=UTC)
+
+
 async def test_schedule_recurring_rejects_bad_cron(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

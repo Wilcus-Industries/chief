@@ -420,8 +420,9 @@ def test_m10_skills_defaults_off(
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
     assert settings.skills_enabled is False
-    # The curated owner default: Office docs + writing/comms + dev/meta.
+    # The curated owner default: the chief-owned workflow + Office docs + comms + dev.
     assert settings.default_skills == (
+        "setup-morning-brief",
         "docx",
         "pdf",
         "pptx",

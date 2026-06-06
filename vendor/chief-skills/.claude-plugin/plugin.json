@@ -10,6 +10,7 @@
   "license": "MIT",
   "keywords": ["chief", "skills", "agent-sdk"],
   "skills": [
+    "./skills/setup-morning-brief",
     "./upstream/skills/docx",
     "./upstream/skills/pdf",
     "./upstream/skills/pptx",
