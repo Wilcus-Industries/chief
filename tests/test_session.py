@@ -8,9 +8,12 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ProcessError,
+    RateLimitEvent,
+    ResultMessage,
     TextBlock,
     ToolUseBlock,
 )
+from claude_agent_sdk.types import RateLimitInfo
 
 from chief.core.session import Final, Milestone, TaskSession
 
@@ -62,6 +65,26 @@ def _assistant(*blocks: Any, session_id: str | None = None) -> AssistantMessage:
     )
 
 
+def _result(cost: float | None) -> ResultMessage:
+    return ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=8,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-1",
+        total_cost_usd=cost,
+    )
+
+
+def _rate_limit(status: str) -> RateLimitEvent:
+    return RateLimitEvent(
+        rate_limit_info=RateLimitInfo(status=status),  # type: ignore[arg-type]
+        uuid="rl-1",
+        session_id="sess-1",
+    )
+
+
 async def test_run_turn_streams_milestones_then_final() -> None:
     client = FakeClient(ClaudeAgentOptions())
     client.messages = [
@@ -77,6 +100,58 @@ async def test_run_turn_streams_milestones_then_final() -> None:
     assert client.connected is True
     assert client.queries == ["do it"]
     assert session.session_id == "sess-1"
+
+
+async def test_run_turn_captures_cost_from_result_message() -> None:
+    client = FakeClient(ClaudeAgentOptions())
+    client.messages = [
+        _assistant(TextBlock(text="hi")),
+        _result(cost=0.42),
+    ]
+    session = _session_with(client)
+
+    [event async for event in session.run_turn("do it")]
+
+    assert session.last_cost_usd == 0.42
+
+
+async def test_cost_defaults_to_zero_when_result_has_none() -> None:
+    client = FakeClient(ClaudeAgentOptions())
+    client.messages = [_assistant(TextBlock(text="hi")), _result(cost=None)]
+    session = _session_with(client)
+
+    [event async for event in session.run_turn("do it")]
+
+    assert session.last_cost_usd == 0.0
+
+
+async def test_cost_resets_each_turn() -> None:
+    client = FakeClient(ClaudeAgentOptions())
+    session = _session_with(client)
+
+    client.messages = [_result(cost=1.0)]
+    [event async for event in session.run_turn("first")]
+    assert session.last_cost_usd == 1.0
+
+    # A turn with no ResultMessage must not carry the prior turn's cost forward.
+    client.messages = [_assistant(TextBlock(text="hi"))]
+    [event async for event in session.run_turn("second")]
+    assert session.last_cost_usd == 0.0
+
+
+async def test_run_turn_captures_rate_limit_status() -> None:
+    client = FakeClient(ClaudeAgentOptions())
+    client.messages = [_rate_limit("rejected"), _assistant(TextBlock(text="hi"))]
+    session = _session_with(client)
+
+    [event async for event in session.run_turn("do it")]
+
+    assert session.last_rate_limit_status == "rejected"
+
+
+async def test_rate_limit_status_starts_none() -> None:
+    session = _session_with(FakeClient(ClaudeAgentOptions()))
+    assert session.last_rate_limit_status is None
 
 
 async def test_run_turn_empty_response_is_no_reply() -> None:
