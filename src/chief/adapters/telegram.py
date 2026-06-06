@@ -576,6 +576,9 @@ class TelegramAdapter(Adapter):
         await apply_budget_decision(
             self._session_factory, cycle=cycle, action=action
         )
+        if action is BudgetAction.DOWNGRADE:
+            # Flip live owner sessions now; new ones pick the model up via the mode.
+            await self._engine.downgrade_live_sessions()
         try:
             await query.edit_message_text(budget_outcome_text(action))
         except Exception:  # editing is best-effort; the mode already persisted

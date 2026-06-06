@@ -12,6 +12,7 @@ from chief.adapters.base import FILE_REPLY_NOTE, Attachment
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
+    PAUSED_BUDGET_ACK,
     WEB_META_TOOLS,
     WORKING_ACK,
     SessionProto,
@@ -102,6 +103,8 @@ class FakeSession:
         on_start: Callable[[], None] | None = None,
         milestones: list[Milestone] | None = None,
         after_gate: list[Milestone] | None = None,
+        cost: float = 0.0,
+        rate_limit: str | None = None,
     ) -> None:
         self.model = model
         self.resume = resume
@@ -110,16 +113,21 @@ class FakeSession:
         self.attachments_seen: list[tuple[Attachment, ...]] = []
         self.interrupted = False
         self.closed = False
+        self.last_cost_usd = 0.0
+        self.last_rate_limit_status: str | None = None
         self._gate = gate
         self._on_start = on_start
         self._milestones = milestones or []
         self._after_gate = after_gate or []
+        self._cost = cost
+        self._rate_limit = rate_limit
 
     async def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()
     ) -> AsyncIterator[TurnEvent]:
         self.queries.append(text)
         self.attachments_seen.append(tuple(attachments))
+        self.last_cost_usd = 0.0  # this turn's spend only (mirrors TaskSession)
         if self._on_start is not None:
             self._on_start()
         for milestone in self._milestones:
@@ -127,6 +135,8 @@ class FakeSession:
         if self._gate is not None:
             await self._gate.wait()
         self.session_id = f"sess-{text}"
+        self.last_cost_usd = self._cost
+        self.last_rate_limit_status = self._rate_limit
         for milestone in self._after_gate:  # yielded post-gate (after a cancel flips)
             yield milestone
         yield Final(text=f"reply:{text}")
@@ -136,8 +146,29 @@ class FakeSession:
         if self._gate is not None:
             self._gate.set()
 
+    async def set_model(self, model: str) -> None:
+        self.model = model
+
     async def aclose(self) -> None:
         self.closed = True
+
+
+class FakeBudget:
+    """Structural BudgetGate: records spend, serves a fixed mode (M9 enforcement)."""
+
+    def __init__(self, *, mode_value: str = "normal") -> None:
+        self._mode = mode_value
+        self.recorded: list[float] = []
+        self.rate_limited = 0
+
+    async def record(self, cost: float) -> None:
+        self.recorded.append(cost)
+
+    async def note_rate_limited(self) -> None:
+        self.rate_limited += 1
+
+    async def mode(self) -> str:
+        return self._mode
 
 
 class FakeIO:
@@ -197,6 +228,9 @@ def _manager(
     idle: float = 1000.0,
     compaction: float = 1000.0,
     message_limit: int = 4096,
+    budget: Any = None,
+    owner_inbox: str | None = None,
+    downgrade_model: str | None = None,
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -211,6 +245,9 @@ def _manager(
         session_factory_sdk=factory,
         stop_intent=stop,
         warrants_task=warrants,
+        budget=budget,
+        owner_inbox=owner_inbox,
+        budget_downgrade_model=downgrade_model,
     )
 
 
@@ -1450,3 +1487,107 @@ def test_io_and_platform_properties_expose_wiring(
     # The scheduler is built against a stack's manager and reads these to target fires.
     assert mgr.io is io
     assert mgr.platform == "telegram"
+
+
+# ---- budget enforcement (M9) ---------------------------------------------
+
+
+async def test_clean_turn_records_spend(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m", cost=4.25)
+    budget = FakeBudget()
+    mgr = _manager(session_factory, io, factory=_one(sess), budget=budget)
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    # The turn's SDK cost rolls into the monthly total; no rate-limit note.
+    assert budget.recorded == [4.25]
+    assert budget.rate_limited == 0
+    await mgr.shutdown()
+
+
+async def test_rate_limit_rejection_notes_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m", cost=1.0, rate_limit="rejected")
+    budget = FakeBudget()
+    mgr = _manager(session_factory, io, factory=_one(sess), budget=budget)
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    # A hard rejection is treated like exhaustion — pause + ask.
+    assert budget.recorded == [1.0]
+    assert budget.rate_limited == 1
+    await mgr.shutdown()
+
+
+async def test_paused_skips_turn_and_acks_owner_once(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    budget = FakeBudget(mode_value="paused")
+    mgr = _manager(
+        session_factory, io, factory=_one(sess), budget=budget, owner_inbox="owner:0"
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await mgr.dispatch(thread_key="-100:5", text="hello again")
+    await _until(lambda: ("owner:0", PAUSED_BUDGET_ACK) in io.sends)
+
+    # Paused → the turn never runs (no spend) and the owner is reminded just once.
+    assert sess.queries == []
+    assert budget.recorded == []
+    assert io.sends.count(("owner:0", PAUSED_BUDGET_ACK)) == 1
+    assert ("-100:5", "reply:hi") not in io.sends
+    await mgr.shutdown()
+
+
+async def test_downgraded_owner_session_uses_downgrade_model(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="placeholder")
+    budget = FakeBudget(mode_value="downgraded")
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        budget=budget,
+        downgrade_model="claude-haiku-4-5",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    # A downgraded cycle builds the owner session on the cheaper model, and still runs.
+    assert sess.model == "claude-haiku-4-5"
+    await mgr.shutdown()
+
+
+async def test_downgrade_live_sessions_switches_owner_models(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    budget = FakeBudget()  # normal — a live session exists before the owner taps
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        budget=budget,
+        downgrade_model="claude-haiku-4-5",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await mgr.downgrade_live_sessions()
+
+    # The Downgrade tap flips every live owner session onto the budget model.
+    assert sess.model == "claude-haiku-4-5"
+    await mgr.shutdown()

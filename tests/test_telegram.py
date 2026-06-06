@@ -42,6 +42,7 @@ class FakeEngine:
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
+        self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
 
@@ -71,6 +72,9 @@ class FakeEngine:
     async def branch(self, thread_key: str, title: str) -> str:
         self.branched.append((thread_key, title))
         return f"{thread_key.split(':')[0]}:88"
+
+    async def downgrade_live_sessions(self) -> None:
+        self.downgraded += 1
 
 
 class FakeResolver:
@@ -518,7 +522,8 @@ def test_callback_handler_pattern_covers_both_card_kinds() -> None:
 async def test_budget_card_tap_flips_mode(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    adapter = _adapter(session_factory, FakeEngine())
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
     update = _callback_update(user_id=OWNER_ID, data="bud:2026-06:downgrade")
 
     await adapter._on_callback(update, _CTX)
@@ -526,6 +531,7 @@ async def test_budget_card_tap_flips_mode(
     async with session_factory() as session:
         row = await usage.get_row(session, "2026-06")
     assert row is not None and row.mode == usage.MODE_DOWNGRADED
+    assert engine.downgraded == 1  # the tap flips live owner sessions too
     update.callback_query.edit_message_text.assert_awaited_once()  # type: ignore[union-attr]
 
 

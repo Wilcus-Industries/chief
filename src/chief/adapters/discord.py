@@ -514,6 +514,9 @@ class DiscordAdapter(Adapter):
         await apply_budget_decision(
             self._session_factory, cycle=cycle, action=action
         )
+        if action is BudgetAction.DOWNGRADE:
+            # Flip live owner sessions now; new ones pick the model up via the mode.
+            await self._engine.downgrade_live_sessions()
         await interaction.response.edit_message(
             content=budget_outcome_text(action), view=None
         )
