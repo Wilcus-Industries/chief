@@ -141,7 +141,7 @@ class TaskSession:
             mcp_servers=mcp_servers if mcp_servers is not None else {},
             # Packaged skills (M10): a local plugin manifest provides them, the skills=
             # filter scopes which are on. Owner-only — guests pass neither, so no skill
-            # is ever discovered for them. skills=None leaves the SDK's default behavior.
+            # is ever discovered for them. skills=None keeps the SDK default behavior.
             plugins=plugins if plugins is not None else [],
             skills=skills,
         )

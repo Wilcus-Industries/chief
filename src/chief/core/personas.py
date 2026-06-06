@@ -11,6 +11,8 @@ Tier isolation is by construction (DESIGN): a guest prompt never carries the own
 ``User.md`` or memory index, and guest sessions are wired with no owner tools at all.
 """
 
+from collections.abc import Sequence
+
 from ..memory.store import MemoryStore
 from ..tools.shell import SANDBOX_SHELL_CONTRACT
 
@@ -115,6 +117,15 @@ _WORKSPACE_GUIDANCE = (
     "reads and writes anywhere else are blocked."
 )
 
+#: Owner-only skills guidance (M10), included when packaged skills are enabled. Names
+#: the available skills so chief reaches for a packaged workflow instead of improvising.
+_SKILLS_GUIDANCE = (
+    "## Skills\n"
+    "You have packaged skills — self-contained expert workflows you invoke with the "
+    "Skill tool when a request matches one. Prefer a matching skill over improvising. "
+    "Available: {skills}."
+)
+
 #: Owner-only shell guidance (M7), included when the sandbox shell is enabled.
 _SHELL_GUIDANCE = (
     "## Shell\n"
@@ -138,6 +149,7 @@ def build_system_prompt(
     workspace_enabled: bool = False,
     shell_enabled: bool = False,
     guest_admin_enabled: bool = False,
+    skills: Sequence[str] = (),
 ) -> str:
     """Assemble the system prompt for a ``tier`` session against ``memory``.
 
@@ -146,7 +158,8 @@ def build_system_prompt(
     service's rules (calendar booking states times in ``owner_tz``).
     ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + sandbox-shell
     guidance; the web block is always present for the owner (web tools are always
-    wired). Guests get none of these.
+    wired). ``skills`` (M10, owner only) names the enabled packaged skills, adding a
+    block that points chief at them. Guests get none of these.
     """
     if tier == "owner":
         sections = [
@@ -166,6 +179,8 @@ def build_system_prompt(
             sections.append(_WORKSPACE_GUIDANCE)
         if shell_enabled:
             sections.append(_SHELL_GUIDANCE)
+        if skills:
+            sections.append(_SKILLS_GUIDANCE.format(skills=", ".join(skills)))
         if guest_admin_enabled:
             sections.append(_GUEST_ADMIN_GUIDANCE.format(owner=owner_name))
     else:

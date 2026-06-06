@@ -439,7 +439,8 @@ def test_skills_default_skills_override(
 ) -> None:
     # The owner trims/extends the enable-list in config.yaml.
     (tmp_path / "config.yaml").write_text(
-        "owner_telegram_id: 1\nskills_enabled: true\ndefault_skills: [docx, claude-api]\n"
+        "owner_telegram_id: 1\nskills_enabled: true\n"
+        "default_skills: [docx, claude-api]\n"
     )
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)

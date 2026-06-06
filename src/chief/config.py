@@ -174,7 +174,8 @@ class Settings(BaseSettings):
     # which are on. Owner-only by construction — guests never get plugins/skills, the
     # same tier isolation as the tool-surface split. default_skills is the curated
     # enable-list the owner session turns on (trim/extend in config.yaml); inert when
-    # disabled, so no cross-dependency model-validator — only a per-entry non-empty check.
+    # disabled, so no cross-dependency model-validator — only a per-entry non-empty
+    # check.
     skills_enabled: bool = False
     default_skills: tuple[str, ...] = (
         "docx",
@@ -274,7 +275,7 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_default_skills(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         """Each enabled skill name must be non-empty — it maps to a SKILL.md name/dir
-        (or ``plugin:skill``), and a blank entry is a config typo the SDK can't resolve."""
+        (or ``plugin:skill``); a blank entry is a config typo the SDK can't resolve."""
         for name in value:
             if not name.strip():
                 raise ValueError("default_skills entries must be non-empty")

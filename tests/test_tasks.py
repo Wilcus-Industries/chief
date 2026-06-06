@@ -1089,6 +1089,89 @@ async def test_owner_gmail_session_partitions_reads_writes_and_deletes(
     await mgr.shutdown()
 
 
+# ---- skills wiring (M10) -----------------------------------------------------
+
+
+def _skills_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    enabled: bool = True,
+    plugin_path: str | None = "vendor/chief-skills",
+) -> TaskManager:
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        front_desk_thread_key="-100:1",
+        skills_enabled=enabled,
+        skills_plugin_path=plugin_path,
+        default_skills=("docx", "claude-api"),
+    )
+
+
+async def test_owner_session_wires_skills_plugin_and_filter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _skills_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["plugins"] == [
+        {"type": "local", "path": "vendor/chief-skills"}
+    ]
+    assert captured["skills"] == ["docx", "claude-api"]
+    # The owner prompt names the skills so chief reaches for them.
+    assert "## Skills" in captured["system_prompt"]
+    assert "docx" in captured["system_prompt"]
+    await mgr.shutdown()
+
+
+async def test_owner_session_no_skills_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _skills_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), enabled=False
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    # Disabled → no plugin, no filter, no Skills block (SDK discovers nothing).
+    assert "plugins" not in captured
+    assert "skills" not in captured
+    assert "## Skills" not in captured["system_prompt"]
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_skills(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Skills are owner-only: even with the framework enabled, a guest session carries
+    # neither the plugin nor the filter (tier isolation, like the tool-surface split).
+    captured: dict[str, Any] = {}
+    mgr = _skills_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "plugins" not in captured
+    assert "skills" not in captured
+    await mgr.shutdown()
+
+
 async def test_guest_gets_no_calendar_or_web_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
