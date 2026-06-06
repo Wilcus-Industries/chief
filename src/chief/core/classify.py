@@ -39,8 +39,16 @@ _WARRANTS_SYSTEM = (
 
 
 async def _ask_yes_no(prompt: str, *, model: str, system: str) -> bool:
-    """Run one Haiku turn and return ``True`` iff the answer starts with 'yes'."""
-    options = ClaudeAgentOptions(max_turns=1, model=model, system_prompt=system)
+    """Run one Haiku turn and return ``True`` iff the answer starts with 'yes'.
+
+    ``allowed_tools=[]`` keeps the bundled CLI from auto-calling a default tool, which
+    would spend the single turn on the tool call and die with ``Reached maximum number
+    of turns (1)`` before answering (fail-safe NO, but noisy). These are pure yes/no
+    judgments — no tool ever needs to run.
+    """
+    options = ClaudeAgentOptions(
+        max_turns=1, model=model, system_prompt=system, allowed_tools=[]
+    )
     parts: list[str] = []
     try:
         async for message in query(prompt=prompt, options=options):

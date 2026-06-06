@@ -13,6 +13,7 @@ from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
     PAUSED_BUDGET_ACK,
+    TURN_TIMEOUT_NOTE,
     WEB_META_TOOLS,
     WORKING_ACK,
     SessionProto,
@@ -225,6 +226,7 @@ def _manager(
     warrants: Callable[..., Any] = _no,
     concurrency: int = 3,
     grace: float = 5.0,
+    turn_timeout: float = 1000.0,
     idle: float = 1000.0,
     compaction: float = 1000.0,
     message_limit: int = 4096,
@@ -239,6 +241,7 @@ def _manager(
         classifier_model="claude-haiku-4-5",
         concurrency=concurrency,
         grace_seconds=grace,
+        turn_timeout=turn_timeout,
         idle_archive_seconds=idle,
         compaction_idle_seconds=compaction,
         message_limit=message_limit,
@@ -549,6 +552,56 @@ async def test_failed_turn_does_not_arm_idle(
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == FAILED
+    await mgr.shutdown()
+
+
+class HangSession(FakeSession):
+    """A session whose turn never reaches a Final — the wedge the watchdog guards.
+
+    ``run_turn`` awaits an event that is never set, so the engine's ``async for`` would
+    block forever without the per-turn timeout.
+    """
+
+    async def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        self.queries.append(text)
+        await asyncio.Event().wait()  # never resolves — no terminal ResultMessage
+        yield Final(text="")  # unreachable; keeps this an async generator
+
+
+async def test_watchdog_times_out_wedged_turn_and_frees_semaphore(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        # First session wedges; the next is a normal one to prove the slot was freed.
+        sess: FakeSession = (
+            HangSession(model=model) if not sessions else FakeSession(model=model)
+        )
+        sessions.append(sess)
+        return sess
+
+    # concurrency=1 so a leaked slot would block the second task entirely.
+    mgr = _manager(
+        session_factory, io, factory=factory, concurrency=1, turn_timeout=0.05
+    )
+
+    await mgr.dispatch(thread_key="-100:1", text="hang")
+    await _until(lambda: ("-100:1", TURN_TIMEOUT_NOTE) in io.sends)
+
+    # The watchdog reset generating and tore the wedged session down.
+    assert mgr._tasks["-100:1"].generating is False
+    assert sessions[0].closed is True
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:1")
+    assert db is not None and db.status == FAILED
+
+    # The semaphore slot was released: a fresh task can now generate and reply.
+    await mgr.dispatch(thread_key="-100:2", text="go")
+    await _until(lambda: ("-100:2", "reply:go") in io.sends)
     await mgr.shutdown()
 
 

@@ -198,6 +198,7 @@ def build_engine(
         classifier_model=settings.classifier_model,
         concurrency=settings.concurrency,
         grace_seconds=settings.grace_seconds,
+        turn_timeout=settings.turn_timeout_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
         compaction_idle_seconds=settings.compaction_idle_seconds,
         # The cap that decides split-vs-file output differs per platform (M8).
