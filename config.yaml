@@ -113,3 +113,24 @@ budget_enabled: false
 # budget_exhaust_fraction: 1.0       # fraction that triggers the pause+ask card
 # budget_downgrade_model: claude-haiku-4-5-20251001  # model the Downgrade choice switches to
 # budget_cycle_anchor_day: 1         # day-of-month the billing cycle resets (1–28)
+
+# Skills framework (M10, opt-in). With skills_enabled on, owner sessions load a curated
+# set of packaged workflows (SKILL.md dirs) the Agent SDK runs natively — vendored from
+# github.com/anthropics/skills (the vendor/skills submodule) and exposed through chief's
+# own plugin manifest (vendor/chief-skills). Owner-only: guests never see skills (tier
+# isolation). default_skills is the enable-list; trim or extend it here.
+skills_enabled: false
+# default_skills:                    # the curated owner default — Office docs + comms + dev
+#   - docx                           #   Office docs: produce/parse files swapped over chat
+#   - pdf
+#   - pptx
+#   - xlsx
+#   - doc-coauthoring                #   writing/comms: draft proposals, specs, updates
+#   - internal-comms
+#   - claude-api                     #   dev/meta: the owner is a developer
+#   - skill-creator                  #   also backs the "chief drafts a new skill" story
+#   - mcp-builder
+#   - setup-morning-brief            #   chief-owned: the first packaged workflow (M10)
+# Excluded from the default (still on disk via the submodule — re-enable by listing above):
+#   algorithmic-art, canvas-design, slack-gif-creator, theme-factory, brand-guidelines
+#   (creative/styling), frontend-design, web-artifacts-builder, webapp-testing (GUI-bound).
