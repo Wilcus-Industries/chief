@@ -860,7 +860,13 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   `setup-morning-brief`, chief-drafts/owner-approves) wired onto **owner sessions only**
   via the per-session `skills=` filter (`_wire_owner_session`), the plugin path resolved
   absolute in `build_engine` so the owner session's `cwd=memory_dir` can't mis-resolve
-  it. Opt-in (`skills_enabled`).
+  it. Opt-in (`skills_enabled`). The four **office-doc skills** (docx/pdf/pptx/xlsx) shell
+  out to a Python + Node (docx-js/pptxgenjs) + pandoc + LibreOffice + poppler toolchain
+  baked into the **M7 sandbox image** (`docker/sandbox/Dockerfile`), alongside the vendored
+  skill tree at the same `/app/vendor/...` path core hands the model. So they are functional
+  **only when `shell_enabled` + the `sandbox` profile are on** (they have no bash otherwise);
+  the image grows ~600 MB but its security posture (secret-free, read-only, capped) is
+  unchanged. `HOME=/tmp` in that image so LibreOffice has a writable profile.
 - **M11 group chats + Opus escalation** (approval-gated).
 
 **Phase 4 — Ship**
