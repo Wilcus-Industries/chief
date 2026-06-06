@@ -1,5 +1,6 @@
 """Entrypoint settings loading and per-platform component wiring."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,47 @@ def test_build_engine_no_schedule_services_when_disabled(
 
     assert manager._schedule_service is None
     assert manager._schedule_bash_service is None
+
+
+def test_build_engine_wires_skills_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(skills_enabled=True)
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # Enabled → flag + curated list thread in, and the plugin path is ABSOLUTE (the
+    # owner session's cwd=memory_dir makes a relative --plugin-dir resolve wrong).
+    assert manager._skills_enabled is True
+    assert manager._default_skills == settings.default_skills
+    assert manager._skills_plugin_path is not None
+    assert os.path.isabs(manager._skills_plugin_path)
+    assert manager._skills_plugin_path.endswith("vendor/chief-skills")
+
+
+def test_build_engine_no_skills_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings()  # skills_enabled defaults off
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert manager._skills_enabled is False
+    assert manager._skills_plugin_path is None
 
 
 def test_build_engine_wires_budget_when_enabled(
