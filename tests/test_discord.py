@@ -30,6 +30,7 @@ class FakeEngine:
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
+        self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
 
@@ -59,6 +60,9 @@ class FakeEngine:
     async def branch(self, thread_key: str, title: str) -> str:
         self.branched.append((thread_key, title))
         return f"{thread_key.split(':')[0]}:88"
+
+    async def downgrade_live_sessions(self) -> None:
+        self.downgraded += 1
 
 
 class FakeResolver:
@@ -547,6 +551,21 @@ async def test_budget_interaction_tap_flips_mode(
         row = await usage.get_row(session, "2026-06")
     assert row is not None and row.mode == usage.MODE_OVERFLOW
     interaction.response.edit_message.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_budget_downgrade_tap_flips_live_sessions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    interaction = _interaction(user_id=OWNER_ID, custom_id="bud:2026-06:downgrade")
+
+    await adapter.on_interaction(interaction)
+
+    async with session_factory() as session:
+        row = await usage.get_row(session, "2026-06")
+    assert row is not None and row.mode == usage.MODE_DOWNGRADED
+    assert engine.downgraded == 1  # the tap flips live owner sessions too
 
 
 async def test_budget_interaction_ignored_for_guest(

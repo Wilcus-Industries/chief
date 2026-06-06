@@ -55,6 +55,7 @@ from ..gate.policy import PolicyStore
 from ..memory.distill import distill as _distill_default
 from ..memory.store import OWNER_NAMESPACE, FactDraft, MemoryStore
 from ..obs.audit import AuditLog
+from ..persistence import usage
 from ..persistence.models import Task
 from ..persistence.tasks import (
     CANCELLED,
@@ -81,6 +82,10 @@ from .session import Final, TaskSession, TurnEvent
 logger = logging.getLogger("chief.core.tasks")
 
 WORKING_ACK = "working on it…"
+#: Owner reminder when a turn is skipped because the cycle is paused at budget (M9).
+#: The choice card was already posted when the cycle paused; this nudges once per
+#: pause episode so queued turns don't silently vanish while the owner hasn't decided.
+PAUSED_BUDGET_ACK = "⏸ Paused at budget — pick how to continue on the card."
 #: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
@@ -141,12 +146,25 @@ class SessionProto(Protocol):
     """The slice of :class:`TaskSession` the engine drives (structural)."""
 
     session_id: str | None
+    #: This turn's SDK cost and latest rate-limit status, captured by the session and
+    #: read by the engine after a clean turn to drive the budget (M9).
+    last_cost_usd: float
+    last_rate_limit_status: str | None
 
     def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()
     ) -> AsyncIterator[TurnEvent]: ...
     async def interrupt(self) -> None: ...
+    async def set_model(self, model: str) -> None: ...
     async def aclose(self) -> None: ...
+
+
+class BudgetProto(Protocol):
+    """The slice of :class:`~chief.core.budget.BudgetGate` the engine drives (M9)."""
+
+    async def record(self, cost: float) -> None: ...
+    async def note_rate_limited(self) -> None: ...
+    async def mode(self) -> str: ...
 
 
 SessionFactory = Callable[..., SessionProto]
@@ -239,6 +257,9 @@ class TaskManager:
         guest_admin_service: GuestAdminService | None = None,
         schedule_service: ScheduleService | None = None,
         schedule_bash_service: ScheduleBashService | None = None,
+        budget: BudgetProto | None = None,
+        owner_inbox: str | None = None,
+        budget_downgrade_model: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -271,6 +292,12 @@ class TaskManager:
         self._guest_admin_service = guest_admin_service
         self._schedule_service = schedule_service
         self._schedule_bash_service = schedule_bash_service
+        self._budget = budget
+        self._owner_inbox = owner_inbox
+        self._budget_downgrade_model = budget_downgrade_model
+        #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
+        #: next time the budget reports a non-paused mode, so each pause acks once.
+        self._paused_ack_sent = False
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
 
@@ -416,12 +443,12 @@ class TaskManager:
         gate_kwargs = self._session_kwargs(
             thread_key=thread_key, tier=tier, db_id=db_id, from_label=from_label
         )
-        # Guests run on the guest model (Sonnet, never Opus); the owner on theirs.
-        model = (
-            self._owner_model
-            if tier == "owner"
-            else (self._guest_model or self._owner_model)
-        )
+        # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
+        # swapped for the cheaper budget model while the cycle is downgraded (M9).
+        if tier == "owner":
+            model = await self._owner_session_model()
+        else:
+            model = self._guest_model or self._owner_model
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
@@ -689,7 +716,54 @@ class TaskManager:
             turn = await task.queue.get()
             await self._run_turn(task, turn)
 
+    # ---- budget enforcement (M9) ----------------------------------------
+
+    async def _owner_session_model(self) -> str:
+        """The model a new owner session opens on — the cheaper budget model while the
+        cycle is in ``downgraded`` mode, else the configured owner model (M9)."""
+        if self._budget is not None and self._budget_downgrade_model is not None:
+            if await self._budget.mode() == usage.MODE_DOWNGRADED:
+                return self._budget_downgrade_model
+        return self._owner_model
+
+    async def _budget_admits(self) -> bool:
+        """False when the cycle is paused at budget — the turn must be skipped without
+        spending. Reminds the owner once per pause episode that turns are blocked."""
+        if self._budget is None:
+            return True
+        if await self._budget.mode() != usage.MODE_PAUSED:
+            self._paused_ack_sent = False
+            return True
+        if not self._paused_ack_sent and self._owner_inbox is not None:
+            self._paused_ack_sent = True
+            await self._io.send(self._owner_inbox, PAUSED_BUDGET_ACK)
+        return False
+
+    async def _record_spend(self, task: _RunningTask) -> None:
+        """Roll this turn's SDK cost into the cycle total; a hard rate-limit rejection
+        is treated like exhaustion (pause + ask)."""
+        if self._budget is None:
+            return
+        await self._budget.record(task.session.last_cost_usd)
+        if task.session.last_rate_limit_status == "rejected":
+            await self._budget.note_rate_limited()
+
+    async def downgrade_live_sessions(self) -> None:
+        """Switch every live owner session to the budget downgrade model (M9).
+
+        Invoked when the owner taps **Downgrade** on the budget card; new sessions
+        already pick the model up via :meth:`_owner_session_model`. No-op when no
+        downgrade model is configured (budget disabled).
+        """
+        if self._budget_downgrade_model is None:
+            return
+        for task in list(self._tasks.values()):
+            if task.tier == "owner":
+                await task.session.set_model(self._budget_downgrade_model)
+
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
+        if not await self._budget_admits():
+            return  # paused at budget — skip without spending (owner already nudged)
         ack = asyncio.create_task(self._ack_after_grace(task))
         task.transcript.append(("owner", turn.text))
         try:
@@ -711,6 +785,7 @@ class TaskManager:
                     await self._emit_final(task, final.text)
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
+                await self._record_spend(task)
                 await self._set_status(task, OPEN)
                 # Only a clean turn re-arms the idle→archive and distill timers.
                 self._arm_idle(task)
