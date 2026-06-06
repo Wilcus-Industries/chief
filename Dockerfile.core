@@ -25,11 +25,14 @@ COPY config.yaml ./
 # Bundled skills plugin (M10). Submodule content must be checked out in the build
 # context (`git submodule update --init`) for owner sessions to load skills.
 COPY vendor/ ./vendor/
-# Fail loudly if the skills submodule wasn't checked out — an empty upstream/ would
-# otherwise COPY clean and silently ship a plugin missing 9 of its 10 skills.
-RUN test -d vendor/chief-skills/upstream/skills \
-    && [ -n "$(ls -A vendor/chief-skills/upstream/skills)" ] \
-    || (echo "vendor/chief-skills/upstream empty — run 'git submodule update --init' before docker build" >&2; exit 1)
+# Fail loudly if the skills submodule wasn't checked out. An empty or partial upstream/
+# would otherwise COPY clean and silently ship a plugin missing skills. We assert each
+# upstream dir plugin.json references exists — keep this list in sync with the manifest.
+RUN set -e; \
+    for s in docx pdf pptx xlsx doc-coauthoring internal-comms claude-api skill-creator mcp-builder; do \
+        test -d "vendor/chief-skills/upstream/skills/$s" \
+        || { echo "vendor/chief-skills/upstream/skills/$s missing — run 'git submodule update --init' before docker build" >&2; exit 1; }; \
+    done
 
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
