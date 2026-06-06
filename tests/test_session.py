@@ -254,6 +254,40 @@ def test_mcp_and_disallowed_tools_flow_into_options() -> None:
     assert options.disallowed_tools == ["mcp__gcal__delete-event"]
 
 
+def test_plugins_and_skills_flow_into_options() -> None:
+    captured: dict[str, ClaudeAgentOptions] = {}
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        captured["options"] = options
+        return FakeClient(options)
+
+    TaskSession(
+        model="claude-sonnet-4-6",
+        plugins=[{"type": "local", "path": "vendor/chief-skills"}],
+        skills=["docx", "claude-api"],
+        client_factory=factory,
+    )
+
+    options = captured["options"]
+    assert options.plugins == [{"type": "local", "path": "vendor/chief-skills"}]
+    assert options.skills == ["docx", "claude-api"]
+
+
+def test_plugins_and_skills_default_empty() -> None:
+    # A plain session (every guest, and an owner with skills off) carries no plugin and
+    # leaves skills unset, so the SDK discovers nothing — tier isolation by construction.
+    captured: dict[str, ClaudeAgentOptions] = {}
+
+    def factory(options: ClaudeAgentOptions) -> FakeClient:
+        captured["options"] = options
+        return FakeClient(options)
+
+    TaskSession(model="claude-sonnet-4-6", client_factory=factory)
+
+    assert captured["options"].plugins == []
+    assert captured["options"].skills is None
+
+
 async def test_dead_resume_falls_back_to_fresh_session() -> None:
     clients: list[FakeClient] = []
 

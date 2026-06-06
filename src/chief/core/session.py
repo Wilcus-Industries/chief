@@ -29,7 +29,7 @@ from claude_agent_sdk import (
     TextBlock,
     ToolUseBlock,
 )
-from claude_agent_sdk.types import HookEvent, McpServerConfig
+from claude_agent_sdk.types import HookEvent, McpServerConfig, SdkPluginConfig
 
 from ..adapters.base import Attachment
 from .agent import NO_REPLY
@@ -124,6 +124,8 @@ class TaskSession:
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         mcp_servers: dict[str, McpServerConfig] | None = None,
+        plugins: list[SdkPluginConfig] | None = None,
+        skills: list[str] | None = None,
         client_factory: ClientFactory = _default_client,
     ) -> None:
         self._options = ClaudeAgentOptions(
@@ -137,6 +139,11 @@ class TaskSession:
             allowed_tools=allowed_tools if allowed_tools is not None else [],
             disallowed_tools=disallowed_tools if disallowed_tools is not None else [],
             mcp_servers=mcp_servers if mcp_servers is not None else {},
+            # Packaged skills (M10): a local plugin manifest provides them, the skills=
+            # filter scopes which are on. Owner-only — guests pass neither, so no skill
+            # is ever discovered for them. skills=None leaves the SDK's default behavior.
+            plugins=plugins if plugins is not None else [],
+            skills=skills,
         )
         self._client_factory = client_factory
         self._client = client_factory(self._options)
