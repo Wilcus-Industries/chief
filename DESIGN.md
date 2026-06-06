@@ -855,7 +855,12 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   once per threshold, and on (near-)exhaustion pauses the cycle and posts a choice card
   (downgrade / continue full-quality / approve overflow) — a persisted mode, restart-proof
   (the admission-card pattern), enforced by `TaskManager`. Opt-in (`budget_enabled`).
-- **M10 skills:** skills framework + `setup-morning-brief` (chief-drafts/owner-approves).
+- **M10 skills — ✅ done.** Agent-SDK skills framework: a curated local plugin
+  (`vendor/chief-skills` — a hand-picked subset of `anthropics/skills` + the chief-owned
+  `setup-morning-brief`, chief-drafts/owner-approves) wired onto **owner sessions only**
+  via the per-session `skills=` filter (`_wire_owner_session`), the plugin path resolved
+  absolute in `build_engine` so the owner session's `cwd=memory_dir` can't mis-resolve
+  it. Opt-in (`skills_enabled`).
 - **M11 group chats + Opus escalation** (approval-gated).
 
 **Phase 4 — Ship**

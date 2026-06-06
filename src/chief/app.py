@@ -47,6 +47,12 @@ logger = logging.getLogger("chief.app")
 
 DOCKER_SECRETS_DIR = "/run/secrets"
 
+# The bundled skills plugin (M10) lives at repo-root vendor/chief-skills. The owner
+# session runs with cwd=memory_dir and the CLI resolves --plugin-dir against that cwd,
+# so the path must be absolute — resolved here against the process cwd, the same
+# convention config.yaml is loaded by.
+SKILLS_PLUGIN_DIR = "vendor/chief-skills"
+
 #: One built engine stack for a platform: its engine, its adapter, and its approval
 #: manager (the adapter's ``run`` drives the connection; the manager needs shutdown).
 Stack = tuple[TaskManager, Adapter, ApprovalManager]
@@ -223,6 +229,14 @@ def build_engine(
         budget_downgrade_model=(
             settings.budget_downgrade_model if budget is not None else None
         ),
+        # Owner-only packaged skills (M10). The path must be absolute (see
+        # SKILLS_PLUGIN_DIR) — the owner session's cwd=memory_dir would mis-resolve a
+        # relative --plugin-dir. Inert (None path) unless the flag is on.
+        skills_enabled=settings.skills_enabled,
+        skills_plugin_path=(
+            os.path.abspath(SKILLS_PLUGIN_DIR) if settings.skills_enabled else None
+        ),
+        default_skills=settings.default_skills,
     )
 
 

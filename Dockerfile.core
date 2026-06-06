@@ -22,6 +22,10 @@ RUN uv sync --no-dev --frozen
 # Non-secret runtime config; secrets arrive as a Docker secret mount at /run/secrets.
 COPY config.yaml ./
 
+# Bundled skills plugin (M10). Submodule content must be checked out in the build
+# context (`git submodule update --init`) for owner sessions to load skills.
+COPY vendor/ ./vendor/
+
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
 
