@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "chief-skills",
+  "displayName": "Chief Skills",
+  "version": "0.1.0",
+  "description": "Curated default skill set for the chief chief-of-staff agent: a hand-picked subset of anthropics/skills (vendored as the ./upstream submodule) that the owner session loads. Only the skills listed here are exposed; the rest of the upstream set is intentionally left out.",
+  "author": {
+    "name": "William Chastain"
+  },
+  "license": "MIT",
+  "keywords": ["chief", "skills", "agent-sdk"],
+  "skills": [
+    "./upstream/skills/docx",
+    "./upstream/skills/pdf",
+    "./upstream/skills/pptx",
+    "./upstream/skills/xlsx",
+    "./upstream/skills/doc-coauthoring",
+    "./upstream/skills/internal-comms",
+    "./upstream/skills/claude-api",
+    "./upstream/skills/skill-creator",
+    "./upstream/skills/mcp-builder"
+  ]
+}
