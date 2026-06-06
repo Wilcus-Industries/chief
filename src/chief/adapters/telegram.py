@@ -35,6 +35,8 @@ from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
     ADMISSION_PREFIX,
+    BUDGET_BUTTON_LABELS,
+    BUDGET_PREFIX,
     CALLBACK_PREFIX,
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENTS,
@@ -43,6 +45,8 @@ from .base import (
     AdmissionCard,
     ApprovalResolver,
     Attachment,
+    BudgetAction,
+    BudgetCard,
     Engine,
     MemoryReader,
     Message,
@@ -51,11 +55,15 @@ from .base import (
     Tier,
     admission_payload,
     apply_admission,
+    apply_budget_decision,
+    budget_outcome_text,
+    budget_payload,
     classify_tier,
     default_branch_title,
     handle_guest_message,
     is_supported_media,
     parse_admission,
+    parse_budget,
     parse_callback,
 )
 from .base import (
@@ -68,10 +76,13 @@ PLATFORM = "telegram"
 TELEGRAM_LIMIT = 4096
 TOPIC_NAME_LIMIT = 128
 
-#: Button payloads ``_on_callback`` claims: approval cards (``appr:``) AND admission
-#: cards (``adm:``). python-telegram-bot only dispatches callbacks matching this regex,
-#: so it must cover both prefixes or one card's taps are silently dropped.
-CALLBACK_QUERY_PATTERN = rf"^(?:{CALLBACK_PREFIX}|{ADMISSION_PREFIX}):"
+#: Button payloads ``_on_callback`` claims: approval (``appr:``), admission (``adm:``),
+#: AND budget choice (``bud:``) cards. python-telegram-bot only dispatches callbacks
+#: matching this regex, so it must cover every prefix or a card's taps are silently
+#: dropped.
+CALLBACK_QUERY_PATTERN = (
+    rf"^(?:{CALLBACK_PREFIX}|{ADMISSION_PREFIX}|{BUDGET_PREFIX}):"
+)
 
 
 def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
@@ -118,6 +129,21 @@ def _admission_keyboard(contact_id: int) -> InlineKeyboardMarkup:
                         contact_id, AdmissionAction.BLOCK
                     ),
                 ),
+            ]
+        ]
+    )
+
+
+def _budget_keyboard(cycle: str) -> InlineKeyboardMarkup:
+    """The three-button budget choice card (M9): downgrade / continue / overflow."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    BUDGET_BUTTON_LABELS[action],
+                    callback_data=budget_payload(cycle, action),
+                )
+                for action in BudgetAction
             ]
         ]
     )
@@ -206,6 +232,16 @@ class TelegramTaskIO:
             text=card.text,
             message_thread_id=thread_id or None,
             reply_markup=_admission_keyboard(card.contact_id),
+        )
+
+    async def send_budget_card(self, route: str, card: BudgetCard) -> None:
+        """Post the budget choice card to ``route`` (M9, no ref tracked)."""
+        chat_id, thread_id = _parse(route)
+        await self._bot.send_message(
+            chat_id=chat_id,
+            text=card.text,
+            message_thread_id=thread_id or None,
+            reply_markup=_budget_keyboard(card.cycle),
         )
 
 
@@ -507,6 +543,10 @@ class TelegramAdapter(Adapter):
         if admission is not None:
             await self._resolve_admission(query, *admission)
             return
+        budget = parse_budget(query.data)
+        if budget is not None:
+            await self._resolve_budget(query, *budget)
+            return
         await query.answer()
 
     async def _resolve_admission(
@@ -527,6 +567,19 @@ class TelegramAdapter(Adapter):
             await query.edit_message_text(outcome)
         except Exception:  # editing is best-effort; the decision already persisted
             logger.debug("admission card edit failed", exc_info=True)
+        await query.answer()
+
+    async def _resolve_budget(
+        self, query: Any, cycle: str, action: BudgetAction
+    ) -> None:
+        """Apply a budget choice and rewrite the card to its outcome (owner only)."""
+        await apply_budget_decision(
+            self._session_factory, cycle=cycle, action=action
+        )
+        try:
+            await query.edit_message_text(budget_outcome_text(action))
+        except Exception:  # editing is best-effort; the mode already persisted
+            logger.debug("budget card edit failed", exc_info=True)
         await query.answer()
 
     async def run(self, on_ready: ReadyHook | None = None) -> None:

@@ -30,6 +30,7 @@ from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
+    BUDGET_BUTTON_LABELS,
     CALLBACK_PREFIX,
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENTS,
@@ -38,6 +39,8 @@ from .base import (
     AdmissionCard,
     ApprovalResolver,
     Attachment,
+    BudgetAction,
+    BudgetCard,
     Engine,
     MemoryReader,
     Message,
@@ -46,11 +49,15 @@ from .base import (
     Tier,
     admission_payload,
     apply_admission,
+    apply_budget_decision,
+    budget_outcome_text,
+    budget_payload,
     classify_tier,
     default_branch_title,
     handle_guest_message,
     is_supported_media,
     parse_admission,
+    parse_budget,
     parse_callback,
     split_message,
 )
@@ -117,6 +124,32 @@ def _admission_view(contact_id: int) -> discord.ui.View:
             custom_id=admission_payload(contact_id, AdmissionAction.BLOCK),
         )
     )
+    return view
+
+
+#: Discord button style per budget choice (labels live in base.BUDGET_BUTTON_LABELS).
+_BUDGET_STYLES = {
+    BudgetAction.DOWNGRADE: discord.ButtonStyle.primary,
+    BudgetAction.CONTINUE: discord.ButtonStyle.success,
+    BudgetAction.OVERFLOW: discord.ButtonStyle.secondary,
+}
+
+
+def _budget_view(cycle: str) -> discord.ui.View:
+    """The three-button budget choice card (M9): downgrade / continue / overflow.
+
+    Like the other cards, each button's ``custom_id`` carries the decision (and the
+    cycle), so :meth:`DiscordAdapter.on_interaction` resolves it with no per-view state.
+    """
+    view = discord.ui.View(timeout=None)
+    for action in BudgetAction:
+        view.add_item(
+            discord.ui.Button(
+                label=BUDGET_BUTTON_LABELS[action],
+                style=_BUDGET_STYLES[action],
+                custom_id=budget_payload(cycle, action),
+            )
+        )
     return view
 
 
@@ -192,6 +225,13 @@ class DiscordTaskIO:
         target_id = thread_id or channel_id
         target = cast(discord.abc.Messageable, await self._resolve(target_id))
         await target.send(card.text, view=_admission_view(card.contact_id))
+
+    async def send_budget_card(self, route: str, card: BudgetCard) -> None:
+        """Post the budget choice card to ``route`` (M9, no ref tracked)."""
+        channel_id, thread_id = _parse(route)
+        target_id = thread_id or channel_id
+        target = cast(discord.abc.Messageable, await self._resolve(target_id))
+        await target.send(card.text, view=_budget_view(card.cycle))
 
 
 class DiscordAdapter(Adapter):
@@ -427,7 +467,8 @@ class DiscordAdapter(Adapter):
             return
         approval = parse_callback(custom_id)
         admission = parse_admission(custom_id)
-        if approval is None and admission is None:
+        budget = parse_budget(custom_id)
+        if approval is None and admission is None and budget is None:
             return
         user = interaction.user
         if classify_tier(sender_id=user.id, owner_id=self._owner_id) is not Tier.OWNER:
@@ -440,6 +481,9 @@ class DiscordAdapter(Adapter):
             return
         if admission is not None:
             await self._resolve_admission(interaction, *admission)
+            return
+        if budget is not None:
+            await self._resolve_budget(interaction, *budget)
 
     async def _resolve_admission(
         self,
@@ -459,6 +503,20 @@ class DiscordAdapter(Adapter):
             else f"🚫 Blocked {who}."
         )
         await interaction.response.edit_message(content=outcome, view=None)
+
+    async def _resolve_budget(
+        self,
+        interaction: discord.Interaction,
+        cycle: str,
+        action: BudgetAction,
+    ) -> None:
+        """Apply a budget choice and rewrite the card to its outcome (owner only)."""
+        await apply_budget_decision(
+            self._session_factory, cycle=cycle, action=action
+        )
+        await interaction.response.edit_message(
+            content=budget_outcome_text(action), view=None
+        )
 
     async def on_ready(self) -> None:
         """Fire the ready hook once (the gateway event re-fires on reconnect)."""

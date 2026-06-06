@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from telegram import Update
 from telegram.ext import Application
 
-from chief.adapters.base import AdmissionCard, Attachment, parse_callback
+from chief.adapters.base import (
+    AdmissionCard,
+    Attachment,
+    BudgetCard,
+    parse_callback,
+)
 from chief.adapters.telegram import (
     CALLBACK_QUERY_PATTERN,
     TelegramAdapter,
@@ -20,6 +25,7 @@ from chief.adapters.telegram import (
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
 from chief.persistence import contacts as contact_repo
+from chief.persistence import usage
 from chief.persistence.contacts import get_or_create_contact
 from chief.persistence.models import Contact, Task
 
@@ -500,12 +506,40 @@ async def test_guest_over_rate_limit_dropped(
 
 def test_callback_handler_pattern_covers_both_card_kinds() -> None:
     # The registered CallbackQueryHandler only dispatches payloads matching this regex;
-    # it MUST cover both approval (appr:) and admission (adm:) cards, or the owner's
-    # Admit/Block taps are silently dropped before reaching _on_callback.
+    # it MUST cover approval (appr:), admission (adm:), and budget (bud:) cards, or the
+    # owner's taps are silently dropped before reaching _on_callback.
     assert re.match(CALLBACK_QUERY_PATTERN, "appr:9:approve_once")
     assert re.match(CALLBACK_QUERY_PATTERN, "adm:5:admit")
     assert re.match(CALLBACK_QUERY_PATTERN, "adm:5:block")
+    assert re.match(CALLBACK_QUERY_PATTERN, "bud:2026-06:downgrade")
     assert not re.match(CALLBACK_QUERY_PATTERN, "other:1:x")
+
+
+async def test_budget_card_tap_flips_mode(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine())
+    update = _callback_update(user_id=OWNER_ID, data="bud:2026-06:downgrade")
+
+    await adapter._on_callback(update, _CTX)
+
+    async with session_factory() as session:
+        row = await usage.get_row(session, "2026-06")
+    assert row is not None and row.mode == usage.MODE_DOWNGRADED
+    update.callback_query.edit_message_text.assert_awaited_once()  # type: ignore[union-attr]
+
+
+async def test_budget_card_tap_ignored_for_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine())
+    update = _callback_update(user_id=7, data="bud:2026-06:continue")
+
+    await adapter._on_callback(update, _CTX)
+
+    async with session_factory() as session:
+        assert await usage.get_row(session, "2026-06") is None
+    update.callback_query.answer.assert_awaited_once_with("Not allowed.")  # type: ignore[union-attr]
 
 
 async def test_admission_card_tap_admits(
@@ -893,6 +927,25 @@ async def test_edit_card_rewrites_outcome() -> None:
     bot.edit_message_text.assert_awaited_once_with(
         text="✅ Approved (once)", chat_id=-100, message_id=77
     )
+
+
+async def test_send_budget_card_posts_three_choice_buttons() -> None:
+    bot = AsyncMock()
+
+    await TelegramTaskIO(bot).send_budget_card(
+        "-100:5", BudgetCard(cycle="2026-06", text="🛑 Budget reached. Pick:")
+    )
+
+    kwargs = bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == -100
+    assert kwargs["message_thread_id"] == 5
+    rows = kwargs["reply_markup"].inline_keyboard
+    payloads = [b.callback_data for row in rows for b in row]
+    assert payloads == [
+        "bud:2026-06:downgrade",
+        "bud:2026-06:continue",
+        "bud:2026-06:overflow",
+    ]
 
 
 # ---- parse_callback ----------------------------------------------------------
