@@ -82,6 +82,14 @@ from .session import Final, TaskSession, TurnEvent
 logger = logging.getLogger("chief.core.tasks")
 
 WORKING_ACK = "working on it…"
+#: User-visible note when the per-turn watchdog fires: a turn ran past
+#: ``turn_timeout`` without a terminal result (a wedged SDK stream / hung tool call),
+#: so the engine tears the session down rather than freezing the task forever.
+TURN_TIMEOUT_NOTE = "⚠️ that turn timed out — try again."
+#: Bound on the watchdog's own teardown of a wedged session: ``interrupt`` may hang on
+#: the same wedged control stream, so it is time-boxed before ``aclose`` forces a fresh
+#: subprocess on the next turn. Keeps a hung teardown from re-freezing the consumer.
+_RESET_TIMEOUT = 10.0
 #: Owner reminder when a turn is skipped because the cycle is paused at budget (M9).
 #: The choice card was already posted when the cycle paused; this nudges once per
 #: pause episode so queued turns don't silently vanish while the owner hasn't decided.
@@ -236,6 +244,7 @@ class TaskManager:
         platform: str = "telegram",
         concurrency: int = 3,
         grace_seconds: float = 6.0,
+        turn_timeout: float = 300.0,
         idle_archive_seconds: float = 3600.0,
         compaction_idle_seconds: float = 3600.0,
         message_limit: int = 4096,
@@ -274,6 +283,7 @@ class TaskManager:
         self._classifier_model = classifier_model
         self._platform = platform
         self._grace_seconds = grace_seconds
+        self._turn_timeout = turn_timeout
         self._idle_archive_seconds = idle_archive_seconds
         self._compaction_idle_seconds = compaction_idle_seconds
         self._message_limit = message_limit
@@ -796,13 +806,20 @@ class TaskManager:
                 task.generating = True
                 await self._set_status(task, RUNNING)
                 final: Final | None = None
-                async for event in task.session.run_turn(turn.text, turn.attachments):
-                    if task.cancelled:
-                        break  # interrupted — stop streaming its milestones
-                    if isinstance(event, Final):
-                        final = event
-                    else:
-                        await self._io.send(task.thread_key, f"· {event.text}")
+                # Watchdog: a turn whose stream never reaches a terminal result (wedged
+                # SDK / hung tool call) must not pin the semaphore and generating=True
+                # forever. The timeout cancels the loop; exiting the semaphore block
+                # frees the slot, and the TimeoutError handler tears the session down.
+                async with asyncio.timeout(self._turn_timeout):
+                    async for event in task.session.run_turn(
+                        turn.text, turn.attachments
+                    ):
+                        if task.cancelled:
+                            break  # interrupted — stop streaming its milestones
+                        if isinstance(event, Final):
+                            final = event
+                        else:
+                            await self._io.send(task.thread_key, f"· {event.text}")
                 ack.cancel()
                 if task.cancelled:
                     return
@@ -815,6 +832,12 @@ class TaskManager:
                 # Only a clean turn re-arms the idle→archive and distill timers.
                 self._arm_idle(task)
                 self._arm_distill(task)
+        except TimeoutError:
+            ack.cancel()
+            logger.warning("task turn timed out", extra={"thread_key": task.thread_key})
+            await self._set_status(task, FAILED)
+            await self._io.send(task.thread_key, TURN_TIMEOUT_NOTE)
+            await self._reset_session(task)
         except Exception:
             logger.exception("task turn failed", extra={"thread_key": task.thread_key})
             await self._set_status(task, FAILED)
@@ -822,6 +845,24 @@ class TaskManager:
         finally:
             ack.cancel()
             task.generating = False
+
+    async def _reset_session(self, task: _RunningTask) -> None:
+        """Best-effort teardown of a wedged session so the next turn reconnects fresh.
+
+        The watchdog fired because the turn never terminated, so ``interrupt`` may also
+        hang on the wedged control stream — it is time-boxed. ``aclose`` (subprocess
+        disconnect) is the robust fallback that guarantees a fresh CLI next turn. Both
+        are guarded so a failed teardown can't re-freeze the consumer loop.
+        """
+        try:
+            async with asyncio.timeout(_RESET_TIMEOUT):
+                await task.session.interrupt()
+        except Exception:
+            logger.debug("interrupt during turn-timeout reset failed", exc_info=True)
+        try:
+            await task.session.aclose()
+        except Exception:
+            logger.debug("aclose during turn-timeout reset failed", exc_info=True)
 
     async def _emit_final(self, task: _RunningTask, text: str) -> None:
         """Deliver the final reply: a Markdown file when long, else split messages (M8).
