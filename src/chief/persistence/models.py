@@ -104,6 +104,28 @@ class RateLimit(Base):
     count: Mapped[int] = mapped_column(default=0)
 
 
+class MonthlyCost(Base):
+    """Per-billing-cycle SDK spend + budget mode (owned by M9 usage budgeting).
+
+    One row per cycle key (``"2026-06"``-style, anchored in ``owner_tz``). Spend is a
+    read-modify-write accumulator, so the unique constraint stops a racing insert from
+    creating a duplicate row; the repo also serializes get-or-create under a lock. A new
+    cycle has no row, so month-to-date implicitly resets to 0. ``mode`` is the persisted
+    budget state the owner's card decision flips (``usage.MODE_*``); ``warned_fraction``
+    is the high-water mark of the last warned threshold, so each tier warns once.
+    """
+
+    __tablename__ = "monthly_costs"
+    __table_args__ = (UniqueConstraint("cycle", name="uq_monthly_cost_cycle"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cycle: Mapped[str]  # billing-cycle key, e.g. "2026-06"
+    total_cost_usd: Mapped[float] = mapped_column(default=0.0)
+    mode: Mapped[str] = mapped_column(default="normal")  # usage.MODE_* (string const)
+    warned_fraction: Mapped[float] = mapped_column(default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
 class Schedule(Base):
     """A one-off reminder, a recurring job, or a monitor (owned by M9).
 
