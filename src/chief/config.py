@@ -178,6 +178,7 @@ class Settings(BaseSettings):
     # check.
     skills_enabled: bool = False
     default_skills: tuple[str, ...] = (
+        "setup-morning-brief",  # chief-owned (the rest are vendored anthropics/skills)
         "docx",
         "pdf",
         "pptx",
