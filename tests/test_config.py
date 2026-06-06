@@ -409,6 +409,62 @@ def test_budget_rejects_nonpositive_credit(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+def test_m10_skills_defaults_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.skills_enabled is False
+    # The curated owner default: Office docs + writing/comms + dev/meta.
+    assert settings.default_skills == (
+        "docx",
+        "pdf",
+        "pptx",
+        "xlsx",
+        "doc-coauthoring",
+        "internal-comms",
+        "claude-api",
+        "skill-creator",
+        "mcp-builder",
+    )
+
+
+def test_skills_default_skills_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The owner trims/extends the enable-list in config.yaml.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nskills_enabled: true\ndefault_skills: [docx, claude-api]\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.skills_enabled is True
+    assert settings.default_skills == ("docx", "claude-api")
+
+
+def test_skills_rejects_blank_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        'owner_telegram_id: 1\ndefault_skills: ["docx", ""]\n'
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="non-empty"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_blank_owner_id_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

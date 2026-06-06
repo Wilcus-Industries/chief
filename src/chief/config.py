@@ -168,6 +168,26 @@ class Settings(BaseSettings):
     budget_downgrade_model: str = "claude-haiku-4-5-20251001"
     budget_cycle_anchor_day: int = 1
 
+    # Skills framework (M10), default off (mirror the opt-in subsystem pattern). The
+    # Agent SDK loads packaged workflows (SKILL.md dirs) natively: chief's own plugin
+    # manifest (a local plugin) provides them and a per-session skills= filter scopes
+    # which are on. Owner-only by construction — guests never get plugins/skills, the
+    # same tier isolation as the tool-surface split. default_skills is the curated
+    # enable-list the owner session turns on (trim/extend in config.yaml); inert when
+    # disabled, so no cross-dependency model-validator — only a per-entry non-empty check.
+    skills_enabled: bool = False
+    default_skills: tuple[str, ...] = (
+        "docx",
+        "pdf",
+        "pptx",
+        "xlsx",
+        "doc-coauthoring",
+        "internal-comms",
+        "claude-api",
+        "skill-creator",
+        "mcp-builder",
+    )
+
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always
     # required (it authenticates the Claude SDK regardless of chat platform).
@@ -248,6 +268,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"budget_cycle_anchor_day must be 1–28, got {value!r}"
             )
+        return value
+
+    @field_validator("default_skills")
+    @classmethod
+    def _validate_default_skills(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Each enabled skill name must be non-empty — it maps to a SKILL.md name/dir
+        (or ``plugin:skill``), and a blank entry is a config typo the SDK can't resolve."""
+        for name in value:
+            if not name.strip():
+                raise ValueError("default_skills entries must be non-empty")
         return value
 
     @property
