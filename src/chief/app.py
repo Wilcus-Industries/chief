@@ -23,6 +23,7 @@ from .adapters.base import Adapter, ReadyHook
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
+from .core.budget import BudgetGate, BudgetIO
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
@@ -115,6 +116,36 @@ def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
     return calendar_mcp.guest_service(settings.calendar_mcp_url)
 
 
+def build_budget(
+    settings: Settings,
+    *,
+    io: BudgetIO,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> BudgetGate | None:
+    """The usage-budget gate (M9), or ``None`` when budgeting is disabled.
+
+    Like the scheduler, the budget routes every warning and the choice card to the
+    owner inbox (``primary_thread_key``), so enabling it requires that key be set —
+    asserted here (there is no config validator, since the gate is inert when off).
+    """
+    if not settings.budget_enabled:
+        return None
+    assert settings.primary_thread_key is not None, (
+        "budget_enabled requires primary_thread_key — budget warnings and the "
+        "choice card have nowhere to land without it"
+    )
+    return BudgetGate(
+        session_factory=session_factory,
+        io=io,
+        owner_inbox=settings.primary_thread_key,
+        monthly_credit_usd=settings.monthly_credit_usd,
+        warn_fractions=settings.budget_warn_fractions,
+        exhaust_fraction=settings.budget_exhaust_fraction,
+        owner_tz=settings.owner_tz,
+        anchor_day=settings.budget_cycle_anchor_day,
+    )
+
+
 def build_engine(
     settings: Settings,
     *,
@@ -125,6 +156,7 @@ def build_engine(
     approvals: ApprovalManager,
     audit: AuditLog,
     memory: MemoryStore,
+    budget: BudgetGate | None = None,
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
     guest_admin = (
@@ -184,6 +216,13 @@ def build_engine(
         guest_admin_service=guest_admin,
         schedule_service=schedule,
         schedule_bash_service=schedule_bash,
+        # When budgeting is on, the gate records each turn's spend and the manager
+        # enforces its mode (pause/downgrade); both are inert (None) otherwise.
+        budget=budget,
+        owner_inbox=settings.primary_thread_key if budget is not None else None,
+        budget_downgrade_model=(
+            settings.budget_downgrade_model if budget is not None else None
+        ),
     )
 
 
@@ -221,6 +260,7 @@ def build_telegram_stack(
         approvals=approvals,
         audit=audit,
         memory=memory,
+        budget=build_budget(settings, io=io, session_factory=session_factory),
     )
     adapter = TelegramAdapter(
         application=application,
@@ -275,6 +315,7 @@ def build_discord_stack(
         approvals=approvals,
         audit=audit,
         memory=memory,
+        budget=build_budget(settings, io=io, session_factory=session_factory),
     )
     adapter = DiscordAdapter(
         client=client,

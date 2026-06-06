@@ -849,8 +849,12 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (`split_message`/`should_send_as_file`, `core/tasks.py:_emit_final`).
 
 **Phase 3 — Proactivity & extensibility**
-- **M9 scheduler:** reminders + recurring + monitors, quiet hours, usage budgeting, uptime
-  heartbeat.
+- **M9 scheduler — ✅ done.** reminders + recurring + monitors, quiet hours, uptime
+  heartbeat, and **usage budgeting**: each turn's SDK cost rolls into a month-to-date
+  total against a fixed credit (`core/budget.py`, `persistence/usage.py`), warns the owner
+  once per threshold, and on (near-)exhaustion pauses the cycle and posts a choice card
+  (downgrade / continue full-quality / approve overflow) — a persisted mode, restart-proof
+  (the admission-card pattern), enforced by `TaskManager`. Opt-in (`budget_enabled`).
 - **M10 skills:** skills framework + `setup-morning-brief` (chief-drafts/owner-approves).
 - **M11 group chats + Opus escalation** (approval-gated).
 
