@@ -256,7 +256,7 @@ def test_build_engine_wires_skills_when_enabled(
     assert manager._default_skills == settings.default_skills
     assert manager._skills_plugin_path is not None
     assert os.path.isabs(manager._skills_plugin_path)
-    assert manager._skills_plugin_path.endswith("vendor/chief-skills")
+    assert manager._skills_plugin_path.endswith(os.path.join("vendor", "chief-skills"))
 
 
 def test_build_engine_no_skills_when_disabled(

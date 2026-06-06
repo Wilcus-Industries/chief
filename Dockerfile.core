@@ -25,6 +25,11 @@ COPY config.yaml ./
 # Bundled skills plugin (M10). Submodule content must be checked out in the build
 # context (`git submodule update --init`) for owner sessions to load skills.
 COPY vendor/ ./vendor/
+# Fail loudly if the skills submodule wasn't checked out — an empty upstream/ would
+# otherwise COPY clean and silently ship a plugin missing 9 of its 10 skills.
+RUN test -d vendor/chief-skills/upstream/skills \
+    && [ -n "$(ls -A vendor/chief-skills/upstream/skills)" ] \
+    || (echo "vendor/chief-skills/upstream empty — run 'git submodule update --init' before docker build" >&2; exit 1)
 
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
