@@ -1591,3 +1591,45 @@ async def test_downgrade_live_sessions_switches_owner_models(
     # The Downgrade tap flips every live owner session onto the budget model.
     assert sess.model == "claude-haiku-4-5"
     await mgr.shutdown()
+
+
+async def test_downgrade_live_sessions_spares_guest_sessions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        sess = FakeSession(model=model, resume=resume)
+        sessions.append(sess)
+        return sess
+
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="owner-model",
+        guest_model="guest-model",
+        classifier_model="claude-haiku-4-5",
+        idle_archive_seconds=1000.0,
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        budget=FakeBudget(),
+        budget_downgrade_model="budget-model",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="owner hi")
+    await mgr.dispatch_guest(thread_key="555:0", text="guest hi", from_label="A")
+    await _until(
+        lambda: ("-100:5", "reply:owner hi") in io.sends
+        and ("555:0", "reply:guest hi") in io.sends
+    )
+    owner_sess = next(s for s in sessions if s.model == "owner-model")
+    guest_sess = next(s for s in sessions if s.model == "guest-model")
+
+    await mgr.downgrade_live_sessions()
+
+    # Only owner sessions follow the budget downgrade; a live guest keeps its model.
+    assert owner_sess.model == "budget-model"
+    assert guest_sess.model == "guest-model"
+    await mgr.shutdown()
