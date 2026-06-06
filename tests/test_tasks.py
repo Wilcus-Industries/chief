@@ -558,19 +558,24 @@ async def test_failed_turn_does_not_arm_idle(
 class HangSession(FakeSession):
     """A session whose turn never reaches a Final — the wedge the watchdog guards.
 
-    ``run_turn`` awaits an event that is never set, so the engine's ``async for`` would
-    block forever without the per-turn timeout.
+    The first turn blocks on a never-set event (no terminal result), so the engine's
+    ``async for`` would hang forever without the per-turn timeout. Once the watchdog
+    tears it down (``aclose``) it heals, modelling the real session reconnecting on a
+    fresh CLI — so the same thread's next turn succeeds.
     """
 
     async def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()
     ) -> AsyncIterator[TurnEvent]:
-        self.queries.append(text)
-        await asyncio.Event().wait()  # never resolves — no terminal ResultMessage
-        yield Final(text="")  # unreachable; keeps this an async generator
+        if not self.closed:  # wedged until the watchdog disconnects us
+            self.queries.append(text)
+            await asyncio.Event().wait()  # never resolves — no terminal ResultMessage
+        self.closed = False  # reconnected fresh, like TaskSession._ensure_connected
+        async for event in super().run_turn(text, attachments):
+            yield event
 
 
-async def test_watchdog_times_out_wedged_turn_and_frees_semaphore(
+async def test_watchdog_times_out_wedged_turn_and_recovers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     io = FakeIO()
@@ -584,7 +589,7 @@ async def test_watchdog_times_out_wedged_turn_and_frees_semaphore(
         sessions.append(sess)
         return sess
 
-    # concurrency=1 so a leaked slot would block the second task entirely.
+    # concurrency=1 so a leaked slot would block every later task entirely.
     mgr = _manager(
         session_factory, io, factory=factory, concurrency=1, turn_timeout=0.05
     )
@@ -599,7 +604,14 @@ async def test_watchdog_times_out_wedged_turn_and_frees_semaphore(
         db = await get_task(session, platform="telegram", thread_key="-100:1")
     assert db is not None and db.status == FAILED
 
-    # The semaphore slot was released: a fresh task can now generate and reply.
+    # Same thread recovers: a follow-up turn on the reset session replies (FAILED→OPEN).
+    await mgr.dispatch(thread_key="-100:1", text="retry")
+    await _until(lambda: ("-100:1", "reply:retry") in io.sends)
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:1")
+    assert db is not None and db.status == OPEN
+
+    # The semaphore slot was released: a fresh task can also generate and reply.
     await mgr.dispatch(thread_key="-100:2", text="go")
     await _until(lambda: ("-100:2", "reply:go") in io.sends)
     await mgr.shutdown()

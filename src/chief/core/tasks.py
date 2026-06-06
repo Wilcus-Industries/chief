@@ -850,19 +850,21 @@ class TaskManager:
         """Best-effort teardown of a wedged session so the next turn reconnects fresh.
 
         The watchdog fired because the turn never terminated, so ``interrupt`` may also
-        hang on the wedged control stream — it is time-boxed. ``aclose`` (subprocess
-        disconnect) is the robust fallback that guarantees a fresh CLI next turn. Both
-        are guarded so a failed teardown can't re-freeze the consumer loop.
+        hang on the wedged control stream; ``aclose`` (subprocess disconnect) then gets
+        a fresh CLI next turn. Both are time-boxed and guarded — this teardown runs on
+        the consumer loop, so a hung step here would re-freeze the task we just rescued.
         """
-        try:
-            async with asyncio.timeout(_RESET_TIMEOUT):
-                await task.session.interrupt()
-        except Exception:
-            logger.debug("interrupt during turn-timeout reset failed", exc_info=True)
-        try:
-            await task.session.aclose()
-        except Exception:
-            logger.debug("aclose during turn-timeout reset failed", exc_info=True)
+        for label, teardown in (
+            ("interrupt", task.session.interrupt),
+            ("aclose", task.session.aclose),
+        ):
+            try:
+                async with asyncio.timeout(_RESET_TIMEOUT):
+                    await teardown()
+            except Exception:
+                logger.debug(
+                    "%s during turn-timeout reset failed", label, exc_info=True
+                )
 
     async def _emit_final(self, task: _RunningTask, text: str) -> None:
         """Deliver the final reply: a Markdown file when long, else split messages (M8).
