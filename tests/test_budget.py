@@ -1,5 +1,6 @@
 """BudgetGate (M9) — cycle key, threshold warnings, exhaustion pause+card."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -160,6 +161,19 @@ async def test_mode_defaults_normal_with_no_row(
 ) -> None:
     gate = _gate(session_factory, io)
     assert await gate.mode() == usage.MODE_NORMAL
+
+
+async def test_concurrent_records_card_only_once(
+    session_factory: async_sessionmaker[AsyncSession], io: FakeBudgetIO
+) -> None:
+    # Two turns finishing at once both cross exhaustion; the gate lock serializes the
+    # read-decide-write so only the first pauses + cards (the second sees mode!=normal).
+    gate = _gate(session_factory, io)
+
+    await asyncio.gather(gate.record(100.0), gate.record(100.0))
+
+    assert len(io.cards) == 1
+    assert await gate.mode() == usage.MODE_PAUSED
 
 
 # ---- note_rate_limited ---------------------------------------------------
