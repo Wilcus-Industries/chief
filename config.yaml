@@ -135,3 +135,16 @@ skills_enabled: false
 # Excluded from the default (still on disk via the submodule — re-enable by listing above):
 #   algorithmic-art, canvas-design, slack-gif-creator, theme-factory, brand-guidelines
 #   (creative/styling), frontend-design, web-artifacts-builder, webapp-testing (GUI-bound).
+
+# Group chats (M11, opt-in). With group_chat_enabled on, chief works in group chats it's
+# invited to (any non-home group/supergroup or guild) beyond the owner's home and 1:1 DMs.
+# In a group it reads every message ambiently but stays silent until @mentioned or
+# replied-to; an engaged owner gets the full owner toolset (output posts in the group, but
+# every tool-approval card is DM'd privately to primary_thread_key), and an engaged
+# non-owner gets the receptionist (no tools). Requires primary_thread_key (the owner DM
+# for those approval cards) AND at least one home id below — owner_home_chat_id (Telegram)
+# / owner_home_guild_id (Discord) — so chief can tell its own HOME surface from a GROUP.
+group_chat_enabled: false
+# owner_home_chat_id:                  # Telegram: the owner's home forum supergroup id (HOME, not a GROUP)
+# owner_home_guild_id:                 # Discord: the owner's home server/guild id (HOME, not a GROUP)
+# group_context_max_messages: 50       # cap on the per-group ambient buffer (last N since join)
