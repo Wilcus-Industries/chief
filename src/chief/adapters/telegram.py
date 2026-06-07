@@ -52,6 +52,7 @@ from .base import (
     Message,
     ReadyHook,
     ReplyFn,
+    Surface,
     Tier,
     admission_payload,
     apply_admission,
@@ -61,6 +62,7 @@ from .base import (
     classify_tier,
     default_branch_title,
     handle_guest_message,
+    is_engaged,
     is_supported_media,
     parse_admission,
     parse_budget,
@@ -150,8 +152,18 @@ def _budget_keyboard(cycle: str) -> InlineKeyboardMarkup:
 
 
 def _parse(thread_key: str) -> tuple[int, int]:
-    chat_str, thread_str = thread_key.split(":")
-    return int(chat_str), int(thread_str)
+    """Decode a ``thread_key`` into ``(chat_id, thread_id)``.
+
+    A group key (``{chat}:grp`` for the owner session, ``{chat}:grp:guest`` for the
+    receptionist) has a non-numeric thread component and no forum topic — it maps to
+    ``thread_id`` 0, so :meth:`TelegramTaskIO.send` posts to the chat with no thread.
+    """
+    chat_str, _, rest = thread_key.partition(":")
+    try:
+        thread_id = int(rest)
+    except ValueError:
+        thread_id = 0
+    return int(chat_str), thread_id
 
 
 def _has_media(message: Any) -> bool:
@@ -264,6 +276,8 @@ class TelegramAdapter(Adapter):
         guest_rate: int = 10,
         guest_rate_window: int = 3600,
         guest_global_rate: int = 60,
+        group_chat_enabled: bool = False,
+        owner_home_chat_id: int | None = None,
     ) -> None:
         self._app = application
         self._engine = engine
@@ -278,6 +292,10 @@ class TelegramAdapter(Adapter):
         self._guest_rate = guest_rate
         self._guest_rate_window = guest_rate_window
         self._guest_global_rate = guest_global_rate
+        # Group chats (M11): when enabled, a non-home group/supergroup is a GROUP
+        # surface — read ambiently, answered only when @mentioned or replied-to.
+        self._group_chat_enabled = group_chat_enabled
+        self._owner_home_chat_id = owner_home_chat_id
         # Contacts already prompted this run — dedupe the admission card so a pending
         # guest who keeps messaging doesn't re-card the owner (their notes still relay).
         self._prompted_admission: set[int] = set()
@@ -319,14 +337,35 @@ class TelegramAdapter(Adapter):
         if not text and not _has_media(message):
             return None
         thread_id = message.message_thread_id or 0
+        surface, thread_key = self._surface(chat, thread_id)
         return Message(
             platform=PLATFORM,
             sender_id=user.id,
             text=text,
-            thread_key=f"{chat.id}:{thread_id}",
+            thread_key=thread_key,
             tier=classify_tier(sender_id=user.id, owner_id=self._owner_id),
             sender_name=user.full_name,
+            surface=surface,
         )
+
+    def _surface(self, chat: Any, thread_id: int) -> tuple[Surface, str]:
+        """Classify the chat's surface and pick its thread_key (M11).
+
+        A non-home group/supergroup with group chats enabled is a GROUP — one shared
+        session keyed ``{chat}:grp`` (no forum topic). The owner's home forum stays HOME
+        and a 1:1 stays DM, both keeping the topic/flat ``{chat}:{thread}`` key so
+        today's behavior is untouched when group chats are off.
+        """
+        chat_type = getattr(chat, "type", "")
+        is_group = chat_type in ("group", "supergroup")
+        is_home = (
+            self._owner_home_chat_id is not None
+            and chat.id == self._owner_home_chat_id
+        )
+        if self._group_chat_enabled and is_group and not is_home:
+            return Surface.GROUP, f"{chat.id}:grp"
+        surface = Surface.DM if chat_type == "private" else Surface.HOME
+        return surface, f"{chat.id}:{thread_id}"
 
     async def _record(self, message: Message) -> None:
         async with self._session_factory() as session:
@@ -343,6 +382,9 @@ class TelegramAdapter(Adapter):
     ) -> None:
         message = self.to_message(update)
         if message is None:
+            return
+        if message.surface is Surface.GROUP:
+            await self._on_group_message(update, message)
             return
         await self._record(message)
         if message.tier is not Tier.OWNER:
@@ -375,6 +417,76 @@ class TelegramAdapter(Adapter):
             attachments=message.attachments,
             is_general=is_general,
         )
+
+    async def _on_group_message(self, update: Update, message: Message) -> None:
+        """Route a GROUP message: answer only when engaged, else read ambiently (M11).
+
+        chief reads every group message as sender-attributed context but stays silent
+        until @mentioned or replied-to. An engaged owner gets the full owner surface
+        (flat, approvals DM'd); an engaged non-owner gets the receptionist — both keep
+        the shared ``{chat}:grp`` session. A non-engaged message is buffered, no reply.
+        """
+        if not self._group_engaged(update):
+            await self._engine.observe(
+                thread_key=message.thread_key,
+                text=message.text,
+                sender_name=message.sender_name,
+            )
+            return
+        await self._record(message)
+        if message.tier is Tier.OWNER:
+            tg_message = update.effective_message
+            attachments = (
+                await self._owner_attachments(tg_message)
+                if tg_message is not None
+                else ()
+            )
+            logger.info("owner group message", extra={"thread_key": message.thread_key})
+            await self._engine.dispatch(
+                thread_key=message.thread_key,
+                text=message.text,
+                attachments=attachments,
+                surface=Surface.GROUP,
+            )
+            return
+        logger.info("guest group message", extra={"thread_key": message.thread_key})
+        await self._engine.dispatch_guest(
+            thread_key=message.thread_key,
+            text=message.text,
+            from_label=message.sender_name,
+            surface=Surface.GROUP,
+        )
+
+    def _group_engaged(self, update: Update) -> bool:
+        """True iff a group message addresses chief — an @mention or a reply to it."""
+        msg = update.effective_message
+        if msg is None:
+            return False
+        bot = self._app.bot
+        reply = getattr(msg, "reply_to_message", None)
+        from_user = getattr(reply, "from_user", None) if reply is not None else None
+        replied = from_user is not None and from_user.id == bot.id
+        return is_engaged(
+            mentioned=self._mentions_bot(msg, bot), replied_to_bot=replied
+        )
+
+    def _mentions_bot(self, msg: Any, bot: Any) -> bool:
+        """True if a message's entities @mention the bot by username or user id."""
+        text = msg.text or msg.caption or ""
+        entities = list(getattr(msg, "entities", None) or []) + list(
+            getattr(msg, "caption_entities", None) or []
+        )
+        username = (bot.username or "").lower()
+        for ent in entities:
+            if ent.type == "mention" and username:
+                handle = text[ent.offset : ent.offset + ent.length].lstrip("@").lower()
+                if handle == username:
+                    return True
+            elif ent.type == "text_mention":
+                user = getattr(ent, "user", None)
+                if user is not None and user.id == bot.id:
+                    return True
+        return False
 
     async def _owner_attachments(self, tg_message: Any) -> tuple[Attachment, ...]:
         """Download the owner's image/PDF files (≤ caps); skip anything else (M8).
