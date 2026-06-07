@@ -449,6 +449,30 @@ def classify_tier(*, sender_id: int, owner_id: int) -> Tier:
     return Tier.OWNER if sender_id == owner_id else Tier.GUEST
 
 
+class Surface(Enum):
+    """Where a message lives, orthogonal to :class:`Tier` (M11 group chats).
+
+    ``HOME`` is the owner's private forum/server (topics = tasks); ``DM`` is a 1:1 chat
+    (flat); ``GROUP`` is any *other* multi-party chat chief is invited to — there it
+    reads every message ambiently but answers only when engaged (:func:`is_engaged`).
+    Values double as the persisted string.
+    """
+
+    HOME = "home"
+    DM = "dm"
+    GROUP = "group"
+
+
+def is_engaged(*, mentioned: bool, replied_to_bot: bool) -> bool:
+    """True iff a group message addresses chief: an @mention or a reply to its message.
+
+    Platform-neutral so both adapters share one gating rule (mirrors
+    :func:`classify_tier`). Each adapter computes the two booleans from its own native
+    fields; in a ``GROUP`` a non-engaged message is buffered ambiently, never answered.
+    """
+    return mentioned or replied_to_bot
+
+
 #: Inbound media caps (owner-only image/PDF intake, M8) — bound the bytes a single
 #: turn pulls into memory. A message over either cap drops the offending file silently.
 MAX_ATTACHMENTS = 5
@@ -486,6 +510,9 @@ class Message:
     sender_name: str | None = None
     #: Owner-only image/PDF files (M8). A tuple keeps the dataclass frozen/hashable.
     attachments: tuple[Attachment, ...] = ()
+    #: Which surface the message arrived on (M11). Defaults to ``DM`` so 1:1 build
+    #: sites stay valid; adapters set it explicitly once group classification is wired.
+    surface: Surface = Surface.DM
 
 
 class Engine(Protocol):

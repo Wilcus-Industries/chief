@@ -1,8 +1,11 @@
 """Platform-neutral types, tier classification, and message splitting (M8)."""
 
 from chief.adapters.base import (
+    Message,
+    Surface,
     Tier,
     classify_tier,
+    is_engaged,
     reply_filename,
     should_send_as_file,
     split_message,
@@ -21,6 +24,43 @@ def test_tier_values_are_persistable_strings() -> None:
     # The DB stores tier as a plain string; these are the canonical values.
     assert Tier.OWNER.value == "owner"
     assert Tier.GUEST.value == "guest"
+
+
+# ---- Surface + engagement gate (M11 group chats) -----------------------------
+
+
+def test_surface_values_are_persistable_strings() -> None:
+    assert Surface.HOME.value == "home"
+    assert Surface.DM.value == "dm"
+    assert Surface.GROUP.value == "group"
+
+
+def test_message_surface_defaults_to_dm() -> None:
+    # Existing 1:1 construction sites omit surface; the default keeps them DM.
+    msg = Message(
+        platform="telegram",
+        sender_id=42,
+        text="hi",
+        thread_key="42:0",
+        tier=Tier.OWNER,
+    )
+    assert msg.surface is Surface.DM
+
+
+def test_is_engaged_on_mention() -> None:
+    assert is_engaged(mentioned=True, replied_to_bot=False) is True
+
+
+def test_is_engaged_on_reply_to_bot() -> None:
+    assert is_engaged(mentioned=False, replied_to_bot=True) is True
+
+
+def test_not_engaged_when_neither() -> None:
+    assert is_engaged(mentioned=False, replied_to_bot=False) is False
+
+
+def test_is_engaged_on_both() -> None:
+    assert is_engaged(mentioned=True, replied_to_bot=True) is True
 
 
 # ---- split_message: boundary-aware splitting (M8) ----------------------------
