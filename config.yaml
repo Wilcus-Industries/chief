@@ -8,8 +8,14 @@ owner_telegram_id: 0
 owner_discord_id: 0
 owner_name: the owner
 
-# Model posture (DESIGN: Sonnet default for the owner; Opus is approval-gated, later).
+# Model posture (M11). The owner runs owner_model_default (Sonnet); Opus is approval-gated.
+# /opus escalates a thread to owner_model_opus now (persists until /sonnet); Opus burns the
+# Max budget faster, so it never runs unsanctioned. opus_auto_detect (opt-in) also lets a
+# per-turn complexity classifier ASK before escalating a complex owner task. Guests are
+# pinned to guest_model (never Opus).
 owner_model_default: claude-sonnet-4-6
+owner_model_opus: claude-opus-4-8
+opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
 # sqlite file path (inside the container this is on the persisted volume).
