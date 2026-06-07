@@ -29,6 +29,7 @@ The engine is platform-neutral: speaks only :class:`TaskIO` (provided by the ada
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -40,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..adapters.base import (
     FILE_REPLY_NOTE,
     Attachment,
+    Surface,
     reply_filename,
     should_send_as_file,
 )
@@ -110,6 +112,18 @@ WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
 #: read-only (ALLOW), so absence from a guest's allowed_tools is not enough — they are
 #: refused at the SDK layer (disallowed_tools), the same hard-deny used for the shell.
 GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS) | set(WEB_META_TOOLS))
+#: System-prompt note appended to an owner session running on a GROUP surface (M11).
+#: Same owner toolset, but a reminder that replies are public to the whole group and
+#: that tool-approval prompts are DM'd privately — so the model neither leaks
+#: owner-private context into the room nor waits on a card it can't see there.
+GROUP_MODE_NOTE = (
+    "GROUP CHAT: You are replying in a shared group, not a private DM — everyone in "
+    "the group sees what you post. Do not disclose the owner's private, personal, or "
+    "confidential information, secrets, or anything from private DMs or memory that "
+    "the group shouldn't see. When a tool you call needs approval, that prompt is sent "
+    "privately to the owner's DM, never shown here — don't announce it or wait for it "
+    "in the group; just continue once it resolves."
+)
 #: A distiller: turn a transcript + the current index into candidate facts.
 DistillFn = Callable[..., Awaitable[list[FactDraft]]]
 #: One-shot prompt that asks the casual session to brief its own history (the live
@@ -229,6 +243,7 @@ class _RunningTask:
     idle_handle: "asyncio.Task[None] | None" = None
     distill_handle: "asyncio.Task[None] | None" = None
     transcript: list[tuple[str, str]] = field(default_factory=list)
+    surface: Surface = Surface.DM
 
 
 class TaskManager:
@@ -276,6 +291,7 @@ class TaskManager:
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
+        group_context_max_messages: int = 50,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -323,6 +339,10 @@ class TaskManager:
         self._paused_ack_sent = False
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[str, _RunningTask] = {}
+        # Per-group ambient buffer (M11): non-engaged group messages, attributed and
+        # bounded, drained into the next engaged turn so a reply sees the whole thread.
+        self._group_context_max = group_context_max_messages
+        self._group_buffers: dict[str, deque[tuple[str, str]]] = {}
 
     # ---- scheduler hooks -------------------------------------------------
 
@@ -354,6 +374,34 @@ class TaskManager:
 
     # ---- inbound routing -------------------------------------------------
 
+    async def observe(
+        self, *, thread_key: str, text: str, sender_name: str | None = None
+    ) -> None:
+        """Buffer a non-engaged group message as ambient context (M11), no reply.
+
+        chief reads every message in a group it's in (sender-attributed) but stays
+        silent until engaged; this appends to the group's bounded buffer so the next
+        engaged turn answers with the whole conversation in view.
+        """
+        buf = self._group_buffers.get(thread_key)
+        if buf is None:
+            buf = deque(maxlen=self._group_context_max)
+            self._group_buffers[thread_key] = buf
+        buf.append((sender_name or "someone", text))
+
+    def _with_group_context(self, group_key: str, text: str) -> str:
+        """Prepend the group's buffered ambient messages to an engaged turn, then clear.
+
+        Draining keeps a later turn from re-reading lines the session already saw; the
+        buffer is bounded (``group_context_max_messages``) so it can't grow without end.
+        """
+        buf = self._group_buffers.get(group_key)
+        if not buf:
+            return text
+        lines = "\n".join(f"{name}: {msg}" for name, msg in buf)
+        buf.clear()
+        return f"Recent group messages:\n{lines}\n\n{text}"
+
     async def dispatch(
         self,
         *,
@@ -361,8 +409,16 @@ class TaskManager:
         text: str,
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
+        surface: Surface = Surface.DM,
     ) -> None:
         """Route an owner message (+ media) into its task, spawning a topic when due."""
+        if surface is Surface.GROUP:
+            # An owner-engaged group turn runs flat (a group has no forum to branch
+            # into) with the full owner surface; its approval cards DM the owner.
+            text = self._with_group_context(thread_key, text)
+            task = await self._ensure_task(thread_key, surface=Surface.GROUP)
+            await self._submit(task, Turn(text=text, attachments=attachments))
+            return
         is_casual = is_general
         if is_general and await self._warrants_task(
             text, model=self._classifier_model
@@ -377,16 +433,27 @@ class TaskManager:
         await self._submit(task, Turn(text=text, attachments=attachments))
 
     async def dispatch_guest(
-        self, *, thread_key: str, text: str, from_label: str | None = None
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        from_label: str | None = None,
+        surface: Surface = Surface.DM,
     ) -> None:
-        """Route a guest DM into its flat per-DM session (no topic spawn, guest model).
+        """Route a guest message into a flat receptionist session (no topic spawn).
 
         Unlike :meth:`dispatch`, a guest never spawns a forum topic: a 1:1 DM is one
         flat session keyed by its ``thread_key``. ``from_label`` is the sender's display
-        name, baked into the relay tool so the owner sees who left a message.
+        name, baked into the relay tool so the owner sees who left a message. On a GROUP
+        surface the receptionist gets its own ``:guest`` session key so a non-owner can
+        never reuse the owner's group session, but reads the same shared ambient buffer.
         """
+        session_key = thread_key
+        if surface is Surface.GROUP:
+            text = self._with_group_context(thread_key, text)
+            session_key = f"{thread_key}:guest"
         task = await self._ensure_task(
-            thread_key, tier="guest", from_label=from_label
+            session_key, tier="guest", from_label=from_label, surface=surface
         )
         # Guests stay text-only — media intake is owner-only (tier isolation, M8).
         await self._submit(task, Turn(text=text))
@@ -446,6 +513,7 @@ class TaskManager:
         tier: str = "owner",
         is_casual: bool = False,
         from_label: str | None = None,
+        surface: Surface = Surface.DM,
     ) -> _RunningTask:
         existing = self._tasks.get(thread_key)
         if existing is not None:
@@ -464,7 +532,11 @@ class TaskManager:
             )
             db_id, resume = db.id, db.sdk_session_id
         gate_kwargs = self._session_kwargs(
-            thread_key=thread_key, tier=tier, db_id=db_id, from_label=from_label
+            thread_key=thread_key,
+            tier=tier,
+            db_id=db_id,
+            from_label=from_label,
+            surface=surface,
         )
         # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
         # swapped for the cheaper budget model while the cycle is downgraded (M9).
@@ -481,12 +553,19 @@ class TaskManager:
             queue=asyncio.Queue(),
             tier=tier,
             is_casual=is_casual,
+            surface=surface,
         )
         self._tasks[thread_key] = rt
         return rt
 
     def _session_kwargs(
-        self, *, thread_key: str, tier: str, db_id: int, from_label: str | None = None
+        self,
+        *,
+        thread_key: str,
+        tier: str,
+        db_id: int,
+        from_label: str | None = None,
+        surface: Surface = Surface.DM,
     ) -> dict[str, Any]:
         """Assemble the SDK session kwargs (gate + memory/tool scoping) for a thread.
 
@@ -497,7 +576,7 @@ class TaskManager:
         each is wired by its own helper; ``from_label`` is the guest's display name.
         """
         can_use_tool, hooks = self._build_gate(
-            task_id=db_id, thread_key=thread_key, tier=tier
+            task_id=db_id, thread_key=thread_key, tier=tier, surface=surface
         )
         gate_kwargs: dict[str, Any] = {}
         if can_use_tool is not None or hooks is not None:
@@ -511,13 +590,19 @@ class TaskManager:
         if self._memory is None:
             return gate_kwargs
         if tier == "owner":
-            self._wire_owner_session(gate_kwargs, thread_key, disallowed_tools)
+            self._wire_owner_session(
+                gate_kwargs, thread_key, disallowed_tools, surface
+            )
         else:
             self._wire_guest_session(gate_kwargs, from_label)
         return gate_kwargs
 
     def _wire_owner_session(
-        self, gate_kwargs: dict[str, Any], thread_key: str, disallowed_tools: list[str]
+        self,
+        gate_kwargs: dict[str, Any],
+        thread_key: str,
+        disallowed_tools: list[str],
+        surface: Surface = Surface.DM,
     ) -> None:
         """Wire the owner's full surface: memory, web, Google, shell, admin, skills."""
         assert self._memory is not None
@@ -545,18 +630,24 @@ class TaskManager:
             # actions, so they're pre-approved (no card) — extra_read_only in
             # _build_gate keeps the gate hook from carding them despite the allow entry.
             allowed += list(schedule.tool_names)
+        system_prompt = build_system_prompt(
+            tier="owner",
+            memory=self._memory,
+            owner_name=self._owner_name,
+            google_services=frozenset(svc.name for svc in services),
+            owner_tz=self._owner_tz,
+            workspace_enabled=workspace_on,
+            shell_enabled=shell_on,
+            guest_admin_enabled=admin is not None,
+            skills=self._default_skills if skills_on else (),
+        )
+        if surface is Surface.GROUP:
+            # Same owner toolset, but a reminder the room is public and approvals are
+            # DM'd — so the model neither leaks private context nor waits on a card it
+            # can't see in the group.
+            system_prompt = f"{system_prompt}\n\n{GROUP_MODE_NOTE}"
         gate_kwargs.update(
-            system_prompt=build_system_prompt(
-                tier="owner",
-                memory=self._memory,
-                owner_name=self._owner_name,
-                google_services=frozenset(svc.name for svc in services),
-                owner_tz=self._owner_tz,
-                workspace_enabled=workspace_on,
-                shell_enabled=shell_on,
-                guest_admin_enabled=admin is not None,
-                skills=self._default_skills if skills_on else (),
-            ),
+            system_prompt=system_prompt,
             cwd=self._memory_dir,
             allowed_tools=allowed,
         )
@@ -642,8 +733,29 @@ class TaskManager:
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
 
+    def _approval_route(self, *, tier: str, thread_key: str, surface: Surface) -> str:
+        """Where this session's approval card lands; raise if a guest has nowhere.
+
+        Owner work approves in-thread — except on a GROUP surface, where the card must
+        never post in the shared room and is DM'd to the owner instead (M11). A guest's
+        card routes to the Front Desk; a group guest with no Front Desk falls back to
+        the owner DM (config guarantees ``owner_inbox`` when group chats are on), never
+        back into the guest's own message (the leak M6 forbids).
+        """
+        if tier == "owner":
+            if surface is Surface.GROUP and self._owner_inbox is not None:
+                return self._owner_inbox
+            return thread_key
+        if self._front_desk_thread_key is not None:
+            return self._front_desk_thread_key
+        if surface is Surface.GROUP and self._owner_inbox is not None:
+            return self._owner_inbox
+        raise RuntimeError(
+            "guest approval has no Front Desk route — set front_desk_thread_key"
+        )
+
     def _build_gate(
-        self, *, task_id: int, thread_key: str, tier: str
+        self, *, task_id: int, thread_key: str, tier: str, surface: Surface = Surface.DM
     ) -> tuple[CanUseTool | None, dict[HookEvent, list[HookMatcher]] | None]:
         """Bind this session's gate callbacks, or ``(None, None)`` if unwired.
 
@@ -681,17 +793,12 @@ class TaskManager:
             extra_read_only = extra_read_only | set(
                 self._schedule_service.tool_names
             )
-        # Owner work approves in-thread; a guest-originated approval routes to the Front
-        # Desk. A guest with no Front Desk configured is a hard error — never silently
-        # self-route a card back into the guest's own DM (config also guards this).
-        if tier == "owner":
-            route = thread_key
-        elif self._front_desk_thread_key is not None:
-            route = self._front_desk_thread_key
-        else:
-            raise RuntimeError(
-                "guest approval has no Front Desk route — set front_desk_thread_key"
-            )
+        # Owner work approves in-thread (a group DMs the owner); a guest-originated
+        # approval routes to the Front Desk. A guest with no route is a hard error —
+        # never silently self-route a card back into the guest's own DM.
+        route = self._approval_route(
+            tier=tier, thread_key=thread_key, surface=surface
+        )
         # Both file roots are owner-only. A guest has no file tools at all, so its gate
         # carries neither a memory nor a workspace root — total isolation by
         # construction (matches the cwd=None treatment in _wire_guest_session).

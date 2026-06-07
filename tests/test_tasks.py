@@ -8,9 +8,10 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import FILE_REPLY_NOTE, Attachment
+from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
+    GROUP_MODE_NOTE,
     MEMORY_TOOLS,
     PAUSED_BUDGET_ACK,
     TURN_TIMEOUT_NOTE,
@@ -1780,4 +1781,182 @@ async def test_downgrade_live_sessions_spares_guest_sessions(
     # Only owner sessions follow the budget downgrade; a live guest keeps its model.
     assert owner_sess.model == "budget-model"
     assert guest_sess.model == "guest-model"
+    await mgr.shutdown()
+
+
+# ---- group chats (M11) -------------------------------------------------------
+
+
+async def test_observe_buffers_then_engaged_owner_turn_sees_context(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    # warrants=_yes proves a GROUP turn stays flat (never spawns a topic) regardless.
+    mgr = _manager(session_factory, io, factory=_one(sess), warrants=_yes)
+
+    await mgr.observe(
+        thread_key="-100:grp", text="launch is thursday", sender_name="Bob"
+    )
+    await mgr.observe(thread_key="-100:grp", text="cool", sender_name="Ada")
+    await mgr.dispatch(
+        thread_key="-100:grp", text="when's launch?", surface=Surface.GROUP
+    )
+    await _until(
+        lambda: any(s[0] == "-100:grp" and "reply:" in s[1] for s in io.sends)
+    )
+
+    # Flat: no topic spawned despite warrants=yes — a group has no forum to branch into.
+    assert io.created == []
+    # The engaged turn carries the buffered ambient lines (attributed) + the new ask.
+    turn = sess.queries[0]
+    assert "Bob: launch is thursday" in turn
+    assert "Ada: cool" in turn
+    assert "when's launch?" in turn
+    await mgr.shutdown()
+
+
+async def test_group_buffer_drains_after_an_engaged_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.observe(thread_key="-100:grp", text="one", sender_name="Bob")
+    await mgr.dispatch(thread_key="-100:grp", text="first", surface=Surface.GROUP)
+    await _until(lambda: len(sess.queries) == 1)
+    await mgr.dispatch(thread_key="-100:grp", text="second", surface=Surface.GROUP)
+    await _until(lambda: len(sess.queries) == 2)
+
+    # The buffered "one" rode the first turn only; the second turn isn't re-fed it.
+    assert "Bob: one" in sess.queries[0]
+    assert "Bob: one" not in sess.queries[1]
+    await mgr.shutdown()
+
+
+async def test_group_buffer_is_bounded(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=_one(sess),
+        stop_intent=_no,
+        warrants_task=_no,
+        group_context_max_messages=2,
+    )
+
+    for i in range(5):
+        await mgr.observe(thread_key="-100:grp", text=f"m{i}", sender_name="Bob")
+    await mgr.dispatch(thread_key="-100:grp", text="ask", surface=Surface.GROUP)
+    await _until(lambda: len(sess.queries) == 1)
+
+    turn = sess.queries[0]
+    # Only the last 2 ambient messages survive the cap.
+    assert "m3" in turn and "m4" in turn
+    assert "m0" not in turn and "m1" not in turn and "m2" not in turn
+    await mgr.shutdown()
+
+
+def test_owner_group_approval_routes_to_owner_dm(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    mgr = _manager(
+        session_factory,
+        FakeIO(),
+        factory=_one(FakeSession(model="m")),
+        owner_inbox="42:0",
+    )
+    # In a group, an owner tool's approval card lands in the owner's private DM …
+    assert (
+        mgr._approval_route(tier="owner", thread_key="-100:grp", surface=Surface.GROUP)
+        == "42:0"
+    )
+    # … but a DM/HOME owner turn still approves in-thread.
+    assert (
+        mgr._approval_route(tier="owner", thread_key="-100:5", surface=Surface.DM)
+        == "-100:5"
+    )
+
+
+def test_guest_group_approval_routes_to_front_desk_then_owner_dm(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    with_fd = _manager(
+        session_factory,
+        FakeIO(),
+        factory=_one(FakeSession(model="m")),
+        owner_inbox="42:0",
+    )
+    with_fd._front_desk_thread_key = "-100:1"
+    assert (
+        with_fd._approval_route(
+            tier="guest", thread_key="-100:grp:guest", surface=Surface.GROUP
+        )
+        == "-100:1"
+    )
+    # No Front Desk in a group → card to the owner DM, never back into the group.
+    no_fd = _manager(
+        session_factory,
+        FakeIO(),
+        factory=_one(FakeSession(model="m")),
+        owner_inbox="42:0",
+    )
+    assert (
+        no_fd._approval_route(
+            tier="guest", thread_key="-100:grp:guest", surface=Surface.GROUP
+        )
+        == "42:0"
+    )
+
+
+async def test_owner_group_session_gets_group_mode_note(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _calendar_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), enabled=False
+    )
+
+    await mgr._ensure_task("-100:grp", tier="owner", surface=Surface.GROUP)
+    assert GROUP_MODE_NOTE in captured["system_prompt"]
+    # A normal DM owner session does NOT carry the group note.
+    await mgr._ensure_task("-100:5", tier="owner", surface=Surface.DM)
+    assert GROUP_MODE_NOTE not in captured["system_prompt"]
+    await mgr.shutdown()
+
+
+async def test_guest_group_session_keyed_apart_and_sees_buffer(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = _guest_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        memory=FakeMemory(),
+    )
+
+    await mgr.observe(thread_key="-100:grp", text="hello room", sender_name="Cleo")
+    await mgr.dispatch_guest(
+        thread_key="-100:grp",
+        text="who runs this?",
+        from_label="Cleo",
+        surface=Surface.GROUP,
+    )
+
+    # Guest gets its own key so it can never reuse the owner group session …
+    assert "-100:grp:guest" in mgr._tasks
+    assert "-100:grp" not in mgr._tasks
+    assert captured["model"] == "guest-model"  # receptionist, never the owner model
+    # … and it still reads the same shared ambient buffer.
+    guest_sess = mgr._tasks["-100:grp:guest"].session
+    await _until(lambda: bool(guest_sess.queries))
+    assert "Cleo: hello room" in guest_sess.queries[0]
+    assert "who runs this?" in guest_sess.queries[0]
     await mgr.shutdown()
