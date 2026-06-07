@@ -14,6 +14,7 @@ from chief.adapters.base import (
     AdmissionCard,
     Attachment,
     BudgetCard,
+    Surface,
     parse_callback,
 )
 from chief.adapters.telegram import (
@@ -30,6 +31,8 @@ from chief.persistence.contacts import get_or_create_contact
 from chief.persistence.models import Contact, Task
 
 OWNER_ID = 42
+BOT_ID = 7000
+BOT_USERNAME = "chief_bot"
 _CTX = cast(Any, SimpleNamespace())
 
 
@@ -39,7 +42,10 @@ class FakeEngine:
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
         self.dispatched_attachments: list[tuple[Attachment, ...]] = []
+        self.dispatched_surfaces: list[Any] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
+        self.dispatched_guest_surfaces: list[Any] = []
+        self.observed: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
         self.downgraded = 0
@@ -53,14 +59,27 @@ class FakeEngine:
         text: str,
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
+        surface: Any = None,
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
         self.dispatched_attachments.append(attachments)
+        self.dispatched_surfaces.append(surface)
 
     async def dispatch_guest(
-        self, *, thread_key: str, text: str, from_label: str | None = None
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        from_label: str | None = None,
+        surface: Any = None,
     ) -> None:
         self.dispatched_guests.append((thread_key, text, from_label))
+        self.dispatched_guest_surfaces.append(surface)
+
+    async def observe(
+        self, *, thread_key: str, text: str, sender_name: str | None = None
+    ) -> None:
+        self.observed.append((thread_key, text, sender_name))
 
     async def cancel(self, thread_key: str) -> bool:
         self.cancelled.append(thread_key)
@@ -140,8 +159,16 @@ def _adapter(
     front_desk: str | None = "-100:1",
     guest_rate: int = 10,
     guest_global_rate: int = 60,
+    group_chat_enabled: bool = False,
+    owner_home_chat_id: int | None = None,
 ) -> TelegramAdapter:
-    app = cast(Application, SimpleNamespace(add_handler=Mock()))  # type: ignore[type-arg]
+    app = cast(
+        Application,  # type: ignore[type-arg]
+        SimpleNamespace(
+            add_handler=Mock(),
+            bot=SimpleNamespace(id=BOT_ID, username=BOT_USERNAME),
+        ),
+    )
     return TelegramAdapter(
         application=app,
         engine=engine,
@@ -155,6 +182,8 @@ def _adapter(
         front_desk_thread_key=front_desk,
         guest_rate=guest_rate,
         guest_global_rate=guest_global_rate,
+        group_chat_enabled=group_chat_enabled,
+        owner_home_chat_id=owner_home_chat_id,
     )
 
 
@@ -175,10 +204,17 @@ def _fake_update(
     thread_id: int | None = None,
     is_forum: bool = False,
     chat_id: int = -100,
+    chat_type: str | None = None,
     caption: str | None = None,
     photo: list[Any] | None = None,
     document: Any | None = None,
+    entities: list[Any] | None = None,
+    reply_to_message: Any = None,
 ) -> Update:
+    # Default the chat type from the id sign (Telegram: private ids are positive, group
+    # ids negative) so existing call sites need no change; group tests override it.
+    if chat_type is None:
+        chat_type = "private" if chat_id >= 0 else "supergroup"
     update = SimpleNamespace(
         effective_message=SimpleNamespace(
             text=text,
@@ -187,11 +223,32 @@ def _fake_update(
             caption=caption,
             photo=photo or [],
             document=document,
+            entities=entities or [],
+            caption_entities=[],
+            reply_to_message=reply_to_message,
         ),
         effective_user=SimpleNamespace(id=user_id, full_name="Someone"),
-        effective_chat=SimpleNamespace(id=chat_id, is_forum=is_forum),
+        effective_chat=SimpleNamespace(
+            id=chat_id, is_forum=is_forum, type=chat_type
+        ),
     )
     return cast(Update, update)
+
+
+def _mention(text: str, *, of: str = BOT_USERNAME) -> list[Any]:
+    """A Telegram ``mention`` entity covering ``@{of}`` within ``text``."""
+    handle = f"@{of}"
+    offset = text.index(handle)
+    return [
+        SimpleNamespace(
+            type="mention", offset=offset, length=len(handle), user=None
+        )
+    ]
+
+
+def _bot_reply() -> Any:
+    """A ``reply_to_message`` stand-in authored by the bot (engagement via reply)."""
+    return SimpleNamespace(from_user=SimpleNamespace(id=BOT_ID))
 
 
 def _tg_file(data: bytes) -> Any:
@@ -378,6 +435,140 @@ async def test_owner_general_message_flags_is_general(
     )
 
     assert engine.dispatched == [("-100:0", "hey", True)]
+
+
+# ---- group chats (M11) -------------------------------------------------------
+
+
+def test_to_message_classifies_group_surface_and_key(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    adapter = _adapter(session_factory, FakeEngine(), group_chat_enabled=True)
+    update = _fake_update(
+        user_id=7, text="hi room", chat_id=-555, chat_type="supergroup"
+    )
+
+    message = adapter.to_message(update)
+
+    assert message is not None
+    assert message.surface is Surface.GROUP
+    assert message.thread_key == "-555:grp"  # one shared session per group
+
+
+def test_to_message_group_disabled_is_not_a_group(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # group_chat_enabled off → a supergroup keeps today's behavior (never GROUP).
+    adapter = _adapter(session_factory, FakeEngine(), group_chat_enabled=False)
+    update = _fake_update(
+        user_id=7, text="hi", chat_id=-555, chat_type="supergroup", thread_id=3
+    )
+
+    message = adapter.to_message(update)
+
+    assert message is not None
+    assert message.surface is not Surface.GROUP
+    assert message.thread_key == "-555:3"
+
+
+def test_to_message_home_chat_is_not_a_group(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The owner's own forum supergroup is HOME, never a GROUP, even with groups on.
+    adapter = _adapter(
+        session_factory,
+        FakeEngine(),
+        group_chat_enabled=True,
+        owner_home_chat_id=-100,
+    )
+    update = _fake_update(
+        user_id=OWNER_ID, text="hi", chat_id=-100, chat_type="supergroup", thread_id=5
+    )
+
+    message = adapter.to_message(update)
+
+    assert message is not None
+    assert message.surface is Surface.HOME
+    assert message.thread_key == "-100:5"  # keeps the topic key, not :grp
+
+
+async def test_group_message_without_mention_is_observed_not_dispatched(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine, group_chat_enabled=True)
+    update = _fake_update(
+        user_id=7, text="just chatting", chat_id=-555, chat_type="supergroup"
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    # Ambient read: buffered, attributed, no reply, no task.
+    assert engine.observed == [("-555:grp", "just chatting", "Someone")]
+    assert engine.dispatched == [] and engine.dispatched_guests == []
+    update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_group_owner_mention_dispatches_with_group_surface(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine, group_chat_enabled=True)
+    text = f"@{BOT_USERNAME} status?"
+    update = _fake_update(
+        user_id=OWNER_ID,
+        text=text,
+        chat_id=-555,
+        chat_type="supergroup",
+        entities=_mention(text),
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched == [("-555:grp", text, False)]
+    assert engine.dispatched_surfaces == [Surface.GROUP]
+    assert engine.observed == []  # an engaged message is answered, not buffered
+
+
+async def test_group_owner_reply_to_bot_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine, group_chat_enabled=True)
+    update = _fake_update(
+        user_id=OWNER_ID,
+        text="and the other thing?",
+        chat_id=-555,
+        chat_type="supergroup",
+        reply_to_message=_bot_reply(),
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    assert engine.dispatched == [("-555:grp", "and the other thing?", False)]
+    assert engine.dispatched_surfaces == [Surface.GROUP]
+
+
+async def test_group_guest_mention_dispatches_as_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine, group_chat_enabled=True)
+    text = f"hey @{BOT_USERNAME} who are you?"
+    update = _fake_update(
+        user_id=7,
+        text=text,
+        chat_id=-555,
+        chat_type="supergroup",
+        entities=_mention(text),
+    )
+
+    await adapter._on_message(update, _CTX)
+
+    # Non-owner engagement → receptionist, no owner dispatch.
+    assert engine.dispatched_guests == [("-555:grp", text, "Someone")]
+    assert engine.dispatched_guest_surfaces == [Surface.GROUP]
+    assert engine.dispatched == []
 
 
 async def test_flat_dm_is_not_general(
@@ -847,6 +1038,22 @@ async def test_taskio_send_splits_long_text() -> None:
     bot = AsyncMock()
     await TelegramTaskIO(bot).send("-100:0", "a" * 9000)
     assert bot.send_message.await_count == 3
+
+
+async def test_taskio_send_group_key_posts_to_chat_no_thread() -> None:
+    # A GROUP session key (`{chat}:grp`, owner) routes to the chat with no topic
+    # thread; the `:guest` variant (group receptionist) does too. The non-numeric
+    # thread component must not blow up _parse's int() conversion.
+    bot = AsyncMock()
+    await TelegramTaskIO(bot).send("-555:grp", "hi room")
+    bot.send_message.assert_awaited_once_with(
+        chat_id=-555, text="hi room", message_thread_id=None
+    )
+    bot.reset_mock()
+    await TelegramTaskIO(bot).send("-555:grp:guest", "front desk here")
+    bot.send_message.assert_awaited_once_with(
+        chat_id=-555, text="front desk here", message_thread_id=None
+    )
 
 
 async def test_taskio_send_file_uploads_document() -> None:
