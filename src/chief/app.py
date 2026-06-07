@@ -195,6 +195,10 @@ def build_engine(
         io=io,
         platform=platform,
         owner_model=settings.owner_model_default,
+        # Owner Opus escalation (M11): /opus pins a thread to owner_model_opus; with
+        # opus_auto_detect on, a complex owner turn also asks before escalating.
+        owner_model_opus=settings.owner_model_opus,
+        opus_auto_detect=settings.opus_auto_detect,
         classifier_model=settings.classifier_model,
         concurrency=settings.concurrency,
         grace_seconds=settings.grace_seconds,
