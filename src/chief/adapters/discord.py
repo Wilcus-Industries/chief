@@ -46,6 +46,7 @@ from .base import (
     Message,
     ReadyHook,
     ReplyFn,
+    Surface,
     Tier,
     admission_payload,
     apply_admission,
@@ -55,6 +56,7 @@ from .base import (
     classify_tier,
     default_branch_title,
     handle_guest_message,
+    is_engaged,
     is_supported_media,
     parse_admission,
     parse_budget,
@@ -79,8 +81,18 @@ _BUTTONS: tuple[tuple[str, ApprovalAction, discord.ButtonStyle], ...] = (
 
 
 def _parse(thread_key: str) -> tuple[int, int]:
-    channel_str, thread_str = thread_key.split(":")
-    return int(channel_str), int(thread_str)
+    """Decode a ``thread_key`` into ``(channel_id, thread_id)``.
+
+    A group key (``{channel}:grp`` for the owner session, ``{channel}:grp:guest`` for
+    the receptionist) has a non-numeric thread component and no Discord thread — it maps
+    to ``thread_id`` 0, so the send path posts to the channel itself.
+    """
+    channel_str, _, rest = thread_key.partition(":")
+    try:
+        thread_id = int(rest)
+    except ValueError:
+        thread_id = 0
+    return int(channel_str), thread_id
 
 
 def _approval_view(approval_id: int) -> discord.ui.View:
@@ -254,6 +266,8 @@ class DiscordAdapter(Adapter):
         guest_rate: int = 10,
         guest_rate_window: int = 3600,
         guest_global_rate: int = 60,
+        group_chat_enabled: bool = False,
+        owner_home_guild_id: int | None = None,
     ) -> None:
         self._client = client
         self._token = token
@@ -269,6 +283,10 @@ class DiscordAdapter(Adapter):
         self._guest_rate = guest_rate
         self._guest_rate_window = guest_rate_window
         self._guest_global_rate = guest_global_rate
+        # Group chats (M11): a guild other than the owner's home server is a GROUP
+        # surface — read ambiently, answered only when @mentioned or replied-to.
+        self._group_chat_enabled = group_chat_enabled
+        self._owner_home_guild_id = owner_home_guild_id
         # Contacts already prompted this run — dedupe the admission card (see Telegram).
         self._prompted_admission: set[int] = set()
         self._ready_hook: ReadyHook | None = None
@@ -290,13 +308,9 @@ class DiscordAdapter(Adapter):
         """
         if not message.content and not message.attachments:
             return None
-        channel = message.channel
-        if isinstance(channel, discord.Thread):
-            if channel.parent_id is None:
-                return None  # orphaned thread — no channel to route a key through
-            thread_key = f"{channel.parent_id}:{channel.id}"
-        else:
-            thread_key = f"{channel.id}:0"
+        surface, thread_key = self._surface(message)
+        if thread_key is None:
+            return None  # orphaned thread — no channel to route a key through
         author = message.author
         return Message(
             platform=PLATFORM,
@@ -305,7 +319,31 @@ class DiscordAdapter(Adapter):
             thread_key=thread_key,
             tier=classify_tier(sender_id=author.id, owner_id=self._owner_id),
             sender_name=author.display_name,
+            surface=surface,
         )
+
+    def _surface(self, message: discord.Message) -> tuple[Surface, str | None]:
+        """Classify the message's surface and pick its thread_key (M11).
+
+        A guild other than the owner's home server, with group chats enabled, is a GROUP
+        — one shared session keyed ``{channel}:grp`` (no Discord thread). A DM (no
+        guild) and the home server keep today's thread/channel keying so behavior is
+        untouched when group chats are off. ``None`` key = an orphaned thread to skip.
+        """
+        channel = message.channel
+        guild = message.guild
+        if (
+            guild is not None
+            and self._group_chat_enabled
+            and guild.id != self._owner_home_guild_id
+        ):
+            return Surface.GROUP, f"{channel.id}:grp"
+        surface = Surface.DM if guild is None else Surface.HOME
+        if isinstance(channel, discord.Thread):
+            if channel.parent_id is None:
+                return surface, None
+            return surface, f"{channel.parent_id}:{channel.id}"
+        return surface, f"{channel.id}:0"
 
     async def _record(self, message: Message) -> None:
         async with self._session_factory() as session:
@@ -325,6 +363,9 @@ class DiscordAdapter(Adapter):
             return  # ignore other bots
         normalized = self.to_message(message)
         if normalized is None:
+            return
+        if normalized.surface is Surface.GROUP:
+            await self._on_group_message(message, normalized)
             return
         await self._record(normalized)
         if normalized.tier is not Tier.OWNER:
@@ -353,6 +394,56 @@ class DiscordAdapter(Adapter):
             attachments=normalized.attachments,
             is_general=is_general,
         )
+
+    async def _on_group_message(
+        self, raw: discord.Message, message: Message
+    ) -> None:
+        """Route a GROUP message: answer only when engaged, else read ambiently (M11).
+
+        chief reads every group message as sender-attributed context but stays silent
+        until @mentioned or replied-to. An engaged owner gets the full owner surface
+        (flat, approvals DM'd); an engaged non-owner gets the receptionist — both keep
+        the shared ``{channel}:grp`` session. A non-engaged message is buffered, silent.
+        """
+        if not self._group_engaged(raw):
+            await self._engine.observe(
+                thread_key=message.thread_key,
+                text=message.text,
+                sender_name=message.sender_name,
+            )
+            return
+        await self._record(message)
+        if message.tier is Tier.OWNER:
+            attachments = await self._owner_attachments(raw)
+            logger.info(
+                "owner group message", extra={"thread_key": message.thread_key}
+            )
+            await self._engine.dispatch(
+                thread_key=message.thread_key,
+                text=message.text,
+                attachments=attachments,
+                surface=Surface.GROUP,
+            )
+            return
+        logger.info("guest group message", extra={"thread_key": message.thread_key})
+        await self._engine.dispatch_guest(
+            thread_key=message.thread_key,
+            text=message.text,
+            from_label=message.sender_name,
+            surface=Surface.GROUP,
+        )
+
+    def _group_engaged(self, message: discord.Message) -> bool:
+        """True iff a group message addresses chief — an @mention or a reply to it."""
+        me = self._client.user
+        if me is None:
+            return False
+        mentioned = any(u.id == me.id for u in message.mentions)
+        ref = message.reference
+        resolved = getattr(ref, "resolved", None) if ref is not None else None
+        author = getattr(resolved, "author", None) if resolved is not None else None
+        replied = author is not None and author.id == me.id
+        return is_engaged(mentioned=mentioned, replied_to_bot=replied)
 
     @staticmethod
     async def _owner_attachments(

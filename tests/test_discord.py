@@ -8,7 +8,7 @@ import discord
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import AdmissionCard, Attachment, BudgetCard
+from chief.adapters.base import AdmissionCard, Attachment, BudgetCard, Surface
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
@@ -27,7 +27,10 @@ class FakeEngine:
     ) -> None:
         self.dispatched: list[tuple[str, str, bool]] = []
         self.dispatched_attachments: list[tuple[Attachment, ...]] = []
+        self.dispatched_surfaces: list[Any] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
+        self.dispatched_guest_surfaces: list[Any] = []
+        self.observed: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
         self.downgraded = 0
@@ -41,14 +44,27 @@ class FakeEngine:
         text: str,
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
+        surface: Any = None,
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
         self.dispatched_attachments.append(attachments)
+        self.dispatched_surfaces.append(surface)
 
     async def dispatch_guest(
-        self, *, thread_key: str, text: str, from_label: str | None = None
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        from_label: str | None = None,
+        surface: Any = None,
     ) -> None:
         self.dispatched_guests.append((thread_key, text, from_label))
+        self.dispatched_guest_surfaces.append(surface)
+
+    async def observe(
+        self, *, thread_key: str, text: str, sender_name: str | None = None
+    ) -> None:
+        self.observed.append((thread_key, text, sender_name))
 
     async def cancel(self, thread_key: str) -> bool:
         self.cancelled.append(thread_key)
@@ -134,6 +150,8 @@ def _adapter(
     io: FakeIO | None = None,
     front_desk: str | None = "100:1",
     guest_rate: int = 10,
+    group_chat_enabled: bool = False,
+    owner_home_guild_id: int | None = None,
 ) -> DiscordAdapter:
     return DiscordAdapter(
         client=cast(discord.Client, _client()),
@@ -148,6 +166,8 @@ def _adapter(
         guest_enabled=guest_enabled,
         front_desk_thread_key=front_desk,
         guest_rate=guest_rate,
+        group_chat_enabled=group_chat_enabled,
+        owner_home_guild_id=owner_home_guild_id,
     )
 
 
@@ -175,14 +195,32 @@ def _message(
     channel: Any,
     bot: bool = False,
     attachments: list[Any] | None = None,
+    guild_id: int | None = None,
+    mentions: list[Any] | None = None,
+    reference: Any = None,
 ) -> discord.Message:
     message = SimpleNamespace(
         content=content,
         author=SimpleNamespace(id=user_id, bot=bot, display_name="Someone"),
         channel=channel,
         attachments=attachments or [],
+        guild=SimpleNamespace(id=guild_id) if guild_id is not None else None,
+        mentions=mentions or [],
+        reference=reference,
     )
     return cast(discord.Message, message)
+
+
+def _bot_mention() -> list[Any]:
+    """A mentions list containing chief's own bot user (engagement via @mention)."""
+    return [SimpleNamespace(id=BOT_ID)]
+
+
+def _bot_reply_ref() -> Any:
+    """A message.reference whose resolved message was authored by the bot."""
+    return SimpleNamespace(
+        resolved=SimpleNamespace(author=SimpleNamespace(id=BOT_ID))
+    )
 
 
 def _attachment(data: bytes, *, content_type: str, filename: str = "f") -> Any:
@@ -305,6 +343,139 @@ async def test_owner_channel_message_flags_is_general(
     )
 
     assert engine.dispatched == [("100:0", "hey", True)]
+
+
+# ---- group chats (M11) -------------------------------------------------------
+
+
+def test_to_message_classifies_group_surface_and_key(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A non-home guild with group chats on is a GROUP, keyed {channel}:grp.
+    adapter = _adapter(
+        session_factory,
+        FakeEngine(),
+        group_chat_enabled=True,
+        owner_home_guild_id=1,
+    )
+
+    message = adapter.to_message(
+        _message(
+            user_id=7, content="hi room", channel=_text_channel(200), guild_id=555
+        )
+    )
+
+    assert message is not None
+    assert message.surface is Surface.GROUP
+    assert message.thread_key == "200:grp"
+
+
+def test_to_message_home_guild_is_not_a_group(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The owner's own server is HOME, never a GROUP, even with groups enabled.
+    adapter = _adapter(
+        session_factory,
+        FakeEngine(),
+        group_chat_enabled=True,
+        owner_home_guild_id=1,
+    )
+
+    message = adapter.to_message(
+        _message(
+            user_id=OWNER_ID, content="hey", channel=_text_channel(100), guild_id=1
+        )
+    )
+
+    assert message is not None
+    assert message.surface is Surface.HOME
+    assert message.thread_key == "100:0"
+
+
+async def test_group_message_without_mention_is_observed_not_dispatched(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(
+        session_factory, engine, group_chat_enabled=True, owner_home_guild_id=1
+    )
+    channel = _text_channel(200)
+
+    await adapter.on_message(
+        _message(user_id=7, content="just chatting", channel=channel, guild_id=555)
+    )
+
+    assert engine.observed == [("200:grp", "just chatting", "Someone")]
+    assert engine.dispatched == [] and engine.dispatched_guests == []
+    channel.send.assert_not_awaited()
+
+
+async def test_group_owner_mention_dispatches_with_group_surface(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(
+        session_factory, engine, group_chat_enabled=True, owner_home_guild_id=1
+    )
+
+    await adapter.on_message(
+        _message(
+            user_id=OWNER_ID,
+            content="status?",
+            channel=_text_channel(200),
+            guild_id=555,
+            mentions=_bot_mention(),
+        )
+    )
+
+    assert engine.dispatched == [("200:grp", "status?", False)]
+    assert engine.dispatched_surfaces == [Surface.GROUP]
+    assert engine.observed == []
+
+
+async def test_group_owner_reply_to_bot_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(
+        session_factory, engine, group_chat_enabled=True, owner_home_guild_id=1
+    )
+
+    await adapter.on_message(
+        _message(
+            user_id=OWNER_ID,
+            content="and the other thing?",
+            channel=_text_channel(200),
+            guild_id=555,
+            reference=_bot_reply_ref(),
+        )
+    )
+
+    assert engine.dispatched == [("200:grp", "and the other thing?", False)]
+    assert engine.dispatched_surfaces == [Surface.GROUP]
+
+
+async def test_group_guest_mention_dispatches_as_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(
+        session_factory, engine, group_chat_enabled=True, owner_home_guild_id=1
+    )
+
+    await adapter.on_message(
+        _message(
+            user_id=7,
+            content="who are you?",
+            channel=_text_channel(200),
+            guild_id=555,
+            mentions=_bot_mention(),
+        )
+    )
+
+    assert engine.dispatched_guests == [("200:grp", "who are you?", "Someone")]
+    assert engine.dispatched_guest_surfaces == [Surface.GROUP]
+    assert engine.dispatched == []
 
 
 # ---- media intake (M8, owner only) -------------------------------------------
@@ -841,6 +1012,24 @@ async def test_taskio_send_splits_long_text() -> None:
     await io.send("100:0", "a" * 5000)
 
     assert channel.send.await_count == 3  # 2000-char cap → 2000 + 2000 + 1000
+
+
+async def test_taskio_send_group_key_posts_to_channel() -> None:
+    # A GROUP session key ({channel}:grp, owner) and its {channel}:grp:guest variant
+    # (group receptionist) both post to the channel — the non-numeric thread component
+    # must resolve to the channel, not raise in _parse's int().
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    client = _io_client(channel)
+    io = DiscordTaskIO(cast(discord.Client, client))
+
+    await io.send("200:grp", "hi room")
+    client.get_channel.assert_called_with(200)
+    channel.send.assert_awaited_with("hi room")
+
+    await io.send("200:grp:guest", "front desk here")
+    client.get_channel.assert_called_with(200)
+    channel.send.assert_awaited_with("front desk here")
 
 
 async def test_taskio_send_file_sends_file() -> None:
