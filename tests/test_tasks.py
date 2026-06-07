@@ -2136,6 +2136,39 @@ async def test_auto_escalate_complex_turn_approved_switches_to_opus(
     assert len(approvals.requests) == 1
     assert approvals.requests[0]["tool_name"] == OPUS_ESCALATION_KIND
     assert sess.model == "claude-opus-4-8"  # approved → the turn runs on Opus
+    # The approved path posts the same confirmation as explicit /opus.
+    assert any("Opus" in text for _key, text in io.sends)
+    await mgr.shutdown()
+
+
+async def test_escalated_thread_survives_a_budget_downgrade(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    budget = FakeBudget()  # normal — a live session exists before either action
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        budget=budget,
+        downgrade_model="claude-haiku-4-5",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await mgr.escalate("-100:5")
+    assert sess.model == "claude-opus-4-8"
+
+    # A later Downgrade tap must NOT silently undo an explicit escalation: the pinned
+    # thread stays on Opus (live and persisted agree), so it never re-asks or reopens
+    # on a model that contradicts the live session.
+    await mgr.downgrade_live_sessions()
+
+    assert sess.model == "claude-opus-4-8"
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+        assert db is not None and db.model == "claude-opus-4-8"
     await mgr.shutdown()
 
 
