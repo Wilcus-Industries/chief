@@ -525,9 +525,18 @@ class Engine(Protocol):
         text: str,
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
+        surface: Surface = Surface.DM,
     ) -> None: ...
     async def dispatch_guest(
-        self, *, thread_key: str, text: str, from_label: str | None = None
+        self,
+        *,
+        thread_key: str,
+        text: str,
+        from_label: str | None = None,
+        surface: Surface = Surface.DM,
+    ) -> None: ...
+    async def observe(
+        self, *, thread_key: str, text: str, sender_name: str | None = None
     ) -> None: ...
     async def cancel(self, thread_key: str) -> bool: ...
     async def active_tasks(self) -> list[Task]: ...
