@@ -146,6 +146,27 @@ async def test_set_status_and_session_id_persist(db_session: AsyncSession) -> No
     assert reloaded.status == task_repo.RUNNING
 
 
+async def test_set_task_model_persists_and_clears(db_session: AsyncSession) -> None:
+    task = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:9", tier="owner"
+    )
+    assert task.model is None
+
+    await task_repo.set_task_model(db_session, task, "claude-opus-4-8")
+    reloaded = await task_repo.get_task(
+        db_session, platform="telegram", thread_key="-100:9"
+    )
+    assert reloaded is not None
+    assert reloaded.model == "claude-opus-4-8"
+
+    await task_repo.set_task_model(db_session, task, None)
+    reloaded = await task_repo.get_task(
+        db_session, platform="telegram", thread_key="-100:9"
+    )
+    assert reloaded is not None
+    assert reloaded.model is None
+
+
 async def test_list_active_excludes_terminal(db_session: AsyncSession) -> None:
     live = await task_repo.get_or_create_task(
         db_session, platform="telegram", thread_key="-100:7", tier="owner"

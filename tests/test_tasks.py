@@ -20,6 +20,7 @@ from chief.core.tasks import (
     SessionProto,
     TaskManager,
 )
+from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.memory.store import Fact, FactDraft
 from chief.persistence.tasks import (
     CANCELLED,
@@ -173,6 +174,18 @@ class FakeBudget:
         return self._mode
 
 
+class FakeApprovals:
+    """Structural ApprovalManager: returns a fixed decision, records each request."""
+
+    def __init__(self, *, approve: bool = True) -> None:
+        self._approve = approve
+        self.requests: list[dict[str, Any]] = []
+
+    async def request(self, **kwargs: Any) -> bool:
+        self.requests.append(kwargs)
+        return self._approve
+
+
 class FakeIO:
     def __init__(self, next_thread: str = "-100:99") -> None:
         self.sends: list[tuple[str, str]] = []
@@ -234,6 +247,10 @@ def _manager(
     budget: Any = None,
     owner_inbox: str | None = None,
     downgrade_model: str | None = None,
+    approvals: Any = None,
+    opus_auto_detect: bool = False,
+    is_complex: Callable[..., Any] = _no,
+    owner_model_opus: str = "claude-opus-4-8",
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -252,6 +269,10 @@ def _manager(
         budget=budget,
         owner_inbox=owner_inbox,
         budget_downgrade_model=downgrade_model,
+        approvals=approvals,
+        opus_auto_detect=opus_auto_detect,
+        is_complex=is_complex,
+        owner_model_opus=owner_model_opus,
     )
 
 
@@ -1974,4 +1995,220 @@ async def test_guest_group_session_keyed_apart_and_sees_buffer(
     await _until(lambda: bool(guest_sess.queries))
     assert "Cleo: hello room" in guest_sess.queries[0]
     assert "who runs this?" in guest_sess.queries[0]
+    await mgr.shutdown()
+
+
+# ---- Opus escalation (M11) ---------------------------------------------------
+
+
+async def test_escalate_switches_live_session_and_persists(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    reply = await mgr.escalate("-100:5")
+
+    assert "Opus" in reply
+    assert sess.model == "claude-opus-4-8"  # the live session flips immediately
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+        assert db is not None and db.model == "claude-opus-4-8"  # persisted
+    await mgr.shutdown()
+
+
+async def test_escalate_with_no_live_task_reopens_on_opus(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+    mgr = _manager(session_factory, io, factory=_mem_factory(sessions))
+
+    # /opus on a thread with no live session just persists the override …
+    await mgr.escalate("-100:7")
+    assert sessions == []
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:7")
+        assert db is not None and db.model == "claude-opus-4-8"
+
+    # … and the next turn opens the session on Opus (survives a restart).
+    await mgr.dispatch(thread_key="-100:7", text="hi")
+    await _until(lambda: ("-100:7", "reply:hi") in io.sends)
+    assert sessions[-1].model == "claude-opus-4-8"
+    await mgr.shutdown()
+
+
+async def test_revert_clears_escalation_and_switches_back(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await mgr.escalate("-100:5")
+    assert sess.model == "claude-opus-4-8"
+
+    reply = await mgr.revert("-100:5")
+
+    assert "Sonnet" in reply
+    assert sess.model == "claude-sonnet-4-6"  # back to the default owner model
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+        assert db is not None and db.model is None  # override cleared
+    await mgr.shutdown()
+
+
+async def test_escalate_overrides_budget_downgrade_with_warning(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="placeholder")
+    budget = FakeBudget(mode_value="downgraded")
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        budget=budget,
+        downgrade_model="claude-haiku-4-5",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    assert sess.model == "claude-haiku-4-5"  # the cycle is downgraded
+
+    reply = await mgr.escalate("-100:5")
+
+    assert sess.model == "claude-opus-4-8"  # explicit escalation wins over downgrade
+    assert "budget" in reply.lower()  # warns Opus burns the credit faster
+    await mgr.shutdown()
+
+
+async def test_revert_under_budget_downgrade_returns_to_downgrade_model(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="placeholder")
+    budget = FakeBudget(mode_value="downgraded")
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        budget=budget,
+        downgrade_model="claude-haiku-4-5",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await mgr.escalate("-100:5")
+    assert sess.model == "claude-opus-4-8"
+
+    await mgr.revert("-100:5")
+
+    # Reverting drops to the active budget downgrade model, not back to full Sonnet.
+    assert sess.model == "claude-haiku-4-5"
+    await mgr.shutdown()
+
+
+async def test_auto_escalate_complex_turn_approved_switches_to_opus(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    approvals = FakeApprovals(approve=True)
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        approvals=approvals,
+        opus_auto_detect=True,
+        is_complex=_yes,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="design a sharded cache")
+    await _until(lambda: ("-100:5", "reply:design a sharded cache") in io.sends)
+
+    assert len(approvals.requests) == 1
+    assert approvals.requests[0]["tool_name"] == OPUS_ESCALATION_KIND
+    assert sess.model == "claude-opus-4-8"  # approved → the turn runs on Opus
+    await mgr.shutdown()
+
+
+async def test_auto_escalate_denied_stays_sonnet_and_suppresses(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    approvals = FakeApprovals(approve=False)
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        approvals=approvals,
+        opus_auto_detect=True,
+        is_complex=_yes,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="design one")
+    await _until(lambda: ("-100:5", "reply:design one") in io.sends)
+    assert sess.model == "claude-sonnet-4-6"  # denied → stays on the default
+    assert len(approvals.requests) == 1
+
+    # A second complex turn in the same task does not re-ask after a denial.
+    await mgr.dispatch(thread_key="-100:5", text="design two")
+    await _until(lambda: ("-100:5", "reply:design two") in io.sends)
+    assert len(approvals.requests) == 1
+    await mgr.shutdown()
+
+
+async def test_auto_escalate_off_never_asks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    approvals = FakeApprovals(approve=True)
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        approvals=approvals,
+        opus_auto_detect=False,  # opt-in flag off — only the command escalates
+        is_complex=_yes,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="design a sharded cache")
+    await _until(lambda: ("-100:5", "reply:design a sharded cache") in io.sends)
+
+    assert approvals.requests == []
+    assert sess.model == "claude-sonnet-4-6"
+    await mgr.shutdown()
+
+
+async def test_auto_escalate_skips_when_already_on_opus(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="claude-sonnet-4-6")
+    approvals = FakeApprovals(approve=True)
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        approvals=approvals,
+        opus_auto_detect=True,
+        is_complex=_yes,
+    )
+
+    await mgr.escalate("-100:5")  # explicit /opus pins the thread to Opus first
+    await mgr.dispatch(thread_key="-100:5", text="design a sharded cache")
+    await _until(lambda: ("-100:5", "reply:design a sharded cache") in io.sends)
+
+    # Already on Opus → the per-turn classifier short-circuits, no card.
+    assert approvals.requests == []
+    assert sess.model == "claude-opus-4-8"
     await mgr.shutdown()
