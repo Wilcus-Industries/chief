@@ -867,7 +867,18 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   **only when `shell_enabled` + the `sandbox` profile are on** (they have no bash otherwise);
   the image grows ~600 MB but its security posture (secret-free, read-only, capped) is
   unchanged. `HOME=/tmp` in that image so LibreOffice has a writable profile.
-- **M11 group chats + Opus escalation** (approval-gated).
+- **M11 group chats — ✅ done.** A third **surface** (`Surface` enum: `HOME | DM |
+  GROUP`, orthogonal to `Tier`) beyond the owner's home forum/server and 1:1 DMs. In a
+  GROUP (any non-home group/supergroup or guild chief is invited to, opt-in via
+  `group_chat_enabled`) chief **reads every message ambiently** — buffered per group
+  (`observe` → bounded `_group_buffers`, `group_context_max_messages`), sender-attributed
+  — but stays **silent until engaged** (`is_engaged`: an @mention of the bot or a reply
+  to its message). An engaged **owner** runs the full owner surface flat (no topic spawn)
+  with a `GROUP_MODE_NOTE` appended (public room, don't leak private context) and **every
+  tool approval DM'd** to `primary_thread_key` (`_approval_route`, fail-closed); an engaged
+  **non-owner** gets the receptionist (no tools) under its own `{id}:grp:guest` session
+  key. One shared `{id}:grp` session/buffer per group; default off ⇒ today's behavior.
+  **Opus escalation (the other half) is still deferred** — to be planned separately.
 
 **Phase 4 — Ship**
 - **M12 Discord adapter** ✅ *(built early)***:** private server, threads = tasks; full
