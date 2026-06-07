@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1970,7 +1970,7 @@ async def test_guest_group_session_keyed_apart_and_sees_buffer(
     assert "-100:grp" not in mgr._tasks
     assert captured["model"] == "guest-model"  # receptionist, never the owner model
     # … and it still reads the same shared ambient buffer.
-    guest_sess = mgr._tasks["-100:grp:guest"].session
+    guest_sess = cast(FakeSession, mgr._tasks["-100:grp:guest"].session)
     await _until(lambda: bool(guest_sess.queries))
     assert "Cleo: hello room" in guest_sess.queries[0]
     assert "who runs this?" in guest_sess.queries[0]

@@ -347,6 +347,61 @@ def test_build_engine_no_budget_when_disabled(
 
     assert manager._budget is None
     assert manager._owner_inbox is None
+
+
+def test_group_params_thread_into_telegram_engine_and_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        group_chat_enabled=True,
+        primary_thread_key="42:0",
+        owner_home_chat_id=-100,
+        group_context_max_messages=12,
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, adapter, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert isinstance(adapter, TelegramAdapter)
+    assert adapter._group_chat_enabled is True
+    assert adapter._owner_home_chat_id == -100
+    assert manager._group_context_max == 12
+    # owner_inbox is wired from primary_thread_key for groups even with budget off, so
+    # an owner-in-group approval has a private DM route (fails closed otherwise).
+    assert manager._budget is None
+    assert manager._owner_inbox == "42:0"
+
+
+def test_group_params_thread_into_discord_engine_and_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _settings(
+        owner_discord_id=99,
+        discord_bot_token="dc",
+        group_chat_enabled=True,
+        primary_thread_key="42:0",
+        owner_home_guild_id=1234,
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, adapter, _ = app.build_discord_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert isinstance(adapter, DiscordAdapter)
+    assert adapter._group_chat_enabled is True
+    assert adapter._owner_home_guild_id == 1234
+    assert manager._owner_inbox == "42:0"
     assert manager._budget_downgrade_model is None
 
 
