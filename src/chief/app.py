@@ -226,10 +226,19 @@ def build_engine(
         # When budgeting is on, the gate records each turn's spend and the manager
         # enforces its mode (pause/downgrade); both are inert (None) otherwise.
         budget=budget,
-        owner_inbox=settings.primary_thread_key if budget is not None else None,
+        # The owner's private DM (primary_thread_key) — where the budget card lands AND
+        # where an owner-in-group tool approval is DM'd (M11). Wired whenever either
+        # subsystem needs it, so the group approval route never falls open to the room.
+        owner_inbox=(
+            settings.primary_thread_key
+            if (budget is not None or settings.group_chat_enabled)
+            else None
+        ),
         budget_downgrade_model=(
             settings.budget_downgrade_model if budget is not None else None
         ),
+        # Group chats (M11): cap on the per-group ambient buffer.
+        group_context_max_messages=settings.group_context_max_messages,
         # Owner-only packaged skills (M10). The path must be absolute (see
         # SKILLS_PLUGIN_DIR) — the owner session's cwd=memory_dir would mis-resolve a
         # relative --plugin-dir. Inert (None path) unless the flag is on.
@@ -291,6 +300,8 @@ def build_telegram_stack(
         guest_rate=settings.guest_rate_per_window,
         guest_rate_window=settings.guest_rate_window_seconds,
         guest_global_rate=settings.guest_global_rate_per_window,
+        group_chat_enabled=settings.group_chat_enabled,
+        owner_home_chat_id=settings.owner_home_chat_id,
     )
     return manager, adapter, approvals
 
@@ -347,6 +358,8 @@ def build_discord_stack(
         guest_rate=settings.guest_rate_per_window,
         guest_rate_window=settings.guest_rate_window_seconds,
         guest_global_rate=settings.guest_global_rate_per_window,
+        group_chat_enabled=settings.group_chat_enabled,
+        owner_home_guild_id=settings.owner_home_guild_id,
     )
     return manager, adapter, approvals
 
