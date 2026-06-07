@@ -1,4 +1,4 @@
-"""Haiku stop-intent / warrants-a-task classifiers (SDK mocked)."""
+"""Haiku stop-intent / warrants-a-task / complexity classifiers (SDK mocked)."""
 
 from collections.abc import AsyncIterator
 from typing import Any
@@ -32,6 +32,16 @@ async def test_warrants_task_parses_yes(monkeypatch: pytest.MonkeyPatch) -> None
     assert await classify.warrants_task("book a flight Friday", model="m") is True
 
 
+async def test_is_complex_parses_yes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(classify, "query", _stream("YES"))
+    assert await classify.is_complex("design a sharded cache", model="m") is True
+
+
+async def test_is_complex_parses_no(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(classify, "query", _stream("NO"))
+    assert await classify.is_complex("what time is it", model="m") is False
+
+
 async def test_classifier_failure_defaults_safe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -41,3 +51,4 @@ async def test_classifier_failure_defaults_safe(
     monkeypatch.setattr(classify, "query", _boom)
     assert await classify.stop_intent("x", model="m") is False
     assert await classify.warrants_task("x", model="m") is False
+    assert await classify.is_complex("x", model="m") is False

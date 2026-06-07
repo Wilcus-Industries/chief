@@ -90,6 +90,23 @@ def test_m2_defaults_and_env_override(
     assert settings.classifier_model == "claude-haiku-4-5"
 
 
+def test_m11_opus_escalation_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The owner runs Sonnet by default; Opus is reachable only by escalation, and the
+    # classifier-driven auto-ask is opt-in (off) so only the explicit command escalates.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.owner_model_default == "claude-sonnet-4-6"
+    assert settings.owner_model_opus == "claude-opus-4-8"
+    assert settings.opus_auto_detect is False
+
+
 def test_m3_gate_defaults_and_seed_parsing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
