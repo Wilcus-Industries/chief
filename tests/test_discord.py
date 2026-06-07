@@ -33,6 +33,8 @@ class FakeEngine:
         self.observed: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
         self.branched: list[tuple[str, str]] = []
+        self.escalated: list[str] = []
+        self.reverted: list[str] = []
         self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
@@ -76,6 +78,14 @@ class FakeEngine:
     async def branch(self, thread_key: str, title: str) -> str:
         self.branched.append((thread_key, title))
         return f"{thread_key.split(':')[0]}:88"
+
+    async def escalate(self, thread_key: str) -> str:
+        self.escalated.append(thread_key)
+        return "⚡ Switched to Opus 4.8 for this thread — /sonnet to switch back."
+
+    async def revert(self, thread_key: str) -> str:
+        self.reverted.append(thread_key)
+        return "↩️ Back to Sonnet 4.6 for this thread."
 
     async def downgrade_live_sessions(self) -> None:
         self.downgraded += 1
@@ -983,6 +993,41 @@ async def test_branch_rejected_in_thread(
 
     assert engine.branched == []  # a tracked thread is already full-memory
     channel.send.assert_awaited_once_with("/branch only works in the casual channel.")
+
+
+# ---- /opus + /sonnet (M11) ---------------------------------------------------
+
+
+async def test_opus_owner_escalates_and_replies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/opus", channel=channel)
+    )
+
+    assert engine.escalated == ["100:5"]
+    channel.send.assert_awaited_once_with(
+        "⚡ Switched to Opus 4.8 for this thread — /sonnet to switch back."
+    )
+
+
+async def test_sonnet_owner_reverts_and_replies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/sonnet", channel=channel)
+    )
+
+    assert engine.reverted == ["100:5"]
+    channel.send.assert_awaited_once_with("↩️ Back to Sonnet 4.6 for this thread.")
 
 
 # ---- DiscordTaskIO -----------------------------------------------------------
