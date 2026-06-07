@@ -18,3 +18,4 @@ dist/
 !/secrets/README.md
 # Local sqlite databases
 *.db
+.aider*
