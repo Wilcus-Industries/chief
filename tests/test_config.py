@@ -203,6 +203,21 @@ def test_group_chat_enabled_ok(
     assert settings.group_context_max_messages == 50  # default cap
 
 
+def test_group_context_max_messages_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A 0/negative cap is a typo: deque(maxlen=0) silently drops all ambient context.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\ngroup_context_max_messages: 0\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="group_context_max_messages"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_group_chat_disabled_ignores_missing_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
