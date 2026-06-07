@@ -1884,6 +1884,21 @@ def test_owner_group_approval_routes_to_owner_dm(
     )
 
 
+def test_owner_group_approval_without_owner_inbox_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Fail closed: an owner group card with no private route must NEVER fall back to the
+    # public room — raise so a misconfigured wiring can't leak the card into the group.
+    mgr = _manager(
+        session_factory,
+        FakeIO(),
+        factory=_one(FakeSession(model="m")),
+        owner_inbox=None,
+    )
+    with pytest.raises(RuntimeError, match="private route"):
+        mgr._approval_route(tier="owner", thread_key="-100:grp", surface=Surface.GROUP)
+
+
 def test_guest_group_approval_routes_to_front_desk_then_owner_dm(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

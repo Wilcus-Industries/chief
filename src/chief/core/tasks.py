@@ -390,16 +390,19 @@ class TaskManager:
         buf.append((sender_name or "someone", text))
 
     def _with_group_context(self, group_key: str, text: str) -> str:
-        """Prepend the group's buffered ambient messages to an engaged turn, then clear.
+        """Prepend the group's buffered ambient messages to an engaged turn, then drop.
 
         Draining keeps a later turn from re-reading lines the session already saw; the
         buffer is bounded (``group_context_max_messages``) so it can't grow without end.
+        Popping the (now-empty) deque keeps ``_group_buffers`` from accreting one entry
+        per group ever seen. The attributed lines are *untrusted* — both name and text
+        come from arbitrary group members — so the GROUP_MODE_NOTE warns the model not
+        to treat them as instructions or to disclose private context in reply.
         """
-        buf = self._group_buffers.get(group_key)
+        buf = self._group_buffers.pop(group_key, None)
         if not buf:
             return text
         lines = "\n".join(f"{name}: {msg}" for name, msg in buf)
-        buf.clear()
         return f"Recent group messages:\n{lines}\n\n{text}"
 
     async def dispatch(
@@ -734,18 +737,25 @@ class TaskManager:
             gate_kwargs["mcp_servers"] = mcp_servers
 
     def _approval_route(self, *, tier: str, thread_key: str, surface: Surface) -> str:
-        """Where this session's approval card lands; raise if a guest has nowhere.
+        """Where this session's approval card lands; raise if there's no private route.
 
         Owner work approves in-thread — except on a GROUP surface, where the card must
-        never post in the shared room and is DM'd to the owner instead (M11). A guest's
-        card routes to the Front Desk; a group guest with no Front Desk falls back to
-        the owner DM (config guarantees ``owner_inbox`` when group chats are on), never
-        back into the guest's own message (the leak M6 forbids).
+        never post in the shared room and is DM'd to the owner (``owner_inbox``) instead
+        (M11). A guest's card routes to the Front Desk; a group guest with no Front Desk
+        falls back to the owner DM, never back into the guest's own message (the leak M6
+        forbids). Every GROUP path **fails closed**: with no private inbox configured we
+        raise rather than silently routing a card into the public room.
         """
         if tier == "owner":
-            if surface is Surface.GROUP and self._owner_inbox is not None:
-                return self._owner_inbox
-            return thread_key
+            if surface is not Surface.GROUP:
+                return thread_key
+            if self._owner_inbox is None:
+                raise RuntimeError(
+                    "owner group approval has no private route — set "
+                    "primary_thread_key (wired to owner_inbox) so the card can't "
+                    "post in the group."
+                )
+            return self._owner_inbox
         if self._front_desk_thread_key is not None:
             return self._front_desk_thread_key
         if surface is Surface.GROUP and self._owner_inbox is not None:

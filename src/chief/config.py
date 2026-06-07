@@ -294,6 +294,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("group_context_max_messages")
+    @classmethod
+    def _validate_group_buffer_cap(cls, value: int) -> int:
+        """The ambient buffer cap must be positive — ``deque(maxlen=0)`` would silently
+        drop every group message, so a ``0`` or negative is a config typo, not 'off'."""
+        if value <= 0:
+            raise ValueError(
+                f"group_context_max_messages must be > 0, got {value!r}"
+            )
+        return value
+
     @field_validator("default_skills")
     @classmethod
     def _validate_default_skills(cls, value: tuple[str, ...]) -> tuple[str, ...]:
