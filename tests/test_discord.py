@@ -1030,6 +1030,22 @@ async def test_sonnet_owner_reverts_and_replies(
     channel.send.assert_awaited_once_with("↩️ Back to Sonnet 4.6 for this thread.")
 
 
+async def test_opus_ignores_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A non-owner /opus never reaches _run_command — the guest gate upstream routes it
+    # to the canned ack instead, so a guest can never escalate to Opus.
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _text_channel(100)
+
+    await adapter.on_message(
+        _message(user_id=7, content="/opus", channel=channel)
+    )
+
+    assert engine.escalated == []
+
+
 # ---- DiscordTaskIO -----------------------------------------------------------
 
 

@@ -938,13 +938,19 @@ class TaskManager:
         Invoked when the owner taps **Downgrade** on the budget card; new sessions
         already pick the model up via :meth:`_owner_session_model`. No-op when no
         downgrade model is configured (budget disabled).
+
+        An Opus-pinned thread is **skipped** (M11): an explicit escalation overrides a
+        budget downgrade — the owner chose to spend faster and was warned — so a
+        Downgrade tap leaves it on Opus (live and persisted stay in agreement, matching
+        the reopen precedence in :meth:`_owner_session_model`; ``/sonnet`` drops it).
         """
         if self._budget_downgrade_model is None:
             return
         for task in list(self._tasks.values()):
-            if task.tier == "owner":
-                await task.session.set_model(self._budget_downgrade_model)
-                task.model = self._budget_downgrade_model
+            if task.tier != "owner" or task.model == self._owner_model_opus:
+                continue
+            await task.session.set_model(self._budget_downgrade_model)
+            task.model = self._budget_downgrade_model
 
     # ---- Opus escalation (M11) ------------------------------------------
 
@@ -1025,7 +1031,9 @@ class TaskManager:
             route=route,
         )
         if approved:
-            await self.escalate(task.thread_key)
+            # Surface escalate()'s confirmation (incl. the budget warning when the cycle
+            # is downgraded) so the auto-detect path warns the same as explicit /opus.
+            await self._io.send(task.thread_key, await self.escalate(task.thread_key))
         else:
             task.auto_escalate_suppressed = True
 
