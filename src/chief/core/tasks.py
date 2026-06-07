@@ -45,7 +45,7 @@ from ..adapters.base import (
     reply_filename,
     should_send_as_file,
 )
-from ..gate.approvals import ApprovalManager
+from ..gate.approvals import OPUS_ESCALATION_KIND, ApprovalManager
 from ..gate.gate import (
     BUILTIN_SHELL_TOOLS,
     FILE_OP_TOOLS,
@@ -72,6 +72,7 @@ from ..persistence.tasks import (
     list_active,
     set_session_id,
     set_status,
+    set_task_model,
 )
 from ..tools.google import GoogleService
 from ..tools.guest import GuestAdminService, GuestService
@@ -96,6 +97,13 @@ _RESET_TIMEOUT = 10.0
 #: The choice card was already posted when the cycle paused; this nudges once per
 #: pause episode so queued turns don't silently vanish while the owner hasn't decided.
 PAUSED_BUDGET_ACK = "⏸ Paused at budget — pick how to continue on the card."
+#: Owner-facing confirmations for the M11 Opus escalation. ``/opus`` (or an approved
+#: auto-detect card) switches the thread to Opus and persists it (Task.model) until
+#: ``/sonnet`` reverts. OPUS_BUDGET_NOTE is appended when the cycle is downgraded, since
+#: escalating overrides the downgrade and so burns the monthly credit faster.
+OPUS_CONFIRM = "⚡ Switched to Opus 4.8 for this thread — /sonnet to switch back."
+OPUS_BUDGET_NOTE = "Heads up: Opus burns the monthly budget faster."
+SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
 #: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
@@ -244,6 +252,12 @@ class _RunningTask:
     distill_handle: "asyncio.Task[None] | None" = None
     transcript: list[tuple[str, str]] = field(default_factory=list)
     surface: Surface = Surface.DM
+    #: The model this live session is running on (M11). Mirrors the SDK session's model
+    #: so the "already on Opus" guard and the auto-escalate skip are O(1) (no DB read).
+    model: str = ""
+    #: Set when an auto-detect escalation card was denied, so a later complex turn in
+    #: the same task doesn't re-ask. Cleared by an explicit /opus or /sonnet.
+    auto_escalate_suppressed: bool = False
 
 
 class TaskManager:
@@ -266,6 +280,9 @@ class TaskManager:
         session_factory_sdk: SessionFactory = _default_session,
         stop_intent: Classifier = classify.stop_intent,
         warrants_task: Classifier = classify.warrants_task,
+        is_complex: Classifier = classify.is_complex,
+        owner_model_opus: str = "claude-opus-4-8",
+        opus_auto_detect: bool = False,
         policy: PolicyStore | None = None,
         approvals: ApprovalManager | None = None,
         audit: AuditLog | None = None,
@@ -306,6 +323,12 @@ class TaskManager:
         self._session_factory_sdk = session_factory_sdk
         self._stop_intent = stop_intent
         self._warrants_task = warrants_task
+        # Owner model posture (M11): default owner_model (Sonnet); escalate to
+        # owner_model_opus via /opus or — when opus_auto_detect is on — an approved
+        # per-turn complexity check. is_complex is injected for testability.
+        self._is_complex = is_complex
+        self._owner_model_opus = owner_model_opus
+        self._opus_auto_detect = opus_auto_detect
         self._policy = policy
         self._approvals = approvals
         self._audit = audit
@@ -533,7 +556,7 @@ class TaskManager:
             db = await get_or_create_task(
                 session, platform=self._platform, thread_key=thread_key, tier=tier
             )
-            db_id, resume = db.id, db.sdk_session_id
+            db_id, resume, persisted_model = db.id, db.sdk_session_id, db.model
         gate_kwargs = self._session_kwargs(
             thread_key=thread_key,
             tier=tier,
@@ -542,9 +565,10 @@ class TaskManager:
             surface=surface,
         )
         # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
-        # swapped for the cheaper budget model while the cycle is downgraded (M9).
+        # swapped for the cheaper budget model while the cycle is downgraded (M9), or
+        # reopened on Opus if the thread was escalated (Task.model, M11).
         if tier == "owner":
-            model = await self._owner_session_model()
+            model = await self._owner_session_model(persisted=persisted_model)
         else:
             model = self._guest_model or self._owner_model
         rt = _RunningTask(
@@ -557,6 +581,7 @@ class TaskManager:
             tier=tier,
             is_casual=is_casual,
             surface=surface,
+            model=model,
         )
         self._tasks[thread_key] = rt
         return rt
@@ -870,9 +895,16 @@ class TaskManager:
 
     # ---- budget enforcement (M9) ----------------------------------------
 
-    async def _owner_session_model(self) -> str:
-        """The model a new owner session opens on — the cheaper budget model while the
-        cycle is in ``downgraded`` mode, else the configured owner model (M9)."""
+    async def _owner_session_model(self, *, persisted: str | None = None) -> str:
+        """The model a new owner session opens on.
+
+        A persisted Opus escalation (``Task.model``, M11) wins outright: explicit
+        escalation overrides an active budget downgrade so a reopened thread comes back
+        on Opus. Otherwise the cheaper budget model while the cycle is ``downgraded``
+        (M9), else the configured owner model.
+        """
+        if persisted == self._owner_model_opus:
+            return self._owner_model_opus
         if self._budget is not None and self._budget_downgrade_model is not None:
             if await self._budget.mode() == usage.MODE_DOWNGRADED:
                 return self._budget_downgrade_model
@@ -912,10 +944,95 @@ class TaskManager:
         for task in list(self._tasks.values()):
             if task.tier == "owner":
                 await task.session.set_model(self._budget_downgrade_model)
+                task.model = self._budget_downgrade_model
+
+    # ---- Opus escalation (M11) ------------------------------------------
+
+    async def escalate(self, thread_key: str) -> str:
+        """Switch the owner thread to Opus now and persist it (``/opus``, M11).
+
+        Persists ``Task.model`` so the thread reopens on Opus after a restart, and — if
+        a session is live — switches it mid-thread so the next turn (including the one
+        that triggered an auto-detect card) runs on Opus. Explicit escalation overrides
+        an active budget downgrade; the reply warns that Opus burns the credit faster.
+        """
+        async with self._session_factory() as session:
+            db = await get_or_create_task(
+                session, platform=self._platform, thread_key=thread_key, tier="owner"
+            )
+            await set_task_model(session, db, self._owner_model_opus)
+        task = self._tasks.get(thread_key)
+        if task is not None:
+            await task.session.set_model(self._owner_model_opus)
+            task.model = self._owner_model_opus
+            task.auto_escalate_suppressed = False
+        note = ""
+        if (
+            self._budget is not None
+            and await self._budget.mode() == usage.MODE_DOWNGRADED
+        ):
+            note = f" {OPUS_BUDGET_NOTE}"
+        return f"{OPUS_CONFIRM}{note}"
+
+    async def revert(self, thread_key: str) -> str:
+        """Clear an Opus escalation; drop back to the default model (``/sonnet``, M11).
+
+        Clears the persisted ``Task.model`` and, if a session is live, switches it back:
+        the budget-downgrade model when the cycle is downgraded, else the owner model.
+        """
+        async with self._session_factory() as session:
+            db = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            if db is not None:
+                await set_task_model(session, db, None)
+        task = self._tasks.get(thread_key)
+        if task is not None:
+            model = await self._owner_session_model()
+            await task.session.set_model(model)
+            task.model = model
+            task.auto_escalate_suppressed = False
+        return SONNET_CONFIRM
+
+    async def _maybe_auto_escalate(self, task: _RunningTask, text: str) -> None:
+        """Ask to escalate a complex owner turn to Opus, if opt-in auto-detect is on.
+
+        Runs at the start of a turn (in the detached consumer, never inline in dispatch:
+        PTB processes updates sequentially, so blocking dispatch on the approval future
+        would deadlock the very button-tap that resolves it). Cheap guards short-circuit
+        before the Haiku classifier: off, not the owner, already on Opus, already denied
+        this task, or no approval channel. A denial suppresses re-asking for the task.
+        """
+        if (
+            not self._opus_auto_detect
+            or task.tier != "owner"
+            or task.model == self._owner_model_opus
+            or task.auto_escalate_suppressed
+            or self._approvals is None
+        ):
+            return
+        if not await self._is_complex(text, model=self._classifier_model):
+            return
+        route = self._approval_route(
+            tier="owner", thread_key=task.thread_key, surface=task.surface
+        )
+        approved = await self._approvals.request(
+            task_id=task.db_id,
+            thread_key=task.thread_key,
+            tier="owner",
+            tool_name=OPUS_ESCALATION_KIND,
+            tool_input={"reason": _title(text)},
+            route=route,
+        )
+        if approved:
+            await self.escalate(task.thread_key)
+        else:
+            task.auto_escalate_suppressed = True
 
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
         if not await self._budget_admits():
             return  # paused at budget — skip without spending (owner already nudged)
+        await self._maybe_auto_escalate(task, turn.text)
         ack = asyncio.create_task(self._ack_after_grace(task))
         task.transcript.append(("owner", turn.text))
         try:
@@ -1146,6 +1263,7 @@ class TaskManager:
             ),
             queue=asyncio.Queue(),
             tier="owner",
+            model=self._owner_model,
         )
         self._tasks[new_key] = rt
         return new_key

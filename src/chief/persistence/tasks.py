@@ -73,6 +73,14 @@ async def set_session_id(
     await session.commit()
 
 
+async def set_task_model(
+    session: AsyncSession, task: Task, model: str | None
+) -> None:
+    """Persist (or clear) the per-task model override (owner Opus escalation, M11)."""
+    task.model = model
+    await session.commit()
+
+
 async def list_active(
     session: AsyncSession, *, platform: str | None = None
 ) -> list[Task]:
