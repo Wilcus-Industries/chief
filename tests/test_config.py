@@ -148,6 +148,77 @@ def test_guest_enabled_with_front_desk_ok(
     assert settings.guest_global_rate_per_window == 60
 
 
+def test_group_chat_enabled_requires_primary_thread_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Group chats on, with a HOME id, but no owner DM for approval cards to land in.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "group_chat_enabled: true\n"
+        "owner_home_chat_id: -100123\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="primary_thread_key"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_group_chat_enabled_requires_a_home_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Approval target set, but no owner_home_* id to tell HOME from a GROUP.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "group_chat_enabled: true\n"
+        'primary_thread_key: "1:0"\n'
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="owner_home"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_group_chat_enabled_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "group_chat_enabled: true\n"
+        'primary_thread_key: "1:0"\n'
+        "owner_home_chat_id: -100123\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.group_chat_enabled
+    assert settings.owner_home_chat_id == -100123
+    assert settings.owner_home_guild_id is None
+    assert settings.group_context_max_messages == 50  # default cap
+
+
+def test_group_chat_disabled_ignores_missing_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default off → no targets required, behavior identical to today (safe rollout).
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.group_chat_enabled is False
+    assert settings.owner_home_chat_id is None
+    assert settings.owner_home_guild_id is None
+
+
 def test_no_platform_configured_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

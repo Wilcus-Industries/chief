@@ -193,6 +193,19 @@ class Settings(BaseSettings):
         "mcp-builder",
     )
 
+    # Group chats (M11), default off (mirror the opt-in subsystem pattern). A GROUP is
+    # any multi-party chat chief is invited to that ISN'T the owner's own HOME surface —
+    # owner_home_chat_id (Telegram) / owner_home_guild_id (Discord) name HOME so the
+    # adapters can tell it from a GROUP. In a group chief reads every message ambiently
+    # but answers only when @mentioned/replied-to; owner-engaged tool approvals are DM'd
+    # to primary_thread_key (never shown in the group), so the after-validator requires
+    # it plus at least one home id. group_context_max_messages caps the per-group
+    # ambient buffer (last N since join) so the shared transcript stays bounded.
+    group_chat_enabled: bool = False
+    owner_home_chat_id: int | None = None
+    owner_home_guild_id: int | None = None
+    group_context_max_messages: int = 50
+
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
     # with their owner id by the configured-platform check; the OAuth token is always
     # required (it authenticates the Claude SDK regardless of chat platform).
@@ -200,7 +213,13 @@ class Settings(BaseSettings):
     discord_bot_token: str | None = None
     claude_code_oauth_token: str
 
-    @field_validator("owner_telegram_id", "owner_discord_id", mode="before")
+    @field_validator(
+        "owner_telegram_id",
+        "owner_discord_id",
+        "owner_home_chat_id",
+        "owner_home_guild_id",
+        mode="before",
+    )
     @classmethod
     def _blank_owner_id_is_none(cls, value: Any) -> Any:
         """Treat a blank owner id as unset (``None``).
@@ -322,6 +341,29 @@ class Settings(BaseSettings):
             raise ValueError(
                 "guest_enabled requires front_desk_thread_key — guest approvals, "
                 "admission prompts, and relayed messages have nowhere to route."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _require_targets_for_group_chats(self) -> "Settings":
+        """Group chats need a private owner inbox for approvals and a HOME id.
+
+        Without ``primary_thread_key`` an owner-engaged group tool's approval card has
+        nowhere private to land — and it must never show in the group (M11). Without an
+        ``owner_home_*`` id every chat the owner speaks in would look like HOME, so no
+        chat would ever classify as a GROUP. Mirrors ``_require_front_desk_for_guests``.
+        """
+        if not self.group_chat_enabled:
+            return self
+        if not self.primary_thread_key:
+            raise ValueError(
+                "group_chat_enabled requires primary_thread_key — owner-engaged group "
+                "approvals are DM'd there, never shown in the group."
+            )
+        if self.owner_home_chat_id is None and self.owner_home_guild_id is None:
+            raise ValueError(
+                "group_chat_enabled requires at least one of owner_home_chat_id / "
+                "owner_home_guild_id to tell the owner's HOME surface from a GROUP."
             )
         return self
 
