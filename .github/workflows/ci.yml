@@ -120,3 +120,58 @@ jobs:
           tags: |
             ghcr.io/${{ env.REPO }}/sandbox:${{ github.sha }}
             ghcr.io/${{ env.REPO }}/sandbox:latest
+
+  # ---------------------------------------------------------------------------
+  # Deploy (DEFERRED — no live VPS yet)
+  #
+  # This job is authored and wired but intentionally dormant until a VPS is
+  # provisioned.  It will never run unless ALL three secrets below are set in
+  # the repo (Settings → Secrets and variables → Actions → New repository
+  # secret):
+  #
+  #   VPS_HOST   — hostname or IP of the target VPS (e.g. "1.2.3.4")
+  #   VPS_USER   — SSH user on that host (e.g. "chief" or "ubuntu")
+  #   VPS_SSH_KEY — the full private key (PEM / OpenSSH format) whose public
+  #                 half is in ~/.ssh/authorized_keys on the VPS
+  #
+  # Activation steps (when a VPS is ready):
+  #   1. Set the three secrets above in the GitHub repo settings.
+  #   2. Ensure the VPS user can run `docker compose` without sudo (add to the
+  #      `docker` group, or grant passwordless sudo for that command).
+  #   3. Clone/copy docker-compose.yml + secrets/ onto the VPS under a deploy
+  #      directory (e.g. ~/chief).
+  #   4. Set the repo variable DEPLOY_DIR to the absolute path of that dir on
+  #      the VPS (default: ~/chief).  Variable: Settings → Variables → Actions.
+  #   5. Push a commit to main.  This job will run automatically on the next
+  #      green build.
+  #
+  # The deploy command pulls the freshly-published :latest images and restarts
+  # the stack in place, which triggers the migrate-on-start path inside core.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: SSH deploy to VPS
+    # Gate: must have a green done-check AND successfully published images.
+    needs: [done-check, publish]
+    # Only deploy on pushes to main (not PRs), AND only when the VPS secrets
+    # are present.  `secrets.*` is '' (empty string) when unset, so this guard
+    # keeps the job from running — and from failing — while no VPS exists.
+    if: >
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      secrets.VPS_HOST != '' &&
+      secrets.VPS_USER != '' &&
+      secrets.VPS_SSH_KEY != ''
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # DEPLOY_DIR can be set as a repo variable; falls back to ~/chief.
+          script: |
+            cd "${{ vars.DEPLOY_DIR || '~/chief' }}"
+            docker compose pull
+            docker compose up -d

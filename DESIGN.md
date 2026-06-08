@@ -900,3 +900,20 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   tables, never ALTERs existing ones), so new columns on existing tables (e.g. M6's
   `contacts.state`) require a fresh DB pre-launch. Add real migrations before any
   persisted deployment.
+
+  **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
+  `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an
+  `if:` that checks three repo secrets so it is **dormant and non-failing** while no VPS
+  exists. When a VPS is ready, set these three GitHub repo secrets (Settings → Secrets →
+  Actions) and the job activates automatically on the next green main push:
+
+  | Secret | Value |
+  |---|---|
+  | `VPS_HOST` | Hostname or IP of the VPS |
+  | `VPS_USER` | SSH user (must have Docker access) |
+  | `VPS_SSH_KEY` | Full private key (PEM / OpenSSH) — matching key must be in `~/.ssh/authorized_keys` on the VPS |
+
+  Optionally set the repo variable `DEPLOY_DIR` to the path of the deploy directory on the
+  VPS (defaults to `~/chief`). See the workflow comments for the full activation checklist.
+  The deploy command is `docker compose pull && docker compose up -d`, which pulls the
+  freshly-published `:latest` GHCR images and restarts the stack in place (migrate-on-start).
