@@ -97,29 +97,56 @@ jobs:
       #
       # This step simulates that layout: read-only rootfs + tmpfs mounted at
       # /home/chief/.claude (stand-in for the named volume).  It then runs
-      # `claude --version` (the lightest CLI invocation that still triggers the
-      # config write / saveConfigWithLock) and confirms the exit code is 0 (not
-      # EROFS).  The app will not start (no secrets) — we only need the CLI call
-      # to succeed without hitting a read-only-filesystem error.
+      # `claude mcp list` — the lightest no-secret invocation that deterministically
+      # creates $CLAUDE_CONFIG_DIR/.claude.json (verified empirically: --version does
+      # NOT write anything).  The step asserts the concrete artifact exists, not just
+      # exit 0.
+      #
+      # CONTROL: also runs the same command with CLAUDE_CONFIG_DIR unset on the
+      # read-only rootfs.  In that case the CLI cannot write $HOME/.claude.json
+      # (EROFS) so the file is absent — proving this check would catch a reverted
+      # #16 fix where CLAUDE_CONFIG_DIR is not forwarded to the container.
       - name: Assert claude CLI config write works under read-only rootfs
         run: |
-          result=$(docker run --rm \
+          config_dir=/home/chief/.claude
+
+          # ── Happy path: CLAUDE_CONFIG_DIR set, tmpfs backing it ──────────────
+          docker run --rm \
             --read-only \
             --tmpfs /tmp:uid=1000,gid=1000 \
-            --tmpfs /home/chief/.claude:uid=1000,gid=1000 \
-            -e CLAUDE_CONFIG_DIR=/home/chief/.claude \
+            --tmpfs "${config_dir}:uid=1000,gid=1000" \
+            -e CLAUDE_CONFIG_DIR="${config_dir}" \
             -e HOME=/home/chief \
-            --entrypoint claude \
-            chief-smoke --version 2>&1)
-          exit_code=$?
-          echo "claude --version output: $result"
-          echo "exit code: $exit_code"
-          if [ "$exit_code" -ne 0 ]; then
-            echo "FAIL: claude CLI exited $exit_code under read-only rootfs" >&2
-            echo "      (likely EROFS — CLAUDE_CONFIG_DIR fix may be broken)" >&2
-            exit 1
+            --entrypoint /bin/sh \
+            chief-smoke -c "
+              claude mcp list 2>&1
+              test -f \"${config_dir}/.claude.json\" \
+                && echo 'ARTIFACT: .claude.json present' \
+                || { echo 'FAIL: .claude.json missing after mcp list' >&2; exit 1; }
+            "
+          echo "PASS: claude CLI wrote ${config_dir}/.claude.json without EROFS"
+
+          # ── Control: CLAUDE_CONFIG_DIR unset → file absent (regression proof) ─
+          # Without CLAUDE_CONFIG_DIR the CLI targets $HOME/.claude.json on the
+          # read-only rootfs.  The write fails silently (EROFS), so the file is
+          # absent — exactly the broken state a reverted #16 fix would produce.
+          ctrl_result=$(docker run --rm \
+            --read-only \
+            --tmpfs /tmp:uid=1000,gid=1000 \
+            --entrypoint /bin/sh \
+            chief-smoke -c "
+              unset CLAUDE_CONFIG_DIR
+              claude mcp list 2>&1
+              test -f /home/chief/.claude.json \
+                && echo FILE_EXISTS \
+                || echo FILE_ABSENT
+            " 2>&1)
+          echo "Control output: $ctrl_result"
+          if echo "$ctrl_result" | grep -q FILE_ABSENT; then
+            echo "CONTROL PASS: without CLAUDE_CONFIG_DIR config write fails (EROFS)"
+          else
+            echo "CONTROL UNEXPECTED: file appeared without CLAUDE_CONFIG_DIR — investigate" >&2
           fi
-          echo "PASS: claude CLI wrote its config without hitting EROFS"
 
   publish:
     name: Build + push images to GHCR
