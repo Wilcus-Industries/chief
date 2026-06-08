@@ -902,6 +902,13 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   drift test asserts that `upgrade head` against an empty DB produces a schema identical
   to `Base.metadata` with no autogenerate diff remaining.
 
+  **Single Alembic tree (issue #14):** `src/chief/alembic/` is the SOLE migration tree.
+  The top-level `alembic.ini` is a thin dev-CLI redirect (`script_location =
+  src/chief/alembic`) so `uv run alembic ...` works from the repo root. Runtime
+  `_run_migrations` and all drift tests resolve the same package copy via
+  `importlib.resources` (`_ALEMBIC_INI` in `db.py`). New revisions go in
+  `src/chief/alembic/versions/` only — there is no second dev-only copy.
+
   **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
   `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an
   `if:` that checks three repo secrets so it is **dormant and non-failing** while no VPS

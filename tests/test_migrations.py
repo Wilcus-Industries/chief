@@ -16,6 +16,12 @@ Acceptance criteria from issue #13:
   not just from CWD=repo-root (guards against Dockerfile.core missing the alembic
   config/versions in the built image).
 - The ``alembic/`` script directory resolved by ``_run_migrations`` also exists.
+
+Acceptance criteria from issue #14:
+- Drift tests (upgrade-head + autogenerate) run against the SAME runtime copy that
+  ``_run_migrations`` uses (``src/chief/alembic/``), not a separate dev-only copy.
+  This closes the repro where a column dropped from the runtime migration only passes
+  CI green because the drift tests were pointing at a different tree.
 """
 
 import importlib.resources
@@ -23,7 +29,6 @@ import logging
 import os
 import tempfile
 from collections.abc import Generator
-from pathlib import Path
 
 import pytest
 from alembic import command
@@ -35,10 +40,6 @@ from sqlalchemy import create_engine, text
 from chief.persistence.db import _ALEMBIC_INI as _PKG_ALEMBIC_INI
 from chief.persistence.db import _run_migrations
 from chief.persistence.models import Base
-
-# Repo-root alembic.ini lives one level above tests/
-_REPO_ROOT = Path(__file__).parent.parent
-_ALEMBIC_INI = _REPO_ROOT / "alembic.ini"
 
 
 @pytest.fixture
@@ -54,11 +55,16 @@ def temp_db_url() -> Generator[str, None, None]:
 
 
 def _alembic_cfg(db_url: str) -> Config:
-    """Return an Alembic Config with sqlalchemy.url and script_location overridden."""
-    cfg = Config(str(_ALEMBIC_INI))
+    """Return an Alembic Config pointing at the RUNTIME (package) copy.
+
+    Uses the same ``_PKG_ALEMBIC_INI`` and script directory that
+    ``_run_migrations`` uses, so these tests guard the copy that ships in the
+    Docker image — not a separate dev-only tree that could silently diverge.
+    """
+    cfg = Config(str(_PKG_ALEMBIC_INI))
     cfg.set_main_option("sqlalchemy.url", db_url)
-    # Override script_location so tests don't depend on CWD being the repo root.
-    cfg.set_main_option("script_location", str(_REPO_ROOT / "alembic"))
+    # Pin to the package script dir (absolute) so tests are CWD-independent.
+    cfg.set_main_option("script_location", str(_PKG_ALEMBIC_INI.parent / "alembic"))
     return cfg
 
 
