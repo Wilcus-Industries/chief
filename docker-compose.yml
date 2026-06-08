@@ -34,6 +34,8 @@ services:
     # (created in Dockerfile.core). Volumes are pre-chowned to 1000:1000 in the image;
     # for pre-existing named volumes run the one-time chown step in secrets/README.md.
     user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
     environment:
@@ -64,6 +66,10 @@ services:
       # stored session, leaving sqlite's sdk_session_ids pointing at sessions that no longer
       # exist → the CLI exits 1 on resume. Persist it so recreates keep conversations.
       - claude-home:/home/chief/.claude
+    tmpfs:
+      # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
+      # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.
+      - /tmp:uid=1000,gid=1000
     healthcheck:
       # init_db creates the sqlite file on boot, so its presence means the app got past startup.
       test: ["CMD", "test", "-f", "/data/chief.db"]
@@ -84,6 +90,8 @@ services:
     # Refreshes the access token in memory only — never writes the shared token file, so
     # a read-only mount is correct (the sheets container is the sole writer).
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
       # Unset → falls through to owner_tz in the mounted config.yaml (the source of truth);
@@ -92,6 +100,9 @@ services:
     volumes:
       - ./secrets/google_token.json:/token/google_token.json:ro
       - ./config.yaml:/config/config.yaml:ro
+    tmpfs:
+      # Python runtime scratch (httplib2 socket temp, googleapiclient, FastMCP internals).
+      - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -111,10 +122,16 @@ services:
     restart: unless-stopped
     # Read-only token: refreshes in memory only (sheets is the sole token writer).
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
     volumes:
       - ./secrets/google_token.json:/token/google_token.json:ro
+    tmpfs:
+      # ReadDriveFile uses tempfile.mkstemp() to stage downloaded Office/PDF files before
+      # passing them to MarkItDown; WeasyPrint also writes temp files during PDF rendering.
+      - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -133,6 +150,8 @@ services:
       context: ./docker/mcp-sheets
     restart: unless-stopped
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
     environment:
       # The package's own auth: OAuth client + the shared minted token.
       CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
@@ -144,6 +163,9 @@ services:
       # (python -m chief.tools.google.auth); if the file is absent Docker creates a
       # *directory* at this path and the server fails to load the token.
       - ./secrets/google_token.json:/token/google_token.json
+    tmpfs:
+      # Python runtime scratch; mcp-google-sheets may write temp files during auth flows.
+      - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -165,6 +187,8 @@ services:
       context: ./docker/mcp-gmail
     restart: unless-stopped
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
     environment:
       PORT: 8004
       # The package's own auth: OAuth client + the seeded (writable) token copy.
@@ -181,6 +205,10 @@ services:
       # Read-only: the gmail package refreshes the token in a writable /tmp copy (seeded
       # from here at startup), never this shared file — sheets stays the sole writer.
       - ./secrets/google_token.json:/seed/google_token.json:ro
+    tmpfs:
+      # GMAIL_TOKEN_PATH defaults to /tmp/gmail_token.json — server.py seeds the writable
+      # per-container token copy here at startup; mcp-google-gmail rewrites it on refresh.
+      - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true
     healthcheck:
