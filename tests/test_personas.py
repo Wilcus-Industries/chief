@@ -1,4 +1,5 @@
-"""build_system_prompt(): owner gets Soul+User+index; guest is a fenced receptionist."""
+"""build_system_prompt(): owner gets Soul+User+facts listing; guest is a fenced
+receptionist."""
 
 from chief.core.personas import build_system_prompt
 from chief.memory.store import Fact
@@ -10,10 +11,10 @@ class FakeMemory:
     def __init__(self) -> None:
         self._soul = "# Soul\nI am chief."
         self._user = "# Will\nPrefers mornings."
-        self._index = "- facts/owner/mornings.md — Prefers mornings"
+        self._listing = "- facts/owner/mornings.md — Prefers mornings"
 
-    def index(self) -> str:
-        return self._index
+    def facts_listing(self) -> str:
+        return self._listing
 
     def soul(self) -> str:
         return self._soul
@@ -35,13 +36,40 @@ class FakeMemory:
         raise NotImplementedError
 
 
-def test_owner_prompt_includes_soul_user_and_index() -> None:
+def test_owner_prompt_includes_soul_user_and_facts_listing() -> None:
     prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
 
     assert "I am chief." in prompt  # Soul.md
     assert "Prefers mornings." in prompt  # User.md
-    assert "facts/owner/mornings.md" in prompt  # MEMORY.md index
+    assert "facts/owner/mornings.md" in prompt  # auto-generated facts/ listing
     assert "Read" in prompt  # told to open fact files on demand
+
+
+def test_owner_prompt_empty_facts_injects_no_listing() -> None:
+    """An empty facts/ directory must not inject the ## Memory index section."""
+    mem = FakeMemory()
+    mem._listing = ""  # simulate empty facts/
+
+    prompt = build_system_prompt(tier="owner", memory=mem, owner_name="Will")
+
+    assert "## Memory index" not in prompt
+    # No bullet listing lines (the guidance block may still say "facts/" in prose)
+    assert "- facts/" not in prompt
+
+
+def test_guest_prompt_has_no_facts_listing() -> None:
+    """Guest prompt must never carry the facts/ listing."""
+    prompt = build_system_prompt(tier="guest", memory=FakeMemory(), owner_name="Will")
+
+    assert "facts/owner/mornings.md" not in prompt
+    assert "## Memory index" not in prompt
+
+
+def test_no_memory_md_referenced_in_memory_guidance() -> None:
+    """The _MEMORY_GUIDANCE block must not instruct chief to maintain MEMORY.md."""
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    assert "MEMORY.md" not in prompt
 
 
 def test_owner_calendar_guidance_included_with_tz_when_enabled() -> None:
@@ -242,7 +270,7 @@ def test_guest_prompt_is_receptionist_without_user_profile() -> None:
     assert "I am chief." in prompt  # Soul.md still present
     assert "Will's assistant" in prompt  # receptionist framing
     assert "Prefers mornings." not in prompt  # owner's private profile withheld
-    assert "facts/owner/mornings.md" not in prompt  # no memory index for guests
+    assert "facts/owner/mornings.md" not in prompt  # no facts listing for guests
 
 
 def test_owner_prompt_has_memory_write_guidance_replacing_read_only_hint() -> None:

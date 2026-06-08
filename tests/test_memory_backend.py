@@ -24,12 +24,6 @@ def _seed_fact(
         "Some body text.\n"
     )
     (facts_dir / f"{slug}.md").write_text(content, encoding="utf-8")
-    index_path = tmp_path / "MEMORY.md"
-    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
-    index_path.write_text(
-        existing.rstrip() + f"\n- facts/{OWNER_NAMESPACE}/{slug}.md — {title}\n",
-        encoding="utf-8",
-    )
 
 
 async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
@@ -43,7 +37,7 @@ async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
     assert removed == 1
     slugs = {f.slug for f in memory.list_facts(OWNER_NAMESPACE)}
     assert slugs == {"mornings"}
-    assert "facts/owner/vacation.md" not in memory.index()
+    assert "facts/owner/vacation.md" not in memory.facts_listing()
     assert not (tmp_path / "facts" / "owner" / "vacation.md").exists()
 
 
@@ -65,7 +59,7 @@ async def test_forget_removes_file_and_index_line(tmp_path: Path) -> None:
 
     assert [f.slug for f in removed] == ["mornings"]
     assert memory.list_facts(OWNER_NAMESPACE) == []
-    assert "facts/owner/mornings.md" not in memory.index()
+    assert "facts/owner/mornings.md" not in memory.facts_listing()
     assert not (tmp_path / "facts" / "owner" / "mornings.md").exists()
 
 
@@ -85,7 +79,7 @@ async def test_ensure_scaffold_seeds_starter_files(tmp_path: Path) -> None:
 
     assert (tmp_path / "Soul.md").exists()
     assert (tmp_path / "User.md").exists()
-    assert (tmp_path / "MEMORY.md").exists()
+    assert not (tmp_path / "MEMORY.md").exists()  # no longer created
     assert (tmp_path / "facts" / "owner").is_dir()
     assert "Will" in memory.user()  # seeded from owner_name
 
@@ -103,7 +97,7 @@ async def test_ensure_scaffold_preserves_hand_edits(tmp_path: Path) -> None:
 def test_readers_return_empty_before_scaffold(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
 
-    assert memory.index() == ""
+    assert memory.facts_listing() == ""
     assert memory.soul() == ""
     assert memory.user() == ""
     assert memory.list_facts(OWNER_NAMESPACE) == []

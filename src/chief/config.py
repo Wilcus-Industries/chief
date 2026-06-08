@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     guest_rate_window_seconds: int = 3600
     guest_global_rate_per_window: int = 60
 
-    # Long-term memory (M4). memory_dir holds Soul/User/MEMORY + facts/ (a persisted
+    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a persisted
     # volume in the container); memory_git versions every write op via subprocess git
     # under the configured author identity.
     memory_dir: str = "/memory"

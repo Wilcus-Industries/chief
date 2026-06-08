@@ -1,14 +1,15 @@
 """System-prompt assembly per tier (DESIGN: Soul.md + tier framing + memory).
 
 ``build_system_prompt`` composes a session's system prompt from ``Soul.md`` (chief's
-identity), a tier-specific framing, and — for the owner — ``User.md`` plus the
-``MEMORY.md`` index plus the memory-writing guidance block (when/where/how to
-persist durable facts). The prompt is fixed at session construction; chief writes
-directly to ``User.md`` or the ``facts/`` tree in the same session via its
-memory-confined Write tool.
+identity), a tier-specific framing, and — for the owner — ``User.md`` plus an
+auto-generated ``facts/`` listing plus the memory-writing guidance block (when/where/how
+to persist durable facts). The ``facts/`` listing is derived from the directory at
+prompt-build time (injected only when non-empty); no stored index file is read or
+written. Chief can Write to ``User.md`` or the ``facts/`` tree in the same session via
+its memory-confined Write tool.
 
 Tier isolation is by construction (DESIGN): a guest prompt never carries the owner's
-``User.md``, memory index, or memory-writing guidance, and guest sessions are wired
+``User.md``, facts listing, or memory-writing guidance, and guest sessions are wired
 with no owner tools at all.
 """
 
@@ -63,9 +64,8 @@ _MEMORY_GUIDANCE = (
     "- A standalone `facts/` file only for time-bound or genuinely self-contained\n"
     "  notes that don't belong in the profile.\n\n"
     "**Format:** plain Markdown, concise, one idea per bullet or short paragraph.\n"
-    "Update `MEMORY.md` if you add a new standalone fact file (one pointer line per\n"
-    "file).\n\n"
-    "To *recall*, Read any file whose index line looks relevant."
+    "The facts/ listing below is auto-generated — no manual index upkeep needed.\n\n"
+    "To *recall*, Read any file whose listing line looks relevant."
 )
 
 #: Owner-only calendar guidance (M5), included when the calendar is wired. The stand-in
@@ -178,14 +178,15 @@ def build_system_prompt(
     block that points chief at them. Guests get none of these.
     """
     if tier == "owner":
+        listing = memory.facts_listing()
         sections = [
             memory.soul(),
             _OWNER_FRAMING,
             memory.user(),
             _MEMORY_GUIDANCE.format(owner=owner_name),
-            "## Memory index",
-            memory.index(),
         ]
+        if listing:
+            sections += ["## Memory index", listing]
         tz = owner_tz or "the owner's timezone"
         for name, guidance in _SERVICE_GUIDANCE.items():
             if name in google_services:
