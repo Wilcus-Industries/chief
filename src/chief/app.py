@@ -249,6 +249,9 @@ def build_engine(
             os.path.abspath(SKILLS_PLUGIN_DIR) if settings.skills_enabled else None
         ),
         default_skills=settings.default_skills,
+        # Share the exact versioner the memory store uses so auto-commit and memory
+        # mutations go through the same git instance — no double-commit races (#22).
+        versioner=memory.versioner,
     )
 
 

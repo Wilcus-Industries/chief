@@ -25,7 +25,7 @@ from chief.core.tasks import (
 from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact
-from chief.memory.versioning import GitVersioner
+from chief.memory.versioning import GitVersioner, NullVersioner, Versioner
 from chief.obs.audit import AuditLog
 from chief.persistence.tasks import (
     CANCELLED,
@@ -49,6 +49,13 @@ Factory = Callable[..., SessionProto]
 
 class FakeMemory:
     """Minimal MemoryStore stub for system prompt assembly and session wiring."""
+
+    def __init__(self) -> None:
+        self._versioner: Versioner = NullVersioner()
+
+    @property
+    def versioner(self) -> Versioner:
+        return self._versioner
 
     def facts_listing(self) -> str:
         return "- facts/owner/x.md — X"

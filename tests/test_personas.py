@@ -3,6 +3,7 @@ receptionist."""
 
 from chief.core.personas import build_system_prompt
 from chief.memory.store import Fact
+from chief.memory.versioning import NullVersioner, Versioner
 
 
 class FakeMemory:
@@ -12,6 +13,11 @@ class FakeMemory:
         self._soul = "# Soul\nI am chief."
         self._user = "# Will\nPrefers mornings."
         self._listing = "- facts/owner/mornings.md — Prefers mornings"
+        self._versioner: Versioner = NullVersioner()
+
+    @property
+    def versioner(self) -> Versioner:
+        return self._versioner
 
     def facts_listing(self) -> str:
         return self._listing

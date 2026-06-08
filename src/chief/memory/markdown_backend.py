@@ -97,6 +97,11 @@ class MarkdownMemory:
         self._owner_name = owner_name
         self._lock = asyncio.Lock()
 
+    @property
+    def versioner(self) -> Versioner:
+        """The versioner this store commits through — shared with TaskManager."""
+        return self._versioner
+
     # ---- readers (sync; used while assembling a system prompt) -----------
 
     def facts_listing(self) -> str:
