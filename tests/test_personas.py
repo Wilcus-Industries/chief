@@ -246,3 +246,23 @@ def test_guest_prompt_is_receptionist_without_user_profile() -> None:
     assert "Will's assistant" in prompt  # receptionist framing
     assert "Prefers mornings." not in prompt  # owner's private profile withheld
     assert "facts/owner/mornings.md" not in prompt  # no memory index for guests
+
+
+def test_owner_prompt_has_memory_write_guidance_replacing_read_only_hint() -> None:
+    # The owner prompt teaches chief when/where/how to write memory, and no longer
+    # contains the old read-only "open a fact file" recall hint.
+    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+
+    # Write guidance must be present: at minimum the key nouns/verbs.
+    assert "User.md" in prompt
+    assert "Write" in prompt  # the write-tool instruction
+    # The old read-only recall hint must be gone.
+    assert "Open any fact file listed below with the Read tool" not in prompt
+
+
+def test_guest_prompt_has_no_memory_write_guidance() -> None:
+    prompt = build_system_prompt(tier="guest", memory=FakeMemory(), owner_name="Will")
+
+    # Guests carry neither write guidance nor the memory index.
+    assert "User.md" not in prompt
+    assert "## Memory" not in prompt

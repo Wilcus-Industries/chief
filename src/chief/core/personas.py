@@ -2,13 +2,15 @@
 
 ``build_system_prompt`` composes a session's system prompt from ``Soul.md`` (chief's
 identity), a tier-specific framing, and — for the owner — ``User.md`` plus the
-``MEMORY.md`` index with an instruction to open fact files on demand. The prompt is
-fixed at session construction; a mid-session distill updates ``MEMORY.md`` for the
-*next* session, though chief can always Read the current file via its memory-confined
-file tools.
+``MEMORY.md`` index plus the memory-writing guidance block (when/where/how to
+persist durable facts). The prompt is fixed at session construction; a mid-session
+distill updates ``MEMORY.md`` for the *next* session, and chief can Write to
+``User.md`` or the ``facts/`` tree in the same session via its memory-confined Write
+tool.
 
 Tier isolation is by construction (DESIGN): a guest prompt never carries the owner's
-``User.md`` or memory index, and guest sessions are wired with no owner tools at all.
+``User.md``, memory index, or memory-writing guidance, and guest sessions are wired
+with no owner tools at all.
 """
 
 from collections.abc import Sequence
@@ -48,8 +50,23 @@ _GUEST_ADMIN_GUIDANCE = (
     "block, mute, or unblock a guest by name, use the manage_guest tool."
 )
 
-_RECALL_HINT = (
-    "Open any fact file listed below with the Read tool when its line looks relevant."
+_MEMORY_GUIDANCE = (
+    "## Memory\n"
+    "You have a persistent memory you can read and write freely.\n\n"
+    "**Write to memory when:** {owner} shares a durable preference, a meaningful\n"
+    "personal fact, an ongoing commitment, or anything they would want you to\n"
+    "remember next session.  Do *not* write ephemeral chatter or one-off task\n"
+    "details — only what has lasting value.\n\n"
+    "**Where to write:**\n"
+    "- `User.md` (the `## Preferences` section for standing preferences; the\n"
+    "  `## Facts` section for profile details and background knowledge) — use the\n"
+    "  Write or Edit tool to update it directly.\n"
+    "- A standalone `facts/` file only for time-bound or genuinely self-contained\n"
+    "  notes that don't belong in the profile.\n\n"
+    "**Format:** plain Markdown, concise, one idea per bullet or short paragraph.\n"
+    "Update `MEMORY.md` if you add a new standalone fact file (one pointer line per\n"
+    "file).\n\n"
+    "To *recall*, Read any file whose index line looks relevant."
 )
 
 #: Owner-only calendar guidance (M5), included when the calendar is wired. The stand-in
@@ -166,7 +183,7 @@ def build_system_prompt(
             memory.soul(),
             _OWNER_FRAMING,
             memory.user(),
-            _RECALL_HINT,
+            _MEMORY_GUIDANCE.format(owner=owner_name),
             "## Memory index",
             memory.index(),
         ]

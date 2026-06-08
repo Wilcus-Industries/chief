@@ -195,8 +195,13 @@ class MarkdownMemory:
         async with self._lock:
             self._root.mkdir(parents=True, exist_ok=True)
             self._facts_dir(OWNER_NAMESPACE).mkdir(parents=True, exist_ok=True)
+            starter_user = (
+                f"# {self._owner_name}\n\n"
+                "## Preferences\n\n"
+                "## Facts\n"
+            )
             seeded = self._seed("Soul.md", _STARTER_SOUL)
-            seeded |= self._seed("User.md", f"# {self._owner_name}\n")
+            seeded |= self._seed("User.md", starter_user)
             seeded |= self._seed("MEMORY.md", _STARTER_MEMORY)
             await self._versioner.init()
             if seeded:
