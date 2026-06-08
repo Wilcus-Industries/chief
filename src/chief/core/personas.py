@@ -129,9 +129,9 @@ _WEB_GUIDANCE = (
 _WORKSPACE_GUIDANCE = (
     "## Workspace\n"
     "/workspace is a scratch directory you can Read, Write, and Edit freely with no "
-    "approval — it is the only place you can write files, and it is shared with your "
-    "shell (the shell's working directory is /workspace). Keep working files there; "
-    "reads and writes anywhere else are blocked."
+    "approval — it is shared with your shell (the shell's working directory is "
+    "/workspace). Keep working files there. You can write to memory (User.md and the "
+    "facts/ tree) and to /workspace; writes outside memory ∪ workspace are blocked."
 )
 
 #: Owner-only skills guidance (M10), included when packaged skills are enabled. Names
