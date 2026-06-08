@@ -37,9 +37,9 @@ async def test_write_fact_creates_file_with_frontmatter(tmp_path: Path) -> None:
     assert "provenance: inferred" in text
     assert "Books calls before noon." in text
     assert fact.created  # stamped on write
-    # The index gains a pointer line referencing the fact file.
-    assert "facts/owner/mornings.md" in memory.index()
-    assert "Prefers mornings" in memory.index()
+    # The auto-generated listing now references the fact file.
+    assert "facts/owner/mornings.md" in memory.facts_listing()
+    assert "Prefers mornings" in memory.facts_listing()
 
 
 async def test_write_fact_overwrites_on_slug_collision(tmp_path: Path) -> None:
@@ -52,10 +52,10 @@ async def test_write_fact_overwrites_on_slug_collision(tmp_path: Path) -> None:
     facts = memory.list_facts(OWNER_NAMESPACE)
     assert len(facts) == 1  # overwritten, not accumulated
     assert facts[0].body == "Actually only 9-11am."
-    # Exactly one pointer line for the slug (the old one was rewritten, not duplicated).
-    index = memory.index()
-    assert index.count("facts/owner/mornings.md") == 1
-    assert "Mornings only" in index
+    # Exactly one line for the slug in the auto-generated listing.
+    listing = memory.facts_listing()
+    assert listing.count("facts/owner/mornings.md") == 1
+    assert "Mornings only" in listing
 
 
 async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
@@ -73,7 +73,7 @@ async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
     assert removed == 1
     slugs = {f.slug for f in memory.list_facts(OWNER_NAMESPACE)}
     assert slugs == {"mornings"}
-    assert "facts/owner/vacation.md" not in memory.index()
+    assert "facts/owner/vacation.md" not in memory.facts_listing()
     assert not (tmp_path / "facts" / "owner" / "vacation.md").exists()
 
 
@@ -99,7 +99,7 @@ async def test_forget_removes_file_and_index_line(tmp_path: Path) -> None:
 
     assert [f.slug for f in removed] == ["mornings"]
     assert memory.list_facts(OWNER_NAMESPACE) == []
-    assert "facts/owner/mornings.md" not in memory.index()
+    assert "facts/owner/mornings.md" not in memory.facts_listing()
     assert not (tmp_path / "facts" / "owner" / "mornings.md").exists()
 
 
@@ -119,7 +119,7 @@ async def test_ensure_scaffold_seeds_starter_files(tmp_path: Path) -> None:
 
     assert (tmp_path / "Soul.md").exists()
     assert (tmp_path / "User.md").exists()
-    assert (tmp_path / "MEMORY.md").exists()
+    assert not (tmp_path / "MEMORY.md").exists()  # no longer created
     assert (tmp_path / "facts" / "owner").is_dir()
     assert "Will" in memory.user()  # seeded from owner_name
 
@@ -137,7 +137,7 @@ async def test_ensure_scaffold_preserves_hand_edits(tmp_path: Path) -> None:
 def test_readers_return_empty_before_scaffold(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
 
-    assert memory.index() == ""
+    assert memory.facts_listing() == ""
     assert memory.soul() == ""
     assert memory.user() == ""
     assert memory.list_facts(OWNER_NAMESPACE) == []

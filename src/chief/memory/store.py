@@ -2,10 +2,10 @@
 
 Defined as a :class:`Protocol` so the markdown backend (M4) and a future semantic/graph
 backend (mem0, per DESIGN) are interchangeable without touching callers. Readers
-(:meth:`index`/:meth:`soul`/:meth:`user`/:meth:`list_facts`) are synchronous file reads
-used while assembling a system prompt; mutators (:meth:`write_fact`/:meth:`forget`/
-:meth:`purge_expired`/:meth:`ensure_scaffold`) are async because each commits through
-the versioner.
+(:meth:`facts_listing`/:meth:`soul`/:meth:`user`/:meth:`list_facts`) are synchronous
+reads used while assembling a system prompt; mutators (:meth:`write_fact`/
+:meth:`forget`/:meth:`purge_expired`/:meth:`ensure_scaffold`) are async because each
+commits through the versioner.
 
 Namespaces partition memory by subject: ``"owner"`` for the owner's own facts and
 ``"contacts/<id>"`` for a guest's (the contact namespace is exercised in M6).
@@ -54,8 +54,11 @@ class FactDraft:
 class MemoryStore(Protocol):
     """Namespaced long-term memory (DESIGN: memory interface)."""
 
-    def index(self) -> str:
-        """The ``MEMORY.md`` index text, loaded into every system prompt."""
+    def facts_listing(self) -> str:
+        """Auto-generated listing of all ``facts/`` files for the owner prompt.
+
+        Returns an empty string when no facts exist (inject nothing in that case).
+        """
         ...
 
     def soul(self) -> str:
@@ -93,5 +96,5 @@ class MemoryStore(Protocol):
         ...
 
     async def ensure_scaffold(self) -> None:
-        """Seed ``Soul.md``/``User.md``/``MEMORY.md`` + ``facts/owner/`` if absent."""
+        """Seed ``Soul.md``/``User.md`` + ``facts/owner/`` if absent."""
         ...
