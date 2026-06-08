@@ -141,3 +141,25 @@ def test_readers_return_empty_before_scaffold(tmp_path: Path) -> None:
     assert memory.soul() == ""
     assert memory.user() == ""
     assert memory.list_facts(OWNER_NAMESPACE) == []
+
+
+async def test_scaffold_user_md_has_preferences_and_facts_sections(
+    tmp_path: Path,
+) -> None:
+    memory = _memory(tmp_path)
+
+    await memory.ensure_scaffold()
+
+    user_text = memory.user()
+    assert "## Preferences" in user_text
+    assert "## Facts" in user_text
+
+
+async def test_scaffold_user_md_heading_uses_owner_name(tmp_path: Path) -> None:
+    memory = MarkdownMemory(
+        tmp_path, versioner=NullVersioner(), owner_name="William Chastain"
+    )
+
+    await memory.ensure_scaffold()
+
+    assert "# William Chastain" in memory.user()

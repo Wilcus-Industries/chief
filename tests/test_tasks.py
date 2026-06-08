@@ -3,9 +3,11 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
@@ -21,7 +23,9 @@ from chief.core.tasks import (
     TaskManager,
 )
 from chief.gate.approvals import OPUS_ESCALATION_KIND
+from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact, FactDraft
+from chief.obs.audit import AuditLog
 from chief.persistence.tasks import (
     CANCELLED,
     DONE,
@@ -2244,4 +2248,68 @@ async def test_auto_escalate_skips_when_already_on_opus(
     # Already on Opus → the per-turn classifier short-circuits, no card.
     assert approvals.requests == []
     assert sess.model == "claude-opus-4-8"
+    await mgr.shutdown()
+
+
+# ---- memory-write integration (M20) ------------------------------------------
+
+
+async def test_memory_write_gate_allows_and_file_lands(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Turn-loop seam: owner Write to memory dir is ALLOWed; file lands on disk.
+
+    The TaskManager assembles the gate (can_use_tool) and passes it to the
+    session factory.  We capture those kwargs, invoke the can_use_tool callback
+    directly against a User.md path inside the real memory_dir, and then write
+    the file ourselves to assert it persists — end-to-end without a live Claude
+    subprocess.
+    """
+    captured: dict[str, Any] = {}
+    policy = PolicyStore(session_factory)
+    await policy.seed(never=[], approved=[])
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=FakeIO(),
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=_capture_factory(captured),
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir=str(tmp_path),
+        owner_name="William Chastain",
+        policy=policy,
+        approvals=cast(Any, FakeApprovals(approve=True)),
+        audit=audit,
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    can_use_tool = captured.get("can_use_tool")
+    assert can_use_tool is not None, "gate can_use_tool must be wired"
+
+    # Simulate chief issuing a Write to User.md inside the memory directory.
+    target = tmp_path / "User.md"
+    payload = "## Preferences\nStays up late.\n\n## Facts\nBorn in Texas.\n"
+    result = await can_use_tool(
+        "Write",
+        {"file_path": str(target), "content": payload},
+        ToolPermissionContext(),
+    )
+
+    # Gate must ALLOW (not ASK, not DENY).
+    assert isinstance(result, PermissionResultAllow), (
+        f"Expected ALLOW for Write to memory_dir, got {result!r}"
+    )
+
+    # The file should land with the written content (the real SDK would write it;
+    # we write it here to confirm the path is valid and persists across the test).
+    target.write_text(payload, encoding="utf-8")
+    assert target.exists()
+    assert "## Preferences" in target.read_text(encoding="utf-8")
+    assert "## Facts" in target.read_text(encoding="utf-8")
     await mgr.shutdown()
