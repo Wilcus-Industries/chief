@@ -14,6 +14,8 @@ Namespaces partition memory by subject: ``"owner"`` for the owner's own facts an
 from dataclasses import dataclass
 from typing import Protocol
 
+from .versioning import Versioner
+
 OWNER_NAMESPACE = "owner"
 
 
@@ -38,6 +40,11 @@ class Fact:
 
 class MemoryStore(Protocol):
     """Namespaced long-term memory (DESIGN: memory interface)."""
+
+    @property
+    def versioner(self) -> Versioner:
+        """The versioner this store commits through — share, don't build a second."""
+        ...
 
     def facts_listing(self) -> str:
         """Auto-generated listing of all ``facts/`` files for the owner prompt.

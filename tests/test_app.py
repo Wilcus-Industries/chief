@@ -13,6 +13,7 @@ from chief.config import PolicySeed, Settings
 from chief.core.budget import BudgetGate
 from chief.gate.policy import PolicyStore
 from chief.memory.store import MemoryStore
+from chief.memory.versioning import GitVersioner, NullVersioner
 from chief.obs.audit import AuditLog
 from chief.persistence import approvals as appr_repo
 from chief.persistence import policy as policy_repo
@@ -347,6 +348,42 @@ def test_build_engine_no_budget_when_disabled(
 
     assert manager._budget is None
     assert manager._owner_inbox is None
+
+
+def test_build_engine_wires_versioner_from_memory(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # memory_git=True → build_memory returns a MarkdownMemory with a real GitVersioner.
+    # build_engine must pass that exact instance into TaskManager so auto-commit (#22)
+    # fires through the real git backend — not through the NullVersioner fallback.
+    settings = _settings(memory_git=True, memory_dir=str(tmp_path / "mem"))
+    policy, audit, memory = _shared(settings, session_factory)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    # The versioner on the manager is the SAME object the store holds — shared instance.
+    assert manager._versioner is memory.versioner
+    assert isinstance(manager._versioner, GitVersioner)
+    # Sanity-check the inverse: memory_git=False gives a NullVersioner on both.
+    settings_null = _settings(memory_git=False)
+    _, audit2, memory_null = _shared(settings_null, session_factory)
+    policy2 = PolicyStore(session_factory, audit=audit2)
+    manager2, _, _ = app.build_telegram_stack(
+        settings_null,
+        session_factory=session_factory,
+        policy=policy2,
+        audit=audit2,
+        memory=memory_null,
+    )
+    assert manager2._versioner is memory_null.versioner
+    assert isinstance(manager2._versioner, NullVersioner)
 
 
 def test_group_params_thread_into_telegram_engine_and_adapter(
