@@ -878,7 +878,17 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   tool approval DM'd** to `primary_thread_key` (`_approval_route`, fail-closed); an engaged
   **non-owner** gets the receptionist (no tools) under its own `{id}:grp:guest` session
   key. One shared `{id}:grp` session/buffer per group; default off ⇒ today's behavior.
-  **Opus escalation (the other half) is still deferred** — to be planned separately.
+- **M11 Opus escalation — ✅ done.** The owner runs `owner_model_default` (Sonnet 4.6);
+  Opus 4.8 (`owner_model_opus`) is **always owner-approved** since it burns the Max
+  budget faster. Two paths: **`/opus`** pre-approves and switches the thread now (no
+  card), **`/sonnet`** reverts; and — opt-in via `opus_auto_detect` — a per-turn Haiku
+  complexity check (`is_complex`) **asks** before escalating a complex owner turn. An
+  escalation persists on `Task.model` (the thread reopens on Opus after a restart) and
+  **wins over an active budget downgrade** (the confirmation warns it spends faster). The
+  auto-detect ask runs in the consumer at turn start (never inline in `dispatch` — PTB's
+  sequential updates would deadlock the resolving tap) and reuses the approval card via
+  the `OpusEscalation` pseudo-kind (no tool-policy rule written); a denial suppresses
+  re-asking for that task. Guests are pinned to `guest_model` — never Opus.
 
 **Phase 4 — Ship**
 - **M12 Discord adapter** ✅ *(built early)***:** private server, threads = tasks; full

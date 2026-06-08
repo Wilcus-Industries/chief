@@ -547,6 +547,12 @@ class DiscordAdapter(Adapter):
                 title = arg.strip() or default_branch_title()
                 await self._engine.branch(message.thread_key, title)
                 await channel.send(f'→ Branched into "{title}".')
+            case "opus":
+                # Escalate this thread to Opus — pre-approved, no card (M11).
+                await channel.send(await self._engine.escalate(message.thread_key))
+            case "sonnet":
+                # Revert this thread to the default model (M11).
+                await channel.send(await self._engine.revert(message.thread_key))
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Resolve an approval, admission, or budget card button tap (owner only)."""

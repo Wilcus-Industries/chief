@@ -1,11 +1,13 @@
 """Cheap Haiku judgments used by the task engine.
 
-Two yes/no classifiers, each a single ``max_turns=1`` query on the configured
+Three yes/no classifiers, each a single ``max_turns=1`` query on the configured
 classifier model (Haiku): ``stop_intent`` (does a mid-turn message mean "stop / do X
-instead"?) and ``warrants_task`` (should a casual message become a tracked task topic?).
-Both fail **safe** — any error or ambiguity returns ``False`` (no interrupt, no spawn).
+instead"?), ``warrants_task`` (should a casual message become a tracked task topic?),
+and ``is_complex`` (does an owner task need the stronger, pricier model?). All fail
+**safe** — any error or ambiguity returns ``False`` (no interrupt, no spawn, no
+escalation).
 
-:func:`ask_condition` is a third, heavier judgment used by the scheduler's agent
+:func:`ask_condition` is a further, heavier judgment used by the scheduler's agent
 monitors: the same yes/no shape but **with read-only tools** (web + the owner's Google
 reads) so Haiku can fetch/look something up before answering. It too fails safe to
 ``False`` — a monitor must never flip on an evaluation error.
@@ -35,6 +37,14 @@ _WARRANTS_SYSTEM = (
     "thread. Answer YES only if it is concrete work to do or follow up on (a request, "
     "a multi-step ask). Answer NO for greetings, small talk, quick questions, or "
     "acknowledgements. Reply with only YES or NO."
+)
+
+
+_COMPLEX_SYSTEM = (
+    "You decide whether an owner's request needs the stronger, more expensive model. "
+    "Answer YES only if it needs deep reasoning or multi-step planning (involved "
+    "design, tricky debugging, careful analysis). Answer NO for simple, routine, or "
+    "quick requests the default model handles well. Reply with only YES or NO."
 )
 
 
@@ -68,6 +78,11 @@ async def stop_intent(text: str, *, model: str) -> bool:
 async def warrants_task(text: str, *, model: str) -> bool:
     """True if a casual ``text`` should spawn a tracked task topic."""
     return await _ask_yes_no(text, model=model, system=_WARRANTS_SYSTEM)
+
+
+async def is_complex(text: str, *, model: str) -> bool:
+    """True if an owner ``text`` needs the stronger model (deep reasoning/planning)."""
+    return await _ask_yes_no(text, model=model, system=_COMPLEX_SYSTEM)
 
 
 async def ask_condition(

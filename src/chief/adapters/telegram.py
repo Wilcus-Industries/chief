@@ -308,6 +308,8 @@ class TelegramAdapter(Adapter):
         self._app.add_handler(CommandHandler("memory", self._on_memory))
         self._app.add_handler(CommandHandler("forget", self._on_forget))
         self._app.add_handler(CommandHandler("branch", self._on_branch))
+        self._app.add_handler(CommandHandler("opus", self._on_opus))
+        self._app.add_handler(CommandHandler("sonnet", self._on_sonnet))
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=CALLBACK_QUERY_PATTERN)
         )
@@ -633,6 +635,28 @@ class TelegramAdapter(Adapter):
         title = (message.text or "").partition(" ")[2].strip() or default_branch_title()
         await self._engine.branch(thread_key, title)
         await message.reply_text(f'→ Branched into "{title}".')
+
+    async def _on_opus(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Escalate this thread to Opus (owner only) — pre-approved, no card (M11)."""
+        thread_key = self._owner_thread(update)
+        if thread_key is None or update.effective_message is None:
+            return
+        await update.effective_message.reply_text(
+            await self._engine.escalate(thread_key)
+        )
+
+    async def _on_sonnet(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Revert this thread to the default model (owner only) (M11)."""
+        thread_key = self._owner_thread(update)
+        if thread_key is None or update.effective_message is None:
+            return
+        await update.effective_message.reply_text(
+            await self._engine.revert(thread_key)
+        )
 
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

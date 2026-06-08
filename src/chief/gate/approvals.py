@@ -41,6 +41,12 @@ from .policy import COMMAND_TOOLS, PolicyStore
 
 logger = logging.getLogger("chief.gate.approvals")
 
+#: Pseudo-tool kind for the M11 Opus-escalation card. It isn't a tool call — it routes
+#: through the same request/resolve machinery so the auto-detect ask reuses the card UI,
+#: but it must never write a tool-policy rule (see :meth:`_persist_rule`). Defined here,
+#: not in tasks.py, so tasks can import it without a cycle (tasks → approvals already).
+OPUS_ESCALATION_KIND = "OpusEscalation"
+
 
 class ApprovalAction(Enum):
     """A button on the approval card. Its value doubles as the callback token."""
@@ -93,6 +99,13 @@ class _Live:
 
 def _preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     """A one-line, human-readable summary of the pending tool call."""
+    if tool_name == OPUS_ESCALATION_KIND:
+        reason = str(tool_input.get("reason", "")).strip()
+        return (
+            f"Switch to Opus 4.8 for this task? ({reason})"
+            if reason
+            else "Switch to Opus 4.8 for this task?"
+        )
     if tool_name in COMMAND_TOOLS:
         command = str(tool_input.get("command", "")).strip()
         return f"Run: {command}"
@@ -251,6 +264,8 @@ class ApprovalManager:
     ) -> str:
         if live is None or live.tool_input is None:
             return " (rule not saved — context lost)"
+        if live.tool_name == OPUS_ESCALATION_KIND:
+            return ""  # a model switch isn't a tool — never write a tool-policy rule
         if action is ApprovalAction.ALWAYS_ALLOW:
             ok = await self._policy.add_allow(live.tool_name, live.tool_input)
         else:
