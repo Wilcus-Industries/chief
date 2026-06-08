@@ -4,8 +4,12 @@ Acceptance criteria from issue #2:
 - ``alembic upgrade head`` against an empty temp sqlite produces a schema equal
   to the current models.
 - ``alembic``'s autogenerate detects **no drift** afterward.
+
+Acceptance criteria from issue #10:
+- ``alembic upgrade head`` does not disable pre-configured ``chief.*`` loggers.
 """
 
+import logging
 import os
 import tempfile
 from collections.abc import Generator
@@ -75,3 +79,23 @@ def test_autogenerate_detects_no_drift(temp_db_url: str) -> None:
 
     # compare_metadata returns a list of diff tuples; empty means no drift.
     assert diffs == [], f"Schema drift detected after upgrade head:\n{diffs}"
+
+
+def test_migration_does_not_disable_existing_loggers(temp_db_url: str) -> None:
+    """Running ``alembic upgrade head`` must not disable pre-configured loggers.
+
+    Regression for issue #10: ``fileConfig`` in env.py previously defaulted
+    ``disable_existing_loggers=True``, which silenced every ``chief.*`` logger
+    that had been configured before the migration ran.
+    """
+    # Configure a chief.* logger before running any migration.
+    logger = logging.getLogger("chief.regression_test_issue_10")
+    logger.disabled = False
+
+    cfg = _alembic_cfg(temp_db_url)
+    command.upgrade(cfg, "head")
+
+    assert not logger.disabled, (
+        "alembic upgrade head disabled the chief.regression_test_issue_10 logger; "
+        "env.py must pass disable_existing_loggers=False to fileConfig"
+    )
