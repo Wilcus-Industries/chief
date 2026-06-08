@@ -22,15 +22,6 @@ RUN uv sync --no-dev --frozen
 # Non-secret runtime config; secrets arrive as a Docker secret mount at /run/secrets.
 COPY config.yaml ./
 
-# Alembic migration config + version scripts. These are also bundled as package
-# data inside the chief wheel (src/chief/alembic.ini + src/chief/alembic/) so
-# _run_migrations finds them via importlib.resources. The explicit COPY here is
-# belt-and-suspenders: the files land at /app/alembic.ini and /app/alembic/
-# which matches the WORKDIR, providing a visible copy for debugging and ensuring
-# they are present even if the package-data bundling is ever misconfigured.
-COPY alembic.ini ./
-COPY alembic/ ./alembic/
-
 # Bundled skills plugin (M10). Submodule content must be checked out in the build
 # context (`git submodule update --init`) for owner sessions to load skills.
 COPY vendor/ ./vendor/
