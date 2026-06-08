@@ -48,7 +48,7 @@ Factory = Callable[..., SessionProto]
 class FakeMemory:
     """Minimal MemoryStore stub for system prompt assembly and session wiring."""
 
-    def index(self) -> str:
+    def facts_listing(self) -> str:
         return "- facts/owner/x.md — X"
 
     def soul(self) -> str:
@@ -891,6 +891,7 @@ def _mem_factory(sessions: list[FakeSession]) -> Factory:
         return sess
 
     return factory
+
 
 
 # ---- calendar wiring (M5) ----------------------------------------------------
