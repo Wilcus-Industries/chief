@@ -81,8 +81,8 @@ def is_read_only(tool_name: str, tool_input: dict[str, Any]) -> bool:
 #: A relative/absent path resolves against the session ``cwd`` (the memory root), so it
 #: is in-bounds; an absolute path that escapes every allowed root is denied.
 FILE_OP_TOOLS = frozenset({"Read", "Glob", "Grep"})
-#: Write-op tools (M7). Confined to the **workspace** only — writes have a low blast
-#: radius there (DESIGN gate rule #2) and never touch the memory or any other path.
+#: Write-op tools (M7/M19). Confined to *memory ∪ workspace* — the agent can persist
+#: facts to memory and produce artifacts in the workspace; writes outside both deny.
 WRITE_OP_TOOLS = frozenset({"Write", "Edit"})
 #: The SDK's built-in shell tools. They execute **inside core**, where the Max OAuth
 #: token lives in the process env — so they are HARD-DENIED here (and refused at the SDK
@@ -145,8 +145,8 @@ def classify(
 
     - **Read/Glob/Grep** ALLOW only while the path stays inside *memory ∪ workspace*
       (just memory until the workspace is wired), else DENY.
-    - **Write/Edit** ALLOW only inside the *workspace* (low blast radius, never memory),
-      else DENY. Only consulted once ``workspace_dir`` is set (M7).
+    - **Write/Edit** ALLOW inside *memory ∪ workspace* (the same roots reads span),
+      else DENY. A guest with no roots gets DENY for any write (M7 + M19).
 
     ``extra_read_only`` names tools an MCP layer has declared read-only (e.g. the
     calendar list/free-busy tools, M5); they ALLOW like the built-ins, keeping
@@ -170,10 +170,13 @@ def classify(
         if read_roots and confined_to_any(tool_input, read_roots, cwd=memory_dir):
             return Verdict(GateDecision.ALLOW, f"{tool_name} reads within scope")
         return Verdict(GateDecision.DENY, f"{tool_name} path is outside scope")
-    if workspace_dir is not None and tool_name in WRITE_OP_TOOLS:
-        if confined_to(tool_input, workspace_dir, cwd=memory_dir):
-            return Verdict(GateDecision.ALLOW, f"{tool_name} writes within workspace")
-        return Verdict(GateDecision.DENY, f"{tool_name} write is outside workspace")
+    if tool_name in WRITE_OP_TOOLS:
+        # Writes are confined to memory ∪ workspace. A guest session with no roots
+        # configured gets DENY — writes must never escape to arbitrary host paths.
+        write_roots = read_roots  # memory ∪ workspace, same set
+        if write_roots and confined_to_any(tool_input, write_roots, cwd=memory_dir):
+            return Verdict(GateDecision.ALLOW, f"{tool_name} writes within scope")
+        return Verdict(GateDecision.DENY, f"{tool_name} write is outside scope")
     if is_read_only(tool_name, tool_input) or tool_name in extra_read_only:
         return Verdict(GateDecision.ALLOW, f"{tool_name} is read-only")
     if listed is not None:  # APPROVED

@@ -309,10 +309,11 @@ async def test_edit_in_workspace_allows(
     assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_write_into_memory_denies(
+async def test_write_into_memory_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Writes are workspace-only — even a memory path (readable) is not writable.
+    # Issue-19: memory writes are now allowed — the gate widens Write/Edit to memory ∪
+    # workspace so the agent can persist facts without an approval card.
     store = await _store(session_factory)
 
     verdict = classify(
@@ -323,14 +324,30 @@ async def test_write_into_memory_denies(
         workspace_dir="/workspace",
     )
 
-    assert verdict.decision is GateDecision.DENY
+    assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_relative_write_resolves_to_memory_cwd_and_denies(
+async def test_edit_into_memory_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A relative path resolves against the session cwd (memory), so it is NOT in the
-    # workspace → DENY. The model must use absolute /workspace paths to write.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Edit",
+        {"file_path": "/memory/facts/owner/x.md"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_relative_write_resolves_to_memory_cwd_and_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A relative path resolves against the session cwd (the memory root) → inside
+    # memory → now ALLOW (Issue-19 widened writes to memory ∪ workspace).
     store = await _store(session_factory)
 
     verdict = classify(
@@ -341,17 +358,50 @@ async def test_relative_write_resolves_to_memory_cwd_and_denies(
         workspace_dir="/workspace",
     )
 
-    assert verdict.decision is GateDecision.DENY
+    assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_write_outside_workspace_denies(
+async def test_write_outside_memory_and_workspace_denies(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    # A write outside both memory and workspace is still a hard DENY.
     store = await _store(session_factory)
 
     verdict = classify(
         "Write",
-        {"file_path": "/etc/passwd", "content": "x"},
+        {"file_path": "/etc/shadow", "content": "x"},
+        store,
+        memory_dir="/memory",
+        workspace_dir="/workspace",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_write_guest_no_roots_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Guest sessions have no memory or workspace roots → any write is DENY.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/tmp/anything.md", "content": "x"},
+        store,
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
+async def test_never_wins_over_memory_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A NEVER rule on Write still hard-denies, even for a memory path.
+    store = await _store(session_factory, never=[("Write", None)])
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/memory/facts/x.md", "content": "y"},
         store,
         memory_dir="/memory",
         workspace_dir="/workspace",
