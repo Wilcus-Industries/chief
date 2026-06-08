@@ -1,9 +1,9 @@
-"""MarkdownMemory: write/overwrite, index lines, purge, forget, list, scaffold."""
+"""MarkdownMemory: purge, forget, list, scaffold, readers."""
 
 from pathlib import Path
 
 from chief.memory.markdown_backend import MarkdownMemory
-from chief.memory.store import OWNER_NAMESPACE, Fact
+from chief.memory.store import OWNER_NAMESPACE
 from chief.memory.versioning import NullVersioner
 
 
@@ -11,62 +11,32 @@ def _memory(tmp_path: Path) -> MarkdownMemory:
     return MarkdownMemory(tmp_path, versioner=NullVersioner(), owner_name="Will")
 
 
-async def _write(memory: MarkdownMemory, **kw: str | None) -> Fact:
-    base: dict[str, str | None] = dict(
-        namespace=OWNER_NAMESPACE,
-        slug="mornings",
-        title="Prefers mornings",
-        body="Books calls before noon.",
-        provenance="inferred",
-        trust="high",
+def _seed_fact(
+    tmp_path: Path, slug: str, title: str, expires: str | None = None
+) -> None:
+    """Write a raw fact file directly, bypassing the removed write_fact API."""
+    facts_dir = tmp_path / "facts" / OWNER_NAMESPACE
+    facts_dir.mkdir(parents=True, exist_ok=True)
+    expires_line = f"expires: {expires}" if expires else "expires: "
+    content = (
+        f"---\ntitle: {title}\ntrust: high\nprovenance: owner-stated\n"
+        f"{expires_line}\ncreated: 2026-01-01T00:00:00+00:00\n---\n"
+        "Some body text.\n"
     )
-    base.update(kw)
-    return await memory.write_fact(**base)  # type: ignore[arg-type]
-
-
-async def test_write_fact_creates_file_with_frontmatter(tmp_path: Path) -> None:
-    memory = _memory(tmp_path)
-    await memory.ensure_scaffold()
-
-    fact = await _write(memory)
-
-    path = tmp_path / "facts" / "owner" / "mornings.md"
-    assert path.exists()
-    text = path.read_text()
-    assert "trust: high" in text
-    assert "provenance: inferred" in text
-    assert "Books calls before noon." in text
-    assert fact.created  # stamped on write
-    # The index gains a pointer line referencing the fact file.
-    assert "facts/owner/mornings.md" in memory.index()
-    assert "Prefers mornings" in memory.index()
-
-
-async def test_write_fact_overwrites_on_slug_collision(tmp_path: Path) -> None:
-    memory = _memory(tmp_path)
-    await memory.ensure_scaffold()
-
-    await _write(memory, body="Books calls before noon.")
-    await _write(memory, title="Mornings only", body="Actually only 9-11am.")
-
-    facts = memory.list_facts(OWNER_NAMESPACE)
-    assert len(facts) == 1  # overwritten, not accumulated
-    assert facts[0].body == "Actually only 9-11am."
-    # Exactly one pointer line for the slug (the old one was rewritten, not duplicated).
-    index = memory.index()
-    assert index.count("facts/owner/mornings.md") == 1
-    assert "Mornings only" in index
+    (facts_dir / f"{slug}.md").write_text(content, encoding="utf-8")
+    index_path = tmp_path / "MEMORY.md"
+    existing = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
+    index_path.write_text(
+        existing.rstrip() + f"\n- facts/{OWNER_NAMESPACE}/{slug}.md — {title}\n",
+        encoding="utf-8",
+    )
 
 
 async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     await memory.ensure_scaffold()
-    await memory.write_fact(
-        namespace=OWNER_NAMESPACE, slug="vacation", title="On vacation",
-        body="Back Monday.", provenance="owner-stated", trust="high",
-        expires="2000-01-01T00:00:00+00:00",
-    )
-    await _write(memory)  # a non-expiring fact survives
+    _seed_fact(tmp_path, "vacation", "On vacation", expires="2000-01-01T00:00:00+00:00")
+    _seed_fact(tmp_path, "mornings", "Prefers mornings")
 
     removed = await memory.purge_expired()
 
@@ -80,11 +50,7 @@ async def test_purge_expired_drops_ttl_facts(tmp_path: Path) -> None:
 async def test_purge_keeps_unexpired_future_ttl(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     await memory.ensure_scaffold()
-    await memory.write_fact(
-        namespace=OWNER_NAMESPACE, slug="vacation", title="On vacation",
-        body="Back later.", provenance="owner-stated", trust="high",
-        expires="2999-01-01T00:00:00+00:00",
-    )
+    _seed_fact(tmp_path, "vacation", "On vacation", expires="2999-01-01T00:00:00+00:00")
 
     assert await memory.purge_expired() == 0
     assert {f.slug for f in memory.list_facts(OWNER_NAMESPACE)} == {"vacation"}
@@ -93,7 +59,7 @@ async def test_purge_keeps_unexpired_future_ttl(tmp_path: Path) -> None:
 async def test_forget_removes_file_and_index_line(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     await memory.ensure_scaffold()
-    await _write(memory)
+    _seed_fact(tmp_path, "mornings", "Prefers mornings")
 
     removed = await memory.forget(OWNER_NAMESPACE, "morning")
 
@@ -106,7 +72,7 @@ async def test_forget_removes_file_and_index_line(tmp_path: Path) -> None:
 async def test_forget_no_match_returns_empty(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     await memory.ensure_scaffold()
-    await _write(memory)
+    _seed_fact(tmp_path, "mornings", "Prefers mornings")
 
     assert await memory.forget(OWNER_NAMESPACE, "nonsense") == []
     assert len(memory.list_facts(OWNER_NAMESPACE)) == 1

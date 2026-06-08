@@ -214,8 +214,6 @@ def build_engine(
         memory=memory,
         memory_dir=settings.memory_dir,
         owner_name=settings.owner_name,
-        distill_idle_seconds=settings.distill_idle_seconds,
-        distill_model=settings.distill_model,
         google_services=build_google_services(settings),
         owner_tz=settings.owner_tz,
         shell_service=build_shell_service(settings),

@@ -25,9 +25,6 @@ class FakeMemory:
         return []
 
     # Mutators are unused by prompt assembly; present only to satisfy MemoryStore.
-    async def write_fact(self, **kwargs: object) -> Fact:
-        raise NotImplementedError
-
     async def forget(self, namespace: str, query: str) -> list[Fact]:
         raise NotImplementedError
 

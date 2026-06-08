@@ -1,7 +1,6 @@
 """TaskManager: hybrid grace, steering, interrupt, semaphore, idle, recovery, spawn."""
 
 import asyncio
-import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -24,7 +23,7 @@ from chief.core.tasks import (
 )
 from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.gate.policy import PolicyStore
-from chief.memory.store import Fact, FactDraft
+from chief.memory.store import Fact
 from chief.obs.audit import AuditLog
 from chief.persistence.tasks import (
     CANCELLED,
@@ -47,10 +46,7 @@ Factory = Callable[..., SessionProto]
 
 
 class FakeMemory:
-    """In-memory MemoryStore: records writes, returns a static index for distill."""
-
-    def __init__(self) -> None:
-        self.written: list[Fact] = []
+    """Minimal MemoryStore stub for system prompt assembly and session wiring."""
 
     def index(self) -> str:
         return "- facts/owner/x.md — X"
@@ -62,31 +58,7 @@ class FakeMemory:
         return "# Will"
 
     def list_facts(self, namespace: str) -> list[Fact]:
-        return [f for f in self.written if f.namespace == namespace]
-
-    async def write_fact(
-        self,
-        *,
-        namespace: str,
-        slug: str,
-        title: str,
-        body: str,
-        provenance: str,
-        trust: str,
-        expires: str | None = None,
-    ) -> Fact:
-        fact = Fact(
-            slug=slug,
-            title=title,
-            body=body,
-            namespace=namespace,
-            provenance=provenance,
-            trust=trust,
-            expires=expires,
-            created="2026-06-03T00:00:00+00:00",
-        )
-        self.written.append(fact)
-        return fact
+        return []
 
     async def forget(self, namespace: str, query: str) -> list[Fact]:
         raise NotImplementedError
@@ -449,6 +421,34 @@ async def test_idle_archives_and_marks_done(
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == DONE
     assert sess.closed is True
+    await mgr.shutdown()
+
+
+async def test_idle_owner_task_does_not_trigger_distillation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An idle task archives without running any distillation pass (removed in #21)."""
+    io = FakeIO()
+    memory = FakeMemory()
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        idle_archive_seconds=0.02,
+        session_factory_sdk=_one(FakeSession(model="m")),
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=memory,
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: "-100:5" in io.archived)
+
+    # No memory writes — distillation is gone, not merely skipped.
+    assert not any("📝" in t for _, t in io.sends)
     await mgr.shutdown()
 
 
@@ -893,195 +893,6 @@ def _mem_factory(sessions: list[FakeSession]) -> Factory:
     return factory
 
 
-def _mem_manager(
-    session_factory: async_sessionmaker[AsyncSession],
-    io: FakeIO,
-    *,
-    factory: Factory,
-    memory: FakeMemory,
-    distill: Callable[..., Any],
-    distill_idle: float = 0.02,
-) -> TaskManager:
-    return TaskManager(
-        session_factory=session_factory,
-        io=io,
-        owner_model="claude-sonnet-4-6",
-        classifier_model="claude-haiku-4-5",
-        idle_archive_seconds=1000.0,  # keep archive out of the way of distill
-        session_factory_sdk=factory,
-        stop_intent=_no,
-        warrants_task=_no,
-        memory=memory,
-        memory_dir="/tmp/mem",
-        owner_name="Will",
-        distill_idle_seconds=distill_idle,
-        distill_model="claude-sonnet-4-6",
-        distill=distill,
-    )
-
-
-async def test_distill_saves_facts_notifies_and_stays_open(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-    captured: dict[str, Any] = {}
-
-    async def distill(
-        transcript: list[tuple[str, str]], index: str, *, model: str
-    ) -> list[FactDraft]:
-        captured["transcript"] = transcript
-        captured["index"] = index
-        return [FactDraft(slug="mornings", title="Prefers mornings", body="b")]
-
-    mgr = _mem_manager(
-        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
-    )
-
-    await mgr.dispatch(thread_key="-100:5", text="i prefer mornings")
-    await _until(lambda: ("-100:5", "reply:i prefer mornings") in io.sends)
-    await _until(lambda: any("📝 Saved to memory" in t for _, t in io.sends))
-
-    # The whole turn (owner + chief) is handed to the distiller, with the live index.
-    assert captured["transcript"] == [
-        ("owner", "i prefer mornings"),
-        ("chief", "reply:i prefer mornings"),
-    ]
-    assert captured["index"] == "- facts/owner/x.md — X"
-    # The draft is persisted to the owner namespace as an inferred fact.
-    assert len(memory.written) == 1
-    fact = memory.written[0]
-    assert (fact.slug, fact.namespace, fact.provenance) == (
-        "mornings",
-        "owner",
-        "inferred",
-    )
-    # Distilling does not end the task — it stays OPEN (and unarchived).
-    assert "-100:5" not in io.archived
-    async with session_factory() as session:
-        db = await get_task(session, platform="telegram", thread_key="-100:5")
-    assert db is not None and db.status == OPEN
-    await mgr.shutdown()
-
-
-async def test_distill_no_drafts_writes_nothing_and_is_silent(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-    calls = {"n": 0}
-
-    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
-        calls["n"] += 1
-        return []
-
-    mgr = _mem_manager(
-        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
-    )
-
-    await mgr.dispatch(thread_key="-100:5", text="hi")
-    await _until(lambda: calls["n"] == 1)  # distiller ran on the quiet window
-
-    assert memory.written == []
-    assert not any("📝" in t for _, t in io.sends)  # nothing to announce
-    await mgr.shutdown()
-
-
-async def test_new_message_cancels_pending_distill(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-
-    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
-        return [FactDraft(slug="s", title="T", body="b")]
-
-    # A long distill window so the timer is still pending when the next message lands.
-    mgr = _mem_manager(
-        session_factory,
-        io,
-        factory=_mem_factory([]),
-        memory=memory,
-        distill=distill,
-        distill_idle=50.0,
-    )
-
-    await mgr.dispatch(thread_key="-100:5", text="first")
-    await _until(lambda: ("-100:5", "reply:first") in io.sends)
-    task = mgr._tasks["-100:5"]
-    await _until(lambda: task.distill_handle is not None)  # armed after the clean turn
-
-    await mgr.dispatch(thread_key="-100:5", text="second")
-    await _until(lambda: ("-100:5", "reply:second") in io.sends)
-
-    # The second turn accumulates onto the same transcript (no distill fired between).
-    assert task.transcript == [
-        ("owner", "first"),
-        ("chief", "reply:first"),
-        ("owner", "second"),
-        ("chief", "reply:second"),
-    ]
-    assert memory.written == []  # the pending distill was cancelled, none fired
-    await mgr.shutdown()
-
-
-async def test_distill_cancelled_mid_flush_keeps_transcript(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
-        entered.set()
-        await release.wait()  # park inside the flush, holding the cancel window open
-        return [FactDraft(slug="s", title="T", body="b")]
-
-    mgr = _mem_manager(
-        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
-    )
-
-    await mgr.dispatch(thread_key="-100:5", text="hi")
-    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
-    task = mgr._tasks["-100:5"]
-    await entered.wait()  # distiller is now parked mid-flush
-
-    # The cancel-during-flush race: a new turn cancels the timer while distilling.
-    mgr._cancel_distill(task)
-    await asyncio.sleep(0)  # let the CancelledError propagate into the parked task
-
-    # The transcript survives for the next pass instead of being silently lost.
-    assert task.transcript == [("owner", "hi"), ("chief", "reply:hi")]
-    assert memory.written == []
-    await mgr.shutdown()
-
-
-async def test_distill_failure_is_logged_with_thread_key(
-    session_factory: async_sessionmaker[AsyncSession],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-
-    async def distill(*args: Any, **kwargs: Any) -> list[FactDraft]:
-        raise RuntimeError("boom")
-
-    mgr = _mem_manager(
-        session_factory, io, factory=_mem_factory([]), memory=memory, distill=distill
-    )
-
-    with caplog.at_level(logging.ERROR, logger="chief.core.tasks"):
-        await mgr.dispatch(thread_key="-100:5", text="hi")
-        await _until(
-            lambda: any(r.msg == "distillation failed" for r in caplog.records)
-        )
-
-    rec = next(r for r in caplog.records if r.msg == "distillation failed")
-    assert rec.__dict__.get("thread_key") == "-100:5"  # context, not a bare traceback
-    assert memory.written == []
-    await mgr.shutdown()
-
-
 # ---- calendar wiring (M5) ----------------------------------------------------
 
 
@@ -1289,8 +1100,6 @@ def _guest_manager(
     memory: FakeMemory,
     calendar: bool = True,
     front_desk: str | None = "-100:1",
-    distill: Callable[..., Any] | None = None,
-    distill_idle: float = 1000.0,
 ) -> TaskManager:
     guest_cal = (
         calendar_mcp.guest_service("http://mcp-calendar:8003/mcp")
@@ -1298,9 +1107,6 @@ def _guest_manager(
         else None
     )
     admin = GuestAdminService(session_factory=session_factory, platform="telegram")
-
-    async def _distill_none(*_a: Any, **_k: Any) -> list[FactDraft]:
-        return []
 
     return TaskManager(
         session_factory=session_factory,
@@ -1319,8 +1125,6 @@ def _guest_manager(
         front_desk_thread_key=front_desk,
         guest_calendar_service=guest_cal,
         guest_admin_service=admin,
-        distill=distill or _distill_none,
-        distill_idle_seconds=distill_idle,
     )
 
 
@@ -1415,32 +1219,6 @@ async def test_guest_session_without_front_desk_raises(
 
     with pytest.raises(RuntimeError, match="front_desk"):
         await mgr._ensure_task("555:0", tier="guest")
-    await mgr.shutdown()
-
-
-async def test_guest_turn_is_not_distilled(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    io = FakeIO()
-    memory = FakeMemory()
-
-    async def _distill_yes(*_a: Any, **_k: Any) -> list[FactDraft]:
-        return [FactDraft(slug="x", title="X", body="b")]
-
-    mgr = _guest_manager(
-        session_factory,
-        io,
-        factory=_mem_factory([]),
-        memory=memory,
-        distill=_distill_yes,
-        distill_idle=0.02,
-    )
-
-    await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
-    await _until(lambda: ("555:0", "reply:hi") in io.sends)
-    await asyncio.sleep(0.05)  # past the distill window
-
-    assert memory.written == []  # a guest's low-trust chatter never enters owner memory
     await mgr.shutdown()
 
 

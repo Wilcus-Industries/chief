@@ -66,10 +66,9 @@ class Settings(BaseSettings):
     # Task engine (M2). concurrency bounds turns actively generating; grace_seconds is
     # the inline-vs-"working…" window; turn_timeout_seconds is the per-turn watchdog (a
     # turn whose stream never terminates is torn down, not left to freeze the task);
-    # idle_archive_seconds is the no-activity → archive timer for real task threads
-    # (distillation is a separate ~10-min trigger owned by M4); compaction_idle_seconds
-    # is its casual-channel twin — instead of archiving (a ``:0`` channel has no
-    # closable topic) the casual lane self-compacts at this idle window;
+    # idle_archive_seconds is the no-activity → archive timer for real task threads;
+    # compaction_idle_seconds is the casual-channel twin — instead of archiving (a
+    # ``:0`` channel has no closable topic) it self-compacts at this idle window;
     # classifier_model runs the cheap stop-intent / warrants-a-task judgments.
     concurrency: int = 3
     grace_seconds: float = 6.0
@@ -100,12 +99,9 @@ class Settings(BaseSettings):
     guest_global_rate_per_window: int = 60
 
     # Long-term memory (M4). memory_dir holds Soul/User/MEMORY + facts/ (a persisted
-    # volume in the container); distill_idle_seconds is the quiet window before a task's
-    # chatter is distilled into facts (Sonnet, distill_model). memory_git versions every
-    # write op via subprocess git under the configured author identity.
+    # volume in the container); memory_git versions every write op via subprocess git
+    # under the configured author identity.
     memory_dir: str = "/memory"
-    distill_idle_seconds: float = 1200.0
-    distill_model: str = "claude-sonnet-4-6"
     memory_git: bool = True
     git_author_name: str = "chief"
     git_author_email: str = "chief@localhost"

@@ -9,11 +9,9 @@ Layout under ``memory_dir``::
     facts/contacts/<id>/<slug>.md   # contact namespace ready, exercised in M6
 
 Each fact file carries hand-rolled ``key: value`` frontmatter (no YAML dependency) and a
-free-text body that may contain ``[[wikilinks]]`` to other facts. Writes overwrite on
-slug collision (DESIGN: "overwrite, don't accumulate"), rewrite the matching
-``MEMORY.md`` pointer line, then commit through the versioner. A single
-:class:`asyncio.Lock` serializes every mutation so concurrent distill/forget/scaffold
-ops can't interleave file + index + commit. ``purge_expired`` drops TTL-expired facts
+free-text body that may contain ``[[wikilinks]]`` to other facts. A single
+:class:`asyncio.Lock` serializes every mutation so concurrent forget/scaffold ops can't
+interleave file + index + commit. ``purge_expired`` drops TTL-expired facts
 (DESIGN: flag time-sensitive facts).
 """
 
@@ -132,33 +130,6 @@ class MarkdownMemory:
         return facts
 
     # ---- mutators (async; each commits one version) ----------------------
-
-    async def write_fact(
-        self,
-        *,
-        namespace: str,
-        slug: str,
-        title: str,
-        body: str,
-        provenance: str,
-        trust: str,
-        expires: str | None = None,
-    ) -> Fact:
-        async with self._lock:
-            path = self._facts_dir(namespace) / f"{slug}.md"
-            # Preserve the original learned-at time across an overwrite.
-            created = (
-                _parse_fact(path, namespace).created if path.exists() else _now_iso()
-            ) or _now_iso()
-            fact = Fact(
-                slug=slug, title=title, body=body, namespace=namespace,
-                provenance=provenance, trust=trust, expires=expires, created=created,
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_render_fact(fact), encoding="utf-8")
-            self._upsert_pointer(fact)
-            await self._versioner.commit(f"memory: write {namespace}/{slug}")
-            return fact
 
     async def forget(self, namespace: str, query: str) -> list[Fact]:
         async with self._lock:
