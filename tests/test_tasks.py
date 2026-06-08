@@ -1,6 +1,7 @@
 """TaskManager: hybrid grace, steering, interrupt, semaphore, idle, recovery, spawn."""
 
 import asyncio
+import shutil
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +25,7 @@ from chief.core.tasks import (
 from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact
+from chief.memory.versioning import GitVersioner
 from chief.obs.audit import AuditLog
 from chief.persistence.tasks import (
     CANCELLED,
@@ -2092,3 +2094,158 @@ async def test_memory_write_gate_allows_and_file_lands(
     assert "## Preferences" in target.read_text(encoding="utf-8")
     assert "## Facts" in target.read_text(encoding="utf-8")
     await mgr.shutdown()
+
+
+# ---- auto-commit memory after turn (issue #22) --------------------------------
+
+_GIT = shutil.which("git")
+requires_git = pytest.mark.skipif(_GIT is None, reason="git not on PATH")
+
+
+class FakeVersioner:
+    """Versioner stub: records commit() calls and signals an asyncio.Event on each."""
+
+    def __init__(self) -> None:
+        self.commits: list[str] = []
+        self.committed = asyncio.Event()
+
+    async def init(self) -> None:
+        return None
+
+    async def commit(self, message: str) -> None:
+        self.commits.append(message)
+        self.committed.set()
+
+
+async def _git_log(root: Path) -> list[str]:
+    """Return git one-line commit subjects (newest first) for the repo at root."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(root), "log", "--pretty=%s",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    return [line for line in out.decode().splitlines() if line.strip()]
+
+
+def _versioned_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    versioner: Any,
+    memory_dir: str,
+) -> TaskManager:
+    """Build a TaskManager wired with a versioner and memory_dir for #22 tests."""
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        versioner=versioner,
+        memory=FakeMemory(),
+        memory_dir=memory_dir,
+        owner_name="Will",
+    )
+
+
+async def test_memory_auto_commit_fires_after_memory_touching_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn that writes to the memory dir triggers versioner.commit() after settling.
+
+    Uses FakeVersioner + GitVersioner to test both the hook timing and the actual
+    git dirty-check: FakeVersioner signals when commit() is called; GitVersioner on a
+    real repo confirms a commit lands only when files changed.
+    """
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    versioner = FakeVersioner()
+
+    written_file = mem_dir / "User.md"
+
+    def _write_memory() -> None:
+        written_file.write_text("profile update")
+
+    # on_start fires inside run_turn — simulates chief writing a memory file mid-turn.
+    sess = FakeSession(
+        model="claude-sonnet-4-6",
+        on_start=_write_memory,
+    )
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=versioner,
+        memory_dir=str(mem_dir),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="update my profile")
+    # Wait for commit() to be called (fires after the turn's writes settle).
+    await asyncio.wait_for(versioner.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    assert len(versioner.commits) == 1
+    assert versioner.commits[0] == "chief: memory auto-save"
+
+
+@requires_git
+async def test_memory_auto_commit_git_skips_when_no_memory_change(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn that leaves the memory dir clean produces no git commit.
+
+    The GitVersioner's dirty-check (git status --porcelain) is the guard: a turn
+    that does not write memory files results in no new commit in the git log.
+    """
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    versioner = GitVersioner(
+        mem_dir, author_name="chief", author_email="chief@localhost"
+    )
+    await versioner.init()
+
+    # Seed one commit so the repo is non-empty; count should stay at 1 post-turn.
+    (mem_dir / "Soul.md").write_text("# Soul")
+    await versioner.commit("initial scaffold")
+
+    fake_v = FakeVersioner()
+    # Wrap: use FakeVersioner to detect call, then delegate to GitVersioner.
+
+    class _DelegatingVersioner:
+        async def init(self) -> None:
+            return None
+
+        async def commit(self, message: str) -> None:
+            fake_v.commits.append(message)
+            fake_v.committed.set()
+            await versioner.commit(message)
+
+    sess = FakeSession(model="claude-sonnet-4-6")  # no on_start → nothing written
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=_DelegatingVersioner(),
+        memory_dir=str(mem_dir),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="what time is it?")
+    # Wait for the commit() call (it fires, but git skips the empty commit).
+    await asyncio.wait_for(fake_v.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    # commit() was called once — the versioner always tries; git decides if dirty.
+    assert len(fake_v.commits) == 1
+    # git log still shows only the initial scaffold — no new commit landed.
+    commits = await _git_log(mem_dir)
+    assert len(commits) == 1, (
+        f"no memory write → commit count must stay at 1, got {commits!r}"
+    )

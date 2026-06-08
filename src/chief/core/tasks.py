@@ -54,6 +54,7 @@ from ..gate.gate import (
 )
 from ..gate.policy import PolicyStore
 from ..memory.store import MemoryStore
+from ..memory.versioning import NullVersioner, Versioner
 from ..obs.audit import AuditLog
 from ..persistence import usage
 from ..persistence.models import Task
@@ -302,6 +303,7 @@ class TaskManager:
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
         group_context_max_messages: int = 50,
+        versioner: Versioner | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -356,6 +358,12 @@ class TaskManager:
         # bounded, drained into the next engaged turn so a reply sees the whole thread.
         self._group_context_max = group_context_max_messages
         self._group_buffers: dict[str, deque[tuple[str, str]]] = {}
+        # Versioner for memory auto-commit (#22): commit after every turn so the
+        # memory dir's git history tracks each session write. NullVersioner when
+        # unset — no commit overhead for tests or runs without memory git.
+        self._versioner: Versioner = (
+            versioner if versioner is not None else NullVersioner()
+        )
 
     # ---- scheduler hooks -------------------------------------------------
 
@@ -1060,6 +1068,10 @@ class TaskManager:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
                 await self._set_status(task, OPEN)
+                # Commit memory dir after the turn's writes settle (#22). The
+                # versioner skips empty commits, so no-op turns cost one git
+                # status check (< 1 ms) and produce no commit.
+                await self._versioner.commit("chief: memory auto-save")
                 # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
         except TimeoutError:
