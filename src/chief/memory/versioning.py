@@ -7,6 +7,9 @@ implementations:
 - :class:`GitVersioner` shells out to ``git`` against the memory repo. Identity is
   passed per-commit (``-c user.name=… -c user.email=…``) so no global git config is
   required, and an op that changes nothing is skipped rather than committed empty.
+  An internal :class:`asyncio.Lock` serializes the add/status/commit sequence so
+  concurrent callers (turn loop + store mutators sharing one instance) never collide
+  on git's ``index.lock``.
 - :class:`NullVersioner` is the no-op default for tests and ``memory_git: false`` runs.
 
 The remote push + encryption land at M13 on top of this; nothing here is thrown away.
@@ -43,7 +46,11 @@ class NullVersioner:
 
 
 class GitVersioner:
-    """Subprocess-``git`` versioner over the memory directory."""
+    """Subprocess-``git`` versioner over the memory directory.
+
+    A single :class:`asyncio.Lock` serializes every ``init``/``commit`` call so
+    concurrent callers sharing one instance never collide on git's ``index.lock``.
+    """
 
     def __init__(
         self, root: str | Path, *, author_name: str, author_email: str
@@ -51,24 +58,27 @@ class GitVersioner:
         self._root = Path(root)
         self._name = author_name
         self._email = author_email
+        self._lock = asyncio.Lock()
 
     async def init(self) -> None:
         """``git init`` the memory dir unless it is already a repo."""
-        if (self._root / ".git").exists():
-            return
-        self._root.mkdir(parents=True, exist_ok=True)
-        await self._git("init")
+        async with self._lock:
+            if (self._root / ".git").exists():
+                return
+            self._root.mkdir(parents=True, exist_ok=True)
+            await self._git("init")
 
     async def commit(self, message: str) -> None:
         """Stage everything and commit, skipping the op if nothing changed."""
-        await self._git("add", "-A")
-        if not (await self._git("status", "--porcelain")).strip():
-            return  # no diff — a commit here would be empty/noise
-        await self._git(
-            "-c", f"user.name={self._name}",
-            "-c", f"user.email={self._email}",
-            "commit", "-m", message,
-        )
+        async with self._lock:
+            await self._git("add", "-A")
+            if not (await self._git("status", "--porcelain")).strip():
+                return  # no diff — a commit here would be empty/noise
+            await self._git(
+                "-c", f"user.name={self._name}",
+                "-c", f"user.email={self._email}",
+                "commit", "-m", message,
+            )
 
     async def _git(self, *args: str) -> str:
         """Run ``git -C <root> <args>``; return stdout, raising on a nonzero exit."""
