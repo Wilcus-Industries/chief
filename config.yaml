@@ -52,10 +52,10 @@ audit_log_path: /data/audit.jsonl  # append-only JSONL: tool calls + approval de
 never_seed: []      # tools/commands hard-denied with no prompt
 approved_seed: []   # tools/commands pre-allowed with no prompt
 
-# Long-term memory (M4). Markdown facts + a MEMORY.md index loaded into every prompt;
-# chief reads fact files on demand (read-only, confined to memory_dir) and writes memory
-# directly in-session via its Write tool.
-memory_dir: /memory          # persisted volume holding Soul/User/MEMORY + facts/
+# Long-term memory (M4). Namespaced markdown facts; the facts/ listing is auto-generated
+# at prompt-build time (no stored index file). Chief reads fact files on demand and writes
+# memory directly in-session via its Write tool; every write is git-versioned.
+memory_dir: /memory          # persisted volume holding Soul/User + facts/
 memory_git: true             # version every memory write op with local git
 git_author_name: chief
 git_author_email: chief@localhost
