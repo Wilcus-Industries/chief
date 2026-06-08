@@ -37,9 +37,14 @@ def _run_migrations(db_path: str) -> None:
     ``+aiosqlite`` driver prefix when building the migration engine.  Calling
     this before the async event loop starts (or in a thread) avoids event-loop
     conflicts entirely.
+
+    script_location is pinned to an absolute path so this works regardless of
+    the process's CWD — alembic.ini's relative ``script_location = alembic``
+    would break when invoked from outside the repo root.
     """
     cfg = Config(str(_ALEMBIC_INI))
     cfg.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
+    cfg.set_main_option("script_location", str(_ALEMBIC_INI.parent / "alembic"))
     command.upgrade(cfg, "head")
 
 
