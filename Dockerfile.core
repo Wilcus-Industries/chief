@@ -39,7 +39,7 @@ RUN set -e; \
 # volumes with the correct ownership (Docker copies image perms into an empty volume on
 # first mount). The claude CLI writes session transcripts under $HOME/.claude; pointing
 # HOME at /home/chief keeps that traffic on the claude-home volume, not /root.
-RUN useradd --create-home --uid 1000 --gid 1000 chief \
+RUN useradd --create-home --uid 1000 chief \
     && mkdir -p /data /memory /workspace /home/chief/.claude \
     && chown -R chief:chief /data /memory /workspace /home/chief
 
