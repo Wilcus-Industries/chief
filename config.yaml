@@ -71,9 +71,9 @@ calendar_enabled: true    # mcp-calendar container up; token is calendar-scope o
 calendar_mcp_url: http://mcp-calendar:8003/mcp
 drive_enabled: false
 drive_mcp_url: http://mcp-drive:8001/mcp
-sheets_enabled: false
+sheets_enabled: true
 sheets_mcp_url: http://mcp-sheets:8002/mcp
-gmail_enabled: false
+gmail_enabled: true
 gmail_mcp_url: http://mcp-gmail:8004/mcp
 # Transparent signature appended server-side to every message chief sends. Not a config
 # key — set the GMAIL_SIGNATURE environment variable (see secrets/README.md); {owner}
