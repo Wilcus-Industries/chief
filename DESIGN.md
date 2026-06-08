@@ -896,10 +896,11 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   off one DB on its own platform-bound engine stack.
 - **M13 hardening:** CI/CD (GHCR + SSH), encryption-at-rest (age), memory-repo backup,
   least-privilege, `BOOTSTRAP.md` onboarding, live sandbox tests. **Schema migrations:**
-  there is no migration tooling yet — `init_db` only runs `create_all` (creates missing
-  tables, never ALTERs existing ones), so new columns on existing tables (e.g. M6's
-  `contacts.state`) require a fresh DB pre-launch. Add real migrations before any
-  persisted deployment.
+  Alembic is adopted; the schema is fully migration-driven. `init_db` runs
+  `alembic upgrade head` at startup (via `_run_migrations`); `create_all` is not used
+  for the real DB. Revision `0001_baseline` captures the full initial model schema. A
+  drift test asserts that `upgrade head` against an empty DB produces a schema identical
+  to `Base.metadata` with no autogenerate diff remaining.
 
   **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
   `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an
