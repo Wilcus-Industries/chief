@@ -911,15 +911,30 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 
   **Non-root core (issue #6):** The `core` container runs as **uid/gid 1000** (`chief`),
   matching the MCP services and sandbox. `Dockerfile.core` creates the user, pre-chowns
-  `/data /memory /workspace /home/chief/.claude`, and sets `HOME=/home/chief` so the
-  claude CLI writes session transcripts under the persisted `claude-home` volume at
-  `/home/chief/.claude` rather than `/root/.claude`. `docker-compose.yml` pins
-  `user: "1000:1000"` and `security_opt: no-new-privileges:true`. Docker secrets are
-  always mounted read-only at `/run/secrets/<name>` (tmpfs, mode `0444`); host secret
-  files must be `0600`. **First deploy on fresh volumes needs no extra step** — Docker
-  initialises volume ownership from the image. **Existing deploys** with root-owned
+  `/data /memory /workspace /home/chief/.claude`, and sets `HOME=/home/chief`.
+  `docker-compose.yml` pins `user: "1000:1000"` and `security_opt: no-new-privileges:true`.
+  Docker secrets are always mounted read-only at `/run/secrets/<name>` (tmpfs, mode `0444`);
+  host secret files must be `0600`. **First deploy on fresh volumes needs no extra step** —
+  Docker initialises volume ownership from the image. **Existing deploys** with root-owned
   volumes need a one-time `chown -R 1000:1000` pass; the exact command is in
   `secrets/README.md`.
+
+  **Writable paths under `read_only: true` (issue #16):** The `core` rootfs is read-only.
+  All writes go to one of three writable mount points:
+
+  | Path | Mount | What lives there |
+  |---|---|---|
+  | `/data` | `sqlite-data` volume | `chief.db` (SQLite) |
+  | `/memory` | `memory` volume | markdown memory files |
+  | `/workspace` | `workspace` volume | shell/workspace scratch (opt-in) |
+  | `/home/chief/.claude` | `claude-home` volume | claude CLI state: `projects/` (transcripts), `.credentials.json`, `.claude.json`, `.claude.json.lock` |
+  | `/tmp` | tmpfs (`uid=1000`) | Python/Node/git ephemeral scratch |
+
+  `CLAUDE_CONFIG_DIR=/home/chief/.claude` (set in `docker-compose.yml`) is the key: when
+  set, the CLI writes its top-level config (`$CLAUDE_CONFIG_DIR/.claude.json`) and lock
+  (`$CLAUDE_CONFIG_DIR/.claude.json.lock`) inside the volume rather than under `$HOME`
+  (which is on the read-only rootfs). Transcripts land at `$CLAUDE_CONFIG_DIR/projects/…`
+  as before, so session resume is unaffected.
 
   **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
   `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an

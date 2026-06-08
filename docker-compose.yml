@@ -44,6 +44,14 @@ services:
       # (id + token). Leave one blank to run the other platform only.
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
       OWNER_DISCORD_ID: ${OWNER_DISCORD_ID:-}
+      # Relocate the claude CLI's top-level config dir from $HOME (read-only rootfs) into
+      # the persisted claude-home volume. Without this, the CLI writes .claude.json (and
+      # its lock) directly under $HOME=/home/chief, hitting EROFS on a read_only container.
+      # With CLAUDE_CONFIG_DIR set the SDK places .claude.json at
+      # $CLAUDE_CONFIG_DIR/.claude.json = /home/chief/.claude/.claude.json (inside the
+      # volume). Transcripts remain at $CLAUDE_CONFIG_DIR/projects/... as before, so
+      # session resume is unaffected.
+      CLAUDE_CONFIG_DIR: /home/chief/.claude
     secrets:
       # Docker secrets are always mounted read-only at /run/secrets/<name> (tmpfs,
       # mode 0444 inside the container). No explicit :ro needed; it is guaranteed by Docker.
@@ -60,11 +68,13 @@ services:
       # Shared scratch (M7): chief's built-in Read/Write/Edit (core) and the sandbox
       # shell operate on the same files. Harmless when the shell/workspace are disabled.
       - workspace:/workspace
-      # The claude CLI writes each session's transcript under $HOME/.claude. The container
-      # runs as uid 1000 ("chief"), so HOME=/home/chief (set in Dockerfile.core) and the
-      # volume is mounted there. Without this volume a `compose up`/recreate wipes every
-      # stored session, leaving sqlite's sdk_session_ids pointing at sessions that no longer
-      # exist → the CLI exits 1 on resume. Persist it so recreates keep conversations.
+      # Persisted claude CLI state: transcripts (projects/), credentials (.credentials.json),
+      # and top-level config (.claude.json + .claude.json.lock). CLAUDE_CONFIG_DIR (set
+      # above) points the CLI here so all three land inside this volume rather than on the
+      # read-only rootfs. Without persistence a recreate wipes every stored session, leaving
+      # sqlite's sdk_session_ids pointing at sessions that no longer exist → CLI exits 1 on
+      # resume. Pre-chowned to uid 1000 in Dockerfile.core so Docker init copies correct
+      # ownership into a freshly-created volume.
       - claude-home:/home/chief/.claude
     tmpfs:
       # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
