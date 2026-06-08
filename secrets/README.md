@@ -4,6 +4,49 @@ Drop one secret per file here (no extension, no trailing newline needed). These 
 mounted at `/run/secrets/<name>` and read by `config.py`. **Never commit the real
 files** — `.gitignore` keeps everything in this directory except this README out of git.
 
+## Host file permissions
+
+Secret files **must be owner-readable only** (`0600`) on the host. Docker reads them as
+root when building the secret tmpfs, but keeping them `0600` prevents other host
+processes or users from reading them:
+
+```sh
+chmod 0600 secrets/telegram_bot_token secrets/discord_bot_token \
+           secrets/claude_code_oauth_token secrets/google_oauth_client.json \
+           secrets/google_token.json
+```
+
+## Secret mounts are read-only
+
+Docker mounts each secret as a tmpfs file at `/run/secrets/<name>` with mode `0444`
+(read-only) inside the container. This is enforced by Docker — no extra `:ro` flag is
+needed and it cannot be overridden from the container process.
+
+## One-time volume chown (pre-existing installs)
+
+The core container now runs as **uid/gid 1000** (`chief`). On a **fresh deploy** Docker
+initialises the named volumes from the image's pre-chowned directories, so no manual step
+is needed.
+
+On an **existing deploy** where the `sqlite-data`, `memory`, `workspace`, or `claude-home`
+volumes were created when core ran as root, their contents are still owned by `uid 0`.
+Run this once before the first non-root `compose up`:
+
+```sh
+# Re-own all four volumes in one shot using a throwaway busybox container.
+docker run --rm \
+  -v chief_sqlite-data:/data \
+  -v chief_memory:/memory \
+  -v chief_workspace:/workspace \
+  -v chief_claude-home:/home/chief/.claude \
+  busybox \
+  chown -R 1000:1000 /data /memory /workspace /home/chief/.claude
+```
+
+Adjust the volume name prefix (`chief_`) if your `docker compose` project name differs
+(check with `docker volume ls | grep chief`). After this, `docker compose up -d core`
+will start cleanly as uid 1000.
+
 | File | Value |
 |------|-------|
 | `telegram_bot_token` | Bot token from @BotFather |

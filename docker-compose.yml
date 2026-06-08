@@ -30,6 +30,12 @@ services:
       context: .
       dockerfile: Dockerfile.core
     restart: unless-stopped
+    # Non-root, matching the MCP services + sandbox pattern. uid/gid 1000 is "chief"
+    # (created in Dockerfile.core). Volumes are pre-chowned to 1000:1000 in the image;
+    # for pre-existing named volumes run the one-time chown step in secrets/README.md.
+    user: "1000:1000"
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
       # Both owner ids are optional here — config requires at least one platform fully set
@@ -37,6 +43,8 @@ services:
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
       OWNER_DISCORD_ID: ${OWNER_DISCORD_ID:-}
     secrets:
+      # Docker secrets are always mounted read-only at /run/secrets/<name> (tmpfs,
+      # mode 0444 inside the container). No explicit :ro needed; it is guaranteed by Docker.
       - telegram_bot_token
       - discord_bot_token
       - claude_code_oauth_token
@@ -50,11 +58,12 @@ services:
       # Shared scratch (M7): chief's built-in Read/Write/Edit (core) and the sandbox
       # shell operate on the same files. Harmless when the shell/workspace are disabled.
       - workspace:/workspace
-      # The claude CLI writes each session's transcript under /root/.claude (container
-      # runs as root). Without this volume a `compose up`/recreate wipes every stored
-      # session, leaving sqlite's sdk_session_ids pointing at sessions that no longer
+      # The claude CLI writes each session's transcript under $HOME/.claude. The container
+      # runs as uid 1000 ("chief"), so HOME=/home/chief (set in Dockerfile.core) and the
+      # volume is mounted there. Without this volume a `compose up`/recreate wipes every
+      # stored session, leaving sqlite's sdk_session_ids pointing at sessions that no longer
       # exist → the CLI exits 1 on resume. Persist it so recreates keep conversations.
-      - claude-home:/root/.claude
+      - claude-home:/home/chief/.claude
     healthcheck:
       # init_db creates the sqlite file on boot, so its presence means the app got past startup.
       test: ["CMD", "test", "-f", "/data/chief.db"]

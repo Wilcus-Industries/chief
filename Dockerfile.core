@@ -34,8 +34,18 @@ RUN set -e; \
         || { echo "vendor/chief-skills/upstream/skills/$s missing — run 'git submodule update --init' before docker build" >&2; exit 1; }; \
     done
 
+# Non-root user (uid/gid 1000) — matches the MCP services and sandbox pattern.
+# Pre-create and chown every named-volume mountpoint so Docker initialises freshly-created
+# volumes with the correct ownership (Docker copies image perms into an empty volume on
+# first mount). The claude CLI writes session transcripts under $HOME/.claude; pointing
+# HOME at /home/chief keeps that traffic on the claude-home volume, not /root.
+RUN useradd --create-home --uid 1000 --gid 1000 chief \
+    && mkdir -p /data /memory /workspace /home/chief/.claude \
+    && chown -R chief:chief /data /memory /workspace /home/chief
+
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
+ENV HOME="/home/chief"
 
 # Migrate-on-start (M13): run alembic upgrade head before the app boots.
 # chief.entrypoint is fail-loud: non-zero exit + clear log on migration failure,
@@ -43,4 +53,5 @@ ENV PATH="/app/.venv/bin:$PATH"
 # DB_PATH mirrors the sqlite-data volume mount in docker-compose.yml.
 ENV DB_PATH="/data/chief.db"
 
+USER chief
 ENTRYPOINT ["python", "-m", "chief.entrypoint"]

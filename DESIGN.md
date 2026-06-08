@@ -909,6 +909,18 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   `importlib.resources` (`_ALEMBIC_INI` in `db.py`). New revisions go in
   `src/chief/alembic/versions/` only — there is no second dev-only copy.
 
+  **Non-root core (issue #6):** The `core` container runs as **uid/gid 1000** (`chief`),
+  matching the MCP services and sandbox. `Dockerfile.core` creates the user, pre-chowns
+  `/data /memory /workspace /home/chief/.claude`, and sets `HOME=/home/chief` so the
+  claude CLI writes session transcripts under the persisted `claude-home` volume at
+  `/home/chief/.claude` rather than `/root/.claude`. `docker-compose.yml` pins
+  `user: "1000:1000"` and `security_opt: no-new-privileges:true`. Docker secrets are
+  always mounted read-only at `/run/secrets/<name>` (tmpfs, mode `0444`); host secret
+  files must be `0600`. **First deploy on fresh volumes needs no extra step** — Docker
+  initialises volume ownership from the image. **Existing deploys** with root-owned
+  volumes need a one-time `chown -R 1000:1000` pass; the exact command is in
+  `secrets/README.md`.
+
   **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
   `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an
   `if:` that checks three repo secrets so it is **dormant and non-failing** while no VPS
