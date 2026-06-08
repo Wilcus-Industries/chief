@@ -48,7 +48,15 @@ class Settings(BaseSettings):
     owner_telegram_id: int | None = None
     owner_discord_id: int | None = None
     owner_name: str = "the owner"
+    # Owner model posture (M11). The owner defaults to owner_model_default (Sonnet) and
+    # reaches owner_model_opus (Opus) only with approval — Opus burns the Max budget
+    # faster, so it never runs unsanctioned. /opus escalates now and persists per-task
+    # (Task.model); /sonnet reverts. opus_auto_detect (opt-in) additionally lets a
+    # per-turn complexity classifier ASK to escalate a complex owner task; the command
+    # works regardless. Guests are pinned to guest_model (never Opus).
     owner_model_default: str = "claude-sonnet-4-6"
+    owner_model_opus: str = "claude-opus-4-8"
+    opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
     db_path: str = "chief.db"
     guest_ack: str = (
