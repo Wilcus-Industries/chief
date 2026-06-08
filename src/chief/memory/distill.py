@@ -2,7 +2,7 @@
 
 A single ``max_turns=1`` SDK call (the one-shot pattern shared with
 :func:`chief.core.agent.owner_oneshot` and :func:`chief.core.classify._ask_yes_no`)
-reads the current ``MEMORY.md`` index plus the idle conversation and returns a **JSON
+reads the current ``facts/`` listing plus the idle conversation and returns a **JSON
 array** of durable facts, ignoring ephemeral chatter and flagging time-sensitive ones
 with ``expires``. JSON is parsed in code; any failure (SDK error, non-JSON, wrong shape)
 logs and writes nothing — distillation must never crash a task.
@@ -103,7 +103,7 @@ async def distill(
 
     Args:
         transcript: ``(speaker, text)`` turns of the idle conversation.
-        index: the current ``MEMORY.md`` text, so the model overwrites, not dupes.
+        index: the current ``facts/`` listing so the model overwrites, not dupes.
         model: the extraction model (owner default, Sonnet).
         query: SDK ``query`` callable, injectable for tests.
 

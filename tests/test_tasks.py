@@ -47,12 +47,12 @@ Factory = Callable[..., SessionProto]
 
 
 class FakeMemory:
-    """In-memory MemoryStore: records writes, returns a static index for distill."""
+    """In-memory MemoryStore: records writes, returns a static listing for distill."""
 
     def __init__(self) -> None:
         self.written: list[Fact] = []
 
-    def index(self) -> str:
+    def facts_listing(self) -> str:
         return "- facts/owner/x.md — X"
 
     def soul(self) -> str:
@@ -947,7 +947,7 @@ async def test_distill_saves_facts_notifies_and_stays_open(
         ("owner", "i prefer mornings"),
         ("chief", "reply:i prefer mornings"),
     ]
-    assert captured["index"] == "- facts/owner/x.md — X"
+    assert captured["index"] == "- facts/owner/x.md — X"  # facts_listing() passthrough
     # The draft is persisted to the owner namespace as an inferred fact.
     assert len(memory.written) == 1
     fact = memory.written[0]

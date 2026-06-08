@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     guest_rate_window_seconds: int = 3600
     guest_global_rate_per_window: int = 60
 
-    # Long-term memory (M4). memory_dir holds Soul/User/MEMORY + facts/ (a persisted
+    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a persisted
     # volume in the container); distill_idle_seconds is the quiet window before a task's
     # chatter is distilled into facts (Sonnet, distill_model). memory_git versions every
     # write op via subprocess git under the configured author identity.

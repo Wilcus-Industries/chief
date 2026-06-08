@@ -133,7 +133,7 @@ GROUP_MODE_NOTE = (
     "privately to the owner's DM, never shown here — don't announce it or wait for it "
     "in the group; just continue once it resolves."
 )
-#: A distiller: turn a transcript + the current index into candidate facts.
+#: A distiller: turn a transcript + the current facts listing into candidate facts.
 DistillFn = Callable[..., Awaitable[list[FactDraft]]]
 #: One-shot prompt that asks the casual session to brief its own history (the live
 #: session, not the engine's pruned transcript, so the brief sees the full context).
@@ -1333,7 +1333,7 @@ class TaskManager:
             return
         try:
             drafts = await self._distill(
-                pending, self._memory.index(), model=self._distill_model
+                pending, self._memory.facts_listing(), model=self._distill_model
             )
             written = [
                 await self._memory.write_fact(
