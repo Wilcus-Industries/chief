@@ -266,3 +266,23 @@ def test_guest_prompt_has_no_memory_write_guidance() -> None:
     # Guests carry neither write guidance nor the memory index.
     assert "User.md" not in prompt
     assert "## Memory" not in prompt
+
+
+def test_workspace_guidance_does_not_claim_only_writable_location() -> None:
+    # With workspace enabled the prompt must NOT claim /workspace is the *only*
+    # writable location — that contradicts the memory-write guidance which tells
+    # chief it can Write/Edit User.md and facts/ files directly.
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        workspace_enabled=True,
+    )
+
+    assert "## Workspace" in prompt
+    # The old contradictory claim must be gone.
+    assert "only place you can write" not in prompt
+    # The true picture: memory AND workspace are both writable.
+    assert "memory" in prompt.lower() or "User.md" in prompt
+    # Writes outside the allowed set are still described as blocked.
+    assert "blocked" in prompt
