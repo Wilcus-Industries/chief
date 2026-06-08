@@ -14,8 +14,7 @@ turns hold a slot — idle sessions cost nothing). Behaviours:
 - **Auto-spawn topics.** A General-topic message that ``warrants_task`` becomes a new
   tracked topic via :meth:`TaskIO.create_thread`.
 - **Idle archive.** After ``idle_archive_seconds`` of inactivity a task is marked done
-  and its thread archived; the next message reopens it (resume). (Memory distillation is
-  a separate ~10-min trigger owned by M4.)
+  and its thread archived; the next message reopens it (resume).
 - **Casual self-compaction.** A casual ``:0`` channel can't archive (it has no closable
   topic) and would otherwise resume an ever-growing transcript every turn. So after
   ``compaction_idle_seconds`` of inactivity it summarizes its own conversation and
@@ -54,8 +53,7 @@ from ..gate.gate import (
     build_pretool_hook,
 )
 from ..gate.policy import PolicyStore
-from ..memory.distill import distill as _distill_default
-from ..memory.store import OWNER_NAMESPACE, FactDraft, MemoryStore
+from ..memory.store import MemoryStore
 from ..obs.audit import AuditLog
 from ..persistence import usage
 from ..persistence.models import Task
@@ -133,8 +131,6 @@ GROUP_MODE_NOTE = (
     "privately to the owner's DM, never shown here — don't announce it or wait for it "
     "in the group; just continue once it resolves."
 )
-#: A distiller: turn a transcript + the current index into candidate facts.
-DistillFn = Callable[..., Awaitable[list[FactDraft]]]
 #: One-shot prompt that asks the casual session to brief its own history (the live
 #: session, not the engine's pruned transcript, so the brief sees the full context).
 COMPACT_PROMPT = (
@@ -250,7 +246,6 @@ class _RunningTask:
     cancelled: bool = False
     consumer: "asyncio.Task[None] | None" = None
     idle_handle: "asyncio.Task[None] | None" = None
-    distill_handle: "asyncio.Task[None] | None" = None
     transcript: list[tuple[str, str]] = field(default_factory=list)
     surface: Surface = Surface.DM
     #: The model this live session is running on (M11). Mirrors the SDK session's model
@@ -291,9 +286,6 @@ class TaskManager:
         memory: MemoryStore | None = None,
         memory_dir: str | None = None,
         owner_name: str = "the owner",
-        distill_idle_seconds: float = 1200.0,
-        distill_model: str = "claude-sonnet-4-6",
-        distill: DistillFn = _distill_default,
         google_services: Sequence[GoogleService] = (),
         owner_tz: str = "UTC",
         shell_service: ShellService | None = None,
@@ -337,9 +329,6 @@ class TaskManager:
         self._memory = memory
         self._memory_dir = memory_dir
         self._owner_name = owner_name
-        self._distill_idle_seconds = distill_idle_seconds
-        self._distill_model = distill_model
-        self._distill = distill
         self._google_services = tuple(google_services)
         self._owner_tz = owner_tz
         self._shell_service = shell_service
@@ -383,8 +372,8 @@ class TaskManager:
     async def wake(self, *, thread_key: str, text: str) -> None:
         """Boot an agent turn from a scheduled wakeup (M9) — like an owner message.
 
-        Reuses the whole machinery (gate, tool surface, approval cards, idle/distill
-        timers): a woken turn re-passes the permission gate, so any effectful tool
+        Reuses the whole machinery (gate, tool surface, approval cards, idle timers): a
+        woken turn re-passes the permission gate, so any effectful tool
         it reaches still raises an approval card — unattended, that card fail-closed
         denies. That is what lets the scheduler treat ``wakeup`` creation as benign.
         """
@@ -878,7 +867,6 @@ class TaskManager:
 
     async def _submit(self, task: _RunningTask, turn: Turn) -> None:
         self._cancel_idle(task)
-        self._cancel_distill(task)
         if task.generating:
             if (
                 await self._stop_intent(turn.text, model=self._classifier_model)
@@ -1072,9 +1060,8 @@ class TaskManager:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
                 await self._set_status(task, OPEN)
-                # Only a clean turn re-arms the idle→archive and distill timers.
+                # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
-                self._arm_distill(task)
         except TimeoutError:
             ack.cancel()
             logger.warning("task turn timed out", extra={"thread_key": task.thread_key})
@@ -1139,8 +1126,7 @@ class TaskManager:
             return  # torn down or cancelled — don't resurrect a timer
         self._cancel_idle(task)
         # The lanes diverge here: a casual ``:0`` channel self-compacts and stays OPEN;
-        # a real task thread archives and dies. Everything else (live session, resume,
-        # steering, distill@20m) is shared.
+        # a real task thread archives and dies.
         idle = self._idle_then_compact if task.is_casual else self._idle_then_archive
         task.idle_handle = asyncio.create_task(idle(task))
 
@@ -1161,7 +1147,6 @@ class TaskManager:
         await self._io.archive_thread(task.thread_key)
         await self._cancel_consumer(task)
         await task.session.aclose()
-        self._cancel_distill(task)
         # Pop last: keep the slot (cancelled, idle_handle live) so a reopening
         # message awaits this teardown in _ensure_task instead of racing it.
         self._tasks.pop(task.thread_key, None)
@@ -1196,7 +1181,6 @@ class TaskManager:
             )
         await self._cancel_consumer(task)
         await task.session.aclose()
-        self._cancel_distill(task)
         # Pop last (mirrors archive): a reopening message awaits this teardown in
         # _ensure_task, then resumes the freshly reseeded id.
         self._tasks.pop(task.thread_key, None)
@@ -1293,86 +1277,10 @@ class TaskManager:
             )
             return casual.sdk_session_id if casual is not None else None
 
-    # ---- distillation (auto-learning; mirrors the idle-archive trio) ------
-
-    def _arm_distill(self, task: _RunningTask) -> None:
-        if (
-            self._memory is None
-            or task.tier != "owner"
-            or task.cancelled
-            or self._tasks.get(task.thread_key) is not task
-        ):
-            return  # no memory, a guest (low-trust), or torn down/cancelled — don't arm
-        self._cancel_distill(task)
-        task.distill_handle = asyncio.create_task(self._distill_then_notify(task))
-
-    def _cancel_distill(self, task: _RunningTask) -> None:
-        if task.distill_handle is not None:
-            task.distill_handle.cancel()
-            task.distill_handle = None
-
-    async def _distill_then_notify(self, task: _RunningTask) -> None:
-        """After a quiet spell, distill the transcript into facts and save them.
-
-        Unlike idle-archive this leaves the task OPEN: learning is a side effect, not an
-        end of life. The distill window (~20m) is shorter than the archive one (~60m),
-        so a task's chatter is captured before it is archived.
-        """
-        try:
-            await asyncio.sleep(self._distill_idle_seconds)
-        except asyncio.CancelledError:
-            return
-        if (
-            self._memory is None
-            or task.cancelled
-            or self._tasks.get(task.thread_key) is not task
-        ):
-            return
-        pending = list(task.transcript)  # snapshot; cleared only after a clean flush
-        if not pending:
-            return
-        try:
-            drafts = await self._distill(
-                pending, self._memory.index(), model=self._distill_model
-            )
-            written = [
-                await self._memory.write_fact(
-                    namespace=OWNER_NAMESPACE,
-                    slug=draft.slug,
-                    title=draft.title,
-                    body=draft.body,
-                    provenance="inferred",
-                    trust=draft.trust,
-                    expires=draft.expires,
-                )
-                for draft in drafts
-            ]
-            # Drop the distilled turns now the writes have landed. A cancel (new turn
-            # racing the timer) or an error before this leaves them — and any turns
-            # appended meanwhile — intact for the next pass, instead of losing them.
-            del task.transcript[: len(pending)]
-            if not written:
-                return
-            lines = "\n".join(f"• {fact.title}" for fact in written)
-            await self._io.send(task.thread_key, f"📝 Saved to memory:\n{lines}")
-            if self._audit is not None:
-                self._audit.log(
-                    {
-                        "event": "memory_write",
-                        "thread_key": task.thread_key,
-                        "count": len(written),
-                    }
-                )
-        except Exception:
-            logger.exception(
-                "distillation failed", extra={"thread_key": task.thread_key}
-            )
-
     async def _stop_task(self, task: _RunningTask) -> None:
         """Tear down: cancel the timers + consumer (awaited) and close the session."""
         task.cancelled = True
         self._cancel_idle(task)
-        self._cancel_distill(task)
         self._tasks.pop(task.thread_key, None)
         await self._cancel_consumer(task)
         await task.session.aclose()

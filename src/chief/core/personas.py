@@ -3,10 +3,9 @@
 ``build_system_prompt`` composes a session's system prompt from ``Soul.md`` (chief's
 identity), a tier-specific framing, and — for the owner — ``User.md`` plus the
 ``MEMORY.md`` index plus the memory-writing guidance block (when/where/how to
-persist durable facts). The prompt is fixed at session construction; a mid-session
-distill updates ``MEMORY.md`` for the *next* session, and chief can Write to
-``User.md`` or the ``facts/`` tree in the same session via its memory-confined Write
-tool.
+persist durable facts). The prompt is fixed at session construction; chief writes
+directly to ``User.md`` or the ``facts/`` tree in the same session via its
+memory-confined Write tool.
 
 Tier isolation is by construction (DESIGN): a guest prompt never carries the owner's
 ``User.md``, memory index, or memory-writing guidance, and guest sessions are wired

@@ -3,9 +3,8 @@
 Defined as a :class:`Protocol` so the markdown backend (M4) and a future semantic/graph
 backend (mem0, per DESIGN) are interchangeable without touching callers. Readers
 (:meth:`index`/:meth:`soul`/:meth:`user`/:meth:`list_facts`) are synchronous file reads
-used while assembling a system prompt; mutators (:meth:`write_fact`/:meth:`forget`/
-:meth:`purge_expired`/:meth:`ensure_scaffold`) are async because each commits through
-the versioner.
+used while assembling a system prompt; mutators (:meth:`forget`/:meth:`purge_expired`/
+:meth:`ensure_scaffold`) are async because each commits through the versioner.
 
 Namespaces partition memory by subject: ``"owner"`` for the owner's own facts and
 ``"contacts/<id>"`` for a guest's (the contact namespace is exercised in M6).
@@ -36,21 +35,6 @@ class Fact:
     created: str
 
 
-@dataclass(frozen=True)
-class FactDraft:
-    """A candidate fact proposed by distillation, before it is written.
-
-    The distiller decides *what* (slug/title/body/trust/expires); the caller supplies
-    namespace + provenance when it persists via :meth:`MemoryStore.write_fact`.
-    """
-
-    slug: str
-    title: str
-    body: str
-    trust: str = "medium"
-    expires: str | None = None
-
-
 class MemoryStore(Protocol):
     """Namespaced long-term memory (DESIGN: memory interface)."""
 
@@ -68,20 +52,6 @@ class MemoryStore(Protocol):
 
     def list_facts(self, namespace: str) -> list[Fact]:
         """Every fact in ``namespace`` (for ``/memory`` and inspection)."""
-        ...
-
-    async def write_fact(
-        self,
-        *,
-        namespace: str,
-        slug: str,
-        title: str,
-        body: str,
-        provenance: str,
-        trust: str,
-        expires: str | None = None,
-    ) -> Fact:
-        """Write (or overwrite on slug collision) a fact, reindex, and commit."""
         ...
 
     async def forget(self, namespace: str, query: str) -> list[Fact]:

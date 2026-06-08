@@ -1,6 +1,6 @@
 """Local git versioning for the memory dir (DESIGN: Soul.md/memory git-tracked).
 
-A :class:`Versioner` records one commit per logical write op so any change — a distilled
+A :class:`Versioner` records one commit per logical write op so any change — a written
 fact, a ``/forget``, a hand-edited ``Soul.md`` — is reversible (``git revert``). Two
 implementations:
 

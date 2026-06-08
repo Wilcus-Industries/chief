@@ -53,11 +53,9 @@ never_seed: []      # tools/commands hard-denied with no prompt
 approved_seed: []   # tools/commands pre-allowed with no prompt
 
 # Long-term memory (M4). Markdown facts + a MEMORY.md index loaded into every prompt;
-# chief reads fact files on demand (read-only, confined to memory_dir). A quiet task is
-# distilled into durable facts after distill_idle_seconds (set ~30 locally to test).
+# chief reads fact files on demand (read-only, confined to memory_dir) and writes memory
+# directly in-session via its Write tool.
 memory_dir: /memory          # persisted volume holding Soul/User/MEMORY + facts/
-distill_idle_seconds: 1200   # quiet window (~20m) before distilling a task's transcript
-distill_model: claude-sonnet-4-6  # owner model extracts facts from the transcript
 memory_git: true             # version every memory write op with local git
 git_author_name: chief
 git_author_email: chief@localhost
