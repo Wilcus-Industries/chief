@@ -34,6 +34,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chief"]
+# Include the Alembic config and migration scripts so they are bundled inside
+# the wheel (and thus present in the Docker image after `uv sync`). Without
+# this, migrate-on-start fails in the container because the files are absent.
+include = [
+    "src/chief/alembic.ini",
+    "src/chief/alembic/**",
+]
 
 [tool.ruff]
 target-version = "py312"

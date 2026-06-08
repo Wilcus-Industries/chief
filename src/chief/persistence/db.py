@@ -4,6 +4,7 @@ Single-node personal app: one sqlite file, async access via aiosqlite so DB call
 never block the event loop that drives the adapters and the SDK.
 """
 
+import importlib.resources
 from pathlib import Path
 
 from alembic import command
@@ -16,8 +17,16 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import NullPool
 
-# alembic.ini lives at the repo root, two levels above this file.
-_ALEMBIC_INI = Path(__file__).parent.parent.parent.parent / "alembic.ini"
+# alembic.ini is bundled as package data inside the chief package so it is
+# present in both the repo checkout (editable install) and the wheel-installed
+# Docker image (where the old __file__-relative path four levels up would have
+# landed in a site-packages ancestor, not /app).
+#
+# importlib.resources.files() returns a Traversable; we materialise it as a
+# plain Path so the rest of the code can use normal Path operations.
+_ALEMBIC_INI: Path = Path(
+    str(importlib.resources.files("chief").joinpath("alembic.ini"))
+)
 
 
 def create_engine(db_path: str) -> AsyncEngine:
