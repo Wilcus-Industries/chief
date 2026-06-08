@@ -250,7 +250,8 @@ def build_engine(
         ),
         default_skills=settings.default_skills,
         # Share the exact versioner the memory store uses so auto-commit and memory
-        # mutations go through the same git instance — no double-commit races (#22).
+        # mutations go through the same git instance. The versioner self-serializes
+        # all callers via its internal asyncio.Lock (#22 / #29).
         versioner=memory.versioner,
     )
 

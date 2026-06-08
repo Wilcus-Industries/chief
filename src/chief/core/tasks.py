@@ -359,8 +359,9 @@ class TaskManager:
         self._group_context_max = group_context_max_messages
         self._group_buffers: dict[str, deque[tuple[str, str]]] = {}
         # Versioner for memory auto-commit (#22): commit after every turn so the
-        # memory dir's git history tracks each session write. NullVersioner when
-        # unset — no commit overhead for tests or runs without memory git.
+        # memory dir's git history tracks each session write. The versioner
+        # self-serializes concurrent callers via its internal asyncio.Lock (#29).
+        # NullVersioner when unset — no commit overhead for tests / no-git runs.
         self._versioner: Versioner = (
             versioner if versioner is not None else NullVersioner()
         )
@@ -1068,9 +1069,9 @@ class TaskManager:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
                 await self._set_status(task, OPEN)
-                # Commit memory dir after the turn's writes settle (#22). The
-                # versioner skips empty commits, so no-op turns cost one git
-                # status check (< 1 ms) and produce no commit.
+                # Commit memory dir after the turn's writes settle (#22/#29). The
+                # versioner self-serializes concurrent callers; it also skips empty
+                # commits, so no-op turns cost one git status check (< 1 ms).
                 await self._versioner.commit("chief: memory auto-save")
                 # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
