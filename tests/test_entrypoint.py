@@ -4,6 +4,10 @@ Acceptance criteria from issue #4:
 - An upgrade failure causes the entrypoint to exit non-zero (sys.exit(1)).
 - The app is never started when the migration fails.
 - A clear error is logged before exit.
+
+Acceptance criteria from issue #8 (smoke test invariants):
+- The "migration complete — starting app" log line appears on a successful run,
+  proving ordering: migrate before exec.
 """
 
 import sys
@@ -28,6 +32,44 @@ def test_migrate_then_exec_calls_run_migrations(tmp_path: Path) -> None:
 
     mock_migrate.assert_called_once_with(db_path)
     mock_execv.assert_called_once_with(app_argv[0], app_argv)
+
+
+def test_migrate_then_exec_logs_completion_before_exec(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The 'migration complete' line must be logged before os.execv is called.
+
+    This is the unit-level proof of the migrate-before-app ordering invariant
+    asserted by the container smoke test (issue #8).
+
+    We use capsys rather than caplog because migrate_then_exec calls
+    configure_logging() after the migration to restore the JSON/stdout handler
+    (alembic's fileConfig resets the root logger during _run_migrations).  That
+    call clears pytest's caplog handler, so the completion line is captured by
+    capsys instead.
+    """
+    import logging
+
+    db_path = str(tmp_path / "chief.db")
+    app_argv = [sys.executable, "-m", "chief.app"]
+    call_order: list[str] = []
+
+    def fake_execv(path: str, argv: list[str]) -> None:
+        call_order.append("execv")
+
+    logging.getLogger().setLevel(logging.INFO)
+    with (
+        patch.object(entrypoint, "_run_migrations"),
+        patch("os.execv", side_effect=fake_execv),
+    ):
+        entrypoint.migrate_then_exec(db_path, app_argv)
+
+    captured = capsys.readouterr()
+    assert "migration complete" in captured.out, (
+        "Expected 'migration complete' in stdout before exec; "
+        f"got stdout: {captured.out!r}"
+    )
+    assert call_order == ["execv"], f"execv not called; order: {call_order}"
 
 
 def test_migrate_then_exec_exits_nonzero_on_upgrade_failure(
