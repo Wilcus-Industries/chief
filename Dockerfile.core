@@ -37,4 +37,10 @@ RUN set -e; \
 # Put the project venv on PATH so the CMD runs without re-resolving at startup.
 ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["python", "-m", "chief.app"]
+# Migrate-on-start (M13): run alembic upgrade head before the app boots.
+# chief.entrypoint is fail-loud: non-zero exit + clear log on migration failure,
+# so the app never starts on a half-migrated schema.
+# DB_PATH mirrors the sqlite-data volume mount in docker-compose.yml.
+ENV DB_PATH="/data/chief.db"
+
+ENTRYPOINT ["python", "-m", "chief.entrypoint"]
