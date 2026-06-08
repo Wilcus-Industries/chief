@@ -393,6 +393,40 @@ async def test_write_guest_no_roots_denies(
     assert verdict.decision is GateDecision.DENY
 
 
+async def test_write_into_memory_no_workspace_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Production default: workspace_enabled=False → workspace_dir is None.
+    # Memory writes must ALLOW on this path so fact persistence works out of the box.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/memory/facts/x.md", "content": "x"},
+        store,
+        memory_dir="/memory",
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_write_outside_memory_no_workspace_denies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Same production default (memory only, no workspace): a write outside /memory
+    # must still DENY — the gate must not open up the whole filesystem.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "Write",
+        {"file_path": "/tmp/anything.md", "content": "x"},
+        store,
+        memory_dir="/memory",
+    )
+
+    assert verdict.decision is GateDecision.DENY
+
+
 async def test_never_wins_over_memory_write(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
