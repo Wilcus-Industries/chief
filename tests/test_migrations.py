@@ -10,8 +10,15 @@ Acceptance criteria from issue #10:
 
 Acceptance criteria from issue #11:
 - ``_run_migrations`` works from an arbitrary CWD (regression guard).
+
+Acceptance criteria from issue #13:
+- ``_ALEMBIC_INI`` resolves to an existing file from the package-install location,
+  not just from CWD=repo-root (guards against Dockerfile.core missing the alembic
+  config/versions in the built image).
+- The ``alembic/`` script directory resolved by ``_run_migrations`` also exists.
 """
 
+import importlib.resources
 import logging
 import os
 import tempfile
@@ -25,6 +32,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import create_engine, text
 
+from chief.persistence.db import _ALEMBIC_INI as _PKG_ALEMBIC_INI
 from chief.persistence.db import _run_migrations
 from chief.persistence.models import Base
 
@@ -138,3 +146,56 @@ def test_run_migrations_succeeds_from_arbitrary_cwd() -> None:
         assert set(Base.metadata.tables.keys()) <= tables
     finally:
         os.unlink(db_path)
+
+
+def test_alembic_ini_resolves_from_package_location() -> None:
+    """_ALEMBIC_INI must exist regardless of the Python install layout.
+
+    Regression guard for issue #13: the old path used ``Path(__file__).parents[3]``
+    which resolves correctly in a repo checkout (editable install) but lands in
+    a wrong directory (e.g. site-packages ancestor) when installed as a wheel.
+    The fix bundles alembic.ini inside the chief package so importlib.resources
+    always finds it.
+    """
+    assert _PKG_ALEMBIC_INI.exists(), (
+        f"_ALEMBIC_INI={_PKG_ALEMBIC_INI!r} does not exist. "
+        "alembic.ini must be bundled as package data so it is found in both "
+        "editable (dev) and wheel (Docker) installs."
+    )
+
+
+def test_alembic_script_dir_resolves_from_package_location() -> None:
+    """The alembic/ script directory must exist next to _ALEMBIC_INI.
+
+    Regression guard for issue #13: the migrations directory must be co-located
+    with alembic.ini so _run_migrations can locate the version scripts in the
+    built Docker image (wheel install).
+    """
+    script_dir = _PKG_ALEMBIC_INI.parent / "alembic"
+    assert script_dir.is_dir(), (
+        f"alembic/ script dir={script_dir!r} does not exist. "
+        "The alembic/ directory must be bundled as package data alongside "
+        "alembic.ini so migrate-on-start works in the Docker image."
+    )
+    # At minimum the versions/ subdir and env.py must be present.
+    assert (script_dir / "versions").is_dir(), (
+        f"alembic/versions/ not found under {script_dir!r}"
+    )
+    assert (script_dir / "env.py").exists(), (
+        f"alembic/env.py not found under {script_dir!r}"
+    )
+
+
+def test_alembic_resources_accessible_via_importlib() -> None:
+    """importlib.resources can locate alembic.ini inside the chief package.
+
+    Asserts the package data is properly declared in pyproject.toml so it
+    survives into a wheel (and thus into the Docker image) without needing
+    an explicit COPY step.
+    """
+    ref = importlib.resources.files("chief").joinpath("alembic.ini")
+    # traversable.is_file() works for both real files and zip-embedded resources
+    assert ref.is_file(), (
+        "chief/alembic.ini is not accessible via importlib.resources. "
+        "Add it to the hatchling include list in pyproject.toml."
+    )
