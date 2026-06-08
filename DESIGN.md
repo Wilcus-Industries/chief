@@ -294,11 +294,11 @@ Decision order for a call:
 1. **NEVER list** → hard refuse, no prompt, no override (e.g. `rm -rf /`, disk wipes,
    curl-pipe-sh, reading secret/credential paths).
 2. **Read-only / safe** → **allow**, no prompt. Reading files, web search/fetch (GET),
-   calendar free/busy, listing, and **writes inside the scratch workspace**. Low blast radius.
+   calendar free/busy, listing, and **writes inside memory or the scratch workspace**. Low blast radius.
 3. **APPROVED allowlist** → **allow**, no prompt. Specific effectful actions you've blessed
    (e.g. `git status`, a named script, email to a known contact).
 4. **Everything else effectful** → **ASK** (the approval flow). Shell not on the allowlist,
-   send-email, deletes/overwrites outside the workspace, web POST/forms, calendar/Drive writes.
+   send-email, deletes/overwrites outside memory ∪ workspace, web POST/forms, calendar/Drive writes.
 
 Only the **owner** triggers effectful tools at all; guest sessions don't have them wired in.
 
@@ -591,7 +591,7 @@ card:
   SDK built-ins (WebSearch/WebFetch). *Live (M7).*
 - **Shell/code** — sandbox container, permission-gated (default-ask per command). *Built M7,
   opt-in (`shell_enabled`).*
-- **File workspace** — scratch dir (Read/Write/Edit), gate-confined to the workspace. *Built
+- **File workspace** — scratch dir (Read/Write/Edit), gate-confined to memory ∪ workspace. *Built
   M7, opt-in (`workspace_enabled`).*
 - **Memory, scheduler/monitors** — owner-tier management tools.
 
@@ -831,7 +831,7 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (`src/chief/sandbox/shell_server.py` ← `tools/shell.py`). The owner bash tool is
   **default-ask gated** — every command routes through the approval card unless pre-blessed.
   **File workspace** = a `/workspace` volume shared core↔sandbox; the gate widens Read/Glob/
-  Grep to memory ∪ workspace and hard-confines Write/Edit to the workspace (`gate/gate.py`).
+  Grep and Write/Edit to memory ∪ workspace (`gate/gate.py`).
   **Web** = the SDK built-ins WebSearch + WebFetch (GET-only), wired owner-only and un-gated
   (read-only). Shell + workspace ship **opt-in** (`shell_enabled`/`workspace_enabled` default
   off, mirroring the Google profile); web is live.

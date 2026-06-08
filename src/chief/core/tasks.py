@@ -107,7 +107,8 @@ SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
 #: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
-#: ``allowed_tools`` but confined to the workspace by the gate (writes elsewhere DENY).
+#: ``allowed_tools`` but confined to memory ∪ workspace by the gate (writes elsewhere
+#: DENY).
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
 #: gate's hard DENY) — they run inside core where the Max token lives, so the model can
@@ -644,7 +645,7 @@ class TaskManager:
         skills_on = self._skills_enabled and self._skills_plugin_path is not None
         allowed = list(MEMORY_TOOLS) + list(WEB_META_TOOLS)
         if workspace_on:
-            # Write/Edit join the allow-list; the gate confines them to /workspace.
+            # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
             allowed += list(WORKSPACE_TOOLS)
         for svc in services:
             # Reads only — writes stay off the allow-list so they reach approval.
