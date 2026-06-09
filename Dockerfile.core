@@ -47,6 +47,11 @@ RUN useradd --create-home --uid 1000 chief \
 ENV PATH="/app/.venv/bin:$PATH"
 ENV HOME="/home/chief"
 
+# Container stdout is a pipe, so Python block-buffers it and the JSON log
+# stream stalls in the 8KB buffer (invisible to `docker logs`) until it fills.
+# Unbuffered stdout makes every log line flush immediately.
+ENV PYTHONUNBUFFERED=1
+
 # Migrate-on-start (M13): run alembic upgrade head before the app boots.
 # chief.entrypoint is fail-loud: non-zero exit + clear log on migration failure,
 # so the app never starts on a half-migrated schema.
