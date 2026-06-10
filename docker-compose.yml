@@ -106,11 +106,20 @@ services:
       # never writes to this volume; playwright is the sole writer.
       - screenshots:/screenshots:ro
       # Google account registry (issue #54): core scans /token for google_token*.json
-      # files to populate the list_accounts tool. Read-only — mcp-sheets is the sole
-      # writer of the shared token; core only reads it to discover registered accounts.
-      # Sourced from the dedicated google_tokens/ subdir (issue #58: single canonical
-      # host path shared by all five token-consuming services).
-      - ./secrets/google_tokens/google_token.json:/token/google_token.json:ro
+      # files to populate list_accounts / set_account. Sourced from the dedicated
+      # google_tokens/ subdir (issue #58: single canonical host path shared by all five
+      # token-consuming services).
+      #
+      # Read-WRITE (issue #53): the runtime add-account flow (chat consent) writes the
+      # newly-minted token here as google_token_<email-slug>.json, picked up by the
+      # per-request re-scan with no restart. The dir (not the single legacy file) is
+      # mounted so new files appear; host dir must be writable by uid 1000 (see
+      # secrets/README.md chown step).
+      - ./secrets/google_tokens:/token
+      # The shared Desktop-app OAuth client (issue #53): add_account reads client_id /
+      # client_secret from it to build the consent URL and exchange the code. Read-only;
+      # named so it never collides with the google_token*.json scan.
+      - ./secrets/google_oauth_client.json:/token/google_oauth_client.json:ro
     tmpfs:
       # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
       # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.

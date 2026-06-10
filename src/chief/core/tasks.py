@@ -83,6 +83,7 @@ from ..tools.google.account_selection import (
     ACCOUNT_SELECTION_GUIDANCE,
     extract_account_hint,
 )
+from ..tools.google.add_account_service import AddAccountService
 from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
 from ..tools.guest import GuestAdminService, GuestService
@@ -308,6 +309,7 @@ class TaskManager:
         guest_admin_service: GuestAdminService | None = None,
         list_accounts_service: ListAccountsService | None = None,
         set_account_service: SetAccountService | None = None,
+        add_account_service: AddAccountService | None = None,
         schedule_service: ScheduleService | None = None,
         schedule_bash_service: ScheduleBashService | None = None,
         budget: BudgetProto | None = None,
@@ -355,6 +357,7 @@ class TaskManager:
         self._guest_admin_service = guest_admin_service
         self._list_accounts_service = list_accounts_service
         self._set_account_service = set_account_service
+        self._add_account_service = add_account_service
         self._schedule_service = schedule_service
         self._schedule_bash_service = schedule_bash_service
         self._budget = budget
@@ -729,6 +732,7 @@ class TaskManager:
         admin = self._guest_admin_service
         list_accounts = self._list_accounts_service
         set_account = self._set_account_service
+        add_account = self._add_account_service
         # Packaged skills are owner-only (M10): a guest session never reaches here, so
         # the plugin + enable-list ride only the owner's options. Both guard on a
         # configured plugin path so an enabled-but-unwired flag stays inert (no error).
@@ -749,6 +753,10 @@ class TaskManager:
         if set_account is not None:
             # Owner-initiated — pre-approved (no card); guests never see this service.
             allowed.append(set_account.tool_name)
+        if add_account is not None:
+            # Owner-initiated runtime account add — pre-approved (no card); guests
+            # never see this service.
+            allowed.append(add_account.tool_name)
         schedule = self._schedule_service
         if schedule is not None:
             # The benign schedule tools (message/wakeup + list/cancel) only mint safe
@@ -811,6 +819,9 @@ class TaskManager:
             mcp_servers[set_account.server_name] = set_account.server_config(
                 thread_key=thread_key
             )
+        if add_account is not None:
+            # Thread-agnostic: writes a global token file the registry re-scans.
+            mcp_servers[add_account.server_name] = add_account.server_config()
         if schedule is not None:
             mcp_servers[schedule.server_name] = schedule.server_config()
         bash_schedule = self._schedule_bash_service
@@ -974,6 +985,10 @@ class TaskManager:
         # ALLOW with no card. It mutates only per-thread DB state the owner controls.
         if tier == "owner" and self._set_account_service is not None:
             extra_read_only = extra_read_only | {self._set_account_service.tool_name}
+        # add_account is owner-initiated (runtime account registration via consent) →
+        # ALLOW with no card. Guests never receive it.
+        if tier == "owner" and self._add_account_service is not None:
+            extra_read_only = extra_read_only | {self._add_account_service.tool_name}
         # Owner work approves in-thread (a group DMs the owner); a guest-originated
         # approval routes to the Front Desk. A guest with no route is a hard error —
         # never silently self-route a card back into the guest's own DM.

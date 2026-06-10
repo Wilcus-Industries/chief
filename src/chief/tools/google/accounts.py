@@ -18,6 +18,7 @@ token exchange + userinfo call; otherwise the label falls back to the filename s
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,26 @@ def _read_email(token_path: Path) -> str | None:
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("failed to read token %s: %s", token_path, exc)
         return None
+
+
+def _slugify_email(email: str) -> str:
+    """Filesystem-safe slug for an email, used in ``google_token_<slug>.json``.
+
+    Lowercase, non-alphanumerics collapsed to ``_`` (so ``work@corp.com`` →
+    ``work_corp_com``).  The label shown to the owner stays the email — this slug
+    only names the on-disk token file.
+    """
+    return re.sub(r"[^a-z0-9]+", "_", email.strip().lower()).strip("_") or "account"
+
+
+def token_path_for(secrets_dir: Path, email: str) -> Path:
+    """Path for a runtime-added account's token file, named by the email slug.
+
+    Owns the ``google_token_<slug>.json`` convention so the add-account flow and the
+    discovery scan agree on naming. Never returns the legacy ``google_token.json``
+    name, so a new account can't clobber the backward-compat primary token.
+    """
+    return secrets_dir / f"{_TOKEN_PREFIX}_{_slugify_email(email)}.json"
 
 
 def _slug_from_name(filename: str) -> str:
