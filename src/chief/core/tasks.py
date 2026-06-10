@@ -73,6 +73,7 @@ from ..persistence.tasks import (
     set_status,
     set_task_model,
 )
+from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.google import GoogleService
 from ..tools.guest import GuestAdminService, GuestService
 from ..tools.schedule import ScheduleBashService, ScheduleService
@@ -304,6 +305,7 @@ class TaskManager:
         default_skills: tuple[str, ...] = (),
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
+        screenshots_dir: str | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -349,6 +351,9 @@ class TaskManager:
         self._skills_enabled = skills_enabled
         self._skills_plugin_path = skills_plugin_path
         self._default_skills = default_skills
+        # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
+        # screenshots from this dir (shared volume) and delivers them via send_file.
+        self._screenshots_dir = screenshots_dir
         #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
         #: next time the budget reports a non-paused mode, so each pause acks once.
         self._paused_ack_sent = False
@@ -872,6 +877,16 @@ class TaskManager:
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "PreToolUse": [HookMatcher(hooks=[hook])]
         }
+        # Screenshot delivery: owner sessions with a configured screenshots dir get
+        # a PostToolUse hook that reads the saved file and delivers it via send_file.
+        # Guest sessions never have browser tools — owner-only by construction.
+        if tier == "owner" and self._screenshots_dir is not None:
+            screenshot_hook = build_screenshot_hook(
+                thread_key=thread_key,
+                io=self._io,
+                screenshots_dir=self._screenshots_dir,
+            )
+            hooks["PostToolUse"] = [HookMatcher(hooks=[screenshot_hook])]
         return can_use_tool, hooks
 
     async def _submit(self, task: _RunningTask, turn: Turn) -> None:
