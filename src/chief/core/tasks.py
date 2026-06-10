@@ -76,6 +76,7 @@ from ..persistence.tasks import (
 )
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
+from ..tools.gmail import mcp as gmail_mcp
 from ..tools.google import GoogleService
 from ..tools.google.account_selection import (
     ACCOUNT_SELECTION_GUIDANCE,
@@ -870,17 +871,18 @@ class TaskManager:
     def _build_services_with_account(
         self, active_account_label: str | None
     ) -> tuple[GoogleService, ...]:
-        """Return the Google services tuple, with the Calendar service stamped with
-        an ``X-Account-Label`` header when a per-thread account is active (issue #46).
+        """Return the Google services tuple with account headers stamped where needed.
 
-        All non-calendar services are passed through unchanged.  The Calendar
-        service is rebuilt (via :func:`~chief.tools.calendar.mcp.service`) with a
-        per-session headers dict so every HTTP call the SDK sends to ``mcp-calendar``
-        carries the label — the server uses it to select the right credential.
+        When a per-thread account is active (issue #46/#48), the Calendar and
+        chief-owned Gmail services are rebuilt with an ``X-Account-Label`` header so
+        each HTTP call the SDK sends carries the label — those servers use it to select
+        the right per-account credential.
+
+        All other services (3rd-party gmail, drive, sheets) pass through unchanged.
 
         When ``active_account_label`` is ``None`` (no binding set for the thread),
-        the calendar service config carries no header and the server falls back to
-        the default (first / single-account) credential, keeping backward compat.
+        no headers are injected and all servers fall back to the default (first /
+        single-account) credential, keeping backward compat.
         """
         if not active_account_label:
             return self._google_services
@@ -889,9 +891,10 @@ class TaskManager:
         for svc in self._google_services:
             if svc.name == "calendar":
                 # Rebuild the calendar service with the active account header.
-                result.append(
-                    calendar_mcp.service(svc.url, headers=headers)
-                )
+                result.append(calendar_mcp.service(svc.url, headers=headers))
+            elif svc.name == "gmail_chief":
+                # Rebuild the chief-owned Gmail service with the active account header.
+                result.append(gmail_mcp.chief_service(svc.url, headers=headers))
             else:
                 result.append(svc)
         return tuple(result)

@@ -289,6 +289,46 @@ services:
       retries: 3
       start_period: 20s
 
+  # chief's OWN Google Gmail MCP server (docker/mcp-gmail-chief, issue #48). FastMCP,
+  # streamable-HTTP at http://mcp-gmail-chief:8005/mcp. Multi-account: scans
+  # TOKEN_DIR=/token for all google_token*.json files; selects per request via
+  # X-Account-Label header (same pattern as mcp-calendar). Runs ALONGSIDE mcp-gmail
+  # during the transition; cutover happens in issue #52.
+  #
+  # Token directory mount (issue #48, mirrors #57/#58 for calendar):
+  #   TOKEN_DIR=/token is scanned for all google_token*.json files.
+  #   Only ./secrets/google_tokens/ is mounted — never the whole ./secrets dir.
+  mcp-gmail-chief:
+    profiles: ["google"]
+    build:
+      context: ./docker/mcp-gmail-chief
+    restart: unless-stopped
+    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    networks:
+      - mcp-internal
+    environment:
+      PORT: 8005
+      GOOGLE_TOKEN_PATH: /token/google_token.json
+      TOKEN_DIR: /token
+      GMAIL_SIGNATURE: ${GMAIL_SIGNATURE:-}
+      OWNER_NAME: ${OWNER_NAME:-}
+    volumes:
+      # Dedicated tokens subdir mounted read-only (mirrors mcp-calendar, issue #57).
+      # Only google_token*.json files live here — unrelated secrets never exposed.
+      - ./secrets/google_tokens:/token:ro
+    tmpfs:
+      - /tmp:uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   # Playwright browser automation (docker/mcp-playwright). Stock @playwright/mcp 0.0.76,
   # headless Chromium with --no-sandbox, streamable HTTP at
   # http://mcp-playwright:3000/mcp on the internal compose network (no host ports).
