@@ -83,12 +83,12 @@ owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America
 # gives the owner a bash tool that forwards to the sandbox; every command is approval-gated
 # unless pre-blessed. workspace_enabled adds Write/Edit, gate-confined to /workspace (a
 # volume shared with the sandbox). The sandbox holds NO secrets and a restricted FS.
-shell_enabled: false
-workspace_enabled: false
+shell_enabled: true
+workspace_enabled: true
 workspace_dir: /workspace            # scratch volume, mounted rw in both core and sandbox
 sandbox_host: sandbox                # internal compose service name (no host ports)
 sandbox_port: 8765
-shell_timeout_seconds: 120           # per-command wall clock; a hang is SIGINT'd + respawned
+shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 
 # Scheduler (M9a, opt-in). With scheduler_enabled on, a long-running tick fires the

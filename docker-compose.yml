@@ -256,7 +256,7 @@ services:
     environment:
       SANDBOX_PORT: 8765
       # Mirror config.yaml's shell limits so the sandbox enforces the same bounds.
-      SHELL_TIMEOUT_SECONDS: ${SHELL_TIMEOUT_SECONDS:-120}
+      SHELL_TIMEOUT_SECONDS: ${SHELL_TIMEOUT_SECONDS:-900}
       SHELL_OUTPUT_LIMIT: ${SHELL_OUTPUT_LIMIT:-64000}
     volumes:
       # The ONLY writable persistent mount — shared rw with core.
