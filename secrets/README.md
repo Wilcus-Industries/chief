@@ -2,7 +2,28 @@
 
 Drop one secret per file here (no extension, no trailing newline needed). These are
 mounted at `/run/secrets/<name>` and read by `config.py`. **Never commit the real
-files** — `.gitignore` keeps everything in this directory except this README out of git.
+files** — `.gitignore` keeps everything in this directory except this README and the
+`google_tokens/` subdirectory placeholder out of git.
+
+## Directory layout
+
+```
+secrets/
+├── README.md                          ← this file (tracked)
+├── claude_code_oauth_token            ← ignored, never commit
+├── discord_bot_token                  ← ignored, never commit
+├── google_oauth_client.json           ← ignored, never commit
+├── telegram_bot_token                 ← ignored, never commit
+└── google_tokens/                     ← dedicated Google account tokens subdir
+    ├── .gitkeep                       ← tracked (keeps the dir in git)
+    ├── google_token.json              ← ignored, never commit (primary account)
+    └── google_token_<label>.json      ← ignored, never commit (additional accounts)
+```
+
+Google account tokens live exclusively in `google_tokens/` — **not** directly under
+`secrets/`.  This lets `mcp-calendar` mount only that subdirectory at `/token:ro`,
+keeping `claude_code_oauth_token`, `discord_bot_token`, `google_oauth_client.json`, and
+`telegram_bot_token` out of that container's filesystem (issue #57).
 
 ## Host file permissions
 
@@ -11,9 +32,9 @@ root when building the secret tmpfs, but keeping them `0600` prevents other host
 processes or users from reading them:
 
 ```sh
-chmod 0600 secrets/telegram_bot_token secrets/discord_bot_token \
-           secrets/claude_code_oauth_token secrets/google_oauth_client.json \
-           secrets/google_token.json
+chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
+           secrets/google_oauth_client.json secrets/telegram_bot_token \
+           secrets/google_tokens/google_token.json
 ```
 
 ## Secret mounts are read-only
@@ -53,7 +74,7 @@ will start cleanly as uid 1000.
 | `discord_bot_token` | Bot token from the Discord Developer Portal (Bot → Reset Token) |
 | `claude_code_oauth_token` | Output of `claude setup-token` (1-year Max OAuth token) |
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
-| `google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
+| `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 
 ## Chat platforms (Telegram and/or Discord)
 
@@ -75,10 +96,13 @@ API instead of the Max subscription. The app refuses to start if it is set.
 
 ## Google OAuth (M5/M8) — Calendar + Drive + Sheets + Gmail
 
-`google_token.json` is **one** refresh token minted **once, locally** (no callback server
-on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`, `spreadsheets`,
-`gmail.modify`). It is bind-mounted into every Google MCP container — `mcp-calendar`,
-`mcp-drive`, `mcp-sheets`, `mcp-gmail` (the `google` compose profile). Producing it:
+`google_tokens/google_token.json` is **one** refresh token minted **once, locally** (no
+callback server on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`,
+`spreadsheets`, `gmail.modify`). It is bind-mounted into every Google MCP container —
+`mcp-calendar`, `mcp-drive`, `mcp-sheets`, `mcp-gmail` (the `google` compose profile).
+`mcp-calendar` mounts the entire `google_tokens/` subdirectory at `/token:ro` so
+additional per-account tokens can be added there without changing the compose file.
+Producing the token:
 
 1. **Project** — <https://console.cloud.google.com> → create/pick a project.
 2. **Enable APIs** — APIs & Services → Library → **Enable** each of: "Google Calendar
@@ -91,7 +115,8 @@ on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`, `spreadsh
 5. **Place it** — save that download as `secrets/google_oauth_client.json` (this file).
 6. **Mint the token** — `uv sync` (pulls the host-only `google-auth-oauthlib`), then
    `python -m chief.tools.google.auth`. A browser opens → grant access to all three
-   scopes → the token is written to `secrets/google_token.json`.
+   scopes → the token is written to `secrets/google_token.json`.  Move (or copy) it to
+   `secrets/google_tokens/google_token.json` so `mcp-calendar` can find it.
 
 The bind-mount must stay writable for the **mcp-sheets** container (the sole writer — it
 persists the refreshed token; calendar + drive refresh in memory only, and **mcp-gmail**
