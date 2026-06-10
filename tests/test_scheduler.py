@@ -10,18 +10,23 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.core import classify
 from chief.core.scheduler import Scheduler
 from chief.persistence.schedules import (
     ACTION_BASH,
     ACTION_MESSAGE,
     ACTION_WAKEUP,
+    KIND_MONITOR,
     KIND_ONCE,
     KIND_RECURRING,
+    PREDICATE_AGENT,
     create_schedule,
     get_schedule,
 )
+from chief.tools.browser import mcp as browser_mcp
 from chief.tools.shell import ShellService
 
 NY = ZoneInfo("America/New_York")
@@ -81,6 +86,7 @@ def _make(
     quiet_end: str = "07:00",
     heartbeat_url: str | None = None,
     http: Any = None,
+    google_services: Any = (),
 ) -> Scheduler:
     return Scheduler(
         session_factory=session_factory,
@@ -97,6 +103,7 @@ def _make(
         heartbeat_url=heartbeat_url,
         http=http,
         now=lambda: now,
+        google_services=google_services,
     )
 
 
@@ -422,3 +429,116 @@ async def test_heartbeat_once_swallows_ping_failure(
 
     sched = _make(session_factory, heartbeat_url="http://hc/ping", http=BoomHttp())
     await sched.heartbeat_once()  # a failed ping is logged, never raised
+
+
+# ---- predicate evaluator: browser read-tool surface -------------------------
+
+
+async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the browser service is in google_services, READ_TOOLS join allowed_tools.
+
+    The predicate evaluator assembles the allowed surface from _WEB_READ_TOOLS plus
+    each GoogleService's read_tools. Passing the browser service means browser
+    READ_TOOLS must appear in allowed_tools and WRITE_TOOLS must be absent (the
+    predicate surface bypasses the gate — reads only).
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_ask_condition(
+        question: str,
+        *,
+        model: str,
+        allowed_tools: list[str],
+        mcp_servers: dict[str, Any] | None = None,
+        max_turns: int = 4,
+    ) -> bool:
+        captured["allowed_tools"] = list(allowed_tools)
+        captured["mcp_servers"] = dict(mcp_servers or {})
+        return True
+
+    monkeypatch.setattr(classify, "ask_condition", fake_ask_condition)
+
+    browser_service = browser_mcp.service("http://mcp-playwright:3000/mcp")
+    async with session_factory() as s:
+        await create_schedule(
+            s,
+            kind=KIND_MONITOR,
+            spec="* * * * *",
+            action="notify",
+            action_type=ACTION_MESSAGE,
+            next_run=EPOCH,
+            predicate="is the dashboard green?",
+            predicate_type=PREDICATE_AGENT,
+        )
+    await _make(
+        session_factory, google_services=(browser_service,)
+    ).tick()
+
+    assert "allowed_tools" in captured, "ask_condition was never called"
+    allowed = set(captured["allowed_tools"])
+
+    # All browser READ_TOOLS must be present.
+    for tool in browser_mcp.READ_TOOLS:
+        assert tool in allowed, (
+            f"browser read tool {tool!r} missing from predicate allowed_tools"
+        )
+
+    # No browser WRITE_TOOLS may appear (predicate surface bypasses the gate).
+    for tool in browser_mcp.WRITE_TOOLS:
+        assert tool not in allowed, (
+            f"browser write tool {tool!r} must NOT be in predicate allowed_tools"
+        )
+
+    # The playwright MCP server must be registered.
+    assert "playwright" in captured["mcp_servers"]
+
+
+async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no browser service is wired, no browser tools appear in allowed_tools."""
+    captured: dict[str, Any] = {}
+
+    async def fake_ask_condition(
+        question: str,
+        *,
+        model: str,
+        allowed_tools: list[str],
+        mcp_servers: dict[str, Any] | None = None,
+        max_turns: int = 4,
+    ) -> bool:
+        captured["allowed_tools"] = list(allowed_tools)
+        captured["mcp_servers"] = dict(mcp_servers or {})
+        return False
+
+    monkeypatch.setattr(classify, "ask_condition", fake_ask_condition)
+
+    # No google_services → no browser service → no browser tools.
+    async with session_factory() as s:
+        await create_schedule(
+            s,
+            kind=KIND_MONITOR,
+            spec="* * * * *",
+            action="notify",
+            action_type=ACTION_MESSAGE,
+            next_run=EPOCH,
+            predicate="is the dashboard green?",
+            predicate_type=PREDICATE_AGENT,
+        )
+    await _make(session_factory, google_services=()).tick()
+
+    assert "allowed_tools" in captured, "ask_condition was never called"
+    allowed = set(captured["allowed_tools"])
+
+    all_browser_tools = set(browser_mcp.READ_TOOLS) | set(browser_mcp.WRITE_TOOLS)
+    for tool in all_browser_tools:
+        assert tool not in allowed, (
+            f"browser tool {tool!r} leaked into predicate surface when disabled"
+        )
+
+    # No playwright MCP server when browser is disabled.
+    assert "playwright" not in captured.get("mcp_servers", {})
