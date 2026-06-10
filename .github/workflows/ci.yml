@@ -189,13 +189,15 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # --profile google: config.yaml enables calendar/sheets/gmail, so
-          # their MCP sidecars must come up alongside core.
-          # --profile sandbox: config.yaml enables shell/workspace, whose bash+Write
-          # tools forward to the sandbox container — it must come up too.
+          # Compose profiles are NOT hardcoded here — they live in the VPS's
+          # gitignored .env as COMPOSE_PROFILES (e.g. `google,sandbox,playwright`),
+          # which `docker compose` reads natively for profile activation. That keeps
+          # the enabled sidecar set in lockstep with the same .env that carries the
+          # feature flags, so toggling a feature (PLAYWRIGHT_ENABLED, etc.) is a
+          # one-file change on the box — no CI edit + redeploy round-trip.
           script: |
             set -e
             cd "${{ vars.DEPLOY_DIR }}"
             git pull --ff-only
             git submodule update --init --recursive
-            docker compose --profile google --profile sandbox up -d --build
+            docker compose up -d --build
