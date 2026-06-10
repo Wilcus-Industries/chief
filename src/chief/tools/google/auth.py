@@ -3,9 +3,11 @@
 The only interactive piece of the Google integration: the operator runs this once on
 their dev machine (``python -m chief.tools.google.auth``), completes the loopback
 consent in a browser, and gets a **google-auth Python credential** written to
-``./secrets/google_token.json``. That single token is bind-mounted into all four Google
-MCP containers -- so the VPS never runs a consent callback server (DESIGN: "run the
-consent dance once locally, mount the resulting refresh token -- no VPS callback").
+``./secrets/google_tokens/google_token.json``. That single token is bind-mounted into
+all five Google-consuming containers (core, mcp-calendar, mcp-drive, mcp-sheets,
+mcp-gmail) from the same canonical subdirectory -- so the VPS never runs a consent
+callback server (DESIGN: "run the consent dance once locally, mount the resulting
+refresh token -- no VPS callback"). No manual move/copy step is required after minting.
 
 The output is ``Credentials.to_json()`` (the native google-auth shape: ``refresh_token``
 / ``token`` / ``scopes`` / ``token_uri`` / ``client_id`` / ``client_secret``), which
@@ -38,9 +40,11 @@ SCOPES: tuple[str, ...] = (
 )
 
 #: Where the operator drops the Google Cloud "Desktop app" OAuth client, and where the
-#: minted token lands -- both under ``./secrets/`` so docker-compose mounts them.
+#: minted token lands.  ``DEFAULT_TOKEN_PATH`` writes directly into the canonical
+#: ``secrets/google_tokens/`` subdirectory so docker-compose can bind-mount it
+#: immediately — no manual move/copy step required (issue #58).
 DEFAULT_CLIENT_PATH = Path("secrets/google_oauth_client.json")
-DEFAULT_TOKEN_PATH = Path("secrets/google_token.json")
+DEFAULT_TOKEN_PATH = Path("secrets/google_tokens/google_token.json")
 
 #: Google userinfo endpoint -- returns ``email`` (and profile data) for an access token.
 _USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo"
@@ -199,8 +203,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(
-        f"Wrote {out}. docker-compose bind-mounts it into the mcp-calendar, mcp-drive, "
-        "mcp-sheets, and mcp-gmail containers as their shared token store."
+        f"Wrote {out}. docker-compose bind-mounts it (from secrets/google_tokens/)"
+        " into core, mcp-calendar, mcp-drive, mcp-sheets, and mcp-gmail."
     )
     return 0
 

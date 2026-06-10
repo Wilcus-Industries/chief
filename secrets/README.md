@@ -21,9 +21,11 @@ secrets/
 ```
 
 Google account tokens live exclusively in `google_tokens/` — **not** directly under
-`secrets/`.  This lets `mcp-calendar` mount only that subdirectory at `/token:ro`,
-keeping `claude_code_oauth_token`, `discord_bot_token`, `google_oauth_client.json`, and
-`telegram_bot_token` out of that container's filesystem (issue #57).
+`secrets/`.  All five Google-consuming services (`core`, `mcp-calendar`, `mcp-drive`,
+`mcp-sheets`, `mcp-gmail`) source their token from this single subdirectory (issue #58),
+which lets each container mount only the tokens it needs and keeps
+`claude_code_oauth_token`, `discord_bot_token`, `google_oauth_client.json`, and
+`telegram_bot_token` out of those containers (issue #57).
 
 ## Host file permissions
 
@@ -98,10 +100,16 @@ API instead of the Max subscription. The app refuses to start if it is set.
 
 `google_tokens/google_token.json` is **one** refresh token minted **once, locally** (no
 callback server on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`,
-`spreadsheets`, `gmail.modify`). It is bind-mounted into every Google MCP container —
-`mcp-calendar`, `mcp-drive`, `mcp-sheets`, `mcp-gmail` (the `google` compose profile).
-`mcp-calendar` mounts the entire `google_tokens/` subdirectory at `/token:ro` so
-additional per-account tokens can be added there without changing the compose file.
+`spreadsheets`, `gmail.modify`). It is bind-mounted from `secrets/google_tokens/` into
+all five Google-consuming containers — `core`, `mcp-calendar`, `mcp-drive`, `mcp-sheets`,
+`mcp-gmail` (the `google` compose profile). This is the **single canonical host path**
+(issue #58): no two different paths, no manual copy step.
+
+`mcp-calendar` mounts the entire `google_tokens/` directory at `/token:ro` so additional
+per-account tokens (`google_token_<label>.json`) can be added there without changing the
+compose file. The other four containers mount the single file
+`google_tokens/google_token.json` directly.
+
 Producing the token:
 
 1. **Project** — <https://console.cloud.google.com> → create/pick a project.
@@ -114,15 +122,15 @@ Producing the token:
    **Desktop app** → **Download JSON**.
 5. **Place it** — save that download as `secrets/google_oauth_client.json` (this file).
 6. **Mint the token** — `uv sync` (pulls the host-only `google-auth-oauthlib`), then
-   `python -m chief.tools.google.auth`. A browser opens → grant access to all three
-   scopes → the token is written to `secrets/google_token.json`.  Move (or copy) it to
-   `secrets/google_tokens/google_token.json` so `mcp-calendar` can find it.
+   `python -m chief.tools.google.auth`. A browser opens → grant access to all four
+   scopes → the token is written directly to `secrets/google_tokens/google_token.json`.
+   No move or copy step is needed.
 
 The bind-mount must stay writable for the **mcp-sheets** container (the sole writer — it
-persists the refreshed token; calendar + drive refresh in memory only, and **mcp-gmail**
-mounts it read-only and refreshes into a throwaway `/tmp` copy it seeds at startup). Run
-the containers as the host owner of the file: `MCP_GOOGLE_UID`/`MCP_GOOGLE_GID` default to
-`1000`, override if you aren't uid 1000.
+persists the refreshed token; `core` and the calendar/drive containers refresh in memory
+only, and **mcp-gmail** seeds a throwaway `/tmp` copy at startup). Run the containers as
+the host owner of the file: `MCP_GOOGLE_UID`/`MCP_GOOGLE_GID` default to `1000`, override
+if you aren't uid 1000.
 
 **Adding Gmail/Drive/Sheets to an existing deploy (M8).** If you minted the token before
 M8 (calendar scope only) or before Drive/Sheets were enabled, **re-mint** it so the new

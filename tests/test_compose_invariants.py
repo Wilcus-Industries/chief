@@ -532,12 +532,18 @@ def test_google_mcp_services_are_not_on_sandbox_net() -> None:
 
 #: The path where google_token.json must be bind-mounted in core.
 _CORE_TOKEN_MOUNT = "/token/google_token.json"
-#: The host-side source of the token bind-mount.
-_HOST_TOKEN_SOURCE = "./secrets/google_token.json"
+#: The canonical host-side source of the token bind-mount (issue #58).
+#: ALL five consumers must resolve to this subdirectory — never the flat
+#: secrets/google_token.json path that predated issue #57.
+_HOST_TOKEN_SOURCE = "./secrets/google_tokens/google_token.json"
+#: The host-side directory containing all google_token*.json files.
+_HOST_TOKEN_DIR = "./secrets/google_tokens"
+#: Old (pre-#58) flat path — must not appear in any token mount after this fix.
+_LEGACY_HOST_TOKEN = "./secrets/google_token.json"
 
 
 def test_google_token_mounted_in_core() -> None:
-    """core must have ./secrets/google_token.json bind-mounted at /token/....
+    """core must have ./secrets/google_tokens/google_token.json bind-mounted at /token/.
 
     The full mount target is /token/google_token.json.
     build_list_accounts_service() defaults to Path('/token') as the discovery
@@ -740,4 +746,120 @@ def test_mcp_calendar_token_mount_is_read_only_subdir() -> None:
     assert entry.endswith(":ro"), (
         f"mcp-calendar token mount ({entry!r}) must end with ':ro'. "
         "Even with the narrowed subdir source, the mount must be read-only."
+    )
+
+
+# ---- unified google token path invariants (issue #58) -------------------------
+#
+# ALL five token-consuming services (core, mcp-calendar, mcp-drive, mcp-sheets,
+# mcp-gmail) must source their token from ./secrets/google_tokens/ — the single
+# canonical subdirectory.  The legacy flat path (./secrets/google_token.json) must
+# not appear anywhere in a token-related bind-mount after this fix.
+#
+# mcp-calendar mounts the whole directory (multi-account scan); the other four
+# mount the single file google_token.json inside that directory.  Either way the
+# host-side source resolves inside ./secrets/google_tokens/ — never directly
+# under ./secrets/.
+
+
+def _token_volumes(compose: dict[str, Any], service: str) -> list[str]:
+    """Return bind-mount volume entries for *service* that reference a token path."""
+    vols: list[str] = compose["services"][service].get("volumes", [])
+    return [v for v in vols if isinstance(v, str) and "google_token" in v]
+
+
+def _host_source(entry: str) -> str:
+    """Extract the host-side path from a 'host:container[:mode]' volume entry."""
+    return entry.split(":")[0]
+
+
+def test_no_service_mounts_legacy_flat_token() -> None:
+    """No token-consuming service may mount the legacy ./secrets/google_token.json.
+
+    After issue #58 the single canonical location is ./secrets/google_tokens/.
+    A service that still mounts the old flat path would diverge from the shared
+    token, breaking refresh-token rotation consistency (mcp-sheets rotates the
+    file in google_tokens/; a flat-path consumer would read a stale token).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    for svc in ("core", "mcp-drive", "mcp-sheets", "mcp-gmail", "mcp-calendar"):
+        for entry in _token_volumes(compose, svc):
+            src = _host_source(entry)
+            assert src != _LEGACY_HOST_TOKEN, (
+                f"{svc} still mounts the legacy flat token path "
+                f"({_LEGACY_HOST_TOKEN!r}).  Change it to source from "
+                f"{_HOST_TOKEN_DIR!r} so all services share the same "
+                "canonical token location (issue #58)."
+            )
+
+
+def test_all_token_consumers_source_from_google_tokens_subdir() -> None:
+    """All token-consuming services must source tokens from ./secrets/google_tokens/.
+
+    core, mcp-drive, mcp-sheets, and mcp-gmail mount the single file
+    ./secrets/google_tokens/google_token.json; mcp-calendar mounts the directory
+    ./secrets/google_tokens.  In either case the host-side source must start with
+    ./secrets/google_tokens — never the whole ./secrets dir or the legacy flat
+    path (issue #58).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    for svc in ("core", "mcp-drive", "mcp-sheets", "mcp-gmail", "mcp-calendar"):
+        token_vols = _token_volumes(compose, svc)
+        assert token_vols, (
+            f"{svc} has no volume entry referencing a google_token path. "
+            "It must mount its token from ./secrets/google_tokens/."
+        )
+        for entry in token_vols:
+            src = _host_source(entry)
+            assert src.startswith(_HOST_TOKEN_DIR), (
+                f"{svc} mounts a token from {src!r}, which is outside the "
+                f"canonical {_HOST_TOKEN_DIR!r} subdirectory.  All five "
+                "token-consuming services must share a single host path so "
+                "mcp-sheets rotation stays consistent (issue #58)."
+            )
+
+
+def test_mcp_sheets_token_mount_is_writable() -> None:
+    """mcp-sheets token mount must be writable (no :ro suffix).
+
+    mcp-sheets is the sole writer of the shared token — it persists the
+    refreshed credentials on every Google API call.  A read-only mount
+    would prevent the write and leave the refresh token stale.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    token_vols = _token_volumes(compose, "mcp-sheets")
+    assert token_vols, "mcp-sheets has no google_token volume entry."
+    entry = token_vols[0]
+    assert not entry.endswith(":ro"), (
+        f"mcp-sheets token mount ({entry!r}) must not be read-only. "
+        "mcp-sheets is the sole writer; it must be able to persist "
+        "refreshed credentials (issue #58)."
+    )
+
+
+def test_mcp_sheets_and_mcp_calendar_share_same_host_token_dir() -> None:
+    """mcp-sheets (writer) and mcp-calendar (scanner) must share the same host dir.
+
+    mcp-sheets persists refresh-token rotations; mcp-calendar scans that directory
+    for all google_token*.json files.  If they point at different host paths the
+    calendar container reads a stale token after every rotation (issue #58).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    sheets_vols = _token_volumes(compose, "mcp-sheets")
+    cal_entry = _calendar_token_entry(compose)
+    assert sheets_vols, "mcp-sheets has no google_token volume entry."
+    assert cal_entry is not None, "mcp-calendar has no /token volume entry."
+    sheets_src = _host_source(sheets_vols[0])
+    cal_src = _host_source(cal_entry)
+    # Both must start with the same canonical directory.  mcp-sheets mounts the
+    # file; mcp-calendar mounts the dir — strip the filename to compare dirs.
+    sheets_dir = (
+        sheets_src.rsplit("/google_token", 1)[0]
+        if "/google_token" in sheets_src
+        else sheets_src
+    )
+    assert sheets_dir == cal_src, (
+        f"mcp-sheets sources its token from {sheets_src!r} (dir: {sheets_dir!r}) "
+        f"but mcp-calendar mounts {cal_src!r}.  They must share the same host "
+        "directory so refresh-token rotation stays consistent (issue #58)."
     )
