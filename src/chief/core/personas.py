@@ -108,12 +108,23 @@ _GMAIL_GUIDANCE = (
     "drafts or labels."
 )
 
+#: Owner-only browser guidance, included when the playwright server is wired.
+_BROWSER_GUIDANCE = (
+    "## Browser\n"
+    "You can control a headless Chromium browser to navigate, inspect, and interact "
+    "with web pages. Navigation, page snapshots, screenshots, console/network "
+    "inspection, and tab listing are read-only and need no approval — use them freely "
+    "to observe what a page shows. Clicking, typing, filling forms, selecting options, "
+    "uploading files, handling dialogs, and running JavaScript need {owner}'s approval."
+)
+
 #: service name → its owner guidance block. Appended in this order when each is enabled.
 _SERVICE_GUIDANCE = {
     "calendar": _CALENDAR_BOOKING_GUIDANCE,
     "drive": _DRIVE_GUIDANCE,
     "sheets": _SHEETS_GUIDANCE,
     "gmail": _GMAIL_GUIDANCE,
+    "browser": _BROWSER_GUIDANCE,
 }
 
 #: Owner-only web guidance (M7). Web search/fetch are always wired for the owner.

@@ -71,6 +71,23 @@ def test_build_google_services_includes_gmail_only_when_enabled() -> None:
     assert gmail.server_config()["url"] == "http://mcp-gmail:8004/mcp"
 
 
+def test_build_google_services_includes_browser_only_when_playwright_enabled() -> None:
+    # Browser (playwright) follows the same enable-flag pattern as Google services.
+    def names(s: Settings) -> set[str]:
+        return {svc.name for svc in app.build_google_services(s)}
+
+    assert "browser" not in names(_settings(playwright_enabled=False))
+    assert "browser" in names(_settings(playwright_enabled=True))
+    # The service carries the configured URL and the correct server_name.
+    (browser,) = [
+        svc
+        for svc in app.build_google_services(_settings(playwright_enabled=True))
+        if svc.name == "browser"
+    ]
+    assert browser.server_name == "playwright"
+    assert browser.server_config()["url"] == "http://mcp-playwright:3000/mcp"
+
+
 def test_build_telegram_stack_wires_gate_into_engine_and_adapter(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
