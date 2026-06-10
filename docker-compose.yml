@@ -20,10 +20,10 @@
 # Google (M5/M8, opt-in):  chief's own FastMCP servers — calendar (:8003), drive (:8001),
 #         sheets (:8002), gmail (:8004) — each a separate container on the internal compose
 #         network, reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp
-#         (never host-published). Mint the shared token (python -m chief.tools.google.auth),
-#         move it to secrets/google_tokens/google_token.json (issue #57 — calendar mounts
-#         only that subdir, not the whole secrets dir), flip the matching *_enabled in
-#         config.yaml, then:
+#         (never host-published). Mint the shared token (python -m chief.tools.google.auth)
+#         — it writes directly to secrets/google_tokens/google_token.json, the single
+#         canonical location all five consumers mount (issue #58). Flip the matching
+#         *_enabled in config.yaml, then:
 #           docker compose --profile google up
 #         The four sit behind the "google" profile, so a plain `up` skips them.
 services:
@@ -107,7 +107,9 @@ services:
       # Google account registry (issue #54): core scans /token for google_token*.json
       # files to populate the list_accounts tool. Read-only — mcp-sheets is the sole
       # writer of the shared token; core only reads it to discover registered accounts.
-      - ./secrets/google_token.json:/token/google_token.json:ro
+      # Sourced from the dedicated google_tokens/ subdir (issue #58: single canonical
+      # host path shared by all five token-consuming services).
+      - ./secrets/google_tokens/google_token.json:/token/google_token.json:ro
     tmpfs:
       # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
       # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.
@@ -188,7 +190,8 @@ services:
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
     volumes:
-      - ./secrets/google_token.json:/token/google_token.json:ro
+      # Sourced from the dedicated google_tokens/ subdir (issue #58).
+      - ./secrets/google_tokens/google_token.json:/token/google_token.json:ro
     tmpfs:
       # ReadDriveFile uses tempfile.mkstemp() to stage downloaded Office/PDF files before
       # passing them to MarkItDown; WeasyPrint also writes temp files during PDF rendering.
@@ -225,7 +228,9 @@ services:
       # Writable — mcp-google-sheets persists a refreshed token here. Mint it first
       # (python -m chief.tools.google.auth); if the file is absent Docker creates a
       # *directory* at this path and the server fails to load the token.
-      - ./secrets/google_token.json:/token/google_token.json
+      # Sourced from the dedicated google_tokens/ subdir (issue #58): same physical
+      # file that mcp-calendar scans, so rotation stays consistent.
+      - ./secrets/google_tokens/google_token.json:/token/google_token.json
     tmpfs:
       # Python runtime scratch; mcp-google-sheets may write temp files during auth flows.
       - /tmp:uid=1000,gid=1000
@@ -269,7 +274,8 @@ services:
     volumes:
       # Read-only: the gmail package refreshes the token in a writable /tmp copy (seeded
       # from here at startup), never this shared file — sheets stays the sole writer.
-      - ./secrets/google_token.json:/seed/google_token.json:ro
+      # Sourced from the dedicated google_tokens/ subdir (issue #58).
+      - ./secrets/google_tokens/google_token.json:/seed/google_token.json:ro
     tmpfs:
       # GMAIL_TOKEN_PATH defaults to /tmp/gmail_token.json — server.py seeds the writable
       # per-container token copy here at startup; mcp-google-gmail rewrites it on refresh.
