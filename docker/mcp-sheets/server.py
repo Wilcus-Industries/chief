@@ -40,7 +40,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from mcp.server.fastmcp import FastMCP
-from row1_guard import ROW_1_ERROR, _check_row_1, blocked_result
+from row1_guard import _check_row_1, blocked_result
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
 
@@ -363,11 +363,11 @@ async def update_cells(
     sheet: str,
     range: str,
     data: list[list[Any]],
-) -> dict[str, Any]:
+) -> Any:
     """Update cells in a Google Spreadsheet."""
     blocked = _guard("update_cells", {"range": range})
     if blocked:
-        return {"isError": True, "content": [{"type": "text", "text": ROW_1_ERROR}]}
+        return blocked
     sheets_service, _ = _get_services()
     full_range = f"{sheet}!{range}"
 
@@ -387,11 +387,11 @@ async def batch_update_cells(
     spreadsheet_id: str,
     sheet: str,
     ranges: dict[str, list[list[Any]]],
-) -> dict[str, Any]:
+) -> Any:
     """Batch update multiple ranges in a Google Spreadsheet."""
     blocked = _guard("batch_update_cells", {"ranges": ranges})
     if blocked:
-        return {"isError": True, "content": [{"type": "text", "text": ROW_1_ERROR}]}
+        return blocked
     sheets_service, _ = _get_services()
 
     def _call() -> dict[str, Any]:
@@ -412,11 +412,11 @@ async def add_rows(
     sheet: str,
     count: int,
     start_row: Optional[int] = None,
-) -> dict[str, Any]:
+) -> Any:
     """Add rows to a sheet in a Google Spreadsheet."""
     blocked = _guard("add_rows", {"start_row": start_row})
     if blocked:
-        return {"isError": True, "content": [{"type": "text", "text": ROW_1_ERROR}]}
+        return blocked
     sheets_service, _ = _get_services()
 
     def _call() -> dict[str, Any]:
@@ -919,11 +919,11 @@ async def share_spreadsheet(
 async def batch_update(
     spreadsheet_id: str,
     requests: list[dict[str, Any]],
-) -> dict[str, Any]:
+) -> Any:
     """Execute a batch update on a Google Spreadsheet."""
     blocked = _guard("batch_update", {"requests": requests})
     if blocked:
-        return {"isError": True, "content": [{"type": "text", "text": ROW_1_ERROR}]}
+        return blocked
     sheets_service, _ = _get_services()
 
     def _call() -> dict[str, Any]:
@@ -951,11 +951,11 @@ async def add_chart(
     position_y: int = 0,
     width: int = 600,
     height: int = 400,
-) -> dict[str, Any]:
+) -> Any:
     """Add a chart to a Google Spreadsheet."""
     blocked = _guard("add_chart", {"data_range": data_range})
     if blocked:
-        return {"isError": True, "content": [{"type": "text", "text": ROW_1_ERROR}]}
+        return blocked
     sheets_service, _ = _get_services()
     valid_chart_types = ["COLUMN", "BAR", "LINE", "AREA", "PIE", "SCATTER", "COMBO", "HISTOGRAM"]
     if chart_type.upper() not in valid_chart_types:
