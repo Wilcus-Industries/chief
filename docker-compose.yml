@@ -21,7 +21,9 @@
 #         sheets (:8002), gmail (:8004) — each a separate container on the internal compose
 #         network, reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp
 #         (never host-published). Mint the shared token (python -m chief.tools.google.auth),
-#         flip the matching *_enabled in config.yaml, then:
+#         move it to secrets/google_tokens/google_token.json (issue #57 — calendar mounts
+#         only that subdir, not the whole secrets dir), flip the matching *_enabled in
+#         config.yaml, then:
 #           docker compose --profile google up
 #         The four sit behind the "google" profile, so a plain `up` skips them.
 services:
@@ -123,15 +125,15 @@ services:
   # nspady mcp-gcal: FastMCP gives each connection its own transport, so the per-task MCP
   # connections chief opens don't collide ("Server already initialized").
   #
-  # Multi-account token directory (issue #56):
+  # Multi-account token directory (issue #56, security-narrowed by issue #57):
   #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files; each file
   #   becomes one registered account.  Add accounts by placing additional token files:
-  #     ./secrets/google_token.json          → primary (default) account
-  #     ./secrets/google_token_work.json     → account labeled "work@corp.com"
-  #   The entire ./secrets directory is mounted read-only at /token so every
-  #   google_token*.json lands in the container automatically. The server only reads files
-  #   matching the google_token* prefix; other secret files (telegram_bot_token, etc.)
-  #   are silently skipped by _load_credentials().
+  #     ./secrets/google_tokens/google_token.json          → primary (default) account
+  #     ./secrets/google_tokens/google_token_work.json     → account labeled "work@corp.com"
+  #   Only the dedicated ./secrets/google_tokens/ subdirectory is mounted at /token so
+  #   unrelated secrets (claude_code_oauth_token, discord_bot_token,
+  #   google_oauth_client.json, telegram_bot_token) are never visible inside this
+  #   container (issue #57).  The whole ./secrets dir is intentionally NOT mounted here.
   mcp-calendar:
     profiles: ["google"]
     build:
@@ -152,10 +154,10 @@ services:
       # set it here or in .env only to override per-deploy.
       OWNER_TZ: ${OWNER_TZ:-}
     volumes:
-      # Entire secrets dir mounted read-only: all google_token*.json files become available
-      # to the multi-account registry. The server only reads files matching the
-      # google_token* prefix, so non-token secrets in this directory are ignored.
-      - ./secrets:/token:ro
+      # Dedicated tokens subdir mounted read-only (issue #57): only google_token*.json
+      # files live in ./secrets/google_tokens/, so unrelated secrets are never exposed
+      # inside this container.  Place token files there, not directly under ./secrets/.
+      - ./secrets/google_tokens:/token:ro
       - ./config.yaml:/config/config.yaml:ro
     tmpfs:
       # Python runtime scratch (httplib2 socket temp, googleapiclient, FastMCP internals).
