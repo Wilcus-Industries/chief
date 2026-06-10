@@ -82,6 +82,19 @@ def _load_gmail_chief_server(tmp_token_dir: Path) -> types.ModuleType:
     if _SERVER_DIR not in sys.path:
         sys.path.insert(0, _SERVER_DIR)
 
+    # A sibling test (test_dynamic_account_discovery) leaves a MagicMock stub for
+    # gmail_signature in sys.modules; that breaks the real signature append on
+    # send/reply. Force-load the genuine module from disk so the server's
+    # ``from gmail_signature import inject_signature`` binds the real predicate.
+    real_sig_path = _SERVER_PATH.parent / "gmail_signature.py"
+    sig_spec = importlib.util.spec_from_file_location(
+        "gmail_signature", real_sig_path
+    )
+    assert sig_spec is not None and sig_spec.loader is not None
+    sig_mod = importlib.util.module_from_spec(sig_spec)
+    sig_spec.loader.exec_module(sig_mod)
+    sys.modules["gmail_signature"] = sig_mod
+
     import os
 
     os.environ["TOKEN_DIR"] = str(tmp_token_dir)
@@ -196,6 +209,15 @@ def _first_message_id_from_list(sse_body: str) -> str:
     content_text = payload["result"]["content"][0]["text"]
     items = json.loads(content_text)
     return items[0]["id"] if items else ""
+
+
+def _result_payload(sse_body: str) -> dict[str, Any]:
+    """Parse the inner tool-result JSON returned by a tools/call SSE response."""
+    raw = _extract_result_text(sse_body)
+    payload = json.loads(raw)
+    content_text = payload["result"]["content"][0]["text"]
+    parsed: dict[str, Any] = json.loads(content_text)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -445,3 +467,226 @@ class TestGmailServerStructure:
         assert sig_path.exists(), (
             f"gmail_signature.py must exist at {sig_path} for the signature scaffold"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: RFC822 build helper (send + reply)
+# ---------------------------------------------------------------------------
+
+
+def _decode_raw(raw: str) -> Any:
+    """Decode a base64url ``raw`` field to an ``EmailMessage`` (default policy)."""
+    import base64
+    from email import message_from_bytes
+    from email.policy import default as default_policy
+
+    return message_from_bytes(
+        base64.urlsafe_b64decode(raw.encode("ascii")), policy=default_policy
+    )
+
+
+class TestBuildRawMessage:
+    """``_build_raw_message`` produces a valid base64url RFC822 message."""
+
+    def test_send_message_round_trips(self, tmp_path: Path) -> None:
+        srv = _load_gmail_chief_server(tmp_path)
+        raw = srv._build_raw_message(
+            to="alice@example.com",
+            subject="Hello",
+            body="Hi there.",
+        )
+        msg = _decode_raw(raw)
+        assert msg["To"] == "alice@example.com"
+        assert msg["Subject"] == "Hello"
+        assert "Hi there." in msg.get_content()
+
+    def test_threading_headers_present_on_reply(self, tmp_path: Path) -> None:
+        srv = _load_gmail_chief_server(tmp_path)
+        raw = srv._build_raw_message(
+            to="bob@example.com",
+            subject="Re: Hello",
+            body="Replying.",
+            in_reply_to="<orig@mail.gmail.com>",
+            references="<orig@mail.gmail.com>",
+        )
+        msg = _decode_raw(raw)
+        assert msg["In-Reply-To"] == "<orig@mail.gmail.com>"
+        assert msg["References"] == "<orig@mail.gmail.com>"
+
+    def test_raw_is_base64url(self, tmp_path: Path) -> None:
+        srv = _load_gmail_chief_server(tmp_path)
+        raw = srv._build_raw_message(to="a@b.c", subject="S", body="B")
+        # urlsafe base64 never contains '+' or '/'.
+        assert "+" not in raw and "/" not in raw
+
+
+# ---------------------------------------------------------------------------
+# Tests: send / reply route through the real server tools (ASGI path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def send_capture_server(tmp_path: Path) -> tuple[types.ModuleType, dict[str, Any]]:
+    """Load a Gmail server whose two fake services record ``messages().send`` calls.
+
+    Returns ``(srv, captured)`` where ``captured[label]`` is the kwargs of the most
+    recent ``send`` on that account's service.
+    """
+    _write_token(tmp_path / "google_token.json", "main@example.com")
+    _write_token(tmp_path / "google_token_work.json", "work@corp.com")
+
+    srv = _load_gmail_chief_server(tmp_path)
+
+    captured: dict[str, Any] = {}
+
+    def _make_svc(label: str) -> MagicMock:
+        svc = MagicMock()
+
+        def _send(*, userId: str, body: dict[str, Any]) -> MagicMock:
+            captured[label] = {"userId": userId, "body": body}
+            exec_mock = MagicMock()
+            exec_mock.execute.return_value = {
+                "id": f"sent_{label}",
+                "threadId": body.get("threadId", f"thr_{label}"),
+            }
+            return exec_mock
+
+        svc.users().messages().send.side_effect = _send
+        return svc
+
+    main_svc = _make_svc("main@example.com")
+    work_svc = _make_svc("work@corp.com")
+    fake_registry = {"main@example.com": main_svc, "work@corp.com": work_svc}
+    srv._build_service_registry = (  # type: ignore[attr-defined]
+        lambda: (fake_registry, main_svc)
+    )
+    return srv, captured
+
+
+def _send_capture_client(srv: types.ModuleType) -> tuple[TestClient, str]:
+    starlette_app = srv.mcp.streamable_http_app()
+    client = TestClient(starlette_app, raise_server_exceptions=True)
+    client.__enter__()
+    r = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"},
+            },
+        },
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        },
+    )
+    assert r.status_code == 200, f"MCP initialize failed: {r.text}"
+    session_id = r.headers.get("mcp-session-id")
+    assert session_id, "No Mcp-Session-Id in initialize response"
+    return client, session_id
+
+
+def _call_tool(
+    client: TestClient,
+    session_id: str,
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    account_label: str | None = None,
+) -> str:
+    extra: dict[str, str] = {}
+    if account_label is not None:
+        extra["X-Account-Label"] = account_label
+    r = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": session_id,
+            **extra,
+        },
+    )
+    assert r.status_code == 200, f"tools/call failed: {r.text}"
+    return str(r.text)
+
+
+class TestGmailSendReply:
+    """gmail_send_message / gmail_reply_on_message drive the real server tools."""
+
+    def test_send_uses_active_account_and_signs(
+        self, send_capture_server: tuple[types.ModuleType, dict[str, Any]]
+    ) -> None:
+        srv, captured = send_capture_server
+        client, session_id = _send_capture_client(srv)
+        body = _result_payload(
+            _call_tool(
+                client,
+                session_id,
+                "gmail_send_message",
+                {"to": "a@b.c", "subject": "Hi", "body": "Hello."},
+                account_label="work@corp.com",
+            )
+        )
+        # Sent on the work service only.
+        assert "work@corp.com" in captured
+        assert "main@example.com" not in captured
+        assert body["id"] == "sent_work@corp.com"
+        # The signature was appended server-side, independent of the model body.
+        raw = captured["work@corp.com"]["body"]["raw"]
+        msg = _decode_raw(raw)
+        assert srv.SIGNATURE in msg.get_content()
+
+    def test_switching_account_sends_from_other_account(
+        self, send_capture_server: tuple[types.ModuleType, dict[str, Any]]
+    ) -> None:
+        srv, captured = send_capture_server
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_send_message",
+            {"to": "a@b.c", "subject": "S", "body": "B"},
+            account_label="main@example.com",
+        )
+        assert set(captured) == {"main@example.com"}
+
+    def test_reply_threads_correctly(
+        self, send_capture_server: tuple[types.ModuleType, dict[str, Any]]
+    ) -> None:
+        srv, captured = send_capture_server
+        # The reply tool fetches the original message to read its Message-ID/References.
+        work_svc = srv._build_service_registry()[0]["work@corp.com"]
+        work_svc.users().messages().get().execute.return_value = {
+            "id": "orig1",
+            "threadId": "THREAD42",
+            "payload": {
+                "headers": [
+                    {"name": "Message-ID", "value": "<orig@mail.gmail.com>"},
+                    {"name": "Subject", "value": "Project"},
+                    {"name": "From", "value": "bob@corp.com"},
+                ]
+            },
+        }
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_reply_on_message",
+            {"message_id": "orig1", "body": "Sounds good."},
+            account_label="work@corp.com",
+        )
+        sent = captured["work@corp.com"]["body"]
+        assert sent["threadId"] == "THREAD42"
+        msg = _decode_raw(sent["raw"])
+        assert msg["In-Reply-To"] == "<orig@mail.gmail.com>"
+        assert "<orig@mail.gmail.com>" in msg["References"]

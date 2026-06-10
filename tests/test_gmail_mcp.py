@@ -35,6 +35,15 @@ def test_permanent_deletes_are_deferred() -> None:
     assert "mcp__gmail__gmail_untrash_message" in mcp.WRITE_TOOLS
 
 
+def test_chief_send_and_reply_route_through_approval() -> None:
+    # On the chief-owned server, send/reply are writes (ASK) — never pre-approved reads.
+    svc = mcp.chief_service("http://mcp-gmail-chief:8005/mcp")
+    assert "mcp__gmail_chief__gmail_send_message" in svc.write_tools
+    assert "mcp__gmail_chief__gmail_reply_on_message" in svc.write_tools
+    assert "mcp__gmail_chief__gmail_send_message" not in svc.read_tools
+    assert "mcp__gmail_chief__gmail_reply_on_message" not in svc.read_tools
+
+
 def test_service_bundles_url_and_streamable_http_config() -> None:
     svc = mcp.service("http://mcp-gmail:8004/mcp")
 

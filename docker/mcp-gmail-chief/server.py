@@ -17,11 +17,11 @@ Auth — multi-account (issue #48, per-request re-scan issue #60):
     See ``docker/mcp-calendar/server.py`` for the full explanation of why ContextVar
     middleware does NOT work here (stateful-session anyio boundary).
 
-Signature scaffold (issue #48, used by write slices #51/#52):
-    The transparent "sent by an assistant" signature scaffold is carried over from the
-    third-party wrapper.  For this read-only slice SIGNATURE is defined and
-    ``inject_signature`` is importable, but the actual append happens on send/reply in
-    #51.
+Signature (issue #48 scaffold, wired in #51):
+    The transparent "sent by an assistant" signature is appended server-side to every
+    outbound body. ``gmail_send_message`` / ``gmail_reply_on_message`` call
+    ``inject_signature`` (from ``gmail_signature``) before building the RFC822 message,
+    so the marking is added independent of what the model wrote.
 
 MIME body walk:
     ``_extract_body`` walks the base64url-encoded ``parts`` tree of a Gmail message
@@ -41,6 +41,7 @@ import base64
 import json
 import logging
 import os
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
 
-from gmail_signature import inject_signature  # noqa: F401 — scaffold for write slices
+from gmail_signature import inject_signature
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -263,6 +264,47 @@ def _extract_body(payload: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# RFC822 message build (send + reply)
+# ---------------------------------------------------------------------------
+
+
+def _build_raw_message(
+    *,
+    to: str,
+    subject: str,
+    body: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    html_body: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+) -> str:
+    """Build an RFC822 message and return it base64url-encoded for the Gmail API.
+
+    Uses the stdlib :class:`email.message.EmailMessage`. The plain-text ``body`` is the
+    primary content; an optional ``html_body`` is added as an alternative part. The
+    ``In-Reply-To`` / ``References`` headers thread a reply. The ``From`` header is left
+    unset: ``users().messages().send(userId="me")`` stamps the authenticated account, so
+    the active-account selection alone decides the sender.
+    """
+    msg = EmailMessage()
+    msg["To"] = to
+    msg["Subject"] = subject
+    if cc:
+        msg["Cc"] = cc
+    if bcc:
+        msg["Bcc"] = bcc
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+    if references:
+        msg["References"] = references
+    msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+
+
+# ---------------------------------------------------------------------------
 # FastMCP server and tools
 # ---------------------------------------------------------------------------
 
@@ -390,6 +432,115 @@ async def gmail_list_labels() -> str:
             }
             for lbl in labels
         ]
+
+    return _json(await asyncio.to_thread(_call))
+
+
+def _signed_body(
+    tool: str, body: str, html_body: str | None
+) -> tuple[str, str | None]:
+    """Append the transparent assistant signature to an outbound body.
+
+    Delegates to :func:`gmail_signature.inject_signature` (the shared scaffold) so the
+    "sent by an assistant" line is added server-side on every send/reply, independent of
+    what the model wrote. Returns the ``(body, html_body)`` pair after injection.
+    """
+    args: dict[str, Any] = {"body": body}
+    if html_body is not None:
+        args["html_body"] = html_body
+    signed = inject_signature(tool, args, SIGNATURE)
+    return signed["body"], signed.get("html_body")
+
+
+@mcp.tool(name="gmail_send_message")
+async def gmail_send_message(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    html_body: str | None = None,
+) -> Any:
+    """Send a new message from the active account; the assistant signature is appended.
+
+    Sends on the account selected by ``X-Account-Label`` (falls back to the default).
+    Returns the sent message's id + threadId.
+    """
+    service = _get_service()
+    signed_body, signed_html = _signed_body("gmail_send_message", body, html_body)
+    raw = _build_raw_message(
+        to=to,
+        subject=subject,
+        body=signed_body,
+        cc=cc,
+        bcc=bcc,
+        html_body=signed_html,
+    )
+
+    def _call() -> dict[str, Any]:
+        sent = (
+            service.users()
+            .messages()
+            .send(userId="me", body={"raw": raw})
+            .execute()
+        )
+        return {"id": sent.get("id"), "threadId": sent.get("threadId")}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_reply_on_message")
+async def gmail_reply_on_message(
+    message_id: str,
+    body: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    html_body: str | None = None,
+) -> Any:
+    """Reply to ``message_id`` on the active account, threaded correctly.
+
+    Fetches the original message to read its ``Message-ID`` / ``References`` / ``Subject``
+    / ``From``, then sets ``In-Reply-To`` + ``References`` and the original ``threadId``
+    so Gmail threads the reply. The assistant signature is appended server-side.
+    """
+    service = _get_service()
+    signed_body, signed_html = _signed_body("gmail_reply_on_message", body, html_body)
+
+    def _call() -> dict[str, Any]:
+        orig = (
+            service.users()
+            .messages()
+            .get(userId="me", id=message_id, format="metadata")
+            .execute()
+        )
+        thread_id = orig.get("threadId")
+        headers = {
+            h["name"].lower(): h["value"]
+            for h in orig.get("payload", {}).get("headers", [])
+        }
+        msg_id = headers.get("message-id", "")
+        prior_refs = headers.get("references", "")
+        references = f"{prior_refs} {msg_id}".strip() if prior_refs else msg_id
+        subject = headers.get("subject", "")
+        reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+        to = headers.get("reply-to") or headers.get("from", "")
+        raw = _build_raw_message(
+            to=to,
+            subject=reply_subject,
+            body=signed_body,
+            cc=cc,
+            bcc=bcc,
+            html_body=signed_html,
+            in_reply_to=msg_id,
+            references=references,
+        )
+        sent = (
+            service.users()
+            .messages()
+            .send(userId="me", body={"raw": raw, "threadId": thread_id})
+            .execute()
+        )
+        return {"id": sent.get("id"), "threadId": sent.get("threadId")}
 
     return _json(await asyncio.to_thread(_call))
 
