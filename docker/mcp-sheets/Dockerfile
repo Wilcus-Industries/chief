@@ -1,5 +1,7 @@
-# Google Sheets MCP server (FastMCP, streamable-HTTP on :8002). Wraps the third-party
-# xing5/mcp-google-sheets package with a server-side row-1 (header) write guard.
+# Google Sheets MCP server (FastMCP, streamable-HTTP on :8002).
+# First-party implementation replacing xing5/mcp-google-sheets (issue #47):
+# multi-account per-request credential selection + atomic per-account
+# token write-back.  Row-1 guard preserved from the original wrapper.
 # Standalone image — imports nothing from the chief package.
 FROM python:3.12-slim
 

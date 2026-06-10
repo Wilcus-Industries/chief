@@ -176,6 +176,14 @@ services:
   # chief's Google Drive MCP server (docker/mcp-drive, ported from genesis-x). FastMCP,
   # streamable-HTTP at http://mcp-drive:8001/mcp. Read a Doc/PDF/Office file; render +
   # upload a Markdown file as PDF (approval-gated).
+  #
+  # Multi-account token directory (issue #47):
+  #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files; each file
+  #   becomes one registered account.  Add accounts by placing additional token files:
+  #     ./secrets/google_tokens/google_token.json          → primary (default) account
+  #     ./secrets/google_tokens/google_token_work.json     → account labeled "work@corp.com"
+  #   Only the dedicated ./secrets/google_tokens/ subdirectory is mounted at /token so
+  #   unrelated secrets are never visible inside this container (issue #57).
   mcp-drive:
     profiles: ["google"]
     build:
@@ -189,9 +197,14 @@ services:
       - mcp-internal
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
+      # Scan the whole directory so all google_token*.json files are accessible
+      # for multi-account support (issue #47).
+      TOKEN_DIR: /token
     volumes:
-      # Sourced from the dedicated google_tokens/ subdir (issue #58).
-      - ./secrets/google_tokens/google_token.json:/token/google_token.json:ro
+      # Dedicated tokens subdir mounted read-only (issue #57/#47): only google_token*.json
+      # files live in ./secrets/google_tokens/, so unrelated secrets are never exposed.
+      # Directory mount enables multi-account — all google_token*.json files are visible.
+      - ./secrets/google_tokens:/token:ro
     tmpfs:
       # ReadDriveFile uses tempfile.mkstemp() to stage downloaded Office/PDF files before
       # passing them to MarkItDown; WeasyPrint also writes temp files during PDF rendering.
@@ -205,9 +218,17 @@ services:
       retries: 3
       start_period: 20s
 
-  # chief's Google Sheets MCP server (docker/mcp-sheets). Wraps third-party
-  # mcp-google-sheets with a row-1 (header) write guard. FastMCP, streamable-HTTP at
-  # http://mcp-sheets:8002/mcp. The sole writer of the shared token file (writable mount).
+  # chief's Google Sheets MCP server (docker/mcp-sheets). First-party FastMCP server
+  # (issue #47 replaces xing5/mcp-google-sheets wrapper) — multi-account per-request
+  # credential selection + atomic per-account token write-back.  Row-1 guard preserved.
+  # FastMCP, streamable-HTTP at http://mcp-sheets:8002/mcp.
+  # The sole writer of ALL google_token*.json files in TOKEN_DIR (per-account atomic
+  # write-back via temp-then-rename; concurrent writes to different account files are safe).
+  #
+  # Multi-account token directory (issue #47):
+  #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files.
+  #   The whole directory is mounted WRITABLE so the server can write back
+  #   refreshed tokens to each account's own file atomically.
   mcp-sheets:
     profiles: ["google"]
     build:
@@ -219,20 +240,23 @@ services:
     networks:
       - mcp-internal
     environment:
-      # The package's own auth: OAuth client + the shared minted token.
-      CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
+      # Token path for the primary (legacy) account; TOKEN_DIR covers all accounts.
       TOKEN_PATH: /token/google_token.json
-    secrets:
-      - google_oauth_client.json
+      # Scan the whole directory for multi-account support (issue #47).
+      TOKEN_DIR: /token
     volumes:
-      # Writable — mcp-google-sheets persists a refreshed token here. Mint it first
-      # (python -m chief.tools.google.auth); if the file is absent Docker creates a
-      # *directory* at this path and the server fails to load the token.
+      # Writable directory mount — sheets is the sole writer of all google_token*.json
+      # files (one per account).  Each write is atomic (temp-then-rename) so concurrent
+      # writes to different account files never collide.  Mint tokens first via
+      # python -m chief.tools.google.auth before starting; if a file is absent Docker
+      # creates a *directory* at that path and the server fails to load the token.
       # Sourced from the dedicated google_tokens/ subdir (issue #58): same physical
-      # file that mcp-calendar scans, so rotation stays consistent.
-      - ./secrets/google_tokens/google_token.json:/token/google_token.json
+      # directory that mcp-calendar scans, so rotation stays consistent.
+      - ./secrets/google_tokens:/token
     tmpfs:
-      # Python runtime scratch; mcp-google-sheets may write temp files during auth flows.
+      # Python runtime scratch; atomic write uses tempfile.mkstemp() in /token dir,
+      # but the rename target is in /token (the volume), so temp files land there too.
+      # /tmp is kept for other runtime scratch.
       - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true

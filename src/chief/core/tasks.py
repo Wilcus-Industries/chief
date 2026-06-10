@@ -76,6 +76,7 @@ from ..persistence.tasks import (
 )
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
+from ..tools.drive import mcp as drive_mcp
 from ..tools.google import GoogleService
 from ..tools.google.account_selection import (
     ACCOUNT_SELECTION_GUIDANCE,
@@ -85,6 +86,7 @@ from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
 from ..tools.guest import GuestAdminService, GuestService
 from ..tools.schedule import ScheduleBashService, ScheduleService
+from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
 from . import classify
 from .personas import build_system_prompt
@@ -870,17 +872,17 @@ class TaskManager:
     def _build_services_with_account(
         self, active_account_label: str | None
     ) -> tuple[GoogleService, ...]:
-        """Return the Google services tuple, with the Calendar service stamped with
-        an ``X-Account-Label`` header when a per-thread account is active (issue #46).
+        """Return the Google services tuple, with all Google MCP servers stamped with
+        an ``X-Account-Label`` header when a per-thread account is active
+        (issue #46/#47).
 
-        All non-calendar services are passed through unchanged.  The Calendar
-        service is rebuilt (via :func:`~chief.tools.calendar.mcp.service`) with a
-        per-session headers dict so every HTTP call the SDK sends to ``mcp-calendar``
-        carries the label — the server uses it to select the right credential.
+        Calendar, Drive, and Sheets are each rebuilt with a per-session headers dict
+        so every HTTP call the SDK sends to those servers carries the label — the
+        server uses it to select the right credential per request.
 
         When ``active_account_label`` is ``None`` (no binding set for the thread),
-        the calendar service config carries no header and the server falls back to
-        the default (first / single-account) credential, keeping backward compat.
+        service configs carry no header and each server falls back to the default
+        (first / single-account) credential, keeping backward compat.
         """
         if not active_account_label:
             return self._google_services
@@ -888,10 +890,11 @@ class TaskManager:
         result: list[GoogleService] = []
         for svc in self._google_services:
             if svc.name == "calendar":
-                # Rebuild the calendar service with the active account header.
-                result.append(
-                    calendar_mcp.service(svc.url, headers=headers)
-                )
+                result.append(calendar_mcp.service(svc.url, headers=headers))
+            elif svc.name == "drive":
+                result.append(drive_mcp.service(svc.url, headers=headers))
+            elif svc.name == "sheets":
+                result.append(sheets_mcp.service(svc.url, headers=headers))
             else:
                 result.append(svc)
         return tuple(result)
