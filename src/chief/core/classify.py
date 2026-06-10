@@ -51,13 +51,16 @@ _COMPLEX_SYSTEM = (
 async def _ask_yes_no(prompt: str, *, model: str, system: str) -> bool:
     """Run one Haiku turn and return ``True`` iff the answer starts with 'yes'.
 
-    ``allowed_tools=[]`` keeps the bundled CLI from auto-calling a default tool, which
-    would spend the single turn on the tool call and die with ``Reached maximum number
-    of turns (1)`` before answering (fail-safe NO, but noisy). These are pure yes/no
+    ``tools=[]`` gives the model an empty base tool set so it cannot call anything —
+    a single yes/no turn is all it can do. ``allowed_tools=[]`` is NOT enough: that
+    field is only an auto-approve allowlist, and the SDK skips the ``--allowedTools``
+    flag entirely when it is empty (falsy), so the CLI falls back to its *default*
+    tool set. The model then spends the one turn on a tool call and dies with
+    ``Reached maximum number of turns (1)`` before answering. These are pure yes/no
     judgments — no tool ever needs to run.
     """
     options = ClaudeAgentOptions(
-        max_turns=1, model=model, system_prompt=system, allowed_tools=[]
+        max_turns=1, model=model, system_prompt=system, tools=[], allowed_tools=[]
     )
     parts: list[str] = []
     try:

@@ -42,6 +42,23 @@ async def test_is_complex_parses_no(monkeypatch: pytest.MonkeyPatch) -> None:
     assert await classify.is_complex("what time is it", model="m") is False
 
 
+async def test_classifier_runs_with_empty_base_toolset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tools available to the one-turn query, so it can't burn the turn on a
+    tool call and die with 'Reached maximum number of turns (1)'. ``tools=[]`` is
+    the lever that empties the base set; ``allowed_tools=[]`` alone does not."""
+    captured: dict[str, Any] = {}
+
+    def _capture(*args: Any, **kwargs: Any) -> Any:
+        captured["options"] = kwargs["options"]
+        return _stream("NO")(*args, **kwargs)
+
+    monkeypatch.setattr(classify, "query", _capture)
+    await classify.is_complex("x", model="m")
+    assert captured["options"].tools == []
+
+
 async def test_classifier_failure_defaults_safe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
