@@ -256,6 +256,13 @@ def build_engine(
         # mutations go through the same git instance. The versioner self-serializes
         # all callers via its internal asyncio.Lock (#22 / #29).
         versioner=memory.versioner,
+        # Screenshot delivery (issue #34): when playwright is enabled, pass the
+        # screenshots dir so the PostToolUse hook can read files and send_file them.
+        screenshots_dir=(
+            settings.playwright_screenshots_dir
+            if settings.playwright_enabled
+            else None
+        ),
     )
 
 
