@@ -29,5 +29,16 @@ EXPOSE 3000
 #               imply --no-sandbox; both flags must be present.
 # --port: bind the MCP HTTP server on 3000
 # --host: bind on all interfaces so core can reach it over the compose network
+# --isolated: each MCP session gets its own in-memory browser context so parallel
+#             sessions never share cookies/storage and cannot collide.  On session
+#             close the in-memory context is discarded (no disk writes per session).
+# --storage-state: seeds every new isolated context from the saved JSON on the
+#             browser-profile named volume.  Persistence-across-restarts is achieved
+#             here: the owner logs in, calls browser_storage_state to write
+#             /browser-profile/storage-state.json, and all subsequent sessions
+#             start already authenticated.  Note: sites that bind sessions to IP,
+#             device fingerprint, or server-side tokens beyond cookies may still
+#             demand re-login (accepted limitation per the issue PRD).
 CMD ["node", "node_modules/@playwright/mcp/cli.js", "--headless", "--no-sandbox", \
-     "--port", "3000", "--host", "0.0.0.0", "--output-dir", "/screenshots"]
+     "--port", "3000", "--host", "0.0.0.0", "--output-dir", "/screenshots", \
+     "--isolated", "--storage-state", "/browser-profile/storage-state.json"]

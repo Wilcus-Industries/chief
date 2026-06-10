@@ -294,6 +294,14 @@ services:
       # core reads them (read-only mount below) to deliver via send_file. The
       # --output-dir /screenshots flag in the CMD keeps the path deterministic.
       - screenshots:/screenshots
+      # Persistent browser profile (issue #35): storage-state.json lives here so
+      # cookie-based logins survive container restarts.  The playwright server runs
+      # with --isolated (each session is a fresh context, parallel sessions never
+      # collide) + --storage-state /browser-profile/storage-state.json (each fresh
+      # context is seeded from this file).  The owner saves state once with the
+      # browser_storage_state MCP tool; every subsequent session wakes up logged in.
+      # Writable — mcp-playwright is the sole writer of this file.
+      - browser-profile:/browser-profile
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/"]
       interval: 30s
@@ -357,6 +365,7 @@ volumes:
   claude-home:
   workspace:  # M7 scratch, shared rw between core (Read/Write/Edit) and the sandbox shell
   screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
+  browser-profile:  # issue #35: persistent storage-state for cookie-based login seeding
 
 # Two named networks provide SSRF isolation for the playwright container (issue #33).
 #
