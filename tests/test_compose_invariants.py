@@ -1,9 +1,10 @@
-"""Regression tests for docker-compose.yml invariants (issue #16, #33).
+"""Regression tests for docker-compose.yml invariants (issue #16, #33, #40).
 
 These tests parse the compose file directly so CI catches config regressions
 without needing Docker. They cover the read-only-rootfs writable-path contract
-(issue #16) and the playwright-network SSRF isolation contract (issue #33) —
-neither requires Docker at runtime.
+(issue #16), the playwright-network SSRF isolation contract (issue #33), and
+the sandbox network reachability contract (issue #40) — none require Docker at
+runtime.
 """
 
 from pathlib import Path
@@ -419,4 +420,57 @@ def test_playwright_dockerfile_sets_storage_state_flag() -> None:
         "docker/mcp-playwright/Dockerfile CMD does not include --storage-state. "
         f"Add '--storage-state', '{_BROWSER_PROFILE_MOUNT}/storage-state.json' to "
         "the CMD so isolated sessions are seeded from the persisted state file."
+    )
+
+
+# ---- sandbox network reachability (issue #40) ---------------------------------
+
+
+def test_sandbox_is_on_mcp_internal() -> None:
+    """sandbox must be attached to mcp-internal so core can resolve sandbox:8765.
+
+    Issue #33 added explicit ``networks:`` to core (mcp-internal + playwright-net),
+    removing it from the implicit default network.  sandbox had no ``networks:``
+    entry, leaving it on the default network only — a disjoint set from core's
+    networks.  Attaching sandbox to mcp-internal restores the route.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    nets = _service_networks(compose, "sandbox")
+    assert _MCP_INTERNAL_NET in nets, (
+        f"sandbox is not attached to {_MCP_INTERNAL_NET!r}. "
+        "core can no longer resolve sandbox:8765 — the shell/bash tool is broken. "
+        f"Add 'networks: [{_MCP_INTERNAL_NET}]' to the sandbox service."
+    )
+
+
+def test_sandbox_is_not_on_playwright_net() -> None:
+    """sandbox must NOT be on playwright-net.
+
+    The sandbox is a secret-free worker; keeping it off playwright-net prevents
+    a compromised browser container from reaching the sandbox shell over HTTP.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    nets = _service_networks(compose, "sandbox")
+    assert _PLAYWRIGHT_NET not in nets, (
+        f"sandbox is attached to {_PLAYWRIGHT_NET!r}. "
+        "Remove playwright-net from sandbox — the sandbox shell must not be "
+        "reachable from the browser container."
+    )
+
+
+def test_core_and_sandbox_share_a_network() -> None:
+    """core and sandbox must share at least one network.
+
+    core reaches the sandbox shell server via DNS name ``sandbox:8765``;
+    Docker's embedded DNS only resolves service names within a shared network.
+    If they share no network the shell/bash tool silently fails to connect.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    core_nets = _service_networks(compose, "core")
+    sandbox_nets = _service_networks(compose, "sandbox")
+    shared = core_nets & sandbox_nets
+    assert shared, (
+        f"core ({sorted(core_nets)}) and sandbox ({sorted(sandbox_nets)}) share "
+        "no network — core cannot resolve sandbox:8765. "
+        f"Attach sandbox to {_MCP_INTERNAL_NET!r} (where core lives)."
     )
