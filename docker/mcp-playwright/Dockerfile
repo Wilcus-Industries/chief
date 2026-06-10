@@ -30,4 +30,4 @@ EXPOSE 3000
 # --port: bind the MCP HTTP server on 3000
 # --host: bind on all interfaces so core can reach it over the compose network
 CMD ["node", "node_modules/@playwright/mcp/cli.js", "--headless", "--no-sandbox", \
-     "--port", "3000", "--host", "0.0.0.0"]
+     "--port", "3000", "--host", "0.0.0.0", "--output-dir", "/screenshots"]
