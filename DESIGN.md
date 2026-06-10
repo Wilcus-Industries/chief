@@ -368,8 +368,10 @@ nothing; the permission gate is a real code callback that runs regardless of wha
 
 **Shell sandbox.** Shell/code executes in a **dedicated, locked-down worker container** —
 no secrets/tokens mounted, restricted filesystem (only a scratch workspace volume),
-limited or no network. The permission gate decides *what* runs; the sandbox bounds the
-*damage* if something slips past. The agent core talks to it over a narrow RPC.
+resource-capped (mem/PID/CPU). Outbound network is allowed (so the owner can `git
+clone`/`pull` and pull deps); the secret-free FS + caps bound the blast radius. The
+permission gate decides *what* runs; the sandbox bounds the *damage* if something slips
+past. The agent core talks to it over a narrow RPC.
 
 **Always-on:** an **audit log** of every tool call, approval decision, and memory write
 (who/what/when/verdict). Least-privilege containers. Secrets via env/secret-mount only,
@@ -458,7 +460,8 @@ Single VPS, one `docker compose`. **Outbound-only** (no public HTTP ingress); Te
 - **`core`** — chat adapters (Telegram long-poll + Discord gateway), agent orchestrator,
   memory, permission gate, sqlite. Holds the secrets. `restart: unless-stopped`, healthcheck.
 - **`sandbox`** — locked-down shell/code worker: no secrets, restricted FS (scratch
-  workspace only), limited/no network. Talks to `core` over a narrow RPC. *Built (M7).*
+  workspace only), resource-capped; outbound network allowed (git/deps). Talks to `core`
+  over a narrow RPC. *Built (M7).*
 - **`mcp-calendar` / `mcp-drive` / `mcp-sheets`** — chief's own FastMCP servers, one per
   service (streamable-HTTP at `http://mcp-<svc>:<port>/mcp`, :8003/:8001/:8002, never
   host-published), behind the **`google` compose profile** (a plain `up` skips them). One
