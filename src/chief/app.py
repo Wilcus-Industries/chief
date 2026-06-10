@@ -42,6 +42,7 @@ from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
+from .tools.google.add_account_service import AddAccountService
 from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
 from .tools.google.set_account_service import SetAccountService
@@ -219,6 +220,25 @@ def build_set_account_service(
     )
 
 
+def build_add_account_service(
+    secrets_dir: Path | str = Path("/token"),
+    client_secrets: Path | str = Path("/token/google_oauth_client.json"),
+) -> AddAccountService:
+    """Build the owner-only ``add_account`` tool — runtime chat-consent flow (#53).
+
+    Writes the minted token into ``secrets_dir`` (the same dir ``list_accounts`` /
+    ``set_account`` re-scan on every call), so a newly added account is selectable
+    with no restart. ``client_secrets`` is the shared Desktop-app OAuth client JSON;
+    in docker-compose it is bind-mounted alongside the tokens at
+    ``/token/google_oauth_client.json``. The default production OAuth seams hit
+    Google's token + userinfo endpoints; tests inject their own.
+    """
+    return AddAccountService(
+        secrets_dir=Path(secrets_dir),
+        client_secrets=Path(client_secrets),
+    )
+
+
 def build_budget(
     settings: Settings,
     *,
@@ -275,6 +295,10 @@ def build_engine(
         session_factory=session_factory,
         platform=platform,
     )
+    # Runtime add-account via chat consent (issue #53): owner-only, no card. Writes
+    # the minted token into the same /token dir the registry re-scans, so a new
+    # account is selectable immediately — no redeploy.
+    add_account = build_add_account_service()
     # The owner's schedule tools are platform-agnostic, so every stack's owner session
     # gets them when the scheduler is on; only the *loop* (built in serve) is singular.
     schedule = (
@@ -330,6 +354,7 @@ def build_engine(
         guest_admin_service=guest_admin,
         list_accounts_service=list_accounts,
         set_account_service=set_account,
+        add_account_service=add_account,
         schedule_service=schedule,
         schedule_bash_service=schedule_bash,
         # When budgeting is on, the gate records each turn's spend and the manager
