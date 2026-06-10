@@ -6,11 +6,20 @@ connection, and FastMCP's session manager gives every connection a fresh transpo
 the nspady "Server already initialized" single-shared-transport failure (which killed
 calendar after the first task) cannot recur here.
 
-Auth: the shared google-auth token (calendar scope) is loaded at module start from
-``GOOGLE_TOKEN_PATH`` and refreshed in memory — no write-back. Three containers share one
-token file; letting google-api-python-client refresh the access token in memory on each
-call (and never persisting) keeps a single writer (the sheets container) and dodges a
-write race. The refresh_token — the part that must persist — is unchanged by a refresh.
+Auth — multi-account (issue #46):
+    The server scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
+    files and loads them into a per-label credential registry at startup. On each
+    request, a Starlette middleware reads the ``X-Account-Label`` header (stamped by
+    chief's per-thread injection seam) and stores it in a ``contextvars.ContextVar``
+    so tool handlers can call ``_get_service()`` to obtain the right
+    google-api-python-client resource. Falls back to the first (default) credential
+    when no header is present — fully backward-compatible with single-account deploys.
+
+    Credentials are refreshed in memory only — no write-back. Three containers share
+    one token file; letting google-api-python-client refresh the access token in memory
+    on each call (and never persisting) keeps a single writer (the sheets container) and
+    dodges a write race. The refresh_token — the part that must persist — is unchanged
+    by a refresh.
 
 Tool names are hyphenated (``@mcp.tool(name=...)``) to match chief's
 ``src/chief/tools/calendar/mcp.py`` catalog. This file is standalone: it imports nothing
@@ -18,11 +27,13 @@ from ``chief`` and ships in its own image with its own requirements.
 """
 
 import asyncio
+import contextvars
 import datetime as dt
 import json
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -33,6 +44,7 @@ from mcp.server.fastmcp import FastMCP
 from owner_tz import owner_tz_from_config, resolve_owner_tz
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -40,7 +52,10 @@ logging.basicConfig(
 log = logging.getLogger("calendar.server")
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+#: Legacy single-token path (backward compat). When present it is always the default.
 TOKEN_PATH = os.environ.get("GOOGLE_TOKEN_PATH", "/token/google_token.json")
+#: Directory scanned for all ``google_token*.json`` files.
+TOKEN_DIR = os.environ.get("TOKEN_DIR", str(Path(TOKEN_PATH).parent))
 CONFIG_PATH = os.environ.get("CONFIG_PATH", "/config/config.yaml")
 # config.yaml (mounted read-only) is the source of truth; OWNER_TZ env overrides it.
 _configured_tz = (os.environ.get("OWNER_TZ") or "").strip() or owner_tz_from_config(
@@ -52,12 +67,157 @@ if _configured_tz and _configured_tz != OWNER_TZ:
     log.warning("owner_tz %r is not a known IANA zone; using %s", _configured_tz, OWNER_TZ)
 PORT = int(os.environ.get("PORT", "8003"))
 
-_creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
-if _creds.expired and _creds.refresh_token:
-    _creds.refresh(Request())  # in memory only — no write-back (single-writer policy)
-# google-api-python-client refreshes the access token in memory on subsequent calls.
-_service = build("calendar", "v3", credentials=_creds, cache_discovery=False)
-log.info("Calendar MCP authenticated | token=%s tz=%s", TOKEN_PATH, OWNER_TZ)
+#: Header name chief stamps with the thread's active account label.
+_ACCOUNT_HEADER = "x-account-label"  # ASGI lower-cases header names
+
+#: Per-request context: the active account label extracted from the HTTP header.
+#: None when no header is present (single-account / no binding).
+_account_label_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "_account_label_var", default=None
+)
+
+# ---------------------------------------------------------------------------
+# Multi-account credential registry
+# ---------------------------------------------------------------------------
+
+_TOKEN_PREFIX = "google_token"
+_LEGACY_NAME = "google_token.json"
+
+
+def _load_credentials(token_dir: Path) -> dict[str, Any]:
+    """Scan ``token_dir`` for ``google_token*.json`` files.
+
+    Returns a label → Credentials dict. The legacy ``google_token.json`` (if
+    present) is always the first entry (and therefore the default fallback).
+    Credentials are loaded but NOT refreshed here; google-api-python-client
+    refreshes in memory on the first API call.
+    """
+    if not token_dir.is_dir():
+        return {}
+    registry: dict[str, Any] = {}
+    legacy: list[tuple[str, Any]] = []
+    labeled: list[tuple[str, Any]] = []
+    for path in sorted(token_dir.iterdir()):
+        if path.suffix != ".json":
+            continue
+        if not path.name.startswith(_TOKEN_PREFIX):
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            scopes = raw.get("scopes") or SCOPES
+            creds = Credentials.from_authorized_user_info(raw, scopes=scopes)
+            label: str | None = raw.get("account")
+            if not label:
+                stem = path.stem
+                prefix = _TOKEN_PREFIX + "_"
+                label = stem[len(prefix):] if stem.startswith(prefix) else stem
+            if path.name == _LEGACY_NAME:
+                legacy.append((label, creds))
+            else:
+                labeled.append((label, creds))
+        except Exception:  # noqa: BLE001
+            log.warning("failed to load token %s", path, exc_info=True)
+    for label, creds in legacy + labeled:
+        registry[label] = creds
+    return registry
+
+
+# Load all registered accounts at startup.
+_creds_registry: dict[str, Any] = _load_credentials(Path(TOKEN_DIR))
+
+if _creds_registry:
+    labels = list(_creds_registry)
+    log.info(
+        "Calendar MCP loaded %d account(s): %s | tz=%s",
+        len(_creds_registry),
+        ", ".join(labels),
+        OWNER_TZ,
+    )
+else:
+    # No token files found — fall back to the legacy single-file path for compat.
+    log.warning(
+        "No token files found in TOKEN_DIR=%s; trying TOKEN_PATH=%s",
+        TOKEN_DIR,
+        TOKEN_PATH,
+    )
+    try:
+        _legacy_creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
+        if _legacy_creds.expired and _legacy_creds.refresh_token:
+            _legacy_creds.refresh(Request())
+        _creds_registry["_legacy"] = _legacy_creds
+        log.info("Calendar MCP authenticated (legacy path) | token=%s tz=%s", TOKEN_PATH, OWNER_TZ)
+    except Exception:
+        log.exception("Failed to load any Google credentials — calendar tools will error")
+
+
+# ---------------------------------------------------------------------------
+# Per-request credential/service selection
+# ---------------------------------------------------------------------------
+
+# Build a google-api-python-client service resource for every loaded credential.
+# Each service is built once; google-api-python-client refreshes the access token
+# in memory on each call, so no write-back is needed.
+_service_registry: dict[str, Any] = {}
+for _label, _creds in _creds_registry.items():
+    try:
+        _service_registry[_label] = build(
+            "calendar", "v3", credentials=_creds, cache_discovery=False
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("failed to build calendar service for %r", _label, exc_info=True)
+
+# The first (default) service — used when no account header is present.
+_default_service: Any = next(iter(_service_registry.values()), None)
+
+
+def _get_service() -> Any:
+    """Return the calendar service resource for the current request.
+
+    Reads the per-request account label from the context variable (set by the
+    ``AccountHeaderMiddleware`` before this tool handler runs) and looks up the
+    matching service.  Falls back to the default (first loaded) service when the
+    label is absent or unknown — backward compat for single-account deploys and
+    any request that carries no ``X-Account-Label`` header.
+    """
+    label = _account_label_var.get()
+    if label and label in _service_registry:
+        return _service_registry[label]
+    return _default_service
+
+
+# ---------------------------------------------------------------------------
+# Starlette middleware: extract X-Account-Label → per-request contextvar
+# ---------------------------------------------------------------------------
+
+
+class AccountHeaderMiddleware:
+    """Extract ``X-Account-Label`` from incoming HTTP headers into a contextvar.
+
+    Starlette ASGI middleware that runs before every request to the MCP endpoint.
+    It sets ``_account_label_var`` so that ``_get_service()`` — called inside tool
+    handlers — sees the correct account for this particular HTTP call.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            label_bytes = headers.get(_ACCOUNT_HEADER.encode(), b"")
+            label: str | None = label_bytes.decode("utf-8") or None
+            token = _account_label_var.set(label)
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _account_label_var.reset(token)
+        else:
+            await self._app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
+# FastMCP server and tools
+# ---------------------------------------------------------------------------
 
 mcp = FastMCP("calendar", host="0.0.0.0", port=PORT)
 
@@ -104,9 +264,10 @@ def _event_summary(e: dict[str, Any]) -> dict[str, Any]:
 @mcp.tool(name="list-calendars")
 async def list_calendars() -> str:
     """List the calendars on the account (id, summary, access role)."""
+    service = _get_service()
 
     def _call() -> list[dict[str, Any]]:
-        items = _service.calendarList().list().execute().get("items", [])
+        items = service.calendarList().list().execute().get("items", [])
         return [
             {
                 "id": c["id"],
@@ -129,10 +290,11 @@ async def list_events(
     maxResults: int = 50,
 ) -> str:
     """List events in [timeMin, timeMax) (RFC3339). Optional free-text ``query``."""
+    service = _get_service()
 
     def _call() -> list[dict[str, Any]]:
         resp = (
-            _service.events()
+            service.events()
             .list(
                 calendarId=calendarId,
                 timeMin=_ensure_offset(timeMin),
@@ -153,9 +315,10 @@ async def list_events(
 @mcp.tool(name="get-event")
 async def get_event(calendarId: str, eventId: str) -> str:
     """Fetch a single event by id (the full Google event resource)."""
+    service = _get_service()
 
     def _call() -> dict[str, Any]:
-        return _service.events().get(calendarId=calendarId, eventId=eventId).execute()
+        return service.events().get(calendarId=calendarId, eventId=eventId).execute()
 
     return _json(await asyncio.to_thread(_call))
 
@@ -163,6 +326,7 @@ async def get_event(calendarId: str, eventId: str) -> str:
 @mcp.tool(name="get-freebusy")
 async def get_freebusy(calendarId: str, timeMin: str, timeMax: str) -> str:
     """Busy intervals on ``calendarId`` within [timeMin, timeMax) (RFC3339)."""
+    service = _get_service()
 
     def _call() -> dict[str, Any]:
         body = {
@@ -171,7 +335,7 @@ async def get_freebusy(calendarId: str, timeMin: str, timeMax: str) -> str:
             "timeZone": OWNER_TZ,
             "items": [{"id": calendarId}],
         }
-        resp = _service.freebusy().query(body=body).execute()
+        resp = service.freebusy().query(body=body).execute()
         return resp.get("calendars", {}).get(calendarId, {})
 
     return _json(await asyncio.to_thread(_call))
@@ -218,8 +382,10 @@ async def create_event(
     if attendees:
         body["attendees"] = [{"email": a} for a in attendees]
 
+    service = _get_service()
+
     def _call() -> dict[str, Any]:
-        return _service.events().insert(calendarId=calendarId, body=body).execute()
+        return service.events().insert(calendarId=calendarId, body=body).execute()
 
     return _json(await asyncio.to_thread(_call))
 
@@ -249,9 +415,11 @@ async def update_event(
     if location is not None:
         body["location"] = location
 
+    service = _get_service()
+
     def _call() -> dict[str, Any]:
         return (
-            _service.events()
+            service.events()
             .patch(calendarId=calendarId, eventId=eventId, body=body)
             .execute()
         )
@@ -262,9 +430,10 @@ async def update_event(
 @mcp.tool(name="delete-event")
 async def delete_event(calendarId: str, eventId: str) -> str:
     """Delete an event. chief hard-blocks this (DEFERRED_TOOLS); the live test uses it."""
+    service = _get_service()
 
     def _call() -> dict[str, Any]:
-        _service.events().delete(calendarId=calendarId, eventId=eventId).execute()
+        service.events().delete(calendarId=calendarId, eventId=eventId).execute()
         return {"deleted": eventId}
 
     return _json(await asyncio.to_thread(_call))
@@ -277,4 +446,19 @@ async def health(_request: StarletteRequest) -> JSONResponse:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    import anyio
+    import uvicorn
+
+    async def _serve() -> None:
+        starlette_app = mcp.streamable_http_app()
+        wrapped = AccountHeaderMiddleware(starlette_app)
+        config = uvicorn.Config(
+            wrapped,
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    anyio.run(_serve)

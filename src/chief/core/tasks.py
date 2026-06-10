@@ -74,6 +74,7 @@ from ..persistence.tasks import (
     set_task_model,
 )
 from ..tools.browser.screenshot import build_screenshot_hook
+from ..tools.calendar import mcp as calendar_mcp
 from ..tools.google import GoogleService
 from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
@@ -567,12 +568,21 @@ class TaskManager:
                 session, platform=self._platform, thread_key=thread_key, tier=tier
             )
             db_id, resume, persisted_model = db.id, db.sdk_session_id, db.model
+        # Read the thread's active account (if any) for credential injection
+        # into the calendar MCP server config (issue #46). Owner-only; guests
+        # never have an active account binding.
+        active_account_label: str | None = None
+        if tier == "owner" and self._set_account_service is not None:
+            active_account_label = (
+                await self._set_account_service.get_active_account_label(thread_key)
+            )
         gate_kwargs = self._session_kwargs(
             thread_key=thread_key,
             tier=tier,
             db_id=db_id,
             from_label=from_label,
             surface=surface,
+            active_account_label=active_account_label,
         )
         # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
         # swapped for the cheaper budget model while the cycle is downgraded (M9), or
@@ -604,6 +614,7 @@ class TaskManager:
         db_id: int,
         from_label: str | None = None,
         surface: Surface = Surface.DM,
+        active_account_label: str | None = None,
     ) -> dict[str, Any]:
         """Assemble the SDK session kwargs (gate + memory/tool scoping) for a thread.
 
@@ -612,6 +623,12 @@ class TaskManager:
         ``fork_session`` are layered on by the caller — they vary per origin. The owner
         and guest tool surfaces diverge sharply (tier isolation by construction), so
         each is wired by its own helper; ``from_label`` is the guest's display name.
+
+        ``active_account_label`` is the thread's current active Google account (from
+        :attr:`Task.active_account`, issue #46).  When set, the calendar MCP server
+        config is stamped with an ``X-Account-Label`` header so the server routes the
+        request to the right credential — without the model ever seeing or passing an
+        account argument.
         """
         can_use_tool, hooks = self._build_gate(
             task_id=db_id, thread_key=thread_key, tier=tier, surface=surface
@@ -629,7 +646,11 @@ class TaskManager:
             return gate_kwargs
         if tier == "owner":
             self._wire_owner_session(
-                gate_kwargs, thread_key, disallowed_tools, surface
+                gate_kwargs,
+                thread_key,
+                disallowed_tools,
+                surface,
+                active_account_label=active_account_label,
             )
         else:
             self._wire_guest_session(gate_kwargs, from_label)
@@ -641,10 +662,18 @@ class TaskManager:
         thread_key: str,
         disallowed_tools: list[str],
         surface: Surface = Surface.DM,
+        *,
+        active_account_label: str | None = None,
     ) -> None:
-        """Wire the owner's full surface: memory, web, Google, shell, admin, skills."""
+        """Wire the owner's full surface: memory, web, Google, shell, admin, skills.
+
+        ``active_account_label`` is the thread's active Google account (issue #46).
+        When set, the calendar service config is built with an ``X-Account-Label``
+        header so the server selects the right credential per request — transparent
+        to the model.
+        """
         assert self._memory is not None
-        services = self._google_services
+        services = self._build_services_with_account(active_account_label)
         workspace_on = self._workspace_dir is not None
         shell_on = self._shell_service is not None
         admin = self._guest_admin_service
@@ -785,6 +814,35 @@ class TaskManager:
         gate_kwargs["disallowed_tools"] = gate_kwargs["disallowed_tools"] + GUEST_DENIED
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
+
+    def _build_services_with_account(
+        self, active_account_label: str | None
+    ) -> tuple[GoogleService, ...]:
+        """Return the Google services tuple, with the Calendar service stamped with
+        an ``X-Account-Label`` header when a per-thread account is active (issue #46).
+
+        All non-calendar services are passed through unchanged.  The Calendar
+        service is rebuilt (via :func:`~chief.tools.calendar.mcp.service`) with a
+        per-session headers dict so every HTTP call the SDK sends to ``mcp-calendar``
+        carries the label — the server uses it to select the right credential.
+
+        When ``active_account_label`` is ``None`` (no binding set for the thread),
+        the calendar service config carries no header and the server falls back to
+        the default (first / single-account) credential, keeping backward compat.
+        """
+        if not active_account_label:
+            return self._google_services
+        headers = {"X-Account-Label": active_account_label}
+        result: list[GoogleService] = []
+        for svc in self._google_services:
+            if svc.name == "calendar":
+                # Rebuild the calendar service with the active account header.
+                result.append(
+                    calendar_mcp.service(svc.url, headers=headers)
+                )
+            else:
+                result.append(svc)
+        return tuple(result)
 
     def _approval_route(self, *, tier: str, thread_key: str, surface: Surface) -> str:
         """Where this session's approval card lands; raise if there's no private route.
@@ -1247,8 +1305,20 @@ class TaskManager:
         Returns the brief. The old session is torn down by the caller.
         """
         summary = await self._run_silent_turn(task.session, COMPACT_PROMPT)
+        # Carry the active account forward into the reseeded session so calendar
+        # calls in the new session still hit the right credential (issue #46).
+        active_account_label: str | None = None
+        if self._set_account_service is not None:
+            active_account_label = (
+                await self._set_account_service.get_active_account_label(
+                    task.thread_key
+                )
+            )
         gate_kwargs = self._session_kwargs(
-            thread_key=task.thread_key, tier=task.tier, db_id=task.db_id
+            thread_key=task.thread_key,
+            tier=task.tier,
+            db_id=task.db_id,
+            active_account_label=active_account_label,
         )
         fresh = self._session_factory_sdk(
             model=self._owner_model, resume=None, **gate_kwargs
@@ -1293,8 +1363,18 @@ class TaskManager:
                 title=title,
             )
             db_id = db.id
+        # Carry the active account into the branched thread; it may be None if the
+        # casual channel had no account bound (backward compat, issue #46).
+        active_account_label: str | None = None
+        if self._set_account_service is not None:
+            active_account_label = (
+                await self._set_account_service.get_active_account_label(new_key)
+            )
         gate_kwargs = self._session_kwargs(
-            thread_key=new_key, tier="owner", db_id=db_id
+            thread_key=new_key,
+            tier="owner",
+            db_id=db_id,
+            active_account_label=active_account_label,
         )
         rt = _RunningTask(
             thread_key=new_key,
