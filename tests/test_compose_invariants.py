@@ -457,6 +457,32 @@ def test_playwright_dockerfile_does_not_use_storage_state_flag() -> None:
     )
 
 
+def test_mcp_playwright_healthcheck_probes_the_served_mcp_endpoint() -> None:
+    """The mcp-playwright healthcheck must hit the served /mcp endpoint, not /.
+
+    @playwright/mcp mounts its streamable-HTTP handler at /mcp; a GET to the
+    root path returns 404, so a `curl -f http://127.0.0.1:3000/` health probe
+    fails on every check and the container is flagged unhealthy even though the
+    server is up (issue #38 prod rollout). The probe must target /mcp and must
+    not use curl's --fail/-f (the endpoint answers a bare GET with a non-2xx
+    status — a liveness probe only needs the server to respond, not to 200).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    test_cmd = compose["services"]["mcp-playwright"]["healthcheck"]["test"]
+    assert isinstance(test_cmd, list)
+    joined = " ".join(test_cmd)
+    assert "/mcp" in joined, (
+        "mcp-playwright healthcheck must probe the served /mcp endpoint, not the "
+        f"root path (which 404s). Got: {joined!r}"
+    )
+    fail_flags = {"-f", "-fsS", "-sf", "--fail"}
+    assert not fail_flags.intersection(test_cmd), (
+        "mcp-playwright healthcheck must not use curl --fail/-f: the /mcp endpoint "
+        "answers a bare GET with a non-2xx status, so -f flags a live server "
+        f"unhealthy. Got: {joined!r}"
+    )
+
+
 # ---- sandbox network isolation (issue #40 regression fix, issue #42) ----------
 
 
