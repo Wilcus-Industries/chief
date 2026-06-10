@@ -14,11 +14,12 @@ import yaml  # type: ignore[import-untyped]
 
 _COMPOSE_PATH = Path(__file__).parent.parent / "docker-compose.yml"
 
-# Network names used in the SSRF isolation design (issue #33).
+# Network names used in the SSRF isolation design (issue #33, #42).
 _PLAYWRIGHT_NET = "playwright-net"
 _MCP_INTERNAL_NET = "mcp-internal"
+_SANDBOX_NET = "sandbox-net"
 
-# Google MCP services that must stay off the playwright network.
+# Google MCP services that must stay off the playwright network and sandbox-net.
 _GOOGLE_MCP_SERVICES = {"mcp-calendar", "mcp-drive", "mcp-sheets", "mcp-gmail"}
 
 
@@ -119,10 +120,13 @@ def test_claude_home_volume_mounted_on_core() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_networks_block_declares_both_isolation_networks() -> None:
-    """Both named networks must be declared at the top-level networks key.
+def test_networks_block_declares_all_isolation_networks() -> None:
+    """All three named networks must be declared at the top-level networks key.
 
     Without explicit declarations the services cannot reference them.
+    mcp-internal: shared by core + Google MCP services.
+    playwright-net: shared by core + mcp-playwright.
+    sandbox-net: dedicated two-member network for core + sandbox (issue #42).
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     top_networks: set[str] = set(compose.get("networks", {}).keys())
@@ -133,6 +137,10 @@ def test_networks_block_declares_both_isolation_networks() -> None:
     assert _MCP_INTERNAL_NET in top_networks, (
         f"Top-level networks block is missing {_MCP_INTERNAL_NET!r}. "
         "Add it so the Google MCP services share a dedicated internal network."
+    )
+    assert _SANDBOX_NET in top_networks, (
+        f"Top-level networks block is missing {_SANDBOX_NET!r}. "
+        "Add it so core and sandbox share a dedicated two-member network (issue #42)."
     )
 
 
@@ -442,23 +450,26 @@ def test_playwright_dockerfile_does_not_use_storage_state_flag() -> None:
     )
 
 
-# ---- sandbox network reachability (issue #40) ---------------------------------
+# ---- sandbox network isolation (issue #40 regression fix, issue #42) ----------
 
 
-def test_sandbox_is_on_mcp_internal() -> None:
-    """sandbox must be attached to mcp-internal so core can resolve sandbox:8765.
+def test_sandbox_is_not_on_mcp_internal() -> None:
+    """sandbox must NOT be attached to mcp-internal (issue #42 security fix).
 
-    Issue #33 added explicit ``networks:`` to core (mcp-internal + playwright-net),
-    removing it from the implicit default network.  sandbox had no ``networks:``
-    entry, leaving it on the default network only — a disjoint set from core's
-    networks.  Attaching sandbox to mcp-internal restores the route.
+    mcp-internal is shared by core and the four Google MCP sidecars
+    (mcp-calendar, mcp-drive, mcp-sheets, mcp-gmail).  Those endpoints are
+    unauthenticated — network reachability is the only access control.  A
+    sandbox on mcp-internal can reach them via arbitrary bash commands, bypassing
+    core's permission gate entirely.  Use the dedicated sandbox-net instead.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     nets = _service_networks(compose, "sandbox")
-    assert _MCP_INTERNAL_NET in nets, (
-        f"sandbox is not attached to {_MCP_INTERNAL_NET!r}. "
-        "core can no longer resolve sandbox:8765 — the shell/bash tool is broken. "
-        f"Add 'networks: [{_MCP_INTERNAL_NET}]' to the sandbox service."
+    assert _MCP_INTERNAL_NET not in nets, (
+        f"sandbox is attached to {_MCP_INTERNAL_NET!r} — a bash command in the "
+        "sandbox can reach the unauthenticated Google MCP services (gmail, drive, "
+        "sheets, calendar) and act on the owner's account without going through "
+        f"core's permission gate.  Remove {_MCP_INTERNAL_NET!r} from sandbox and "
+        f"use the dedicated {_SANDBOX_NET!r} instead."
     )
 
 
@@ -477,19 +488,41 @@ def test_sandbox_is_not_on_playwright_net() -> None:
     )
 
 
-def test_core_and_sandbox_share_a_network() -> None:
-    """core and sandbox must share at least one network.
+def test_core_and_sandbox_share_sandbox_net() -> None:
+    """core and sandbox must both be on the dedicated sandbox-net (issue #42).
 
     core reaches the sandbox shell server via DNS name ``sandbox:8765``;
     Docker's embedded DNS only resolves service names within a shared network.
-    If they share no network the shell/bash tool silently fails to connect.
+    sandbox-net is a two-member network (core + sandbox only) — it gives core
+    the route it needs while keeping sandbox isolated from the Google MCP services
+    that live on mcp-internal.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     core_nets = _service_networks(compose, "core")
     sandbox_nets = _service_networks(compose, "sandbox")
-    shared = core_nets & sandbox_nets
-    assert shared, (
-        f"core ({sorted(core_nets)}) and sandbox ({sorted(sandbox_nets)}) share "
-        "no network — core cannot resolve sandbox:8765. "
-        f"Attach sandbox to {_MCP_INTERNAL_NET!r} (where core lives)."
+    assert _SANDBOX_NET in core_nets, (
+        f"core is not on {_SANDBOX_NET!r} — it cannot reach sandbox:8765. "
+        f"Add {_SANDBOX_NET!r} to the core service networks."
     )
+    assert _SANDBOX_NET in sandbox_nets, (
+        f"sandbox is not on {_SANDBOX_NET!r} — core cannot reach sandbox:8765. "
+        f"Add {_SANDBOX_NET!r} to the sandbox service networks."
+    )
+
+
+def test_google_mcp_services_are_not_on_sandbox_net() -> None:
+    """No Google MCP service may be on sandbox-net (issue #42).
+
+    sandbox-net is intended as a two-member network (core + sandbox only).
+    If any Google MCP sidecar were on sandbox-net the sandbox could reach it
+    directly, bypassing the permission gate — the same vulnerability issue #42
+    was filed to close.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    for svc in _GOOGLE_MCP_SERVICES:
+        nets = _service_networks(compose, svc)
+        assert _SANDBOX_NET not in nets, (
+            f"{svc} is attached to {_SANDBOX_NET!r} — a sandbox bash command could "
+            "reach it and act on the owner's Google account without a permission "
+            f"check.  Remove {_SANDBOX_NET!r} from {svc}."
+        )

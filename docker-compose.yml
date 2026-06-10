@@ -38,12 +38,15 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    # core bridges both internal networks: it must reach the Google MCP services on
-    # mcp-internal and the browser on playwright-net. Neither network is on the other,
-    # so a compromised playwright container has no route to calendar/drive/sheets/gmail.
+    # core bridges all three internal networks: it must reach the Google MCP services
+    # on mcp-internal, the browser on playwright-net, and the sandbox shell on
+    # sandbox-net. No two of these networks overlap, so a compromised playwright
+    # container has no route to calendar/drive/sheets/gmail, and the sandbox cannot
+    # reach the Google MCP services directly.
     networks:
       - mcp-internal
       - playwright-net
+      - sandbox-net
     environment:
       # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
       # Both owner ids are optional here — config requires at least one platform fully set
@@ -328,10 +331,13 @@ services:
       - /home/sandbox
     security_opt:
       - no-new-privileges:true
-    # mcp-internal only — core resolves sandbox:8765 over this network.  Intentionally
-    # off playwright-net so the browser container has no route to the shell server.
+    # sandbox-net only — core resolves sandbox:8765 over this dedicated two-member
+    # network (core + sandbox).  Intentionally off mcp-internal so arbitrary bash
+    # commands cannot reach the unauthenticated Google MCP sidecars (issue #42).
+    # Intentionally off playwright-net so the browser container has no route to
+    # the shell server.
     networks:
-      - mcp-internal
+      - sandbox-net
     # Blast-radius caps for a process running arbitrary owner commands.
     mem_limit: 1g
     pids_limit: 256
@@ -369,14 +375,23 @@ volumes:
   screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
   browser-profile:  # issue #35: Chromium --user-data-dir; cookies/session survive restarts
 
-# Two named networks provide SSRF isolation for the playwright container (issue #33).
+# Three named networks provide SSRF isolation (issue #33) and sandbox isolation
+# (issue #42).
 #
-# mcp-internal  — shared by core + the four Google MCP services. Invisible to
-#                 mcp-playwright; a hostile page cannot reach calendar/drive/sheets/gmail.
+# mcp-internal  — shared by core + the four Google MCP sidecars (calendar, drive,
+#                 sheets, gmail).  Invisible to mcp-playwright (hostile page cannot
+#                 SSRF into Google services) and invisible to sandbox (a bash command
+#                 cannot reach the unauthenticated Google MCP endpoints).
 # playwright-net — shared by core + mcp-playwright. Has full internet egress (no
-#                 internal_only flag). The Google MCP services are never attached here.
+#                 internal_only flag). Google MCP services and sandbox are never
+#                 attached here.
+# sandbox-net   — dedicated two-member network: core + sandbox only. Core resolves
+#                 sandbox:8765 here. Keeping sandbox off mcp-internal ensures arbitrary
+#                 bash commands cannot act on the owner's Google account by hitting the
+#                 unauthenticated MCP sidecars directly (issue #42).
 #
-# core sits on both so it can dispatch tasks to either group.
+# core sits on all three so it can dispatch tasks to any group.
 networks:
   mcp-internal:
   playwright-net:
+  sandbox-net:
