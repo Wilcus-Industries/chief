@@ -5,7 +5,8 @@ Two Gmail servers coexist during the transition (issue #48 → #52):
 - ``mcp-gmail`` (port 8004) — third-party ``MindMadeLab/mcp-google-gmail`` (0.1.4),
   still active; cutover happens in issue #52.
 - ``mcp-gmail-chief`` (port 8005) — chief's own FastMCP server (issue #48), multi-
-  account, mirrors the calendar/drive/sheets pattern.
+  account, mirrors the calendar/drive/sheets pattern. Send/reply landed in #51 (writes
+  routed through the approval card).
 
 :func:`service` wires the 3rd-party server (SDK server name ``gmail``).
 :func:`chief_service` wires the new chief-owned server (SDK server name
@@ -49,6 +50,16 @@ CHIEF_READ_TOOLS: tuple[str, ...] = qualified(
     "gmail_search_messages",
     "gmail_list_drafts",
     "gmail_list_labels",
+)
+
+#: Effectful tools on the chief-owned Gmail server — sending and replying (issue #51).
+#: Kept OUT of ``allowed_tools`` so the SDK routes each to the owner's approval card
+#: (reads ALLOW, writes ASK). Every outbound body also gets the transparent signature
+#: appended server-side.
+CHIEF_WRITE_TOOLS: tuple[str, ...] = qualified(
+    CHIEF_SERVER_NAME,
+    "gmail_send_message",
+    "gmail_reply_on_message",
 )
 
 #: Effectful Gmail tools — wired for the owner but routed through ASK → approval. Every
@@ -97,15 +108,15 @@ def chief_service(
     used to inject ``X-Account-Label`` for multi-account credential selection
     (issue #48).  ``None`` → no extra headers (single-account / no binding).
 
-    This server runs alongside the 3rd-party server during the transition; it is
-    read-only (no write/deferred tools yet — those come in #51/#52).
+    This server runs alongside the 3rd-party server during the transition. Reads are
+    pre-approved; send/reply (issue #51) are writes routed through the approval card.
     """
     return GoogleService(
         name="gmail_chief",
         server_name=CHIEF_SERVER_NAME,
         url=url,
         read_tools=CHIEF_READ_TOOLS,
-        write_tools=(),
+        write_tools=CHIEF_WRITE_TOOLS,
         deferred_tools=(),
         headers=headers,
     )
