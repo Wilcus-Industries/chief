@@ -8,11 +8,15 @@ Tests cover:
 - mint_token extended to write the account (email) field via an injected email_fn
 - ListAccountsService: owner-only in-process tool returns formatted account list
 - guest sessions have no access to list_accounts (tier isolation by construction)
+- build_list_accounts_service() defaults to /token (the compose bind-mount, issue #54)
+- backward-compat email resolution: tokens without account field resolve email via
+  injected resolver (issue #54)
 """
 
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -265,3 +269,197 @@ class TestBuildAccountsService:
         svc = build_list_accounts_service(secrets_dir=absent)
         # still returns a service (owner can call it; it just reports 0 accounts)
         assert svc is not None
+
+    def test_build_list_accounts_service_default_path_is_production_mount(
+        self,
+    ) -> None:
+        """Default secrets_dir must be /token — the compose bind-mount for core.
+
+        docker-compose.yml mounts ./secrets/google_token.json into core at
+        /token/google_token.json.  Using the cwd-relative ``secrets/`` would
+        scan an empty/absent directory and always return zero accounts.
+        """
+        import inspect
+
+        from chief.app import build_list_accounts_service
+
+        sig = inspect.signature(build_list_accounts_service)
+        default = sig.parameters["secrets_dir"].default
+        # The production default must be Path("/token"), matching the compose mount.
+        assert default == Path("/token"), (
+            f"build_list_accounts_service default secrets_dir is {default!r}; "
+            "expected Path('/token') (the compose bind-mount for core). "
+            "A cwd-relative 'secrets/' scans an empty dir and always returns zero."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat email resolution (issue #54): tokens without 'account' field
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatEmailResolution:
+    """Legacy tokens (no 'account' field) must resolve email via the token credentials.
+
+    discover_accounts accepts an optional ``email_resolver`` callable so tests
+    can inject a fake; the production default uses a real OAuth token exchange.
+    """
+
+    def test_legacy_token_without_account_resolves_email_via_resolver(
+        self, tmp_path: Path
+    ) -> None:
+        """When a token has no 'account' field, the injected resolver is called."""
+        # Write a legacy token without account field
+        data = {
+            "token": "at",
+            "refresh_token": "rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "secret",
+        }
+        (tmp_path / "google_token.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+        resolved_emails: list[Path] = []
+
+        def fake_resolver(token_path: Path) -> str | None:
+            resolved_emails.append(token_path)
+            return "legacy@example.com"
+
+        accounts = discover_accounts(tmp_path, email_resolver=fake_resolver)
+
+        assert len(accounts) == 1
+        assert accounts[0].email == "legacy@example.com"
+        assert accounts[0].label == "legacy@example.com"
+        assert len(resolved_emails) == 1
+
+    def test_token_with_account_field_skips_resolver(self, tmp_path: Path) -> None:
+        """Tokens that already have 'account' don't call the resolver."""
+        _write_token(tmp_path / "google_token.json", email="known@example.com")
+
+        resolver_called = False
+
+        def fake_resolver(token_path: Path) -> str | None:
+            nonlocal resolver_called
+            resolver_called = True
+            return "should-not-be-called@example.com"
+
+        accounts = discover_accounts(tmp_path, email_resolver=fake_resolver)
+
+        assert accounts[0].email == "known@example.com"
+        assert not resolver_called
+
+    def test_resolver_returning_none_falls_back_to_slug(
+        self, tmp_path: Path
+    ) -> None:
+        """If the resolver can't determine the email, fall back to the filename slug."""
+        data = {
+            "token": "at",
+            "refresh_token": "rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "secret",
+        }
+        (tmp_path / "google_token.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+        accounts = discover_accounts(
+            tmp_path, email_resolver=lambda _path: None
+        )
+
+        assert accounts[0].email is None
+        assert accounts[0].label == "google_token"
+
+    def test_discover_accounts_no_resolver_still_works(
+        self, tmp_path: Path
+    ) -> None:
+        """discover_accounts without email_resolver behaves as before for legacy."""
+        _write_token(tmp_path / "google_token.json", email=None)
+
+        accounts = discover_accounts(tmp_path)
+
+        assert len(accounts) == 1
+        assert accounts[0].email is None
+        assert accounts[0].label == "google_token"
+
+
+# ---------------------------------------------------------------------------
+# auth.main() wires email_fn in production (issue #54)
+# ---------------------------------------------------------------------------
+
+
+class TestAuthMainWiresEmailFn:
+    """Production CLI must wire an email_fn so freshly minted tokens carry 'account'."""
+
+    def test_main_wires_email_fn_and_token_has_account_field(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """After production mint, the token JSON must contain the 'account' field."""
+        from chief.tools.google import auth
+
+        client = tmp_path / "client.json"
+        client.write_text("{}", encoding="utf-8")
+        out = tmp_path / "token.json"
+
+        class _FakeCreds:
+            def to_json(self) -> str:
+                return json.dumps(
+                    {
+                        "token": "at",
+                        "refresh_token": "rt",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "client_id": "cid",
+                        "client_secret": "secret",
+                    }
+                )
+
+        monkeypatch.setattr(auth, "_run_local_consent", lambda _c, _s: _FakeCreds())
+        # Patch the userinfo fetch so it doesn't need network
+        with patch(
+            "chief.tools.google.auth._fetch_userinfo_email",
+            return_value="prod@example.com",
+        ):
+            code = auth.main(["--client", str(client), "--out", str(out)])
+
+        assert code == 0
+        data = json.loads(out.read_text(encoding="utf-8"))
+        assert data.get("account") == "prod@example.com"
+
+    def test_main_without_userinfo_still_succeeds_gracefully(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If userinfo fetch fails, mint still completes (no account field, no crash).
+
+        Graceful degradation: the token is written without the 'account' field.
+        """
+        from chief.tools.google import auth
+
+        client = tmp_path / "client.json"
+        client.write_text("{}", encoding="utf-8")
+        out = tmp_path / "token.json"
+
+        class _FakeCreds:
+            def to_json(self) -> str:
+                return json.dumps(
+                    {
+                        "token": "at",
+                        "refresh_token": "rt",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "client_id": "cid",
+                        "client_secret": "secret",
+                    }
+                )
+
+        monkeypatch.setattr(auth, "_run_local_consent", lambda _c, _s: _FakeCreds())
+        # Patch userinfo to raise, simulating a network failure
+        with patch(
+            "chief.tools.google.auth._fetch_userinfo_email",
+            side_effect=Exception("network error"),
+        ):
+            code = auth.main(["--client", str(client), "--out", str(out)])
+
+        # Mint still succeeds; account field is absent (graceful degradation)
+        assert code == 0
+        assert out.exists()

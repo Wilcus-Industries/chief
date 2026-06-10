@@ -526,3 +526,54 @@ def test_google_mcp_services_are_not_on_sandbox_net() -> None:
             "reach it and act on the owner's Google account without a permission "
             f"check.  Remove {_SANDBOX_NET!r} from {svc}."
         )
+
+
+# ---- google_token bind-mount in core (issue #54) ------------------------------
+
+#: The path where google_token.json must be bind-mounted in core.
+_CORE_TOKEN_MOUNT = "/token/google_token.json"
+#: The host-side source of the token bind-mount.
+_HOST_TOKEN_SOURCE = "./secrets/google_token.json"
+
+
+def test_google_token_mounted_in_core() -> None:
+    """core must have ./secrets/google_token.json bind-mounted at /token/....
+
+    The full mount target is /token/google_token.json.
+    build_list_accounts_service() defaults to Path('/token') as the discovery
+    directory.  Without the bind-mount, core's /token directory is absent or empty
+    and discover_accounts() returns [] — zero accounts on a live single-account
+    deployment (issue #54 Defect 1).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
+    has_token_mount = any(
+        isinstance(v, str) and _CORE_TOKEN_MOUNT in v for v in core_volumes
+    )
+    assert has_token_mount, (
+        f"core service is missing a bind-mount for the google token at "
+        f"{_CORE_TOKEN_MOUNT!r}. Add "
+        f"'- {_HOST_TOKEN_SOURCE}:{_CORE_TOKEN_MOUNT}:ro' to core.volumes so "
+        "discover_accounts() can find the token at /token."
+    )
+
+
+def test_google_token_mounted_in_core_is_read_only() -> None:
+    """The google_token bind-mount in core must be read-only (:ro).
+
+    mcp-sheets is the sole writer of the shared token file.  A writable mount
+    in core would risk concurrent writes and token corruption.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
+    token_entry = next(
+        (v for v in core_volumes if isinstance(v, str) and _CORE_TOKEN_MOUNT in v),
+        None,
+    )
+    assert token_entry is not None, (
+        f"No volume entry containing {_CORE_TOKEN_MOUNT!r} found in core.volumes."
+    )
+    assert token_entry.endswith(":ro"), (
+        f"The google token bind-mount in core ({token_entry!r}) must end with ':ro'. "
+        "mcp-sheets is the sole writer; a writable core mount risks token corruption."
+    )

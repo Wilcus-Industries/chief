@@ -102,6 +102,10 @@ services:
       # mcp-playwright to deliver them to the owner via send_file. Read-only — core
       # never writes to this volume; playwright is the sole writer.
       - screenshots:/screenshots:ro
+      # Google account registry (issue #54): core scans /token for google_token*.json
+      # files to populate the list_accounts tool. Read-only — mcp-sheets is the sole
+      # writer of the shared token; core only reads it to discover registered accounts.
+      - ./secrets/google_token.json:/token/google_token.json:ro
     tmpfs:
       # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
       # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.

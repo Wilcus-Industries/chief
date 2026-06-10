@@ -1,16 +1,16 @@
-"""One-time Google OAuth consent → a mountable token (Calendar/Drive/Sheets/Gmail).
+"""One-time Google OAuth consent -> a mountable token (Calendar/Drive/Sheets/Gmail).
 
 The only interactive piece of the Google integration: the operator runs this once on
 their dev machine (``python -m chief.tools.google.auth``), completes the loopback
 consent in a browser, and gets a **google-auth Python credential** written to
 ``./secrets/google_token.json``. That single token is bind-mounted into all four Google
-MCP containers — so the VPS never runs a consent callback server (DESIGN: "run the
-consent dance once locally, mount the resulting refresh token — no VPS callback").
+MCP containers -- so the VPS never runs a consent callback server (DESIGN: "run the
+consent dance once locally, mount the resulting refresh token -- no VPS callback").
 
 The output is ``Credentials.to_json()`` (the native google-auth shape: ``refresh_token``
 / ``token`` / ``scopes`` / ``token_uri`` / ``client_id`` / ``client_secret``), which
 every server reads with ``Credentials.from_authorized_user_file`` and refreshes in
-memory. One token, four scopes — no per-service files, no Node-shape remap.
+memory. One token, four scopes -- no per-service files, no Node-shape remap.
 
 ``google-auth-oauthlib`` is a **dev/host-only** dependency (imported lazily): the
 runtime containers reach Google through the MCP servers, not through this helper, so the
@@ -19,13 +19,17 @@ core image stays lean.
 
 import argparse
 import json
+import logging
+import urllib.request
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
 
-#: Calendar R/W, Drive (read + upload), Sheets R/W, Gmail R/W (read + send/modify) — the
-#: union the four servers need. Delete is permitted by the calendar/gmail scopes but
-#: each server keeps its permanent-delete tools deferred.
+logger = logging.getLogger("chief.tools.google.auth")
+
+#: Calendar R/W, Drive (read + upload), Sheets R/W, Gmail R/W (read + send/modify)
+#: -- the union the four servers need. Delete is permitted by the calendar/gmail scopes
+#: but each server keeps its permanent-delete tools deferred.
 SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
@@ -34,9 +38,12 @@ SCOPES: tuple[str, ...] = (
 )
 
 #: Where the operator drops the Google Cloud "Desktop app" OAuth client, and where the
-#: minted token lands — both under ``./secrets/`` so docker-compose mounts them.
+#: minted token lands -- both under ``./secrets/`` so docker-compose mounts them.
 DEFAULT_CLIENT_PATH = Path("secrets/google_oauth_client.json")
 DEFAULT_TOKEN_PATH = Path("secrets/google_token.json")
+
+#: Google userinfo endpoint -- returns ``email`` (and profile data) for an access token.
+_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo"
 
 
 class _Credentials(Protocol):
@@ -45,7 +52,7 @@ class _Credentials(Protocol):
     def to_json(self) -> str: ...
 
 
-#: Run the consent dance for ``client_secrets`` over ``scopes`` → fresh credentials.
+#: Run the consent dance for ``client_secrets`` over ``scopes`` -> fresh credentials.
 ConsentFn = Callable[[Path, list[str]], _Credentials]
 #: Optionally called after consent to retrieve the authenticated user's email address.
 #: Injected in production; omitted when callers don't need the account label.
@@ -65,6 +72,35 @@ def _run_local_consent(client_secrets: Path, scopes: list[str]) -> _Credentials:
     return creds
 
 
+def _fetch_userinfo_email(credentials: _Credentials) -> str:
+    """Fetch the authenticated user's email from the Google userinfo endpoint.
+
+    Uses the access token embedded in ``credentials`` (available immediately after a
+    successful consent flow).  Returns the ``email`` field from the JSON response.
+
+    Raises :exc:`RuntimeError` when the request fails or the response has no
+    ``email`` field so callers can decide whether to propagate or swallow.
+    This is a **host-only** helper called from :func:`main` after consent; the core
+    container never calls it.
+    """
+    token_data = json.loads(credentials.to_json())
+    access_token = token_data.get("token")
+    if not access_token:
+        raise RuntimeError("credentials carry no access token; cannot fetch userinfo")
+
+    req = urllib.request.Request(
+        _USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data: dict[str, object] = json.loads(resp.read().decode())
+
+    email = data.get("email")
+    if not email:
+        raise RuntimeError(f"userinfo response has no 'email' field: {data!r}")
+    return str(email)
+
+
 def mint_token(
     *,
     client_secrets: Path,
@@ -77,7 +113,7 @@ def mint_token(
 
     ``consent`` is injected in tests; production uses :func:`_run_local_consent`
     (resolved late so a monkeypatch on the module global takes effect). The credentials
-    are written verbatim via ``Credentials.to_json()`` — the shape every server reads.
+    are written verbatim via ``Credentials.to_json()`` -- the shape every server reads.
 
     ``email_fn`` is an optional callable that returns the authenticated user's email
     address (e.g. from the Google userinfo endpoint).  When provided its return value
@@ -113,8 +149,47 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_TOKEN_PATH)
     args = parser.parse_args(argv)
 
+    # Run consent first (captures credentials) so we can attempt userinfo before
+    # deciding whether to pass email_fn.  A consent failure (missing client) is fatal;
+    # a userinfo failure (network, bad token) is non-fatal -- we still write the token
+    # so the operator isn't locked out.
+    if not args.client.exists():
+        print(
+            f"OAuth client file not found: {args.client}\n"
+            "Download the Desktop-app OAuth client JSON from Google Cloud Console "
+            f"and save it to {args.client}."
+        )
+        return 1
+
     try:
-        out = mint_token(client_secrets=args.client, token_out=args.out)
+        credentials = _run_local_consent(args.client, list(SCOPES))
+    except Exception as exc:  # noqa: BLE001
+        print(f"OAuth consent failed: {exc}")
+        return 1
+
+    # Try to resolve the authenticated email -- non-fatal if unavailable.
+    email: str | None = None
+    try:
+        email = _fetch_userinfo_email(credentials)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not fetch email from userinfo (token will lack 'account' field): %s",
+            exc,
+        )
+
+    # Build a zero-argument callable that returns the captured email, or None when
+    # the userinfo call failed (token is written without the account field).
+    email_fn: EmailFn | None = (lambda e: lambda: e)(email) if email is not None else (
+        None
+    )
+
+    try:
+        out = mint_token(
+            client_secrets=args.client,
+            token_out=args.out,
+            consent=lambda _c, _s: credentials,
+            email_fn=email_fn,
+        )
     except ClientSecretsMissing as exc:
         print(
             f"OAuth client file not found: {exc}\n"
