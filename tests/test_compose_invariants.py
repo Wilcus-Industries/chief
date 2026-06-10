@@ -326,3 +326,97 @@ def test_playwright_dockerfile_sets_output_dir() -> None:
         "Add '--output-dir', '/screenshots' to the CMD so screenshots land in "
         "the shared volume."
     )
+
+
+# ---- browser-profile persistent volume (issue #35) ----------------------------
+
+_BROWSER_PROFILE_VOLUME = "browser-profile"
+_BROWSER_PROFILE_MOUNT = "/browser-profile"
+
+
+def test_browser_profile_volume_declared_in_top_level_volumes() -> None:
+    """A named 'browser-profile' volume must be declared at the top-level volumes key.
+
+    Without this declaration the mount in mcp-playwright refers to an undeclared
+    volume, which Docker Compose rejects at start time.  A named volume (not tmpfs
+    or an anonymous inline volume) survives container restarts, giving cookie-based
+    logins the persistence they need.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    top_volumes = compose.get("volumes", {}) or {}
+    assert _BROWSER_PROFILE_VOLUME in top_volumes, (
+        f"'{_BROWSER_PROFILE_VOLUME}' is not declared in the top-level volumes block. "
+        f"Add '{_BROWSER_PROFILE_VOLUME}:' under volumes: in docker-compose.yml."
+    )
+
+
+def test_browser_profile_volume_mounted_in_mcp_playwright() -> None:
+    """The browser-profile volume must be mounted (writable) in mcp-playwright.
+
+    The storage-state file that seeds isolated sessions is saved here by the
+    browser_storage_state MCP tool.  A read-only mount would prevent saving
+    updated state.
+    """
+    volumes = _service_volumes("mcp-playwright")
+    targets = _volume_targets(volumes)
+    # The volume must be mounted at _BROWSER_PROFILE_MOUNT without :ro.
+    mount_path = next(
+        (t for t, s in targets.items() if s == _BROWSER_PROFILE_VOLUME), None
+    )
+    assert mount_path is not None, (
+        f"'{_BROWSER_PROFILE_VOLUME}' volume is not mounted in the mcp-playwright "
+        f"service.  Add '- {_BROWSER_PROFILE_VOLUME}:{_BROWSER_PROFILE_MOUNT}' to "
+        "mcp-playwright.volumes."
+    )
+    # Strip any mode suffix and verify the mount point.
+    path = mount_path.split(":")[0]
+    assert path == _BROWSER_PROFILE_MOUNT, (
+        f"'{_BROWSER_PROFILE_VOLUME}' volume is mounted at {path!r} but must be at "
+        f"{_BROWSER_PROFILE_MOUNT!r} so the --storage-state flag path is consistent."
+    )
+    # The mount must be writable (no :ro suffix).
+    raw = next(
+        v for v in volumes if isinstance(v, str) and _BROWSER_PROFILE_VOLUME in v
+    )
+    assert ":ro" not in raw, (
+        f"'{_BROWSER_PROFILE_VOLUME}' volume is mounted read-only in mcp-playwright. "
+        "It must be writable so browser_storage_state can update the seeded state file."
+    )
+
+
+def test_playwright_dockerfile_sets_isolated_flag() -> None:
+    """The mcp-playwright Dockerfile CMD must include --isolated.
+
+    --isolated keeps each MCP session in its own in-memory browser context so
+    parallel sessions never share cookies or storage (no collision).  The session
+    is seeded from the --storage-state file so prior logins carry in, but any
+    in-session writes stay private to that session.
+    """
+    dockerfile = (
+        Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
+    )
+    content = dockerfile.read_text()
+    assert "--isolated" in content, (
+        "docker/mcp-playwright/Dockerfile CMD does not include --isolated. "
+        "Add '--isolated' to the CMD so each session gets a fresh context that "
+        "does not collide with parallel sessions."
+    )
+
+
+def test_playwright_dockerfile_sets_storage_state_flag() -> None:
+    """The mcp-playwright Dockerfile CMD must include --storage-state.
+
+    --storage-state <path> seeds each isolated session with saved cookies and
+    local-storage from a file on the browser-profile named volume.  This is how
+    cookie-based logins survive container restarts: the user saves state once with
+    browser_storage_state, and every subsequent session starts already logged in.
+    """
+    dockerfile = (
+        Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
+    )
+    content = dockerfile.read_text()
+    assert "--storage-state" in content, (
+        "docker/mcp-playwright/Dockerfile CMD does not include --storage-state. "
+        f"Add '--storage-state', '{_BROWSER_PROFILE_MOUNT}/storage-state.json' to "
+        "the CMD so isolated sessions are seeded from the persisted state file."
+    )
