@@ -116,7 +116,12 @@ def _write_token(path: Path, label: str) -> None:
 
 @pytest.fixture()
 def gmail_server(tmp_path: Path) -> types.ModuleType:
-    """Load a fresh Gmail server module with two fake service accounts."""
+    """Load a fresh Gmail server module with two fake service accounts.
+
+    Patches ``_build_service_registry`` on the loaded module so every per-request
+    rescan (issue #60) returns the same deterministic fake registry — the two
+    mocked services are always "visible" regardless of TOKEN_DIR contents.
+    """
     _write_token(tmp_path / "google_token.json", "main@example.com")
     _write_token(tmp_path / "google_token_work.json", "work@corp.com")
 
@@ -130,12 +135,16 @@ def gmail_server(tmp_path: Path) -> types.ModuleType:
     work_svc.users().messages().list().execute.return_value = {
         "messages": [{"id": "msg_work_1", "threadId": "t2"}]
     }
-
-    srv._service_registry = {  # type: ignore[attr-defined]
+    fake_registry = {
         "main@example.com": main_svc,
         "work@corp.com": work_svc,
     }
-    srv._default_service = main_svc  # type: ignore[attr-defined]
+
+    # Patch _build_service_registry so the dynamic rescan always returns the
+    # fake registry instead of scanning the real filesystem.
+    srv._build_service_registry = (  # type: ignore[attr-defined]
+        lambda: (fake_registry, main_svc)
+    )
     return srv
 
 
