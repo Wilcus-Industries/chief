@@ -69,6 +69,7 @@ from ..persistence.tasks import (
     get_or_create_task,
     get_task,
     list_active,
+    set_active_account,
     set_session_id,
     set_status,
     set_task_model,
@@ -76,6 +77,10 @@ from ..persistence.tasks import (
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
 from ..tools.google import GoogleService
+from ..tools.google.account_selection import (
+    ACCOUNT_SELECTION_GUIDANCE,
+    extract_account_hint,
+)
 from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
 from ..tools.guest import GuestAdminService, GuestService
@@ -572,10 +577,36 @@ class TaskManager:
         # into the calendar MCP server config (issue #46). Owner-only; guests
         # never have an active account binding.
         active_account_label: str | None = None
+        account_ask_needed = False
         if tier == "owner" and self._set_account_service is not None:
             active_account_label = (
                 await self._set_account_service.get_active_account_label(thread_key)
             )
+            # Issue #49: selection precedence — if no explicit binding, try memory.
+            if active_account_label is None:
+                accounts = self._set_account_service.accounts
+                n_accounts = len(accounts)
+                if n_accounts > 0 and self._memory is not None:
+                    hint = extract_account_hint(self._memory, accounts)
+                    if hint is not None:
+                        # Auto-select from memory and persist so next call skips this.
+                        async with self._session_factory() as session:
+                            db_task = await get_or_create_task(
+                                session,
+                                platform=self._platform,
+                                thread_key=thread_key,
+                                tier="owner",
+                            )
+                            await set_active_account(session, db_task, hint)
+                        active_account_label = hint
+                        logger.info(
+                            "account auto-selected from memory: %r for thread %s",
+                            hint,
+                            thread_key,
+                        )
+                    elif n_accounts > 1:
+                        # Multiple accounts, no hint → ask the owner.
+                        account_ask_needed = True
         gate_kwargs = self._session_kwargs(
             thread_key=thread_key,
             tier=tier,
@@ -583,6 +614,7 @@ class TaskManager:
             from_label=from_label,
             surface=surface,
             active_account_label=active_account_label,
+            account_ask_needed=account_ask_needed,
         )
         # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
         # swapped for the cheaper budget model while the cycle is downgraded (M9), or
@@ -615,6 +647,7 @@ class TaskManager:
         from_label: str | None = None,
         surface: Surface = Surface.DM,
         active_account_label: str | None = None,
+        account_ask_needed: bool = False,
     ) -> dict[str, Any]:
         """Assemble the SDK session kwargs (gate + memory/tool scoping) for a thread.
 
@@ -629,6 +662,12 @@ class TaskManager:
         config is stamped with an ``X-Account-Label`` header so the server routes the
         request to the right credential — without the model ever seeing or passing an
         account argument.
+
+        ``account_ask_needed`` (issue #49): when ``True``, the owner session's system
+        prompt includes the account-selection guidance
+        (:data:`~chief.tools.google.account_selection.ACCOUNT_SELECTION_GUIDANCE`)
+        so the model asks which account to use before touching any Google API.  Only
+        set when there are multiple accounts, no thread binding, and no memory hint.
         """
         can_use_tool, hooks = self._build_gate(
             task_id=db_id, thread_key=thread_key, tier=tier, surface=surface
@@ -651,6 +690,7 @@ class TaskManager:
                 disallowed_tools,
                 surface,
                 active_account_label=active_account_label,
+                account_ask_needed=account_ask_needed,
             )
         else:
             self._wire_guest_session(gate_kwargs, from_label)
@@ -664,6 +704,7 @@ class TaskManager:
         surface: Surface = Surface.DM,
         *,
         active_account_label: str | None = None,
+        account_ask_needed: bool = False,
     ) -> None:
         """Wire the owner's full surface: memory, web, Google, shell, admin, skills.
 
@@ -671,6 +712,12 @@ class TaskManager:
         When set, the calendar service config is built with an ``X-Account-Label``
         header so the server selects the right credential per request — transparent
         to the model.
+
+        ``account_ask_needed`` (issue #49): when ``True``, appends
+        :data:`~chief.tools.google.account_selection.ACCOUNT_SELECTION_GUIDANCE` to the
+        system prompt so the model asks the owner which account to use before touching
+        any Google API — only active when multiple accounts are registered, the thread
+        has no binding, and memory provides no hint.
         """
         assert self._memory is not None
         services = self._build_services_with_account(active_account_label)
@@ -721,6 +768,11 @@ class TaskManager:
             # DM'd — so the model neither leaks private context nor waits on a card it
             # can't see in the group.
             system_prompt = f"{system_prompt}\n\n{GROUP_MODE_NOTE}"
+        if account_ask_needed:
+            # No per-thread binding and no memory hint with multiple registered accounts
+            # (issue #49): instruct the model to ask which account before any Google
+            # call, then bind via set_account — never silently guess.
+            system_prompt = f"{system_prompt}\n\n{ACCOUNT_SELECTION_GUIDANCE}"
         gate_kwargs.update(
             system_prompt=system_prompt,
             cwd=self._memory_dir,
