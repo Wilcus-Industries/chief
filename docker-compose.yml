@@ -95,6 +95,10 @@ services:
       # resume. Pre-chowned to uid 1000 in Dockerfile.core so Docker init copies correct
       # ownership into a freshly-created volume.
       - claude-home:/home/chief/.claude
+      # Screenshot delivery (issue #34): core reads screenshot files written by
+      # mcp-playwright to deliver them to the owner via send_file. Read-only — core
+      # never writes to this volume; playwright is the sole writer.
+      - screenshots:/screenshots:ro
     tmpfs:
       # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
       # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.
@@ -285,6 +289,11 @@ services:
     tmpfs:
       # Chromium writes profile data, crash dumps, and devtools sockets to /tmp.
       - /tmp
+    volumes:
+      # Shared output directory: screenshot files written by playwright server land here;
+      # core reads them (read-only mount below) to deliver via send_file. The
+      # --output-dir /screenshots flag in the CMD keeps the path deterministic.
+      - screenshots:/screenshots
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/"]
       interval: 30s
@@ -347,6 +356,7 @@ volumes:
   memory:
   claude-home:
   workspace:  # M7 scratch, shared rw between core (Read/Write/Edit) and the sandbox shell
+  screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
 
 # Two named networks provide SSRF isolation for the playwright container (issue #33).
 #

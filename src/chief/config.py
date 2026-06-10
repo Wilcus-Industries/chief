@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     # JS evaluation) approval-gated. Guest sessions never see browser tools.
     playwright_enabled: bool = False
     playwright_mcp_url: str = "http://mcp-playwright:3000/mcp"
+    # Mount point of the shared screenshots volume inside the core container (and
+    # inside mcp-playwright at the same path). Core reads screenshot files from here
+    # to deliver them via send_file after browser_take_screenshot runs.
+    playwright_screenshots_dir: str = "/screenshots"
 
     # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google
     # profile pattern). shell_enabled wires the in-process bash tool that forwards to
