@@ -463,3 +463,126 @@ class TestAuthMainWiresEmailFn:
         # Mint still succeeds; account field is absent (graceful degradation)
         assert code == 0
         assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Production wiring: build_list_accounts_service passes a real email_resolver
+# ---------------------------------------------------------------------------
+
+
+class TestProductionResolverWiring:
+    """build_list_accounts_service must pass a real email_resolver to discover_accounts.
+
+    The resolver is read-only: it refreshes the token in-memory and calls the
+    Google userinfo endpoint — it never writes the token back to disk.
+    """
+
+    def test_production_path_resolves_legacy_token_email(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy token (no 'account' field) must label by email through production."""
+        import json as _json
+
+        import chief.app as app_module
+        from chief.app import build_list_accounts_service
+
+        # Write a legacy token with no 'account' field
+        legacy_data = {
+            "token": None,
+            "refresh_token": "rt-legacy",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "secret",
+            "scopes": ["https://www.googleapis.com/auth/calendar"],
+        }
+        (tmp_path / "google_token.json").write_text(
+            _json.dumps(legacy_data), encoding="utf-8"
+        )
+
+        # Patch the resolver used internally so no network call happens
+        monkeypatch.setattr(
+            app_module,
+            "_resolve_email_from_token",
+            lambda token_path: "legacy@example.com",
+        )
+
+        svc = build_list_accounts_service(secrets_dir=tmp_path)
+        # The service must have discovered the account with the resolved email
+        accounts = svc.accounts
+        assert len(accounts) == 1
+        assert accounts[0].label == "legacy@example.com"
+        assert accounts[0].email == "legacy@example.com"
+
+    def test_production_resolver_is_passed_not_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """build_list_accounts_service must pass a resolver, not None."""
+        import json as _json
+
+        import chief.app as app_module
+        from chief.app import build_list_accounts_service
+
+        legacy_data = {
+            "token": None,
+            "refresh_token": "rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "secret",
+        }
+        (tmp_path / "google_token.json").write_text(
+            _json.dumps(legacy_data), encoding="utf-8"
+        )
+
+        resolver_calls: list[object] = []
+
+        def _capturing_discover(
+            secrets_dir: object,
+            email_resolver: object = None,
+        ) -> list[object]:
+            resolver_calls.append(email_resolver)
+            return []
+
+        # app.py imports discover_accounts directly, so patch the reference in app
+        monkeypatch.setattr(app_module, "discover_accounts", _capturing_discover)
+        monkeypatch.setattr(app_module, "_resolve_email_from_token", lambda p: None)
+
+        build_list_accounts_service(secrets_dir=tmp_path)
+
+        assert len(resolver_calls) == 1
+        assert resolver_calls[0] is not None, (
+            "build_list_accounts_service passed email_resolver=None; "
+            "legacy tokens will never resolve their email"
+        )
+
+    def test_production_resolver_degrades_gracefully_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the resolver raises, discover_accounts falls back to the slug label."""
+        import json as _json
+
+        import chief.app as app_module
+        from chief.app import build_list_accounts_service
+
+        legacy_data = {
+            "token": None,
+            "refresh_token": "rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "secret",
+        }
+        (tmp_path / "google_token.json").write_text(
+            _json.dumps(legacy_data), encoding="utf-8"
+        )
+
+        def _failing_resolver(token_path: object) -> str | None:
+            raise RuntimeError("network unavailable")
+
+        monkeypatch.setattr(app_module, "_resolve_email_from_token", _failing_resolver)
+
+        # Must not raise — graceful degradation to slug
+        svc = build_list_accounts_service(secrets_dir=tmp_path)
+        accounts = svc.accounts
+        assert len(accounts) == 1
+        # Resolver raised -> _to_account caught it -> falls back to slug
+        assert accounts[0].label == "google_token"
+        assert accounts[0].email is None

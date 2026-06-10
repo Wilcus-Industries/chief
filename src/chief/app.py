@@ -11,8 +11,10 @@ tasks left mid-flight.
 """
 
 import asyncio
+import json
 import logging
 import os
+import urllib.request
 from pathlib import Path
 
 import discord
@@ -41,6 +43,7 @@ from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
 from .tools.google.accounts import discover_accounts
+from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
 from .tools.guest import GuestAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
@@ -128,6 +131,43 @@ def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
     return calendar_mcp.guest_service(settings.calendar_mcp_url)
 
 
+def _resolve_email_from_token(token_path: Path) -> str | None:
+    """Resolve the Google email for a legacy token that lacks an ``account`` field.
+
+    Read-only: refreshes the token **in memory** to obtain a fresh access token, then
+    calls the Google userinfo endpoint.  Never writes back to ``token_path``.  Returns
+    the email string, or ``None`` on any failure (missing fields, network error, etc.)
+    so the caller can gracefully degrade to the filename-slug label.
+
+    This is the production resolver passed to
+    :func:`~chief.tools.google.accounts.discover_accounts` by
+    :func:`build_list_accounts_service`.
+    """
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+
+        raw = json.loads(token_path.read_text(encoding="utf-8"))
+        creds = Credentials.from_authorized_user_info(raw)  # type: ignore[no-untyped-call]
+        if not creds.valid:
+            creds.refresh(Request())
+        access_token = creds.token
+        if not access_token:
+            logger.warning("no access token after refresh for %s", token_path)
+            return None
+        req = urllib.request.Request(
+            _USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data: dict[str, object] = json.loads(resp.read().decode())
+        email = data.get("email")
+        return str(email) if email else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("email resolver failed for %s: %s", token_path, exc)
+        return None
+
+
 def build_list_accounts_service(
     secrets_dir: Path | str = Path("/token"),
 ) -> ListAccountsService:
@@ -141,8 +181,13 @@ def build_list_accounts_service(
     been set up yet.
 
     Pass ``secrets_dir=tmp_path`` in tests to avoid scanning the real filesystem.
+    ``_resolve_email_from_token`` is the production resolver: it refreshes the token
+    in memory and calls the Google userinfo endpoint to recover the email for legacy
+    tokens that lack the ``account`` field.  It degrades to ``None`` on failure.
     """
-    accounts = discover_accounts(Path(secrets_dir))
+    accounts = discover_accounts(
+        Path(secrets_dir), email_resolver=_resolve_email_from_token
+    )
     return ListAccountsService(accounts=accounts)
 
 
