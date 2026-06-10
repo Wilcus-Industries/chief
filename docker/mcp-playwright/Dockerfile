@@ -2,9 +2,10 @@
 # with headless Chromium over streamable HTTP on port 3000. No secrets — this container
 # only controls a browser, it never touches the Max token or any credentials.
 #
-# Headless Chromium inside a container needs --no-sandbox (seccomp/apparmor restrictions
-# on the host deny the kernel namespacing Chromium uses for its own sandboxing). The MCP
-# package passes --no-sandbox through its own --headless Chromium launch.
+# Chromium inside a container needs --no-sandbox because the hardened compose profile
+# (user 1000:1000, cap_drop ALL + SYS_ADMIN only, no-new-privileges:true) blocks the
+# setuid chrome-sandbox helper that Chromium uses for its own process sandbox. The flag
+# is passed explicitly on the CMD line; --headless does NOT imply it.
 FROM mcr.microsoft.com/playwright:v1.52.0-jammy
 
 # Install only the node runtime packages we need; playwright browsers are pre-installed
@@ -23,7 +24,10 @@ RUN npm install --save-exact @playwright/mcp@0.0.76
 EXPOSE 3000
 
 # --headless: headless Chromium (no display needed inside the container)
+# --no-sandbox: required because the hardened profile blocks the setuid chrome-sandbox
+#               helper (no-new-privileges:true + non-root user). --headless does NOT
+#               imply --no-sandbox; both flags must be present.
 # --port: bind the MCP HTTP server on 3000
 # --host: bind on all interfaces so core can reach it over the compose network
-CMD ["node", "node_modules/@playwright/mcp/cli.js", "--headless", \
+CMD ["node", "node_modules/@playwright/mcp/cli.js", "--headless", "--no-sandbox", \
      "--port", "3000", "--host", "0.0.0.0"]

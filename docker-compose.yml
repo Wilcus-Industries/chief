@@ -242,21 +242,22 @@ services:
       start_period: 20s
 
   # Playwright browser automation (docker/mcp-playwright). Stock @playwright/mcp 0.0.76,
-  # headless Chromium, streamable HTTP at http://mcp-playwright:3000/mcp on the internal
-  # compose network (no host ports). Read tools (navigate, snapshot, screenshot,
-  # inspection) are pre-approved; write tools (click, type, JS) are approval-gated.
-  # Owner-only — guests never receive the playwright MCP server.
-  # Enable with: flip playwright_enabled in config.yaml, then:
+  # headless Chromium with --no-sandbox, streamable HTTP at
+  # http://mcp-playwright:3000/mcp on the internal compose network (no host ports).
+  # Read tools (navigate, snapshot, screenshot, inspection) are pre-approved; write
+  # tools (click, type, JS) are approval-gated. Owner-only — guests never receive the
+  # playwright MCP server.
+  # Enable with: set playwright_enabled: true in config.yaml, then:
   #   docker compose --profile playwright up
   mcp-playwright:
     profiles: ["playwright"]
     build:
       context: ./docker/mcp-playwright
     restart: unless-stopped
-    # Chromium's internal process sandbox needs SYS_ADMIN inside a container
-    # (kernel namespace restrictions deny it otherwise). The Playwright base image
-    # is configured for headless --no-sandbox mode which avoids this, but SYS_ADMIN
-    # is kept as a belt-and-braces measure consistent with other Chromium deployments.
+    # --no-sandbox is required in the CMD because this hardened profile (non-root user,
+    # cap_drop ALL + SYS_ADMIN only, no-new-privileges:true) blocks the setuid
+    # chrome-sandbox helper Chromium uses for its own process sandbox. SYS_ADMIN is
+    # kept for the kernel namespace operations Chromium still performs in headless mode.
     user: "1000:1000"
     cap_drop: [ALL]
     cap_add: [SYS_ADMIN]
