@@ -128,8 +128,10 @@ services:
   # connections chief opens don't collide ("Server already initialized").
   #
   # Multi-account token directory (issue #56, security-narrowed by issue #57):
-  #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files; each file
-  #   becomes one registered account.  Add accounts by placing additional token files:
+  #   TOKEN_DIR=/token is re-scanned per request for all google_token*.json files
+  #   (issue #50); each file becomes one registered account.  A token dropped after
+  #   boot is picked up on the next request — no restart needed.  Add accounts by
+  #   placing additional token files:
   #     ./secrets/google_tokens/google_token.json          → primary (default) account
   #     ./secrets/google_tokens/google_token_work.json     → account labeled "work@corp.com"
   #   Only the dedicated ./secrets/google_tokens/ subdirectory is mounted at /token so
@@ -225,8 +227,9 @@ services:
   # The sole writer of ALL google_token*.json files in TOKEN_DIR (per-account atomic
   # write-back via temp-then-rename; concurrent writes to different account files are safe).
   #
-  # Multi-account token directory (issue #47):
-  #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files.
+  # Multi-account token directory (issue #47, per-request re-scan issue #60):
+  #   TOKEN_DIR=/token is re-scanned per request for all google_token*.json files,
+  #   so a token dropped after boot is picked up immediately — no restart needed.
   #   The whole directory is mounted WRITABLE so the server can write back
   #   refreshed tokens to each account's own file atomically.
   mcp-sheets:
