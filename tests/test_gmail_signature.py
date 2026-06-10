@@ -1,10 +1,10 @@
 """Coverage for the Gmail outbound-signature guard.
 
-``docker/mcp-gmail/gmail_signature.py`` lives in a vendored image (excluded from the
-package and the venv), so we load it by path — the same trick ``test_sheets_row1_guard``
-uses. The predicate is trust-critical: the personas prompt promises every message chief
-sends is transparently marked as assistant-sent, and that marking is appended here
-server-side regardless of what the model wrote in the body.
+``docker/mcp-gmail-chief/gmail_signature.py`` lives in a vendored image (excluded from
+the package and the venv), so we load it by path — the same trick
+``test_sheets_row1_guard`` uses. The predicate is trust-critical: the personas prompt
+promises every message chief sends is transparently marked as assistant-sent, and that
+marking is appended here server-side regardless of what the model wrote in the body.
 """
 
 import importlib.util
@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 
 _SIG_PATH = (
-    Path(__file__).resolve().parents[1] / "docker" / "mcp-gmail" / "gmail_signature.py"
+    Path(__file__).resolve().parents[1]
+    / "docker"
+    / "mcp-gmail-chief"
+    / "gmail_signature.py"
 )
 _spec = importlib.util.spec_from_file_location("gmail_signature", _SIG_PATH)
 assert _spec and _spec.loader

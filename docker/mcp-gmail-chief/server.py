@@ -545,6 +545,206 @@ async def gmail_reply_on_message(
     return _json(await asyncio.to_thread(_call))
 
 
+@mcp.tool(name="gmail_create_draft")
+async def gmail_create_draft(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    html_body: str | None = None,
+) -> str:
+    """Create a draft on the active account; the assistant signature is appended.
+
+    Drafts on the account selected by ``X-Account-Label`` (falls back to the default).
+    Returns the new draft's id (and the underlying message id).
+    """
+    service = _get_service()
+    signed_body, signed_html = _signed_body("gmail_create_draft", body, html_body)
+    raw = _build_raw_message(
+        to=to,
+        subject=subject,
+        body=signed_body,
+        cc=cc,
+        bcc=bcc,
+        html_body=signed_html,
+    )
+
+    def _call() -> dict[str, Any]:
+        draft = (
+            service.users()
+            .drafts()
+            .create(userId="me", body={"message": {"raw": raw}})
+            .execute()
+        )
+        return {"id": draft.get("id"), "messageId": draft.get("message", {}).get("id")}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_update_draft")
+async def gmail_update_draft(
+    draft_id: str,
+    to: str,
+    subject: str,
+    body: str,
+    cc: str | None = None,
+    bcc: str | None = None,
+    html_body: str | None = None,
+) -> str:
+    """Replace the contents of ``draft_id`` on the active account; signature appended.
+
+    Gmail's ``drafts().update`` replaces the whole draft message, so ``to`` / ``subject``
+    / ``body`` are required — the new full content. Returns the draft id.
+    """
+    service = _get_service()
+    signed_body, signed_html = _signed_body("gmail_update_draft", body, html_body)
+    raw = _build_raw_message(
+        to=to,
+        subject=subject,
+        body=signed_body,
+        cc=cc,
+        bcc=bcc,
+        html_body=signed_html,
+    )
+
+    def _call() -> dict[str, Any]:
+        draft = (
+            service.users()
+            .drafts()
+            .update(userId="me", id=draft_id, body={"message": {"raw": raw}})
+            .execute()
+        )
+        return {"id": draft.get("id"), "messageId": draft.get("message", {}).get("id")}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_send_draft")
+async def gmail_send_draft(draft_id: str) -> str:
+    """Send an existing draft from the active account.
+
+    The draft already carries the signature from create/update time, so the body is NOT
+    re-signed here. Returns the sent message's id + threadId.
+    """
+    service = _get_service()
+
+    def _call() -> dict[str, Any]:
+        sent = (
+            service.users()
+            .drafts()
+            .send(userId="me", body={"id": draft_id})
+            .execute()
+        )
+        return {"id": sent.get("id"), "threadId": sent.get("threadId")}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_create_label")
+async def gmail_create_label(
+    name: str,
+    label_list_visibility: str = "labelShow",
+    message_list_visibility: str = "show",
+) -> str:
+    """Create a label on the active account. Returns the new label's id + name."""
+    service = _get_service()
+
+    def _call() -> dict[str, Any]:
+        label = (
+            service.users()
+            .labels()
+            .create(
+                userId="me",
+                body={
+                    "name": name,
+                    "labelListVisibility": label_list_visibility,
+                    "messageListVisibility": message_list_visibility,
+                },
+            )
+            .execute()
+        )
+        return {
+            "id": label.get("id"),
+            "name": label.get("name"),
+            "type": label.get("type"),
+        }
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_modify_message_labels")
+async def gmail_modify_message_labels(
+    message_id: str,
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+) -> str:
+    """Add and/or remove labels on a message for the active account.
+
+    Pass label ids (e.g. ``INBOX``, ``UNREAD``, or a custom label id). Returns the
+    message id and its resulting label set.
+    """
+    service = _get_service()
+
+    def _call() -> dict[str, Any]:
+        msg = (
+            service.users()
+            .messages()
+            .modify(
+                userId="me",
+                id=message_id,
+                body={
+                    "addLabelIds": add_label_ids or [],
+                    "removeLabelIds": remove_label_ids or [],
+                },
+            )
+            .execute()
+        )
+        return {"id": msg.get("id"), "labelIds": msg.get("labelIds", [])}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_trash_message")
+async def gmail_trash_message(message_id: str) -> str:
+    """Move a message to Trash on the active account (reversible via untrash)."""
+    service = _get_service()
+
+    def _call() -> dict[str, Any]:
+        msg = (
+            service.users()
+            .messages()
+            .trash(userId="me", id=message_id)
+            .execute()
+        )
+        return {"id": msg.get("id"), "labelIds": msg.get("labelIds", [])}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+@mcp.tool(name="gmail_untrash_message")
+async def gmail_untrash_message(message_id: str) -> str:
+    """Restore a message from Trash on the active account."""
+    service = _get_service()
+
+    def _call() -> dict[str, Any]:
+        msg = (
+            service.users()
+            .messages()
+            .untrash(userId="me", id=message_id)
+            .execute()
+        )
+        return {"id": msg.get("id"), "labelIds": msg.get("labelIds", [])}
+
+    return _json(await asyncio.to_thread(_call))
+
+
+# Permanent deletes are deliberately NOT registered as tools (issue #52): the model
+# cannot call ``gmail_delete_draft`` or ``gmail_delete_label`` at all. Hard-block =
+# absent from the server's tool catalog, so there is no callable to reach. Trashing a
+# message is reversible (``gmail_untrash_message``) so it stays a gated write instead.
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: StarletteRequest) -> JSONResponse:
     """Liveness probe for the compose healthcheck."""
