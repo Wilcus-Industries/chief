@@ -78,6 +78,14 @@ gmail_mcp_url: http://mcp-gmail:8004/mcp
 # fills from OWNER_NAME. Default: "Sent by {owner}'s assistant on their behalf."
 owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America/New_York
 
+# Browser automation (M13, owner-only, opt-in). With playwright_enabled on, owner
+# sessions get the @playwright/mcp 0.0.76 tool set (headless Chromium, --no-sandbox).
+# Read tools (navigate, snapshot, screenshot, console/network inspection) are
+# pre-approved; write tools (click, type, fill, drag, JS) reach the approval card.
+# Bring up the container first: docker compose --profile playwright up
+playwright_enabled: false
+playwright_mcp_url: http://mcp-playwright:3000/mcp
+
 # Shell sandbox + file workspace (M7, owner-only, opt-in). Bring up the secret-free
 # sandbox container (docker compose --profile sandbox up) and flip these on. shell_enabled
 # gives the owner a bash tool that forwards to the sandbox; every command is approval-gated

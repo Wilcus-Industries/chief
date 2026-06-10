@@ -2,6 +2,46 @@
 
 from chief.tools.browser import mcp
 
+# ---- catalog drift guard --------------------------------------------------------
+
+
+def test_catalog_is_subset_of_default_076_tool_set() -> None:
+    # Guard against catalog drift: every tool name chief lists must exist in the
+    # pinned default tool set exposed by @playwright/mcp@0.0.76 with no --caps.
+    # The constant is vendored in mcp.py so this test needs no Docker / network.
+    all_catalog = set(mcp.READ_TOOLS) | set(mcp.WRITE_TOOLS)
+    # Strip the mcp__playwright__ prefix for comparison against the bare names.
+    bare_catalog = {t.removeprefix("mcp__playwright__") for t in all_catalog}
+    phantom = bare_catalog - mcp.PLAYWRIGHT_076_DEFAULT_TOOLS
+    assert not phantom, (
+        f"Tool(s) in chief's catalog are NOT in the @playwright/mcp@0.0.76 "
+        f"default-enabled tool set: {sorted(phantom)}. "
+        "Remove phantom names or enable the required --caps."
+    )
+
+
+def test_browser_network_request_singular_in_read_tools() -> None:
+    # browser_network_request (singular) is a default-enabled read tool that
+    # returns full details for a single request; it was missing from READ_TOOLS.
+    assert "mcp__playwright__browser_network_request" in mcp.READ_TOOLS
+
+
+def test_no_vision_tools_without_caps() -> None:
+    # Vision tools (browser_mouse_*) require --caps=vision; they must not appear
+    # in the catalog unless that cap is added to the CMD.
+    vision_tools = {
+        t
+        for t in set(mcp.READ_TOOLS) | set(mcp.WRITE_TOOLS)
+        if "mouse" in t
+    }
+    assert not vision_tools, (
+        f"Vision tools appear in catalog but --caps=vision is not in the CMD: "
+        f"{sorted(vision_tools)}"
+    )
+
+
+# ---- tool name tests (server-qualified) ----------------------------------------
+
 
 def test_tool_names_are_server_qualified() -> None:
     # SDK qualifies MCP tool names as mcp__<server>__<tool>.
