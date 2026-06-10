@@ -294,13 +294,11 @@ services:
       # core reads them (read-only mount below) to deliver via send_file. The
       # --output-dir /screenshots flag in the CMD keeps the path deterministic.
       - screenshots:/screenshots
-      # Persistent browser profile (issue #35): storage-state.json lives here so
-      # cookie-based logins survive container restarts.  The playwright server runs
-      # with --isolated (each session is a fresh context, parallel sessions never
-      # collide) + --storage-state /browser-profile/storage-state.json (each fresh
-      # context is seeded from this file).  The owner saves state once with the
-      # browser_storage_state MCP tool; every subsequent session wakes up logged in.
-      # Writable — mcp-playwright is the sole writer of this file.
+      # Persistent browser profile (issue #35): Chromium writes its full profile
+      # (cookies, localStorage, IndexedDB, session state) here via --user-data-dir.
+      # Because this is a named volume, all state survives container restarts —
+      # cookie-based logins persist by construction, no explicit save step needed.
+      # Writable — Chromium is the sole writer; core never mounts this volume.
       - browser-profile:/browser-profile
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/"]
@@ -369,7 +367,7 @@ volumes:
   claude-home:
   workspace:  # M7 scratch, shared rw between core (Read/Write/Edit) and the sandbox shell
   screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
-  browser-profile:  # issue #35: persistent storage-state for cookie-based login seeding
+  browser-profile:  # issue #35: Chromium --user-data-dir; cookies/session survive restarts
 
 # Two named networks provide SSRF isolation for the playwright container (issue #33).
 #
