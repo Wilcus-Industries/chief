@@ -153,11 +153,11 @@ def calendar_server(tmp_path: Path) -> types.ModuleType:
         "items": [{"id": "cal_work", "summary": "Work", "accessRole": "owner"}]
     }
 
-    setattr(srv, "_service_registry", {
+    srv._service_registry = {  # type: ignore[attr-defined]
         "main@example.com": main_svc,
         "work@corp.com": work_svc,
-    })
-    setattr(srv, "_default_service", main_svc)
+    }
+    srv._default_service = main_svc  # type: ignore[attr-defined]
     return srv
 
 
