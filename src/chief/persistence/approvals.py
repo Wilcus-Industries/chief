@@ -62,6 +62,24 @@ async def set_state(
     await session.commit()
 
 
+async def try_mark_notified(session: AsyncSession, approval_id: int) -> bool:
+    """Atomically move ``requested`` → ``notified``; never touch a decided row.
+
+    A tap can decide the approval while the card is still posting; this guarded
+    ``UPDATE … WHERE state = requested`` loses that race quietly instead of
+    overwriting the terminal state back to ``notified``. Returns ``True`` only when
+    this writer flipped the row.
+    """
+    stmt = (
+        update(Approval)
+        .where(Approval.id == approval_id, Approval.state == REQUESTED)
+        .values(state=NOTIFIED)
+    )
+    result = cast(CursorResult[Any], await session.execute(stmt))
+    await session.commit()
+    return bool(result.rowcount)
+
+
 async def list_pending(session: AsyncSession) -> list[Approval]:
     """Return undecided approvals (``requested``/``notified``), oldest first."""
     stmt = select(Approval).where(Approval.state.in_(PENDING)).order_by(Approval.id)

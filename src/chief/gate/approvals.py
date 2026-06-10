@@ -29,13 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..persistence.approvals import (
     APPROVED,
     DENIED,
-    NOTIFIED,
     TIMED_OUT,
     create_approval,
-    get,
     list_pending,
-    set_state,
     try_decide,
+    try_mark_notified,
 )
 from .policy import COMMAND_TOOLS, PolicyStore
 
@@ -187,10 +185,10 @@ class ApprovalManager:
             live.msg_ref = await self._io.send_card(
                 route, ApprovalCard(approval_id=approval_id, text=preview)
             )
+            # Guarded requested→notified: a tap may have already decided the row
+            # while the card was posting; never overwrite a terminal state.
             async with self._sf() as session:
-                row = await get(session, approval_id)
-                if row is not None:
-                    await set_state(session, row, NOTIFIED)
+                await try_mark_notified(session, approval_id)
             return await asyncio.wait_for(future, self._timeout)
         except TimeoutError:
             return await self._expire(approval_id)
