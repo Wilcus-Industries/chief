@@ -81,6 +81,19 @@ async def set_task_model(
     await session.commit()
 
 
+async def get_active_account(session: AsyncSession, task: Task) -> str | None:
+    """Return the active Google account label for ``task``, or ``None`` if unset."""
+    return task.active_account
+
+
+async def set_active_account(
+    session: AsyncSession, task: Task, label: str | None
+) -> None:
+    """Persist (or clear) the per-thread active Google account label (issue #45)."""
+    task.active_account = label
+    await session.commit()
+
+
 async def list_active(
     session: AsyncSession, *, platform: str | None = None
 ) -> list[Task]:

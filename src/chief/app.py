@@ -45,6 +45,7 @@ from .tools.google import GoogleService
 from .tools.google.accounts import discover_accounts
 from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
+from .tools.google.set_account_service import SetAccountService
 from .tools.guest import GuestAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
@@ -191,6 +192,29 @@ def build_list_accounts_service(
     return ListAccountsService(accounts=accounts)
 
 
+def build_set_account_service(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    secrets_dir: Path | str = Path("/token"),
+) -> SetAccountService:
+    """Build the owner-only ``set_account`` tool with the registered account list.
+
+    Mirrors :func:`build_list_accounts_service`: scans ``secrets_dir`` for token files
+    at startup, then builds a :class:`SetAccountService` closed over that snapshot.
+    Always returns a service — with an empty account list when the dir is absent —
+    so the tool is available even before any Google account has been set up.
+    """
+    accounts = discover_accounts(
+        Path(secrets_dir), email_resolver=_resolve_email_from_token
+    )
+    return SetAccountService(
+        session_factory=session_factory,
+        accounts=accounts,
+        platform=platform,
+    )
+
+
 def build_budget(
     settings: Settings,
     *,
@@ -242,6 +266,11 @@ def build_engine(
     # Account registry: always wired into owner sessions (read-only, no card).
     # Scans the secrets dir at build time so restarts pick up newly added tokens.
     list_accounts = build_list_accounts_service()
+    # Per-thread active-account binding: owner-only, pre-approved (no card).
+    set_account = build_set_account_service(
+        session_factory=session_factory,
+        platform=platform,
+    )
     # The owner's schedule tools are platform-agnostic, so every stack's owner session
     # gets them when the scheduler is on; only the *loop* (built in serve) is singular.
     schedule = (
@@ -296,6 +325,7 @@ def build_engine(
         guest_calendar_service=build_guest_calendar_service(settings),
         guest_admin_service=guest_admin,
         list_accounts_service=list_accounts,
+        set_account_service=set_account,
         schedule_service=schedule,
         schedule_bash_service=schedule_bash,
         # When budgeting is on, the gate records each turn's spend and the manager
