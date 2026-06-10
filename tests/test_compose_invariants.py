@@ -354,9 +354,9 @@ def test_browser_profile_volume_declared_in_top_level_volumes() -> None:
 def test_browser_profile_volume_mounted_in_mcp_playwright() -> None:
     """The browser-profile volume must be mounted (writable) in mcp-playwright.
 
-    The storage-state file that seeds isolated sessions is saved here by the
-    browser_storage_state MCP tool.  A read-only mount would prevent saving
-    updated state.
+    Chromium writes its full profile (cookies, localStorage, IndexedDB, session
+    state) to --user-data-dir on every page visit, so the volume must be writable.
+    A read-only mount would make Chromium unable to persist any state.
     """
     volumes = _service_volumes("mcp-playwright")
     targets = _volume_targets(volumes)
@@ -373,7 +373,7 @@ def test_browser_profile_volume_mounted_in_mcp_playwright() -> None:
     path = mount_path.split(":")[0]
     assert path == _BROWSER_PROFILE_MOUNT, (
         f"'{_BROWSER_PROFILE_VOLUME}' volume is mounted at {path!r} but must be at "
-        f"{_BROWSER_PROFILE_MOUNT!r} so the --storage-state flag path is consistent."
+        f"{_BROWSER_PROFILE_MOUNT!r} so the --user-data-dir flag path is consistent."
     )
     # The mount must be writable (no :ro suffix).
     raw = next(
@@ -381,45 +381,64 @@ def test_browser_profile_volume_mounted_in_mcp_playwright() -> None:
     )
     assert ":ro" not in raw, (
         f"'{_BROWSER_PROFILE_VOLUME}' volume is mounted read-only in mcp-playwright. "
-        "It must be writable so browser_storage_state can update the seeded state file."
+        "It must be writable so Chromium can persist cookies and session state."
     )
 
 
-def test_playwright_dockerfile_sets_isolated_flag() -> None:
-    """The mcp-playwright Dockerfile CMD must include --isolated.
+def test_playwright_dockerfile_sets_user_data_dir_flag() -> None:
+    """The mcp-playwright Dockerfile CMD must include --user-data-dir.
 
-    --isolated keeps each MCP session in its own in-memory browser context so
-    parallel sessions never share cookies or storage (no collision).  The session
-    is seeded from the --storage-state file so prior logins carry in, but any
-    in-session writes stay private to that session.
+    --user-data-dir <path> tells Chromium to persist its full profile (cookies,
+    localStorage, IndexedDB, session state) to disk.  Because all writes go
+    directly through Chromium, logins survive container restarts by construction
+    — no explicit save step required.  The path must be on the browser-profile
+    named volume so it outlives the container.
     """
     dockerfile = (
         Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
     )
     content = dockerfile.read_text()
-    assert "--isolated" in content, (
-        "docker/mcp-playwright/Dockerfile CMD does not include --isolated. "
-        "Add '--isolated' to the CMD so each session gets a fresh context that "
-        "does not collide with parallel sessions."
+    assert "--user-data-dir" in content, (
+        "docker/mcp-playwright/Dockerfile CMD does not include --user-data-dir. "
+        f"Add '--user-data-dir', '{_BROWSER_PROFILE_MOUNT}' to the CMD so Chromium "
+        "persists its profile to the browser-profile named volume."
     )
 
 
-def test_playwright_dockerfile_sets_storage_state_flag() -> None:
-    """The mcp-playwright Dockerfile CMD must include --storage-state.
+def test_playwright_dockerfile_does_not_use_isolated_flag() -> None:
+    """The mcp-playwright Dockerfile CMD must NOT include --isolated.
 
-    --storage-state <path> seeds each isolated session with saved cookies and
-    local-storage from a file on the browser-profile named volume.  This is how
-    cookie-based logins survive container restarts: the user saves state once with
-    browser_storage_state, and every subsequent session starts already logged in.
+    --isolated keeps browser state in memory only and discards it on session
+    close — the opposite of persistence.  When --user-data-dir is used,
+    --isolated must be absent so Chromium writes profile data to disk.
     """
     dockerfile = (
         Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
     )
     content = dockerfile.read_text()
-    assert "--storage-state" in content, (
-        "docker/mcp-playwright/Dockerfile CMD does not include --storage-state. "
-        f"Add '--storage-state', '{_BROWSER_PROFILE_MOUNT}/storage-state.json' to "
-        "the CMD so isolated sessions are seeded from the persisted state file."
+    assert "--isolated" not in content, (
+        "docker/mcp-playwright/Dockerfile CMD includes --isolated, which discards "
+        "all browser state on session close and prevents login persistence. "
+        "Remove --isolated and use --user-data-dir instead."
+    )
+
+
+def test_playwright_dockerfile_does_not_use_storage_state_flag() -> None:
+    """The mcp-playwright Dockerfile CMD must NOT include --storage-state.
+
+    --storage-state is a one-way read-only seed — it never writes back, so
+    logins made during a session are not persisted.  With --user-data-dir,
+    Chromium handles persistence natively; --storage-state is redundant and
+    misleading.
+    """
+    dockerfile = (
+        Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
+    )
+    content = dockerfile.read_text()
+    assert "--storage-state" not in content, (
+        "docker/mcp-playwright/Dockerfile CMD includes --storage-state, which is "
+        "a read-only seed incompatible with --user-data-dir persistence. "
+        "Remove --storage-state from the CMD."
     )
 
 
