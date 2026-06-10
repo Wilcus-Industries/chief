@@ -38,6 +38,12 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # core bridges both internal networks: it must reach the Google MCP services on
+    # mcp-internal and the browser on playwright-net. Neither network is on the other,
+    # so a compromised playwright container has no route to calendar/drive/sheets/gmail.
+    networks:
+      - mcp-internal
+      - playwright-net
     environment:
       # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
       # Both owner ids are optional here — config requires at least one platform fully set
@@ -115,6 +121,8 @@ services:
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
+    networks:
+      - mcp-internal
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
       # Unset → falls through to owner_tz in the mounted config.yaml (the source of truth);
@@ -147,6 +155,8 @@ services:
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
+    networks:
+      - mcp-internal
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
     volumes:
@@ -175,6 +185,8 @@ services:
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
+    networks:
+      - mcp-internal
     environment:
       # The package's own auth: OAuth client + the shared minted token.
       CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
@@ -212,6 +224,8 @@ services:
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
+    networks:
+      - mcp-internal
     environment:
       PORT: 8004
       # The package's own auth: OAuth client + the seeded (writable) token copy.
@@ -263,6 +277,11 @@ services:
     cap_add: [SYS_ADMIN]
     security_opt:
       - no-new-privileges:true
+    # playwright-net only — no route to mcp-internal, so a hostile or compromised
+    # page cannot SSRF into the Google MCP services (calendar/drive/sheets/gmail).
+    # Internet egress is preserved (playwright-net has no internal_only restriction).
+    networks:
+      - playwright-net
     tmpfs:
       # Chromium writes profile data, crash dumps, and devtools sockets to /tmp.
       - /tmp
@@ -328,3 +347,15 @@ volumes:
   memory:
   claude-home:
   workspace:  # M7 scratch, shared rw between core (Read/Write/Edit) and the sandbox shell
+
+# Two named networks provide SSRF isolation for the playwright container (issue #33).
+#
+# mcp-internal  — shared by core + the four Google MCP services. Invisible to
+#                 mcp-playwright; a hostile page cannot reach calendar/drive/sheets/gmail.
+# playwright-net — shared by core + mcp-playwright. Has full internet egress (no
+#                 internal_only flag). The Google MCP services are never attached here.
+#
+# core sits on both so it can dispatch tasks to either group.
+networks:
+  mcp-internal:
+  playwright-net:
