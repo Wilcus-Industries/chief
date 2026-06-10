@@ -129,17 +129,20 @@ def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
 
 
 def build_list_accounts_service(
-    secrets_dir: Path | str | None = None,
+    secrets_dir: Path | str = Path("/token"),
 ) -> ListAccountsService:
     """Discover registered Google accounts and build the owner-only list_accounts tool.
 
-    Scans ``secrets_dir`` (defaults to ``./secrets``) for ``google_token*.json`` files.
+    Scans ``secrets_dir`` (defaults to ``/token``) for ``google_token*.json`` files.
+    In production docker-compose.yml, ``./secrets/google_token.json`` is bind-mounted
+    into core at ``/token/google_token.json``, so the default aligns with that path.
     Always returns a :class:`ListAccountsService` — with an empty account list when the
     dir is absent or empty — so the tool is available even when no Google account has
     been set up yet.
+
+    Pass ``secrets_dir=tmp_path`` in tests to avoid scanning the real filesystem.
     """
-    base = Path(secrets_dir) if secrets_dir is not None else Path("secrets")
-    accounts = discover_accounts(base)
+    accounts = discover_accounts(Path(secrets_dir))
     return ListAccountsService(accounts=accounts)
 
 
