@@ -310,6 +310,48 @@ async def test_concurrent_resolves_decide_once(
     assert row.decided_by in {"42", "99"}
 
 
+async def test_tap_during_card_post_is_not_clobbered_by_notified_write(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A decision landing while the card is still posting must stick.
+
+    ``request`` stamps ``notified`` after ``send_card`` returns; a tap that commits a
+    terminal state in that window must not be overwritten back to ``notified`` (the
+    row would look pending again, letting a later tap double-decide via re-arm).
+    """
+
+    class TapDuringPostIO(FakeIO):
+        manager: ApprovalManager
+
+        async def send_card(self, route: str, card: ApprovalCard) -> str:
+            ref = await super().send_card(route, card)
+            await self.manager.resolve(
+                card.approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+            )
+            return ref
+
+    io, audit = TapDuringPostIO(), RecordingAudit()
+    manager, _ = await _manager(session_factory, io=io, audit=audit)
+    io.manager = manager
+
+    allowed = await manager.request(
+        task_id=None,
+        thread_key="-100:5",
+        tier="owner",
+        tool_name="Bash",
+        tool_input={"command": "git push"},
+        route="-100:5",
+    )
+
+    assert allowed is True
+    approval_id = io.cards[0][1].approval_id
+    async with session_factory() as session:
+        row = await appr_repo.get(session, approval_id)
+    assert row is not None
+    assert row.state == appr_repo.APPROVED
+    assert row.decided_by == "42"
+
+
 async def test_resolve_in_post_card_pre_future_window_still_wakes(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -318,20 +360,20 @@ async def test_resolve_in_post_card_pre_future_window_still_wakes(
 
     The card is the only place a resolver learns the approval id, so a tap can only
     arrive once ``send_card`` has returned. Holding that post-card window open (a slow
-    ``set_state``) and tapping inside it would — if the future were armed last — strand
-    the parked turn until the fail-closed timeout; arming the future *before* the card
-    closes the race.
+    ``try_mark_notified``) and tapping inside it would — if the future were armed
+    last — strand the parked turn until the fail-closed timeout; arming the future
+    *before* the card closes the race.
     """
     io, audit = FakeIO(), RecordingAudit()
     manager, _ = await _manager(session_factory, io=io, audit=audit, timeout=0.5)
 
-    real_set_state = appr_repo.set_state  # the fn re-bound in appr_mod's namespace
+    real_mark = appr_repo.try_mark_notified  # the fn re-bound in appr_mod's namespace
 
-    async def slow_set_state(*a: Any, **k: Any) -> Any:
+    async def slow_mark(*a: Any, **k: Any) -> Any:
         await asyncio.sleep(0.05)  # hold the post-card window open
-        return await real_set_state(*a, **k)
+        return await real_mark(*a, **k)
 
-    monkeypatch.setattr(appr_mod, "set_state", slow_set_state)
+    monkeypatch.setattr(appr_mod, "try_mark_notified", slow_mark)
 
     parked = asyncio.ensure_future(
         manager.request(
