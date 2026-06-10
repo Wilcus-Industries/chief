@@ -40,6 +40,11 @@ class Settings(BaseSettings):
         yaml_file="config.yaml",
         extra="ignore",
         protected_namespaces=(),
+        # Compose forwards per-deploy overrides as ${VAR:-}, which expands to an empty
+        # string when unset in .env. Ignore empties so an unset override falls through
+        # to the config.yaml default instead of clobbering it (e.g. SCHEDULER_ENABLED=""
+        # parsing as a bool, or PRIMARY_PLATFORM="" blanking the default).
+        env_ignore_empty=True,
     )
 
     # Non-secret config (config.yaml / env). Each platform's owner id is optional —

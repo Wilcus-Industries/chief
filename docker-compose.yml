@@ -44,6 +44,18 @@ services:
       # (id + token). Leave one blank to run the other platform only.
       OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
       OWNER_DISCORD_ID: ${OWNER_DISCORD_ID:-}
+      # Per-deploy instance config — set in the gitignored .env, never in committed
+      # config.yaml (keeps personal ids out of a public repo). Each overrides its
+      # config.yaml default only when non-empty.
+      PRIMARY_PLATFORM: ${PRIMARY_PLATFORM:-}
+      PRIMARY_THREAD_KEY: ${PRIMARY_THREAD_KEY:-}
+      OWNER_HOME_GUILD_ID: ${OWNER_HOME_GUILD_ID:-}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-}
+      GROUP_CHAT_ENABLED: ${GROUP_CHAT_ENABLED:-}
+      BUDGET_ENABLED: ${BUDGET_ENABLED:-}
+      DRIVE_ENABLED: ${DRIVE_ENABLED:-}
+      SKILLS_ENABLED: ${SKILLS_ENABLED:-}
+      OPUS_AUTO_DETECT: ${OPUS_AUTO_DETECT:-}
       # Relocate the claude CLI's top-level config dir from $HOME (read-only rootfs) into
       # the persisted claude-home volume. Without this, the CLI writes .claude.json (and
       # its lock) directly under $HOME=/home/chief, hitting EROFS on a read_only container.
