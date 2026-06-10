@@ -73,7 +73,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Transcripts | Keep, auto-prune after 90 days; memory written directly by chief persists |
 | Transport / ingress | Telegram long-polling; outbound-only, no public HTTP ingress |
 | MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
-| Deploy | CI/CD: GH Actions → GHCR → SSH `compose pull && up` |
+| Deploy | CI/CD: GH Actions done-check + smoke-test → SSH `git pull && compose up -d --build` (git-build model, no registry) |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
 | Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (Docker secret); never set `ANTHROPIC_API_KEY`; regen yearly |
@@ -472,9 +472,11 @@ Single VPS, one `docker compose`. **Outbound-only** (no public HTTP ingress); Te
 (`python -m chief.tools.google.auth`), mounting the resulting refresh token for the MCP
 containers — no callback server on the VPS.
 
-**Deploy = CI/CD.** Push to main → GitHub Actions builds images, pushes to a private
-registry (GHCR), then deploys over SSH (`compose pull && up -d`). Deploy restarts are
-absorbed by the **notify-and-ask** task recovery. (SSH only; still no HTTP ingress.)
+**Deploy = CI/CD (git-build model).** Push to main → GitHub Actions runs the done-check
+and container smoke-test, then deploys over SSH: the VPS holds a git clone, so deploy is
+`git pull --ff-only && docker compose up -d --build` — images are built **on the VPS**,
+no registry. Deploy restarts are absorbed by the **notify-and-ask** task recovery. (SSH
+only; still no HTTP ingress.)
 
 ## Ops & observability (draft)
 
@@ -893,7 +895,7 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 - **M12 Discord adapter** ✅ *(built early)***:** private server, threads = tasks; full
   parity with Telegram (commands, 4-button approval cards, guest ack), runs alongside it
   off one DB on its own platform-bound engine stack.
-- **M13 hardening:** CI/CD (GHCR + SSH), encryption-at-rest (age), memory-repo backup,
+- **M13 hardening:** CI/CD (git-build + SSH), encryption-at-rest (age), memory-repo backup,
   least-privilege, `BOOTSTRAP.md` onboarding, live sandbox tests. **Schema migrations:**
   Alembic is adopted; the schema is fully migration-driven. `init_db` runs
   `alembic upgrade head` at startup (via `_run_migrations`); `create_all` is not used
@@ -935,19 +937,26 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (which is on the read-only rootfs). Transcripts land at `$CLAUDE_CONFIG_DIR/projects/…`
   as before, so session resume is unaffected.
 
-  **SSH deploy (authored, live execution deferred — no VPS yet):** The `deploy` job in
-  `.github/workflows/ci.yml` is wired and valid — `needs: [done-check, publish]`, gated by an
-  `if:` that checks three repo secrets so it is **dormant and non-failing** while no VPS
-  exists. When a VPS is ready, set these three GitHub repo secrets (Settings → Secrets →
-  Actions) and the job activates automatically on the next green main push:
+  **SSH deploy (live — git-build model):** The `deploy` job in `.github/workflows/ci.yml`
+  runs on every green push to main — `needs: [done-check, smoke-test]`. There is **no
+  registry publish step**: the VPS holds a git clone of this repo (secrets/`.env`
+  transferred out-of-band — they're gitignored and never travel through git or CI), and
+  the job SSHes in to pull and rebuild in place:
 
-  | Secret | Value |
+  ```
+  cd "$DEPLOY_DIR"
+  git pull --ff-only
+  git submodule update --init --recursive
+  docker compose --profile google up -d --build
+  ```
+
+  Images are built **on the VPS itself**; `up -d --build` restarts core, triggering the
+  migrate-on-start path before the app boots. Required repo settings (Settings → Secrets
+  and variables → Actions):
+
+  | Setting | Value |
   |---|---|
-  | `VPS_HOST` | Hostname or IP of the VPS |
-  | `VPS_USER` | SSH user (must have Docker access) |
-  | `VPS_SSH_KEY` | Full private key (PEM / OpenSSH) — matching key must be in `~/.ssh/authorized_keys` on the VPS |
-
-  Optionally set the repo variable `DEPLOY_DIR` to the path of the deploy directory on the
-  VPS (defaults to `~/chief`). See the workflow comments for the full activation checklist.
-  The deploy command is `docker compose pull && docker compose up -d`, which pulls the
-  freshly-published `:latest` GHCR images and restarts the stack in place (migrate-on-start).
+  | secret `VPS_HOST` | Hostname or IP of the VPS |
+  | secret `VPS_USER` | SSH user (must have Docker access) |
+  | secret `VPS_SSH_KEY` | Private key (OpenSSH) — public half in `~/.ssh/authorized_keys` on the VPS |
+  | variable `DEPLOY_DIR` | Absolute path of the clone on the VPS; **doubles as the activation switch** — the job is skipped while it's unset (the `secrets` context isn't available in a job-level `if:`, so the guard checks `DEPLOY_DIR` instead) |
