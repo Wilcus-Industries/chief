@@ -113,8 +113,10 @@ def discover_accounts(
     ``email_resolver`` is called for tokens that lack an ``account`` field (legacy
     tokens minted before issue #54's fix).  It receives the token path and should
     return the email string or ``None``.  When ``None``, legacy tokens degrade to
-    a filename-slug label as before.  The production default wires a real OAuth
-    token exchange + userinfo call via :func:`~chief.app.build_list_accounts_service`.
+    a filename-slug label as before.
+    :func:`~chief.app.build_list_accounts_service` passes
+    :func:`~chief.app._resolve_email_from_token` as the production resolver —
+    a read-only in-memory OAuth refresh + userinfo call.
     """
     if not secrets_dir.is_dir():
         return []
