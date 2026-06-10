@@ -13,6 +13,7 @@ tasks left mid-flight.
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 import discord
 import httpx
@@ -39,6 +40,8 @@ from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
+from .tools.google.accounts import discover_accounts
+from .tools.google.list_accounts_service import ListAccountsService
 from .tools.guest import GuestAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
@@ -125,6 +128,21 @@ def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
     return calendar_mcp.guest_service(settings.calendar_mcp_url)
 
 
+def build_list_accounts_service(
+    secrets_dir: Path | str | None = None,
+) -> ListAccountsService:
+    """Discover registered Google accounts and build the owner-only list_accounts tool.
+
+    Scans ``secrets_dir`` (defaults to ``./secrets``) for ``google_token*.json`` files.
+    Always returns a :class:`ListAccountsService` — with an empty account list when the
+    dir is absent or empty — so the tool is available even when no Google account has
+    been set up yet.
+    """
+    base = Path(secrets_dir) if secrets_dir is not None else Path("secrets")
+    accounts = discover_accounts(base)
+    return ListAccountsService(accounts=accounts)
+
+
 def build_budget(
     settings: Settings,
     *,
@@ -173,6 +191,9 @@ def build_engine(
         if settings.guest_enabled
         else None
     )
+    # Account registry: always wired into owner sessions (read-only, no card).
+    # Scans the secrets dir at build time so restarts pick up newly added tokens.
+    list_accounts = build_list_accounts_service()
     # The owner's schedule tools are platform-agnostic, so every stack's owner session
     # gets them when the scheduler is on; only the *loop* (built in serve) is singular.
     schedule = (
@@ -226,6 +247,7 @@ def build_engine(
         guest_model=settings.guest_model,
         guest_calendar_service=build_guest_calendar_service(settings),
         guest_admin_service=guest_admin,
+        list_accounts_service=list_accounts,
         schedule_service=schedule,
         schedule_bash_service=schedule_bash,
         # When budgeting is on, the gate records each turn's spend and the manager

@@ -18,6 +18,7 @@ core image stays lean.
 """
 
 import argparse
+import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -46,6 +47,9 @@ class _Credentials(Protocol):
 
 #: Run the consent dance for ``client_secrets`` over ``scopes`` → fresh credentials.
 ConsentFn = Callable[[Path, list[str]], _Credentials]
+#: Optionally called after consent to retrieve the authenticated user's email address.
+#: Injected in production; omitted when callers don't need the account label.
+EmailFn = Callable[[], str]
 
 
 class ClientSecretsMissing(FileNotFoundError):
@@ -67,12 +71,20 @@ def mint_token(
     token_out: Path,
     consent: ConsentFn | None = None,
     scopes: Sequence[str] = SCOPES,
+    email_fn: EmailFn | None = None,
 ) -> Path:
     """Run consent and write the google-auth token to ``token_out``.
 
     ``consent`` is injected in tests; production uses :func:`_run_local_consent`
     (resolved late so a monkeypatch on the module global takes effect). The credentials
     are written verbatim via ``Credentials.to_json()`` — the shape every server reads.
+
+    ``email_fn`` is an optional callable that returns the authenticated user's email
+    address (e.g. from the Google userinfo endpoint).  When provided its return value
+    is written into the token JSON as the ``account`` field, which
+    :func:`~chief.tools.google.accounts.discover_accounts` reads to label the account.
+    Existing tokens minted without this field degrade gracefully in the registry.
+
     Raises :class:`ClientSecretsMissing` if the client file isn't present.
     """
     if not client_secrets.exists():
@@ -80,7 +92,14 @@ def mint_token(
     resolver = consent if consent is not None else _run_local_consent
     credentials = resolver(client_secrets, list(scopes))
     token_out.parent.mkdir(parents=True, exist_ok=True)
-    token_out.write_text(credentials.to_json(), encoding="utf-8")
+    token_json = credentials.to_json()
+    if email_fn is not None:
+        # Inject the email into the google-auth JSON so the account registry can
+        # label this account without a network round-trip at read time.
+        token_data = json.loads(token_json)
+        token_data["account"] = email_fn()
+        token_json = json.dumps(token_data)
+    token_out.write_text(token_json, encoding="utf-8")
     return token_out
 
 
