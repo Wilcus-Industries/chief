@@ -9,9 +9,9 @@ Ported from genesis-x's ``drive/server.py`` with three changes for chief:
 - multi-account credential selection via ``X-Account-Label`` request header
   (issue #47): same pattern as mcp-calendar (issue #46/#56).
 
-Auth — multi-account (issue #47):
-    The server scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
-    files and loads them into a per-label credential registry at startup. On each
+Auth — multi-account (issue #47, per-request re-scan issue #60):
+    The server re-scans TOKEN_DIR (default ``/token``) on every request so a token
+    dropped after startup is picked up immediately — no restart needed.  On each
     ``tools/call``, ``_get_service()`` reads ``X-Account-Label`` directly from the
     Starlette request object exposed via FastMCP's per-call ``request_context``
     (``mcp.get_context().request_context.request``).  Falls back to the first
@@ -108,51 +108,67 @@ def _load_credentials(token_dir: Path) -> dict[str, Any]:
     return registry
 
 
-# Load all registered accounts at startup.
-_creds_registry: dict[str, Any] = _load_credentials(Path(TOKEN_DIR))
-
-if _creds_registry:
-    labels = list(_creds_registry)
-    log.info(
-        "Drive MCP loaded %d account(s): %s",
-        len(_creds_registry),
-        ", ".join(labels),
-    )
-else:
-    # No token files found — fall back to the legacy single-file path for compat.
-    log.warning(
-        "No token files found in TOKEN_DIR=%s; trying TOKEN_PATH=%s",
-        TOKEN_DIR,
-        TOKEN_PATH,
-    )
-    try:
-        _legacy_creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
-        if _legacy_creds.expired and _legacy_creds.refresh_token:
-            _legacy_creds.refresh(Request())
-        _creds_registry["_legacy"] = _legacy_creds
-        log.info("Drive MCP authenticated (legacy path) | token=%s", TOKEN_PATH)
-    except Exception:
-        log.exception("Failed to load any Google credentials — drive tools will error")
-
-
 # ---------------------------------------------------------------------------
-# Per-request credential/service selection
+# Per-request credential/service selection (dynamic re-scan, issue #60)
 # ---------------------------------------------------------------------------
 
-# Build a google-api-python-client service resource for every loaded credential.
-# Each service is built once; google-api-python-client refreshes the access token
-# in memory on each call, so no write-back is needed.
-_service_registry: dict[str, Any] = {}
-for _label, _creds in _creds_registry.items():
-    try:
-        _service_registry[_label] = build(
-            "drive", "v3", credentials=_creds, cache_discovery=False
-        )
-    except Exception:  # noqa: BLE001
-        log.warning("failed to build drive service for %r", _label, exc_info=True)
+# No boot-time registry build: we re-scan TOKEN_DIR on every request so a token
+# dropped after the server starts is picked up immediately without a restart.
+# For a handful of token files the directory scan is negligible.
 
-# The first (default) service — used when no account header is present.
-_default_service: Any = next(iter(_service_registry.values()), None)
+_token_dir = Path(TOKEN_DIR)
+
+log.info("Drive MCP ready | TOKEN_DIR=%s", TOKEN_DIR)
+
+
+def _build_service_registry() -> tuple[dict[str, Any], Any]:
+    """Scan TOKEN_DIR and build a label → service dict.
+
+    Returns ``(registry, default_service)`` where ``default_service`` is the
+    first entry (the legacy/primary account) or ``None`` when the dir is empty.
+
+    Falls back to the legacy single-file TOKEN_PATH when the directory scan
+    yields nothing — preserves backward compat for single-token deploys.
+    """
+    creds_registry = _load_credentials(_token_dir)
+
+    if not creds_registry:
+        # Legacy fallback: try the single TOKEN_PATH.
+        try:
+            legacy_creds = Credentials.from_authorized_user_file(
+                TOKEN_PATH, scopes=SCOPES
+            )
+            if legacy_creds.expired and legacy_creds.refresh_token:
+                legacy_creds.refresh(Request())
+            creds_registry["_legacy"] = legacy_creds
+        except Exception:  # noqa: BLE001
+            pass  # No credentials at all; tools will error on the actual call.
+
+    registry: dict[str, Any] = {}
+    for lbl, creds in creds_registry.items():
+        try:
+            registry[lbl] = build(
+                "drive", "v3", credentials=creds, cache_discovery=False
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("failed to build drive service for %r", lbl, exc_info=True)
+
+    default = next(iter(registry.values()), None)
+    return registry, default
+
+
+def _get_service_for_label(label: str | None) -> Any:
+    """Return the drive service for ``label``, re-scanning TOKEN_DIR each call.
+
+    A token dropped after module load is discovered here because we call
+    ``_build_service_registry()`` on every invocation.  Falls back to the
+    default (first) service when ``label`` is absent or not in the registry.
+    """
+    registry, default = _build_service_registry()
+    if label and label in registry:
+        return registry[label]
+    return default
+
 
 mcp = FastMCP("drive", host="0.0.0.0", port=PORT)
 
@@ -165,6 +181,9 @@ def _get_service() -> Any:
     invocation*, not per session).  Falls back to the default (first loaded)
     service when the label is absent or unknown — backward compat for
     single-account deploys and requests that carry no header.
+
+    Re-scans TOKEN_DIR on every call (issue #60) so tokens dropped at runtime
+    are picked up without a restart.
 
     Why not a ContextVar?  See the calendar server's docstring for the full
     explanation.  Short version: FastMCP's stateful-mode session task is spawned
@@ -180,9 +199,7 @@ def _get_service() -> Any:
             label = req.headers.get(_ACCOUNT_HEADER)
     except LookupError:
         pass
-    if label and label in _service_registry:
-        return _service_registry[label]
-    return _default_service
+    return _get_service_for_label(label)
 
 
 # ---------------------------------------------------------------------------

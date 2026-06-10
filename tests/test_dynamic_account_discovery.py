@@ -1,4 +1,4 @@
-"""Dynamic account discovery (issue #50): dropped token files appear without restart.
+"""Dynamic account discovery (issues #50/#60): dropped tokens appear without restart.
 
 Tests prove:
 - ListAccountsService re-scans the token dir per list_accounts call; a token dropped
@@ -6,6 +6,7 @@ Tests prove:
 - SetAccountService re-scans per set_account call; a label dropped after construction
   is accepted by set_account.
 - calendar server _get_service() picks up a token dropped after module load.
+- drive, sheets, and gmail-chief servers do the same (issue #60).
 - Re-registering an existing token under a new label (the stand-in demo) shows two
   entries in list_accounts and both are selectable.
 """
@@ -320,4 +321,329 @@ class TestCalendarServerDynamicRescan:
         assert service is not None, (
             "New label dropped after server load must be discoverable "
             "via _get_service_for_label"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Drive server: dynamic re-scan per request (issue #60)
+# ---------------------------------------------------------------------------
+
+_DRIVE_SERVER_PATH = (
+    Path(__file__).parent.parent / "docker" / "mcp-drive" / "server.py"
+)
+_DRIVE_DOCKER_DIR = str(_DRIVE_SERVER_PATH.parent)
+
+
+def _make_drive_extra_stubs() -> dict[str, Any]:
+    """Build stubs for Drive-only heavy deps (weasyprint, markitdown, etc.)."""
+    stubs: dict[str, Any] = {}
+    for name in (
+        "markdown",
+        "drive_query",
+        "googleapiclient.http",
+        "markitdown",
+        "weasyprint",
+    ):
+        stub = types.ModuleType(name)
+        # Provide minimal attrs each dep exposes at import time
+        if name == "drive_query":
+            stub._escape_drive_query = MagicMock()  # type: ignore[attr-defined]
+        if name == "googleapiclient.http":
+            stub.MediaIoBaseUpload = MagicMock()  # type: ignore[attr-defined]
+        if name == "markitdown":
+            stub.MarkItDown = MagicMock()  # type: ignore[attr-defined]
+        if name == "weasyprint":
+            stub.HTML = MagicMock()  # type: ignore[attr-defined]
+        stubs[name] = stub
+    return stubs
+
+
+def _load_drive_server(tmp_token_dir: Path) -> types.ModuleType:
+    """Import docker/mcp-drive/server.py with mocked google + heavy deps."""
+    stubs = _make_google_stubs()
+    stubs.update(_make_drive_extra_stubs())
+    for name, stub in stubs.items():
+        sys.modules.setdefault(name, stub)
+
+    if _DRIVE_DOCKER_DIR not in sys.path:
+        sys.path.insert(0, _DRIVE_DOCKER_DIR)
+
+    import os
+
+    os.environ["TOKEN_DIR"] = str(tmp_token_dir)
+    os.environ["GOOGLE_TOKEN_PATH"] = str(tmp_token_dir / "google_token.json")
+
+    mod_name = f"drive_server_dynamic_{id(tmp_token_dir)}"
+    spec = importlib.util.spec_from_file_location(mod_name, _DRIVE_SERVER_PATH)
+    assert spec is not None and spec.loader is not None
+    srv = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = srv
+    spec.loader.exec_module(srv)
+    return srv
+
+
+class TestDriveServerDynamicRescan:
+    """drive server picks up a token dropped after module load (issue #60)."""
+
+    def test_dropped_token_label_selectable_after_drop(
+        self, tmp_path: Path
+    ) -> None:
+        """_get_service_for_label picks up a new labelled token after it is dropped.
+
+        The drive server must re-scan TOKEN_DIR per request so a token
+        dropped at runtime is discoverable by label without restarting.
+        """
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_drive_server(tmp_path)
+
+        default_svc = srv._get_service_for_label(None)
+        svc_before = srv._get_service_for_label("work@example.com")
+        # Unknown label falls back to default before the token is dropped.
+        assert svc_before is default_svc, (
+            "Unknown label should fall back to the default service"
+        )
+
+        # Drop a second token file for 'work'.
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        # After drop: work label must resolve to a distinct service object.
+        svc_after = srv._get_service_for_label("work@example.com")
+        assert svc_after is not None, (
+            "_get_service_for_label returned None for dropped label; "
+            "the drive server must re-scan TOKEN_DIR per request"
+        )
+
+    def test_new_label_selectable_after_drop(self, tmp_path: Path) -> None:
+        """A token dropped under a new label is selectable by the drive server."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_drive_server(tmp_path)
+
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        service = srv._get_service_for_label("work@example.com")
+        assert service is not None, (
+            "New label dropped after drive server load must be discoverable "
+            "via _get_service_for_label"
+        )
+
+    def test_single_account_no_header_still_works(self, tmp_path: Path) -> None:
+        """Single-account / no-header requests resolve to the default credential."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_drive_server(tmp_path)
+
+        service = srv._get_service_for_label(None)
+        assert service is not None, (
+            "Single-account deploy: None label must return the default service"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sheets server: dynamic re-scan per request (issue #60)
+# ---------------------------------------------------------------------------
+
+_SHEETS_SERVER_PATH = (
+    Path(__file__).parent.parent / "docker" / "mcp-sheets" / "server.py"
+)
+_SHEETS_DOCKER_DIR = str(_SHEETS_SERVER_PATH.parent)
+
+
+def _make_sheets_extra_stubs() -> dict[str, Any]:
+    """Build stubs for Sheets-only deps (row1_guard)."""
+    stubs: dict[str, Any] = {}
+    row1_guard = types.ModuleType("row1_guard")
+    row1_guard.ROW_1_ERROR = "Row 1 is protected"  # type: ignore[attr-defined]
+    row1_guard._check_row_1 = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    row1_guard.blocked_result = MagicMock()  # type: ignore[attr-defined]
+    stubs["row1_guard"] = row1_guard
+    return stubs
+
+
+def _load_sheets_server(tmp_token_dir: Path) -> types.ModuleType:
+    """Import docker/mcp-sheets/server.py with mocked google + row1_guard."""
+    stubs = _make_google_stubs()
+    stubs.update(_make_sheets_extra_stubs())
+    for name, stub in stubs.items():
+        sys.modules.setdefault(name, stub)
+
+    if _SHEETS_DOCKER_DIR not in sys.path:
+        sys.path.insert(0, _SHEETS_DOCKER_DIR)
+
+    import os
+
+    os.environ["TOKEN_DIR"] = str(tmp_token_dir)
+    os.environ["TOKEN_PATH"] = str(tmp_token_dir / "google_token.json")
+
+    mod_name = f"sheets_server_dynamic_{id(tmp_token_dir)}"
+    spec = importlib.util.spec_from_file_location(mod_name, _SHEETS_SERVER_PATH)
+    assert spec is not None and spec.loader is not None
+    srv = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = srv
+    spec.loader.exec_module(srv)
+    return srv
+
+
+class TestSheetsServerDynamicRescan:
+    """sheets server picks up a token dropped after module load (issue #60).
+
+    Sheets returns a (sheets_svc, drive_svc) pair via _get_services_for_label().
+    Per-account atomic write-back must be preserved.
+    """
+
+    def test_dropped_token_label_selectable_after_drop(
+        self, tmp_path: Path
+    ) -> None:
+        """_get_services_for_label picks up a new labelled token after it is dropped."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_sheets_server(tmp_path)
+
+        default_pair = srv._get_services_for_label(None)
+        pair_before = srv._get_services_for_label("work@example.com")
+        # Unknown label falls back to default before the token is dropped.
+        assert pair_before == default_pair, (
+            "Unknown label should fall back to the default service pair"
+        )
+
+        # Drop a second token file for 'work'.
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        # After drop: work label must resolve to a non-None service pair.
+        sheets_svc, drive_svc = srv._get_services_for_label("work@example.com")
+        assert sheets_svc is not None, (
+            "_get_services_for_label returned None sheets_svc for dropped label; "
+            "the sheets server must re-scan TOKEN_DIR per request"
+        )
+        assert drive_svc is not None, (
+            "_get_services_for_label returned None drive_svc for dropped label; "
+            "the sheets server must re-scan TOKEN_DIR per request"
+        )
+
+    def test_new_label_selectable_after_drop(self, tmp_path: Path) -> None:
+        """A token dropped under a new label is selectable by the sheets server."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_sheets_server(tmp_path)
+
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        sheets_svc, drive_svc = srv._get_services_for_label("work@example.com")
+        assert sheets_svc is not None and drive_svc is not None, (
+            "New label dropped after sheets server load must be discoverable "
+            "via _get_services_for_label"
+        )
+
+    def test_service_pair_shape_preserved(self, tmp_path: Path) -> None:
+        """_get_services_for_label returns a (sheets, drive) tuple, not None."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_sheets_server(tmp_path)
+
+        pair = srv._get_services_for_label(None)
+        assert isinstance(pair, tuple) and len(pair) == 2, (
+            "_get_services_for_label must return a 2-tuple (sheets_svc, drive_svc)"
+        )
+
+    def test_single_account_no_header_still_works(self, tmp_path: Path) -> None:
+        """Single-account / no-header requests resolve to the default pair."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_sheets_server(tmp_path)
+
+        sheets_svc, drive_svc = srv._get_services_for_label(None)
+        assert sheets_svc is not None, (
+            "Single-account deploy: None label must return the default sheets service"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Gmail-chief server: dynamic re-scan per request (issue #60)
+# ---------------------------------------------------------------------------
+
+_GMAIL_SERVER_PATH = (
+    Path(__file__).parent.parent / "docker" / "mcp-gmail-chief" / "server.py"
+)
+_GMAIL_DOCKER_DIR = str(_GMAIL_SERVER_PATH.parent)
+
+
+def _make_gmail_extra_stubs() -> dict[str, Any]:
+    """Build stubs for Gmail-only deps (gmail_signature)."""
+    stubs: dict[str, Any] = {}
+    gmail_sig = types.ModuleType("gmail_signature")
+    gmail_sig.inject_signature = MagicMock()  # type: ignore[attr-defined]
+    stubs["gmail_signature"] = gmail_sig
+    return stubs
+
+
+def _load_gmail_server(tmp_token_dir: Path) -> types.ModuleType:
+    """Import docker/mcp-gmail-chief/server.py with mocked google + gmail_signature."""
+    stubs = _make_google_stubs()
+    stubs.update(_make_gmail_extra_stubs())
+    for name, stub in stubs.items():
+        sys.modules.setdefault(name, stub)
+
+    if _GMAIL_DOCKER_DIR not in sys.path:
+        sys.path.insert(0, _GMAIL_DOCKER_DIR)
+
+    import os
+
+    os.environ["TOKEN_DIR"] = str(tmp_token_dir)
+    os.environ["GOOGLE_TOKEN_PATH"] = str(tmp_token_dir / "google_token.json")
+
+    mod_name = f"gmail_server_dynamic_{id(tmp_token_dir)}"
+    spec = importlib.util.spec_from_file_location(mod_name, _GMAIL_SERVER_PATH)
+    assert spec is not None and spec.loader is not None
+    srv = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = srv
+    spec.loader.exec_module(srv)
+    return srv
+
+
+class TestGmailServerDynamicRescan:
+    """gmail-chief server picks up a token dropped after module load (issue #60)."""
+
+    def test_dropped_token_label_selectable_after_drop(
+        self, tmp_path: Path
+    ) -> None:
+        """_get_service_for_label picks up a new labelled token after it is dropped.
+
+        The gmail-chief server must re-scan TOKEN_DIR per request so a token
+        dropped at runtime is discoverable by label without restarting.
+        """
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_gmail_server(tmp_path)
+
+        default_svc = srv._get_service_for_label(None)
+        svc_before = srv._get_service_for_label("work@example.com")
+        # Unknown label falls back to default before the token is dropped.
+        assert svc_before is default_svc, (
+            "Unknown label should fall back to the default service"
+        )
+
+        # Drop a second token file for 'work'.
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        # After drop: work label must resolve to a distinct service object.
+        svc_after = srv._get_service_for_label("work@example.com")
+        assert svc_after is not None, (
+            "_get_service_for_label returned None for dropped label; "
+            "the gmail-chief server must re-scan TOKEN_DIR per request"
+        )
+
+    def test_new_label_selectable_after_drop(self, tmp_path: Path) -> None:
+        """A token dropped under a new label is selectable by the gmail server."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_gmail_server(tmp_path)
+
+        _write_token(tmp_path / "google_token_work.json", "work@example.com")
+
+        service = srv._get_service_for_label("work@example.com")
+        assert service is not None, (
+            "New label dropped after gmail-chief server load must be discoverable "
+            "via _get_service_for_label"
+        )
+
+    def test_single_account_no_header_still_works(self, tmp_path: Path) -> None:
+        """Single-account / no-header requests resolve to the default credential."""
+        _write_token(tmp_path / "google_token.json", "owner@example.com")
+        srv = _load_gmail_server(tmp_path)
+
+        service = srv._get_service_for_label(None)
+        assert service is not None, (
+            "Single-account deploy: None label must return the default service"
         )
