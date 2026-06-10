@@ -330,6 +330,10 @@ services:
       - /home/sandbox
     security_opt:
       - no-new-privileges:true
+    # mcp-internal only — core resolves sandbox:8765 over this network.  Intentionally
+    # off playwright-net so the browser container has no route to the shell server.
+    networks:
+      - mcp-internal
     # Blast-radius caps for a process running arbitrary owner commands.
     mem_limit: 1g
     pids_limit: 256
