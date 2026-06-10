@@ -122,6 +122,16 @@ services:
   # at http://mcp-calendar:8003/mcp on the internal network (no host ports). Replaces the
   # nspady mcp-gcal: FastMCP gives each connection its own transport, so the per-task MCP
   # connections chief opens don't collide ("Server already initialized").
+  #
+  # Multi-account token directory (issue #56):
+  #   TOKEN_DIR=/token is scanned at startup for all google_token*.json files; each file
+  #   becomes one registered account.  Add accounts by placing additional token files:
+  #     ./secrets/google_token.json          → primary (default) account
+  #     ./secrets/google_token_work.json     → account labeled "work@corp.com"
+  #   The entire ./secrets directory is mounted read-only at /token so every
+  #   google_token*.json lands in the container automatically. The server only reads files
+  #   matching the google_token* prefix; other secret files (telegram_bot_token, etc.)
+  #   are silently skipped by _load_credentials().
   mcp-calendar:
     profiles: ["google"]
     build:
@@ -136,11 +146,16 @@ services:
       - mcp-internal
     environment:
       GOOGLE_TOKEN_PATH: /token/google_token.json
+      # Mount the secrets dir as /token so all google_token*.json files are accessible.
+      TOKEN_DIR: /token
       # Unset → falls through to owner_tz in the mounted config.yaml (the source of truth);
       # set it here or in .env only to override per-deploy.
       OWNER_TZ: ${OWNER_TZ:-}
     volumes:
-      - ./secrets/google_token.json:/token/google_token.json:ro
+      # Entire secrets dir mounted read-only: all google_token*.json files become available
+      # to the multi-account registry. The server only reads files matching the
+      # google_token* prefix, so non-token secrets in this directory are ignored.
+      - ./secrets:/token:ro
       - ./config.yaml:/config/config.yaml:ro
     tmpfs:
       # Python runtime scratch (httplib2 socket temp, googleapiclient, FastMCP internals).
