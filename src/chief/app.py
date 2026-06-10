@@ -42,7 +42,6 @@ from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
 from .tools.google import GoogleService
-from .tools.google.accounts import discover_accounts
 from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
 from .tools.google.set_account_service import SetAccountService
@@ -172,7 +171,7 @@ def _resolve_email_from_token(token_path: Path) -> str | None:
 def build_list_accounts_service(
     secrets_dir: Path | str = Path("/token"),
 ) -> ListAccountsService:
-    """Discover registered Google accounts and build the owner-only list_accounts tool.
+    """Build the owner-only list_accounts tool backed by dynamic token-dir re-scan.
 
     Scans ``secrets_dir`` (defaults to ``/token``) for ``google_token*.json`` files.
     In production docker-compose.yml, ``./secrets/google_token.json`` is bind-mounted
@@ -181,15 +180,20 @@ def build_list_accounts_service(
     dir is absent or empty — so the tool is available even when no Google account has
     been set up yet.
 
+    Dynamic mode (issue #50): passes ``secrets_dir`` through to
+    :class:`~chief.tools.google.list_accounts_service.ListAccountsService` so the
+    tool re-scans the directory on every call.  A token dropped at runtime appears in
+    ``list_accounts`` without a restart.
+
     Pass ``secrets_dir=tmp_path`` in tests to avoid scanning the real filesystem.
     ``_resolve_email_from_token`` is the production resolver: it refreshes the token
     in memory and calls the Google userinfo endpoint to recover the email for legacy
     tokens that lack the ``account`` field.  It degrades to ``None`` on failure.
     """
-    accounts = discover_accounts(
-        Path(secrets_dir), email_resolver=_resolve_email_from_token
+    return ListAccountsService(
+        secrets_dir=Path(secrets_dir),
+        email_resolver=_resolve_email_from_token,
     )
-    return ListAccountsService(accounts=accounts)
 
 
 def build_set_account_service(
@@ -198,20 +202,20 @@ def build_set_account_service(
     platform: str,
     secrets_dir: Path | str = Path("/token"),
 ) -> SetAccountService:
-    """Build the owner-only ``set_account`` tool with the registered account list.
+    """Build the owner-only ``set_account`` tool backed by dynamic token-dir re-scan.
 
-    Mirrors :func:`build_list_accounts_service`: scans ``secrets_dir`` for token files
-    at startup, then builds a :class:`SetAccountService` closed over that snapshot.
+    Dynamic mode (issue #50): passes ``secrets_dir`` through to
+    :class:`~chief.tools.google.set_account_service.SetAccountService` so the tool
+    re-scans the directory on every call.  A token dropped at runtime is immediately
+    selectable via ``set_account`` without a restart.
     Always returns a service — with an empty account list when the dir is absent —
     so the tool is available even before any Google account has been set up.
     """
-    accounts = discover_accounts(
-        Path(secrets_dir), email_resolver=_resolve_email_from_token
-    )
     return SetAccountService(
         session_factory=session_factory,
-        accounts=accounts,
         platform=platform,
+        secrets_dir=Path(secrets_dir),
+        email_resolver=_resolve_email_from_token,
     )
 
 

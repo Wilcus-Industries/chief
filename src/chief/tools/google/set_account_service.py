@@ -1,4 +1,4 @@
-"""Owner-only in-process ``set_account`` MCP tool (issue #45).
+"""Owner-only in-process ``set_account`` MCP tool (issue #45, #50).
 
 Exposes per-thread active-account binding to the owner agent as a single,
 pre-approved tool — no approval card needed since it is owner-initiated with
@@ -8,13 +8,16 @@ into owner sessions only, mirroring the
 
 The tool records which registered Google account is active for the current
 thread (persisted to sqlite, keyed by ``thread_key``).  Validation rejects
-any label/email not present in the registry supplied at startup.  This slice
-is the FAÇADE only — it records and reports the active account but does NOT
-yet change which account the Google MCP servers hit (that's issue #46).
+any label/email not present in the registry.
+
+Dynamic discovery (issue #50): when ``secrets_dir`` is supplied the tool
+re-scans the token directory on every call so a token dropped after the service
+was built is immediately selectable — no restart needed.
 """
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import (
@@ -30,7 +33,7 @@ from ...persistence.tasks import (
     get_or_create_task,
     set_active_account,
 )
-from .accounts import GoogleAccount
+from .accounts import EmailResolver, GoogleAccount, discover_accounts
 
 logger = logging.getLogger("chief.tools.google.set_account")
 
@@ -80,17 +83,26 @@ def _resolve_account(
 class SetAccountService:
     """Builds the owner session's ``set_account`` in-process tool.
 
-    ``accounts`` is the snapshot from
-    :func:`~chief.tools.google.accounts.discover_accounts` at startup.
     ``session_factory`` is the shared async SQLAlchemy sessionmaker so the tool
     can persist the active-account binding per thread.  ``platform`` scopes the
     DB lookup to the same platform as the engine that wired this service.
+
+    Dynamic mode (issue #50): pass ``secrets_dir`` to re-scan the token directory
+    on every ``set_account`` call.  A token dropped after the service was built is
+    immediately selectable — no restart needed.
+
+    Static mode (backward compat): omit ``secrets_dir`` and supply ``accounts``
+    directly — validation uses that fixed snapshot.
     """
 
     session_factory: async_sessionmaker[AsyncSession] = field(repr=False)
     accounts: list[GoogleAccount] = field(default_factory=list)
     platform: str = "telegram"
     server_name: str = _SERVER_NAME
+    #: When set, the tool re-scans this directory on every call (dynamic mode).
+    secrets_dir: Path | None = None
+    #: Resolver passed to discover_accounts in dynamic mode (legacy-token email lookup).
+    email_resolver: EmailResolver | None = field(default=None, repr=False)
 
     @property
     def tool_name(self) -> str:
@@ -103,7 +115,9 @@ class SetAccountService:
         Each owner session gets its own tool instance so the closure addresses
         the right thread (an in-process MCP handler receives no caller context).
         """
-        accounts = self.accounts
+        secrets_dir = self.secrets_dir
+        email_resolver = self.email_resolver
+        static_accounts = self.accounts
         factory = self.session_factory
         platform = self.platform
 
@@ -112,6 +126,14 @@ class SetAccountService:
             identifier = args.get("account", "")
             if not identifier:
                 return _text_result("account is required.", is_error=True)
+
+            # Re-scan on every call when in dynamic mode.
+            if secrets_dir is not None:
+                accounts = discover_accounts(
+                    secrets_dir, email_resolver=email_resolver
+                )
+            else:
+                accounts = static_accounts
 
             match = _resolve_account(identifier, accounts)
             if match is None:

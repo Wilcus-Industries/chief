@@ -397,6 +397,11 @@ class TestBuildSetAccountService:
     def test_build_set_account_service_with_accounts(
         self, session_factory: async_sessionmaker[AsyncSession], tmp_path: Any
     ) -> None:
+        """Service built with secrets_dir uses dynamic mode (issue #50).
+
+        Discovery happens at tool-call time; we verify the service has secrets_dir
+        wired correctly so the account is reachable per call.
+        """
         import json
 
         token_data = {
@@ -411,6 +416,8 @@ class TestBuildSetAccountService:
             json.dumps(token_data), encoding="utf-8"
         )
 
+        from pathlib import Path
+
         from chief.app import build_set_account_service
 
         svc = build_set_account_service(
@@ -418,5 +425,7 @@ class TestBuildSetAccountService:
             platform="telegram",
             secrets_dir=tmp_path,
         )
-        assert len(svc.accounts) == 1
-        assert svc.accounts[0].label == "main@example.com"
+        # Dynamic mode: accounts discovered per call — verify secrets_dir is set.
+        assert svc.secrets_dir == Path(tmp_path), (
+            "secrets_dir must be wired so the tool can re-scan at call time"
+        )
