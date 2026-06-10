@@ -19,3 +19,5 @@ dist/
 # Local sqlite databases
 *.db
 .aider*
+# Local backups — memory dumps + .claude credential backups, never publish
+/backups/
