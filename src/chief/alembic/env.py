@@ -8,6 +8,7 @@ touches the event loop.  The application's ``init_db`` helper calls
 configured db_path.
 """
 
+import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -17,7 +18,12 @@ from chief.persistence.models import Base
 
 config = context.config
 
-if config.config_file_name is not None:
+# Only honor alembic.ini's [logging] sections when run from the alembic CLI
+# (bare root logger).  Programmatic runs (entrypoint / init_db at app boot)
+# already have the app's JSON/stdout handler installed; fileConfig would
+# replace it and reset the root level to WARNING, silently dropping every
+# INFO log for the life of the process.
+if config.config_file_name is not None and not logging.getLogger().handlers:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata

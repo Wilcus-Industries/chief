@@ -42,13 +42,10 @@ def test_migrate_then_exec_logs_completion_before_exec(
     This is the unit-level proof of the migrate-before-app ordering invariant
     asserted by the container smoke test (issue #8).
 
-    We use capsys rather than caplog because migrate_then_exec calls
-    configure_logging() after the migration to restore the JSON/stdout handler
-    (alembic's fileConfig resets the root logger during _run_migrations).  That
-    call clears pytest's caplog handler, so the completion line is captured by
-    capsys instead.
+    We call configure_logging() up front (as entrypoint.main does) so the
+    completion line goes to the JSON/stdout handler and is captured by capsys.
     """
-    import logging
+    from chief.obs.logging import configure_logging
 
     db_path = str(tmp_path / "chief.db")
     app_argv = [sys.executable, "-m", "chief.app"]
@@ -57,7 +54,7 @@ def test_migrate_then_exec_logs_completion_before_exec(
     def fake_execv(path: str, argv: list[str]) -> None:
         call_order.append("execv")
 
-    logging.getLogger().setLevel(logging.INFO)
+    configure_logging()
     with (
         patch.object(entrypoint, "_run_migrations"),
         patch("os.execv", side_effect=fake_execv),
