@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     gmail_mcp_url: str = "http://mcp-gmail:8004/mcp"
     owner_tz: str = "UTC"
 
+    # Browser automation (M13+), owner-only, default off (mirror the opt-in pattern).
+    # playwright_enabled wires the stock @playwright/mcp 0.0.76 container (headless
+    # Chromium, streamable HTTP at playwright_mcp_url) into owner sessions: read tools
+    # (navigate, snapshot, screenshot, inspection) ALLOWed, write tools (click, type,
+    # JS evaluation) approval-gated. Guest sessions never see browser tools.
+    playwright_enabled: bool = False
+    playwright_mcp_url: str = "http://mcp-playwright:3000/mcp"
+
     # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google
     # profile pattern). shell_enabled wires the in-process bash tool that forwards to
     # the secret-free sandbox container at sandbox_host:sandbox_port; every command is

@@ -34,6 +34,7 @@ from .memory.versioning import GitVersioner, NullVersioner, Versioner
 from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence.db import create_engine, init_db, session_factory
+from .tools.browser import mcp as browser_mcp
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
 from .tools.gmail import mcp as gmail_mcp
@@ -96,6 +97,8 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
         services.append(sheets_mcp.service(settings.sheets_mcp_url))
     if settings.gmail_enabled:
         services.append(gmail_mcp.service(settings.gmail_mcp_url))
+    if settings.playwright_enabled:
+        services.append(browser_mcp.service(settings.playwright_mcp_url))
     return services
 
 
