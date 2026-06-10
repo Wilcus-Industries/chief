@@ -86,6 +86,17 @@ def _load_sheets_server(tmp_token_dir: Path) -> types.ModuleType:
     if _SERVER_DIR not in sys.path:
         sys.path.insert(0, _SERVER_DIR)
 
+    # Load the real row1_guard from _SERVER_DIR, overriding any mock that a
+    # prior test (e.g. test_dynamic_account_discovery) may have registered via
+    # sys.modules.setdefault.  The guard must be the real implementation so the
+    # row-1 checks actually fire in these transport-level tests.
+    _guard_path = Path(_SERVER_DIR) / "row1_guard.py"
+    _guard_spec = importlib.util.spec_from_file_location("row1_guard", _guard_path)
+    assert _guard_spec is not None and _guard_spec.loader is not None
+    _guard_mod = importlib.util.module_from_spec(_guard_spec)
+    sys.modules["row1_guard"] = _guard_mod
+    _guard_spec.loader.exec_module(_guard_mod)
+
     import os
 
     os.environ["TOKEN_DIR"] = str(tmp_token_dir)
