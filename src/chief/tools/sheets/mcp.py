@@ -1,9 +1,10 @@
 """The ``mcp-sheets`` server: tool catalog + the SDK ``mcp_servers`` entry.
 
-chief wraps the third-party ``xing5/mcp-google-sheets`` (pinned ``0.6.3``) in its own
-container (``docker/mcp-sheets``), streamable HTTP on port 8002, MCP at ``/mcp``,
-with a server-side guard that refuses edits to row 1 (the header row). This module names
-the package's tools and partitions them for the gate.
+chief runs its own first-party FastMCP server (``docker/mcp-sheets/server.py``),
+streamable HTTP on port 8002, MCP at ``/mcp``.  The server supports multi-account
+per-request credential selection (``X-Account-Label`` header) with atomic per-account
+token write-back, and a server-side guard that refuses edits to row 1 (the header row).
+This module names the server's tools and partitions them for the gate.
 
 Wiring rules (DESIGN: reads ALLOW, writes ASK): listings / range + formula reads are
 pre-approved; cell/row/sheet writes and ``share_spreadsheet`` stay out of
@@ -16,8 +17,8 @@ from ..google import GoogleService, qualified
 #: The SDK names an MCP tool ``mcp__<server>__<tool>``; this is the ``<server>`` half.
 SERVER_NAME = "sheets"
 
-#: Read-only sheet tools — the gate ALLOWs these with no approval card. Names track
-#: ``mcp-google-sheets`` 0.6.3 (pinned in docker/mcp-sheets/requirements.txt).
+#: Read-only sheet tools — the gate ALLOWs these with no approval card.
+#: Tool names match the first-party server (``docker/mcp-sheets/server.py``).
 READ_TOOLS: tuple[str, ...] = qualified(
     SERVER_NAME,
     "get_sheet_data",

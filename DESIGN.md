@@ -588,8 +588,9 @@ card:
 - **Drive** — read a Doc/PDF/Office file, and render+upload a Markdown file as PDF
   (approval-gated). *Server built (M5), disabled until M8.*
 - **Google Sheets** — read (ranges/formulas/listings) + write (cells/rows/sheets, share),
-  with a server-side **row-1 (header) write guard**; wraps pinned
-  `xing5/mcp-google-sheets` 0.6.3. *Server built (M5), disabled until M8.*
+  with a server-side **row-1 (header) write guard**; first-party FastMCP server
+  (`docker/mcp-sheets/server.py`), multi-account per-request credential selection,
+  atomic per-account token write-back. *Live (M8).*
 - **Web** — search + fetch (read-only GET is un-gated; POST/forms are effectful → gated).
   SDK built-ins (WebSearch/WebFetch). *Live (M7).*
 - **Shell/code** — sandbox container, permission-gated (default-ask per command). *Built M7,
