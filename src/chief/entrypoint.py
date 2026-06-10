@@ -35,14 +35,6 @@ def migrate_then_exec(db_path: str, app_argv: list[str]) -> None:
     try:
         logger.info("running alembic upgrade head against %s", db_path)
         _run_migrations(db_path)
-        # alembic's env.py calls fileConfig(alembic.ini) during the migration,
-        # which resets the root logger level to WARNING and replaces our JSON/stdout
-        # handler with a plain stderr one — so any INFO log after this point would
-        # be silently dropped.  Restore our logging config before the completion
-        # line so it reaches container logs as intended.
-        from .obs.logging import configure_logging
-
-        configure_logging()
         logger.info("migration complete — starting app")
     except Exception as exc:
         logger.error(

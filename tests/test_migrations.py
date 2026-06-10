@@ -121,6 +121,38 @@ def test_migration_does_not_disable_existing_loggers(temp_db_url: str) -> None:
     )
 
 
+def test_migration_preserves_configured_root_logger(temp_db_url: str) -> None:
+    """``alembic upgrade head`` must not clobber an app-configured root logger.
+
+    Regression for the silent-INFO-logs prod bug: env.py's ``fileConfig`` call
+    replaced the app's JSON/stdout root handler and reset the root level to
+    WARNING whenever migrations ran in-process (``init_db`` at boot), silently
+    dropping every INFO log for the life of the app.  env.py must skip
+    ``fileConfig`` when the root logger already has handlers.
+    """
+    root = logging.getLogger()
+    old_handlers, old_level = root.handlers[:], root.level
+    sentinel = logging.NullHandler()
+    try:
+        root.handlers[:] = [sentinel]
+        root.setLevel(logging.INFO)
+
+        cfg = _alembic_cfg(temp_db_url)
+        command.upgrade(cfg, "head")
+
+        assert root.handlers == [sentinel], (
+            "alembic upgrade head replaced the root logger's handlers; "
+            "env.py must skip fileConfig when the root logger is configured"
+        )
+        assert root.level == logging.INFO, (
+            f"alembic upgrade head reset the root level to {root.level}; "
+            "expected INFO to survive"
+        )
+    finally:
+        root.handlers[:] = old_handlers
+        root.setLevel(old_level)
+
+
 def test_run_migrations_succeeds_from_arbitrary_cwd() -> None:
     """_run_migrations must work regardless of the process's CWD.
 
