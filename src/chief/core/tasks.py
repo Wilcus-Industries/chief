@@ -77,6 +77,7 @@ from ..persistence.tasks import (
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
 from ..tools.drive import mcp as drive_mcp
+from ..tools.gmail import mcp as gmail_mcp
 from ..tools.google import GoogleService
 from ..tools.google.account_selection import (
     ACCOUNT_SELECTION_GUIDANCE,
@@ -874,11 +875,12 @@ class TaskManager:
     ) -> tuple[GoogleService, ...]:
         """Return the Google services tuple, with all Google MCP servers stamped with
         an ``X-Account-Label`` header when a per-thread account is active
-        (issue #46/#47).
+        (issue #46/#47/#48).
 
-        Calendar, Drive, and Sheets are each rebuilt with a per-session headers dict
-        so every HTTP call the SDK sends to those servers carries the label — the
-        server uses it to select the right credential per request.
+        Calendar, Drive, Sheets, and chief-owned Gmail are each rebuilt with a
+        per-session headers dict so every HTTP call the SDK sends to those servers
+        carries the label — the server uses it to select the right credential per
+        request.
 
         When ``active_account_label`` is ``None`` (no binding set for the thread),
         service configs carry no header and each server falls back to the default
@@ -895,6 +897,8 @@ class TaskManager:
                 result.append(drive_mcp.service(svc.url, headers=headers))
             elif svc.name == "sheets":
                 result.append(sheets_mcp.service(svc.url, headers=headers))
+            elif svc.name == "gmail_chief":
+                result.append(gmail_mcp.chief_service(svc.url, headers=headers))
             else:
                 result.append(svc)
         return tuple(result)
