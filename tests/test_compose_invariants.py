@@ -668,3 +668,76 @@ def test_mcp_calendar_token_dir_env_set() -> None:
         f"mcp-calendar {_CALENDAR_TOKEN_DIR_ENV}={env[_CALENDAR_TOKEN_DIR_ENV]!r} "
         f"should be {_CALENDAR_TOKEN_DIR!r}."
     )
+
+
+# ---- mcp-calendar token mount security (issue #57) ---------------------------
+
+#: The only permitted host-side source for the mcp-calendar /token mount.
+#: Must be the dedicated google_tokens subdir — never the whole secrets dir.
+_CALENDAR_TOKEN_HOST_SOURCE = "./secrets/google_tokens"
+#: Whole-secrets-dir path that must NOT be the source (the pre-fix value).
+_SECRETS_DIR = "./secrets"
+
+
+def _calendar_token_entry(compose: dict[str, Any]) -> str | None:
+    """Return the volume entry that mounts /token in mcp-calendar, or None."""
+    cal_volumes: list[str] = compose["services"]["mcp-calendar"].get("volumes", [])
+    return next(
+        (
+            v
+            for v in cal_volumes
+            if isinstance(v, str)
+            and len(v.split(":")) >= 2
+            and v.split(":")[1] == _CALENDAR_TOKEN_DIR
+        ),
+        None,
+    )
+
+
+def test_mcp_calendar_token_mount_uses_dedicated_subdir() -> None:
+    """mcp-calendar /token must be mounted from ./secrets/google_tokens, not ./secrets.
+
+    Mounting the whole ./secrets directory exposes unrelated secrets
+    (claude_code_oauth_token, discord_bot_token, google_oauth_client.json,
+    telegram_bot_token) inside the calendar container.  A compromise of the
+    calendar container or its supply chain would leak those secrets.  Only the
+    dedicated google_tokens subdirectory — containing solely google_token*.json
+    files — may be mounted at /token (issue #57).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    entry = _calendar_token_entry(compose)
+    assert entry is not None, (
+        f"mcp-calendar has no volume entry mounting {_CALENDAR_TOKEN_DIR!r}. "
+        f"Add '- {_CALENDAR_TOKEN_HOST_SOURCE}:{_CALENDAR_TOKEN_DIR}:ro'."
+    )
+    host_source = entry.split(":")[0]
+    assert host_source != _SECRETS_DIR, (
+        f"mcp-calendar mounts the entire secrets directory ({_SECRETS_DIR!r}) at "
+        f"{_CALENDAR_TOKEN_DIR!r}.  This exposes claude_code_oauth_token, "
+        "discord_bot_token, google_oauth_client.json and telegram_bot_token inside "
+        "the container.  Change the host source to the dedicated tokens subdir: "
+        f"'- {_CALENDAR_TOKEN_HOST_SOURCE}:{_CALENDAR_TOKEN_DIR}:ro' (issue #57)."
+    )
+    assert host_source == _CALENDAR_TOKEN_HOST_SOURCE, (
+        f"mcp-calendar /token host source is {host_source!r}; "
+        f"expected {_CALENDAR_TOKEN_HOST_SOURCE!r}. "
+        "Only the dedicated google_tokens subdir should be mounted."
+    )
+
+
+def test_mcp_calendar_token_mount_is_read_only_subdir() -> None:
+    """The dedicated tokens subdir mount in mcp-calendar must be :ro.
+
+    This is a belt-and-suspenders check: the subdir-source assertion above
+    ensures the right directory, this one ensures the :ro flag is preserved
+    after the source change (issue #57).
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    entry = _calendar_token_entry(compose)
+    assert entry is not None, (
+        f"mcp-calendar has no volume entry mounting {_CALENDAR_TOKEN_DIR!r}."
+    )
+    assert entry.endswith(":ro"), (
+        f"mcp-calendar token mount ({entry!r}) must end with ':ro'. "
+        "Even with the narrowed subdir source, the mount must be read-only."
+    )
