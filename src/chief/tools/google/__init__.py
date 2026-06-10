@@ -37,7 +37,14 @@ class GoogleService:
     read_tools: tuple[str, ...]
     write_tools: tuple[str, ...]
     deferred_tools: tuple[str, ...] = ()
+    #: Optional per-session HTTP headers injected into every MCP call to this
+    #: server (e.g. ``{"X-Account-Label": "work@corp.com"}`` for multi-account
+    #: credential selection, issue #46).  ``None`` or empty → no extra headers.
+    headers: dict[str, str] | None = None
 
     def server_config(self) -> McpHttpServerConfig:
         """The ``mcp_servers`` entry for this server (streamable HTTP)."""
-        return {"type": "http", "url": self.url}
+        config: McpHttpServerConfig = {"type": "http", "url": self.url}
+        if self.headers:
+            config["headers"] = dict(self.headers)
+        return config

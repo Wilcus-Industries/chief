@@ -48,8 +48,17 @@ GUEST_READ_TOOLS: tuple[str, ...] = qualified(
 GUEST_WRITE_TOOLS: tuple[str, ...] = qualified(SERVER_NAME, "create-event")
 
 
-def service(url: str) -> GoogleService:
-    """The :class:`GoogleService` for the calendar container at ``url``."""
+def service(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> GoogleService:
+    """The :class:`GoogleService` for the calendar container at ``url``.
+
+    ``headers`` is forwarded to every HTTP call the SDK makes to the MCP server
+    — used to inject ``X-Account-Label`` for multi-account credential selection
+    (issue #46).  ``None`` → no extra headers (single-account / no binding).
+    """
     return GoogleService(
         name="calendar",
         server_name=SERVER_NAME,
@@ -57,11 +66,17 @@ def service(url: str) -> GoogleService:
         read_tools=READ_TOOLS,
         write_tools=WRITE_TOOLS,
         deferred_tools=DEFERRED_TOOLS,
+        headers=headers,
     )
 
 
 def guest_service(url: str) -> GoogleService:
-    """The narrowed calendar service wired into guest sessions (free/busy + booking)."""
+    """The narrowed calendar service wired into guest sessions (free/busy + booking).
+
+    Guest sessions are never account-bound (no ``set_account`` for guests), so
+    this factory carries no headers — the server falls back to the default
+    (first) credential, which is the right behaviour for single-account deploys.
+    """
     return GoogleService(
         name="calendar",
         server_name=SERVER_NAME,
