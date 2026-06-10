@@ -6,14 +6,22 @@ connection, and FastMCP's session manager gives every connection a fresh transpo
 the nspady "Server already initialized" single-shared-transport failure (which killed
 calendar after the first task) cannot recur here.
 
-Auth — multi-account (issue #46):
+Auth — multi-account (issue #46, fixed in issue #56):
     The server scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
     files and loads them into a per-label credential registry at startup. On each
-    request, a Starlette middleware reads the ``X-Account-Label`` header (stamped by
-    chief's per-thread injection seam) and stores it in a ``contextvars.ContextVar``
-    so tool handlers can call ``_get_service()`` to obtain the right
-    google-api-python-client resource. Falls back to the first (default) credential
-    when no header is present — fully backward-compatible with single-account deploys.
+    ``tools/call``, ``_get_service()`` reads ``X-Account-Label`` directly from the
+    Starlette request object exposed via FastMCP's per-call ``request_context``
+    (``mcp.get_context().request_context.request``).  This is genuinely
+    per-request-scoped: the MCP lowlevel server sets the ``request_ctx`` ContextVar
+    *inside* the spawned task that handles each message, so it is never frozen at
+    session-start.  Falls back to the first (default) credential when no header is
+    present — fully backward-compatible with single-account deploys.
+
+    The earlier approach used a Starlette ASGI middleware writing to a module-level
+    ContextVar.  That broke because FastMCP (stateful mode) dispatches tool handlers
+    in a *persistent session task* that was spawned before the current HTTP request
+    arrived; anyio memory-stream boundaries do not propagate contextvars, so the
+    handler always saw the value frozen at session creation.
 
     Credentials are refreshed in memory only — no write-back. Three containers share
     one token file; letting google-api-python-client refresh the access token in memory
@@ -24,10 +32,14 @@ Auth — multi-account (issue #46):
 Tool names are hyphenated (``@mcp.tool(name=...)``) to match chief's
 ``src/chief/tools/calendar/mcp.py`` catalog. This file is standalone: it imports nothing
 from ``chief`` and ships in its own image with its own requirements.
+
+Reuse pattern for #47 / #48 (Drive, Gmail):
+    Copy ``_get_service()`` verbatim, replacing ``_service_registry`` /
+    ``_default_service`` with the equivalent registry for your service.  No
+    middleware, no ContextVar.
 """
 
 import asyncio
-import contextvars
 import datetime as dt
 import json
 import logging
@@ -44,7 +56,6 @@ from mcp.server.fastmcp import FastMCP
 from owner_tz import owner_tz_from_config, resolve_owner_tz
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -68,13 +79,8 @@ if _configured_tz and _configured_tz != OWNER_TZ:
 PORT = int(os.environ.get("PORT", "8003"))
 
 #: Header name chief stamps with the thread's active account label.
-_ACCOUNT_HEADER = "x-account-label"  # ASGI lower-cases header names
-
-#: Per-request context: the active account label extracted from the HTTP header.
-#: None when no header is present (single-account / no binding).
-_account_label_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "_account_label_var", default=None
-)
+#: ASGI lower-cases incoming header names; we match the normalised form.
+_ACCOUNT_HEADER = "x-account-label"
 
 # ---------------------------------------------------------------------------
 # Multi-account credential registry
@@ -173,46 +179,32 @@ _default_service: Any = next(iter(_service_registry.values()), None)
 def _get_service() -> Any:
     """Return the calendar service resource for the current request.
 
-    Reads the per-request account label from the context variable (set by the
-    ``AccountHeaderMiddleware`` before this tool handler runs) and looks up the
-    matching service.  Falls back to the default (first loaded) service when the
-    label is absent or unknown — backward compat for single-account deploys and
-    any request that carries no ``X-Account-Label`` header.
+    Reads ``X-Account-Label`` from the per-call Starlette request exposed by
+    FastMCP's ``request_context`` (set by the MCP lowlevel server *per handler
+    invocation*, not per session).  Falls back to the default (first loaded)
+    service when the label is absent or unknown — backward compat for
+    single-account deploys and requests that carry no header.
+
+    Why not a ContextVar?  FastMCP (stateful mode) dispatches tool handlers in
+    a persistent session task spawned at ``initialize`` time; a middleware-set
+    ContextVar set on a later HTTP POST is invisible to that task because anyio
+    memory-stream boundaries do not propagate contextvars.  Reading from
+    ``request_context.request`` is safe because the MCP lowlevel server calls
+    ``request_ctx.set()`` *inside* each per-message spawned task before
+    invoking the handler — so it is always scoped to the individual call.
     """
-    label = _account_label_var.get()
+    label: str | None = None
+    try:
+        req = mcp.get_context().request_context.request
+        if req is not None:
+            label = req.headers.get(_ACCOUNT_HEADER)
+    except LookupError:
+        # Called outside a request context (e.g. at import time or in tests
+        # that don't go through the ASGI path).  Fall back to default.
+        pass
     if label and label in _service_registry:
         return _service_registry[label]
     return _default_service
-
-
-# ---------------------------------------------------------------------------
-# Starlette middleware: extract X-Account-Label → per-request contextvar
-# ---------------------------------------------------------------------------
-
-
-class AccountHeaderMiddleware:
-    """Extract ``X-Account-Label`` from incoming HTTP headers into a contextvar.
-
-    Starlette ASGI middleware that runs before every request to the MCP endpoint.
-    It sets ``_account_label_var`` so that ``_get_service()`` — called inside tool
-    handlers — sees the correct account for this particular HTTP call.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self._app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            label_bytes = headers.get(_ACCOUNT_HEADER.encode(), b"")
-            label: str | None = label_bytes.decode("utf-8") or None
-            token = _account_label_var.set(label)
-            try:
-                await self._app(scope, receive, send)
-            finally:
-                _account_label_var.reset(token)
-        else:
-            await self._app(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -450,10 +442,11 @@ if __name__ == "__main__":
     import uvicorn
 
     async def _serve() -> None:
+        # No middleware wrapper needed: X-Account-Label is read inside _get_service()
+        # directly from FastMCP's per-call request_context — no ContextVar required.
         starlette_app = mcp.streamable_http_app()
-        wrapped = AccountHeaderMiddleware(starlette_app)
         config = uvicorn.Config(
-            wrapped,
+            starlette_app,
             host=mcp.settings.host,
             port=mcp.settings.port,
             log_level=mcp.settings.log_level.lower(),

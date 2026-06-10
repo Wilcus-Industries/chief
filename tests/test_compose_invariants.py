@@ -577,3 +577,94 @@ def test_google_token_mounted_in_core_is_read_only() -> None:
         f"The google token bind-mount in core ({token_entry!r}) must end with ':ro'. "
         "mcp-sheets is the sole writer; a writable core mount risks token corruption."
     )
+
+
+# ---- mcp-calendar token directory mount (issue #56) --------------------------
+
+#: The container path where the token directory must be mounted in mcp-calendar.
+_CALENDAR_TOKEN_DIR = "/token"
+#: The env var that tells server.py which directory to scan for google_token*.json.
+_CALENDAR_TOKEN_DIR_ENV = "TOKEN_DIR"
+
+
+def test_mcp_calendar_token_dir_mounted() -> None:
+    """mcp-calendar must have a directory bind-mounted at /token.
+
+    Mounting only a single file (google_token.json) prevents additional
+    google_token_<label>.json files from reaching the container — making
+    multi-account calendar completely non-functional in a real deploy even after
+    the in-process contextvar fix (issue #56).  The mount must cover the whole
+    token directory so every google_token*.json is visible to the server.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    cal_volumes: list[str] = compose["services"]["mcp-calendar"].get("volumes", [])
+    # Accept either a directory mount (./secrets:/token) or any entry that maps
+    # something to exactly /token (without a filename suffix).
+    has_dir_mount = any(
+        isinstance(v, str) and (
+            v.split(":")[1].rstrip(":ro").rstrip(":rw") == _CALENDAR_TOKEN_DIR
+            if len(v.split(":")) >= 2 else False
+        )
+        for v in cal_volumes
+    )
+    assert has_dir_mount, (
+        f"mcp-calendar is missing a directory bind-mount at {_CALENDAR_TOKEN_DIR!r}. "
+        "Add '- ./secrets:/token:ro' (or a subdirectory) so that all "
+        "google_token*.json files reach the container for multi-account support "
+        "(issue #56).  A single-file mount blocks the second account's token."
+    )
+
+
+def test_mcp_calendar_token_dir_is_read_only() -> None:
+    """The token directory mount in mcp-calendar must be read-only (:ro).
+
+    mcp-sheets is the sole writer of the shared token files.  A writable mount
+    in mcp-calendar would risk concurrent writes and token corruption.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    cal_volumes: list[str] = compose["services"]["mcp-calendar"].get("volumes", [])
+    token_entry = next(
+        (
+            v
+            for v in cal_volumes
+            if isinstance(v, str)
+            and len(v.split(":")) >= 2
+            and v.split(":")[1].rstrip(":ro").rstrip(":rw") == _CALENDAR_TOKEN_DIR
+        ),
+        None,
+    )
+    assert token_entry is not None, (
+        f"No volume entry mounting {_CALENDAR_TOKEN_DIR!r} found in "
+        "mcp-calendar.volumes."
+    )
+    assert token_entry.endswith(":ro"), (
+        f"The token dir mount in mcp-calendar ({token_entry!r}) must end with ':ro'. "
+        "mcp-sheets is the sole writer; a writable mount risks token corruption."
+    )
+
+
+def test_mcp_calendar_token_dir_env_set() -> None:
+    """mcp-calendar must set TOKEN_DIR so server.py scans the mounted directory.
+
+    Without TOKEN_DIR the server falls back to TOKEN_PATH's parent, which may
+    not match the actual mount point.  An explicit TOKEN_DIR=/token makes the
+    scan path unambiguous and independent of GOOGLE_TOKEN_PATH.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    env = compose["services"]["mcp-calendar"].get("environment", {}) or {}
+    if isinstance(env, list):
+        env_dict: dict[str, str] = {}
+        for entry in env:
+            if "=" in entry:
+                k, _, v = entry.partition("=")
+                env_dict[k] = v
+        env = env_dict
+    assert _CALENDAR_TOKEN_DIR_ENV in env, (
+        f"mcp-calendar environment is missing {_CALENDAR_TOKEN_DIR_ENV!r}. "
+        f"Add '{_CALENDAR_TOKEN_DIR_ENV}: {_CALENDAR_TOKEN_DIR}' so server.py "
+        "scans the mounted token directory for all google_token*.json files."
+    )
+    assert env[_CALENDAR_TOKEN_DIR_ENV] == _CALENDAR_TOKEN_DIR, (
+        f"mcp-calendar {_CALENDAR_TOKEN_DIR_ENV}={env[_CALENDAR_TOKEN_DIR_ENV]!r} "
+        f"should be {_CALENDAR_TOKEN_DIR!r}."
+    )
