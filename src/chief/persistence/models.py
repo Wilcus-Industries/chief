@@ -58,6 +58,8 @@ class Task(Base):
     model: Mapped[str | None]
     title: Mapped[str | None]
     sdk_session_id: Mapped[str | None]
+    #: Per-thread active Google account label (issue #45). None = no account pinned.
+    active_account: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
