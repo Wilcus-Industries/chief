@@ -535,60 +535,80 @@ def test_google_mcp_services_are_not_on_sandbox_net() -> None:
         )
 
 
-# ---- google_token bind-mount in core (issue #54) ------------------------------
+# ---- google_token directory mount in core (issue #54, RW per issue #53) --------
 
-#: The path where google_token.json must be bind-mounted in core.
-_CORE_TOKEN_MOUNT = "/token/google_token.json"
-#: The canonical host-side source of the token bind-mount (issue #58).
-#: ALL five consumers must resolve to this subdirectory — never the flat
+#: The container path where the token *directory* must be mounted in core.
+#: build_list_accounts_service() defaults to Path('/token') as the discovery
+#: directory; the add-account flow (issue #53) writes newly-minted
+#: google_token_<slug>.json files here so they are re-scanned without a restart.
+_CORE_TOKEN_DIR_MOUNT = "/token"
+#: The canonical host-side source of the token directory mount (issue #58).
+#: ALL token consumers resolve to this subdirectory — never the flat
 #: secrets/google_token.json path that predated issue #57.
-_HOST_TOKEN_SOURCE = "./secrets/google_tokens/google_token.json"
-#: The host-side directory containing all google_token*.json files.
 _HOST_TOKEN_DIR = "./secrets/google_tokens"
 #: Old (pre-#58) flat path — must not appear in any token mount after this fix.
 _LEGACY_HOST_TOKEN = "./secrets/google_token.json"
 
 
+def _core_token_dir_entry(compose: dict[str, Any]) -> str | None:
+    """Return core's volume entry whose target is exactly /token, else None.
+
+    Matches the directory mount (source:/token[:mode]) but not the
+    google_oauth_client.json file mount (source:/token/google_oauth_client.json).
+    """
+    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
+    for v in core_volumes:
+        if not isinstance(v, str):
+            continue
+        parts = v.split(":")
+        # source:target  or  source:target:mode
+        if len(parts) >= 2 and parts[1] == _CORE_TOKEN_DIR_MOUNT:
+            return v
+    return None
+
+
 def test_google_token_mounted_in_core() -> None:
-    """core must have ./secrets/google_tokens/google_token.json bind-mounted at /token/.
+    """core must have the token directory bind-mounted at /token.
 
-    The full mount target is /token/google_token.json.
     build_list_accounts_service() defaults to Path('/token') as the discovery
-    directory.  Without the bind-mount, core's /token directory is absent or empty
-    and discover_accounts() returns [] — zero accounts on a live single-account
-    deployment (issue #54 Defect 1).
+    directory.  Without the directory mount, core's /token is absent or empty
+    and discover_accounts() returns [] — zero accounts on a live deployment
+    (issue #54 Defect 1).  A directory (not single-file) mount is required so
+    every google_token*.json — including accounts added at runtime (issue #53)
+    — is visible.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
-    has_token_mount = any(
-        isinstance(v, str) and _CORE_TOKEN_MOUNT in v for v in core_volumes
+    entry = _core_token_dir_entry(compose)
+    assert entry is not None, (
+        f"core service is missing a bind-mount of the token directory at "
+        f"{_CORE_TOKEN_DIR_MOUNT!r}. Add "
+        f"'- {_HOST_TOKEN_DIR}:{_CORE_TOKEN_DIR_MOUNT}' to core.volumes so "
+        "discover_accounts() can find every token at /token."
     )
-    assert has_token_mount, (
-        f"core service is missing a bind-mount for the google token at "
-        f"{_CORE_TOKEN_MOUNT!r}. Add "
-        f"'- {_HOST_TOKEN_SOURCE}:{_CORE_TOKEN_MOUNT}:ro' to core.volumes so "
-        "discover_accounts() can find the token at /token."
+    assert entry.startswith(_HOST_TOKEN_DIR + ":"), (
+        f"core's /token mount ({entry!r}) must be sourced from "
+        f"{_HOST_TOKEN_DIR!r} (issue #58 canonical path)."
     )
 
 
-def test_google_token_mounted_in_core_is_read_only() -> None:
-    """The google_token bind-mount in core must be read-only (:ro).
+def test_google_token_mount_in_core_is_writable() -> None:
+    """core's /token directory mount must be writable (NOT :ro) — issue #53.
 
-    mcp-sheets is the sole writer of the shared token file.  A writable mount
-    in core would risk concurrent writes and token corruption.
+    The runtime add-account flow mints a new google_token_<email-slug>.json into
+    /token from inside core, so discover_accounts() picks it up with no restart.
+    core writes only *new* per-account files and never the shared
+    google_token.json, so it does not contend with mcp-sheets (which solely
+    refreshes existing account files); the writes target distinct files.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
-    token_entry = next(
-        (v for v in core_volumes if isinstance(v, str) and _CORE_TOKEN_MOUNT in v),
-        None,
+    entry = _core_token_dir_entry(compose)
+    assert entry is not None, (
+        f"No volume entry targeting {_CORE_TOKEN_DIR_MOUNT!r} found in core.volumes."
     )
-    assert token_entry is not None, (
-        f"No volume entry containing {_CORE_TOKEN_MOUNT!r} found in core.volumes."
-    )
-    assert token_entry.endswith(":ro"), (
-        f"The google token bind-mount in core ({token_entry!r}) must end with ':ro'. "
-        "mcp-sheets is the sole writer; a writable core mount risks token corruption."
+    assert not entry.endswith(":ro"), (
+        f"core's /token mount ({entry!r}) must be read-write so the add-account "
+        "flow (issue #53) can mint new google_token_<slug>.json files there. "
+        "Remove the ':ro' suffix."
     )
 
 
