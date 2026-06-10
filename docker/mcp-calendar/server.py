@@ -7,8 +7,9 @@ the nspady "Server already initialized" single-shared-transport failure (which k
 calendar after the first task) cannot recur here.
 
 Auth — multi-account (issue #46, fixed in issue #56):
-    The server scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
-    files and loads them into a per-label credential registry at startup. On each
+    The server re-scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
+    files on every request (issue #50), rebuilding the per-label credential registry
+    so a token dropped after startup is picked up immediately. On each
     ``tools/call``, ``_get_service()`` reads ``X-Account-Label`` directly from the
     Starlette request object exposed via FastMCP's per-call ``request_context``
     (``mcp.get_context().request_context.request``).  This is genuinely
