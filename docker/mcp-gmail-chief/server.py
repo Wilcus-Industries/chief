@@ -4,9 +4,9 @@ Replaces the third-party ``mcp-google-gmail`` container (cutover in issue #52). 
 FastMCP server on top of ``google-api-python-client``, mirroring the pattern established
 by ``docker/mcp-calendar/server.py``.
 
-Auth — multi-account (issue #48):
-    The server scans TOKEN_DIR (default ``/token``) for all ``google_token*.json``
-    files and loads them into a per-label credential registry at startup.  On each
+Auth — multi-account (issue #48, per-request re-scan issue #60):
+    The server re-scans TOKEN_DIR (default ``/token``) on every request so a token
+    dropped after startup is picked up immediately — no restart needed.  On each
     ``tools/call``, ``_get_service()`` reads ``X-Account-Label`` directly from the
     Starlette request object exposed via FastMCP's per-call ``request_context``
     (``mcp.get_context().request_context.request``).  This is genuinely per-request
@@ -32,8 +32,8 @@ Tool names are snake_case (``@mcp.tool(name=...)``) to match the tool catalog in
 ``chief`` and ships in its own image with its own ``requirements.txt``.
 
 Reuse pattern (calendar → gmail):
-    ``_get_service()`` is verbatim from calendar with ``_service_registry`` /
-    ``_default_service`` swapped for the Gmail equivalents.
+    ``_build_service_registry()`` / ``_get_service_for_label()`` / ``_get_service()``
+    mirror calendar's per-request re-scan pattern (issue #50/#60).
 """
 
 import asyncio
@@ -130,46 +130,66 @@ def _load_credentials(token_dir: Path) -> dict[str, Any]:
     return registry
 
 
-_creds_registry: dict[str, Any] = _load_credentials(Path(TOKEN_DIR))
-
-if _creds_registry:
-    labels = list(_creds_registry)
-    log.info(
-        "Gmail MCP loaded %d account(s): %s",
-        len(_creds_registry),
-        ", ".join(labels),
-    )
-else:
-    log.warning(
-        "No token files found in TOKEN_DIR=%s; trying TOKEN_PATH=%s",
-        TOKEN_DIR,
-        TOKEN_PATH,
-    )
-    try:
-        _legacy_creds = Credentials.from_authorized_user_file(
-            TOKEN_PATH, scopes=SCOPES
-        )
-        if _legacy_creds.expired and _legacy_creds.refresh_token:
-            _legacy_creds.refresh(Request())
-        _creds_registry["_legacy"] = _legacy_creds
-        log.info("Gmail MCP authenticated (legacy path) | token=%s", TOKEN_PATH)
-    except Exception:
-        log.exception("Failed to load any Google credentials — gmail tools will error")
-
 # ---------------------------------------------------------------------------
-# Per-request credential/service selection
+# Per-request credential/service selection (dynamic re-scan, issue #60)
 # ---------------------------------------------------------------------------
 
-_service_registry: dict[str, Any] = {}
-for _label, _creds in _creds_registry.items():
-    try:
-        _service_registry[_label] = build(
-            "gmail", "v1", credentials=_creds, cache_discovery=False
-        )
-    except Exception:  # noqa: BLE001
-        log.warning("failed to build gmail service for %r", _label, exc_info=True)
+# No boot-time registry build: we re-scan TOKEN_DIR on every request so a token
+# dropped after the server starts is picked up immediately without a restart.
+# For a handful of token files the directory scan is negligible.
 
-_default_service: Any = next(iter(_service_registry.values()), None)
+_token_dir = Path(TOKEN_DIR)
+
+log.info("Gmail MCP ready | TOKEN_DIR=%s", TOKEN_DIR)
+
+
+def _build_service_registry() -> tuple[dict[str, Any], Any]:
+    """Scan TOKEN_DIR and build a label → service dict.
+
+    Returns ``(registry, default_service)`` where ``default_service`` is the
+    first entry (the legacy/primary account) or ``None`` when the dir is empty.
+
+    Falls back to the legacy single-file TOKEN_PATH when the directory scan
+    yields nothing — preserves backward compat for single-token deploys.
+    """
+    creds_registry = _load_credentials(_token_dir)
+
+    if not creds_registry:
+        # Legacy fallback: try the single TOKEN_PATH.
+        try:
+            legacy_creds = Credentials.from_authorized_user_file(
+                TOKEN_PATH, scopes=SCOPES
+            )
+            if legacy_creds.expired and legacy_creds.refresh_token:
+                legacy_creds.refresh(Request())
+            creds_registry["_legacy"] = legacy_creds
+        except Exception:  # noqa: BLE001
+            pass  # No credentials at all; tools will error on the actual call.
+
+    registry: dict[str, Any] = {}
+    for lbl, creds in creds_registry.items():
+        try:
+            registry[lbl] = build(
+                "gmail", "v1", credentials=creds, cache_discovery=False
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("failed to build gmail service for %r", lbl, exc_info=True)
+
+    default = next(iter(registry.values()), None)
+    return registry, default
+
+
+def _get_service_for_label(label: str | None) -> Any:
+    """Return the Gmail service for ``label``, re-scanning TOKEN_DIR each call.
+
+    A token dropped after module load is discovered here because we call
+    ``_build_service_registry()`` on every invocation.  Falls back to the
+    default (first) service when ``label`` is absent or not in the registry.
+    """
+    registry, default = _build_service_registry()
+    if label and label in registry:
+        return registry[label]
+    return default
 
 
 def _get_service() -> Any:
@@ -179,6 +199,9 @@ def _get_service() -> Any:
     ``request_context`` (set by the MCP lowlevel server *per handler invocation*, not
     per session).  Falls back to the default (first loaded) service when the label is
     absent or unknown.
+
+    Re-scans TOKEN_DIR on every call (issue #60) so tokens dropped at runtime
+    are picked up without a restart.
 
     Why not a ContextVar?  Same reason as mcp-calendar: FastMCP stateful-mode dispatches
     tool handlers in a persistent session task; anyio memory-stream boundaries do not
@@ -192,9 +215,7 @@ def _get_service() -> Any:
             label = req.headers.get(_ACCOUNT_HEADER)
     except LookupError:
         pass
-    if label and label in _service_registry:
-        return _service_registry[label]
-    return _default_service
+    return _get_service_for_label(label)
 
 
 # ---------------------------------------------------------------------------

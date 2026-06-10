@@ -3,12 +3,13 @@
 Replaces the ``xing5/mcp-google-sheets`` wrapper with a first-party server
 that follows the same multi-account pattern as ``mcp-calendar`` (issue #47):
 
-Auth — multi-account (issue #47):
-    Scans ``TOKEN_DIR`` (default ``/token``) for all ``google_token*.json``
-    files at startup. On each ``tools/call``, ``_get_service()`` reads
-    ``X-Account-Label`` from the Starlette request via FastMCP's per-call
-    ``request_context`` — the same technique calendar uses (#56 fix).  Falls
-    back to the first (default) credential when no header is present.
+Auth — multi-account (issue #47, per-request re-scan issue #60):
+    Re-scans ``TOKEN_DIR`` (default ``/token``) on every request so a token
+    dropped after startup is picked up immediately — no restart needed.  On each
+    ``tools/call``, ``_get_services()`` reads ``X-Account-Label`` from the
+    Starlette request via FastMCP's per-call ``request_context`` — the same
+    technique calendar uses (#56 fix).  Falls back to the first (default)
+    credential when no header is present.
 
 Refresh write-back — per-account atomic (the write-race fix, issue #47):
     After a credential is refreshed, the updated token is written to the
@@ -111,30 +112,6 @@ def _load_credentials(token_dir: Path) -> dict[str, tuple[Any, Path]]:
     return entries
 
 
-# Load all registered accounts at startup.
-# Maps label → (Credentials, token_file_path)
-_creds_registry: dict[str, tuple[Any, Path]] = _load_credentials(Path(TOKEN_DIR))
-
-if _creds_registry:
-    labels = list(_creds_registry)
-    log.info("Sheets MCP loaded %d account(s): %s", len(_creds_registry), ", ".join(labels))
-else:
-    log.warning(
-        "No token files found in TOKEN_DIR=%s; trying TOKEN_PATH=%s",
-        TOKEN_DIR,
-        TOKEN_PATH,
-    )
-    try:
-        _legacy_path = Path(TOKEN_PATH)
-        _legacy_creds = Credentials.from_authorized_user_file(TOKEN_PATH, scopes=SCOPES)
-        if _legacy_creds.expired and _legacy_creds.refresh_token:
-            _legacy_creds.refresh(Request())
-        _creds_registry["_legacy"] = (_legacy_creds, _legacy_path)
-        log.info("Sheets MCP authenticated (legacy path) | token=%s", TOKEN_PATH)
-    except Exception:
-        log.exception("Failed to load any Google credentials — sheets tools will error")
-
-
 # ---------------------------------------------------------------------------
 # Per-account atomic token write-back
 # ---------------------------------------------------------------------------
@@ -175,24 +152,76 @@ def _refresh_if_needed(creds: Any, token_path: Path) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Per-request credential/service selection
+# Per-request credential/service selection (dynamic re-scan, issue #60)
 # ---------------------------------------------------------------------------
 
-# Build a pair of service resources (sheets + drive) for every loaded credential.
-_service_registry: dict[str, tuple[Any, Any]] = {}
-for _label, (_creds, _path) in _creds_registry.items():
-    try:
-        _creds = _refresh_if_needed(_creds, _path)
-        _sheets_svc = build("sheets", "v4", credentials=_creds, cache_discovery=False)
-        _drive_svc = build("drive", "v3", credentials=_creds, cache_discovery=False)
-        _service_registry[_label] = (_sheets_svc, _drive_svc)
-    except Exception:  # noqa: BLE001
-        log.warning("failed to build sheets services for %r", _label, exc_info=True)
+# No boot-time registry build: we re-scan TOKEN_DIR on every request so a token
+# dropped after the server starts is picked up immediately without a restart.
+# For a handful of token files the directory scan is negligible.
 
-# Default (first) service pair.
-_default_services: tuple[Any, Any] | None = (
-    next(iter(_service_registry.values()), None)
-)
+_token_dir = Path(TOKEN_DIR)
+
+log.info("Sheets MCP ready | TOKEN_DIR=%s", TOKEN_DIR)
+
+
+def _build_service_registry() -> tuple[dict[str, tuple[Any, Any]], tuple[Any, Any] | None]:
+    """Scan TOKEN_DIR and build a label → (sheets_svc, drive_svc) dict.
+
+    Returns ``(registry, default_pair)`` where ``default_pair`` is the first
+    entry or ``None`` when the dir is empty.
+
+    Falls back to the legacy single-file TOKEN_PATH when the directory scan
+    yields nothing — preserves backward compat for single-token deploys.
+
+    Refreshes credentials in-memory if expired and writes back atomically using
+    ``_refresh_if_needed`` so the per-account token file stays current without
+    a write race.
+    """
+    creds_registry = _load_credentials(_token_dir)
+
+    if not creds_registry:
+        # Legacy fallback: try the single TOKEN_PATH.
+        try:
+            _legacy_path = Path(TOKEN_PATH)
+            _legacy_creds = Credentials.from_authorized_user_file(
+                TOKEN_PATH, scopes=SCOPES
+            )
+            if _legacy_creds.expired and _legacy_creds.refresh_token:
+                _legacy_creds.refresh(Request())
+            creds_registry["_legacy"] = (_legacy_creds, _legacy_path)
+        except Exception:  # noqa: BLE001
+            pass  # No credentials at all; tools will error on the actual call.
+
+    registry: dict[str, tuple[Any, Any]] = {}
+    for lbl, (creds, token_path) in creds_registry.items():
+        try:
+            creds = _refresh_if_needed(creds, token_path)
+            sheets_svc = build("sheets", "v4", credentials=creds, cache_discovery=False)
+            drive_svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+            registry[lbl] = (sheets_svc, drive_svc)
+        except Exception:  # noqa: BLE001
+            log.warning("failed to build sheets services for %r", lbl, exc_info=True)
+
+    default = next(iter(registry.values()), None)
+    return registry, default
+
+
+def _get_services_for_label(
+    label: str | None,
+) -> tuple[Any, Any] | tuple[None, None]:
+    """Return (sheets_svc, drive_svc) for ``label``, re-scanning TOKEN_DIR each call.
+
+    A token dropped after module load is discovered here because we call
+    ``_build_service_registry()`` on every invocation.  Falls back to the
+    default (first) service pair when ``label`` is absent or not in the registry.
+    """
+    registry, default = _build_service_registry()
+    if label and label in registry:
+        return registry[label]
+    if default is not None:
+        return default
+    return None, None
+
 
 mcp = FastMCP("sheets", host="0.0.0.0", port=PORT)
 
@@ -204,6 +233,9 @@ def _get_services() -> tuple[Any, Any] | tuple[None, None]:
     FastMCP's ``request_context``.  Falls back to the default (first loaded)
     services.  See mcp-calendar's ``_get_service()`` for the full explanation
     of why ContextVar is NOT used here.
+
+    Re-scans TOKEN_DIR on every call (issue #60) so tokens dropped at runtime
+    are picked up without a restart.
     """
     label: str | None = None
     try:
@@ -212,11 +244,7 @@ def _get_services() -> tuple[Any, Any] | tuple[None, None]:
             label = req.headers.get(_ACCOUNT_HEADER)
     except LookupError:
         pass
-    if label and label in _service_registry:
-        return _service_registry[label]
-    if _default_services is not None:
-        return _default_services
-    return None, None
+    return _get_services_for_label(label)
 
 
 # ---------------------------------------------------------------------------
