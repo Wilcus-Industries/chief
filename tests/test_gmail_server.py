@@ -690,3 +690,301 @@ class TestGmailSendReply:
         msg = _decode_raw(sent["raw"])
         assert msg["In-Reply-To"] == "<orig@mail.gmail.com>"
         assert "<orig@mail.gmail.com>" in msg["References"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: remaining writes — drafts, labels, trash/untrash (issue #52)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def write_capture_server(
+    tmp_path: Path,
+) -> tuple[types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]]:
+    """Load a Gmail server whose two fake services record every write API call.
+
+    Returns ``(srv, captured)`` where ``captured[label]`` is the ordered list of
+    ``(api_path, kwargs)`` tuples recorded on that account's service — e.g.
+    ``("drafts.create", {...})`` — so a test can assert the right account got the
+    right call with the right arguments.
+    """
+    _write_token(tmp_path / "google_token.json", "main@example.com")
+    _write_token(tmp_path / "google_token_work.json", "work@corp.com")
+
+    srv = _load_gmail_chief_server(tmp_path)
+
+    captured: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+
+    def _make_svc(label: str) -> MagicMock:
+        svc = MagicMock()
+        events = captured.setdefault(label, [])
+
+        def _record(api_path: str, result: dict[str, Any]) -> Any:
+            def _fn(**kwargs: Any) -> MagicMock:
+                events.append((api_path, kwargs))
+                exec_mock = MagicMock()
+                exec_mock.execute.return_value = result
+                return exec_mock
+
+            return _fn
+
+        users = svc.users.return_value
+        users.drafts.return_value.create.side_effect = _record(
+            "drafts.create", {"id": f"draft_{label}", "message": {"id": "m1"}}
+        )
+        users.drafts.return_value.update.side_effect = _record(
+            "drafts.update", {"id": f"draft_{label}", "message": {"id": "m1"}}
+        )
+        users.drafts.return_value.send.side_effect = _record(
+            "drafts.send", {"id": f"sent_{label}", "threadId": f"thr_{label}"}
+        )
+        users.labels.return_value.create.side_effect = _record(
+            "labels.create", {"id": f"Label_{label}", "name": "Newsletters"}
+        )
+        users.messages.return_value.modify.side_effect = _record(
+            "messages.modify", {"id": "msg1", "labelIds": ["INBOX", "Label_1"]}
+        )
+        users.messages.return_value.trash.side_effect = _record(
+            "messages.trash", {"id": "msg1", "labelIds": ["TRASH"]}
+        )
+        users.messages.return_value.untrash.side_effect = _record(
+            "messages.untrash", {"id": "msg1", "labelIds": ["INBOX"]}
+        )
+        return svc
+
+    main_svc = _make_svc("main@example.com")
+    work_svc = _make_svc("work@corp.com")
+    fake_registry = {"main@example.com": main_svc, "work@corp.com": work_svc}
+    srv._build_service_registry = (  # type: ignore[attr-defined]
+        lambda: (fake_registry, main_svc)
+    )
+    return srv, captured
+
+
+class TestGmailDrafts:
+    """Draft create/update/send drive the real server tools over the ASGI path."""
+
+    def test_create_draft_uses_active_account_and_signs(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        result = _result_payload(
+            _call_tool(
+                client,
+                session_id,
+                "gmail_create_draft",
+                {"to": "a@b.c", "subject": "Hi", "body": "Hello."},
+                account_label="work@corp.com",
+            )
+        )
+        assert result["id"] == "draft_work@corp.com"
+        # Created on the work account only.
+        work_calls = [p for p, _ in captured["work@corp.com"]]
+        assert "drafts.create" in work_calls
+        assert all(
+            p != "drafts.create" for p, _ in captured["main@example.com"]
+        )
+        # The signature is baked into the draft body server-side.
+        _, kwargs = next(
+            c for c in captured["work@corp.com"] if c[0] == "drafts.create"
+        )
+        raw = kwargs["body"]["message"]["raw"]
+        msg = _decode_raw(raw)
+        assert srv.SIGNATURE in msg.get_content()
+
+    def test_update_draft_replaces_message(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_update_draft",
+            {
+                "draft_id": "draft_work@corp.com",
+                "to": "a@b.c",
+                "subject": "New",
+                "body": "Updated.",
+            },
+            account_label="work@corp.com",
+        )
+        _, kwargs = next(
+            c for c in captured["work@corp.com"] if c[0] == "drafts.update"
+        )
+        assert kwargs["id"] == "draft_work@corp.com"
+        msg = _decode_raw(kwargs["body"]["message"]["raw"])
+        assert srv.SIGNATURE in msg.get_content()
+
+    def test_send_draft_does_not_resign(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        result = _result_payload(
+            _call_tool(
+                client,
+                session_id,
+                "gmail_send_draft",
+                {"draft_id": "draft_work@corp.com"},
+                account_label="work@corp.com",
+            )
+        )
+        assert result["id"] == "sent_work@corp.com"
+        _, kwargs = next(
+            c for c in captured["work@corp.com"] if c[0] == "drafts.send"
+        )
+        assert kwargs["body"]["id"] == "draft_work@corp.com"
+
+
+class TestGmailLabelsAndTrash:
+    """create_label / modify_message_labels / trash / untrash on the active account."""
+
+    def test_create_label_on_active_account(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        result = _result_payload(
+            _call_tool(
+                client,
+                session_id,
+                "gmail_create_label",
+                {"name": "Newsletters"},
+                account_label="work@corp.com",
+            )
+        )
+        assert result["id"] == "Label_work@corp.com"
+        _, kwargs = next(
+            c for c in captured["work@corp.com"] if c[0] == "labels.create"
+        )
+        assert kwargs["body"]["name"] == "Newsletters"
+
+    def test_modify_message_labels(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_modify_message_labels",
+            {
+                "message_id": "msg1",
+                "add_label_ids": ["Label_1"],
+                "remove_label_ids": ["UNREAD"],
+            },
+            account_label="work@corp.com",
+        )
+        _, kwargs = next(
+            c for c in captured["work@corp.com"] if c[0] == "messages.modify"
+        )
+        assert kwargs["id"] == "msg1"
+        assert kwargs["body"]["addLabelIds"] == ["Label_1"]
+        assert kwargs["body"]["removeLabelIds"] == ["UNREAD"]
+
+    def test_trash_and_untrash(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_trash_message",
+            {"message_id": "msg1"},
+            account_label="work@corp.com",
+        )
+        _call_tool(
+            client,
+            session_id,
+            "gmail_untrash_message",
+            {"message_id": "msg1"},
+            account_label="work@corp.com",
+        )
+        paths = [p for p, _ in captured["work@corp.com"]]
+        assert "messages.trash" in paths
+        assert "messages.untrash" in paths
+        trash_kwargs = next(
+            kw for p, kw in captured["work@corp.com"] if p == "messages.trash"
+        )
+        assert trash_kwargs["id"] == "msg1"
+
+    def test_writes_target_the_injected_account_not_the_default(
+        self,
+        write_capture_server: tuple[
+            types.ModuleType, dict[str, list[tuple[str, dict[str, Any]]]]
+        ],
+    ) -> None:
+        """A write with the work label must never touch the default (main) service."""
+        srv, captured = write_capture_server
+        client, session_id = _send_capture_client(srv)
+        _call_tool(
+            client,
+            session_id,
+            "gmail_trash_message",
+            {"message_id": "msg1"},
+            account_label="work@corp.com",
+        )
+        assert captured["work@corp.com"], "work account recorded no calls"
+        assert not captured["main@example.com"], (
+            "default account must not be touched when work label is injected"
+        )
+
+
+class TestPermanentDeletesAreHardBlocked:
+    """gmail_delete_draft / gmail_delete_label must NOT be registered as tools."""
+
+    def _list_tool_names(self, gmail_server: types.ModuleType) -> set[str]:
+        import anyio
+
+        async def _names() -> set[str]:
+            tools = await gmail_server.mcp.list_tools()
+            return {t.name for t in tools}
+
+        return anyio.run(_names)
+
+    def test_delete_tools_not_registered(
+        self, gmail_server: types.ModuleType
+    ) -> None:
+        names = self._list_tool_names(gmail_server)
+        assert "gmail_delete_draft" not in names, (
+            "gmail_delete_draft must be hard-blocked — not a registered tool."
+        )
+        assert "gmail_delete_label" not in names, (
+            "gmail_delete_label must be hard-blocked — not a registered tool."
+        )
+
+    def test_write_tools_are_registered(
+        self, gmail_server: types.ModuleType
+    ) -> None:
+        names = self._list_tool_names(gmail_server)
+        for tool in (
+            "gmail_create_draft",
+            "gmail_update_draft",
+            "gmail_send_draft",
+            "gmail_create_label",
+            "gmail_modify_message_labels",
+            "gmail_trash_message",
+            "gmail_untrash_message",
+        ):
+            assert tool in names, f"{tool} must be a registered server tool."

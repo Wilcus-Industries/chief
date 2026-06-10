@@ -1,72 +1,49 @@
-"""The ``mcp-gmail`` servers: tool catalogs + SDK ``mcp_servers`` entries.
+"""The chief-owned ``mcp-gmail`` server: tool catalog + SDK ``mcp_servers`` entry.
 
-Two Gmail servers coexist during the transition (issue #48 → #52):
+After the cutover (issue #52) there is a single Gmail server — chief's own FastMCP
+server at ``docker/mcp-gmail-chief/server.py`` (multi-account, mirrors the
+calendar/drive/sheets pattern). The third-party ``MindMadeLab/mcp-google-gmail``
+dependency has been dropped; the ``mcp-gmail`` compose service now runs the chief-owned
+image. The SDK server name stays ``gmail_chief`` so the per-thread account-rebuild
+branch in ``tasks.py`` (``_build_services_with_account``) keeps matching.
 
-- ``mcp-gmail`` (port 8004) — third-party ``MindMadeLab/mcp-google-gmail`` (0.1.4),
-  still active; cutover happens in issue #52.
-- ``mcp-gmail-chief`` (port 8005) — chief's own FastMCP server (issue #48), multi-
-  account, mirrors the calendar/drive/sheets pattern. Send/reply landed in #51 (writes
-  routed through the approval card).
-
-:func:`service` wires the 3rd-party server (SDK server name ``gmail``).
-:func:`chief_service` wires the new chief-owned server (SDK server name
-``gmail_chief``), which reads ``X-Account-Label`` for per-request account selection
-identical to the calendar server (issue #46/#56).
+:func:`chief_service` wires the chief-owned server (SDK server name ``gmail_chief``),
+which reads ``X-Account-Label`` for per-request account selection identical to the
+calendar server (issue #46/#56).
 
 Wiring rules (DESIGN: reads ALLOW, writes ASK): list/get/search reads are pre-approved;
 sending, replying, drafting, and label/trash mutations stay out of ``allowed_tools`` so
-each reaches the owner's approval card. Permanent deletes are deferred (hard-blocked) —
-trashing is reversible (``untrash``) so it stays a gated write, mirroring how the
-calendar keeps ``delete-event`` deferred.
+each reaches the owner's approval card. Permanent deletes are deferred (hard-blocked):
+``gmail_delete_draft`` / ``gmail_delete_label`` are not even registered as tools on the
+server, AND are listed in ``disallowed_tools`` here — belt and suspenders. Trashing is
+reversible (``untrash``) so it stays a gated write, mirroring how the calendar keeps
+``delete-event`` deferred.
 """
 
 from ..google import GoogleService, qualified
 
-#: The SDK names an MCP tool ``mcp__<server>__<tool>``; this is the ``<server>`` half.
-SERVER_NAME = "gmail"
-
-#: Server name for the chief-owned Gmail server (issue #48).  Distinct from
-#: ``SERVER_NAME`` so both servers can be registered in the same MCP session during
-#: the transition period; the 3rd-party server is removed in issue #52.
+#: Server name for the chief-owned Gmail server (issue #48).  The SDK names an MCP tool
+#: ``mcp__<server>__<tool>``; this is the ``<server>`` half.  ``tasks.py``'s per-thread
+#: account rebuild matches on the service ``name`` (``gmail_chief``), so keep them in
+#: sync.
 CHIEF_SERVER_NAME = "gmail_chief"
 
-#: Read-only Gmail tools — the gate ALLOWs these with no approval card. Names track
-#: ``mcp-google-gmail`` 0.1.4 (pinned in docker/mcp-gmail/requirements.txt).
+#: Read-only Gmail tools — the gate ALLOWs these with no approval card.
 READ_TOOLS: tuple[str, ...] = qualified(
-    SERVER_NAME,
-    "gmail_list_messages",
-    "gmail_get_message",
-    "gmail_search_messages",
-    "gmail_list_drafts",
-    "gmail_list_labels",
-)
-
-#: Read-only tools on the chief-owned Gmail server (same logical names, different
-#: SDK namespace).  These are the pre-approved reads for the new server.
-CHIEF_READ_TOOLS: tuple[str, ...] = qualified(
     CHIEF_SERVER_NAME,
     "gmail_list_messages",
     "gmail_get_message",
     "gmail_search_messages",
     "gmail_list_drafts",
     "gmail_list_labels",
-)
-
-#: Effectful tools on the chief-owned Gmail server — sending and replying (issue #51).
-#: Kept OUT of ``allowed_tools`` so the SDK routes each to the owner's approval card
-#: (reads ALLOW, writes ASK). Every outbound body also gets the transparent signature
-#: appended server-side.
-CHIEF_WRITE_TOOLS: tuple[str, ...] = qualified(
-    CHIEF_SERVER_NAME,
-    "gmail_send_message",
-    "gmail_reply_on_message",
 )
 
 #: Effectful Gmail tools — wired for the owner but routed through ASK → approval. Every
-#: outbound message also gets the transparent signature appended server-side. Trash is
-#: here (not deferred) because it is reversible via ``gmail_untrash_message``.
+#: outbound message (send/reply/draft) also gets the transparent signature appended
+#: server-side. Trash is here (not deferred) because it is reversible via
+#: ``gmail_untrash_message``.
 WRITE_TOOLS: tuple[str, ...] = qualified(
-    SERVER_NAME,
+    CHIEF_SERVER_NAME,
     "gmail_send_message",
     "gmail_reply_on_message",
     "gmail_create_draft",
@@ -78,23 +55,13 @@ WRITE_TOOLS: tuple[str, ...] = qualified(
     "gmail_untrash_message",
 )
 
-#: Hard-blocked via ``disallowed_tools`` — permanent, irreversible deletes. (Trashing a
-#: message is a reversible gated write; deleting a draft or a label is not.)
+#: Hard-blocked — permanent, irreversible deletes. The chief-owned server never
+#: registers these as tools (the model has no callable to reach), and they are placed
+#: in ``disallowed_tools`` here as a second layer. (Trashing a message is a reversible
+#: gated write; deleting a draft or a label is not.)
 DEFERRED_TOOLS: tuple[str, ...] = qualified(
-    SERVER_NAME, "gmail_delete_draft", "gmail_delete_label"
+    CHIEF_SERVER_NAME, "gmail_delete_draft", "gmail_delete_label"
 )
-
-
-def service(url: str) -> GoogleService:
-    """The :class:`GoogleService` for the 3rd-party gmail container at ``url``."""
-    return GoogleService(
-        name="gmail",
-        server_name=SERVER_NAME,
-        url=url,
-        read_tools=READ_TOOLS,
-        write_tools=WRITE_TOOLS,
-        deferred_tools=DEFERRED_TOOLS,
-    )
 
 
 def chief_service(
@@ -108,15 +75,15 @@ def chief_service(
     used to inject ``X-Account-Label`` for multi-account credential selection
     (issue #48).  ``None`` → no extra headers (single-account / no binding).
 
-    This server runs alongside the 3rd-party server during the transition. Reads are
-    pre-approved; send/reply (issue #51) are writes routed through the approval card.
+    Reads are pre-approved; send/reply/draft and label/trash mutations are writes routed
+    through the approval card. Permanent deletes are hard-blocked (deferred).
     """
     return GoogleService(
         name="gmail_chief",
         server_name=CHIEF_SERVER_NAME,
         url=url,
-        read_tools=CHIEF_READ_TOOLS,
-        write_tools=CHIEF_WRITE_TOOLS,
-        deferred_tools=(),
+        read_tools=READ_TOOLS,
+        write_tools=WRITE_TOOLS,
+        deferred_tools=DEFERRED_TOOLS,
         headers=headers,
     )

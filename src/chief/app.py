@@ -102,7 +102,7 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
     if settings.sheets_enabled:
         services.append(sheets_mcp.service(settings.sheets_mcp_url))
     if settings.gmail_enabled:
-        services.append(gmail_mcp.service(settings.gmail_mcp_url))
+        services.append(gmail_mcp.chief_service(settings.gmail_mcp_url))
     if settings.playwright_enabled:
         services.append(browser_mcp.service(settings.playwright_mcp_url))
     return services

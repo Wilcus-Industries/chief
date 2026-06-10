@@ -1,6 +1,0 @@
-# Pinned to the version whose tool names chief's tools/gmail/mcp.py catalog tracks.
-mcp-google-gmail==0.1.4
-# gmail_signature monkeypatches the internal mcp._tool_manager.call_tool; pin mcp so a
-# base-image rebuild can't silently change that contract (sheets pins the same version;
-# mcp-google-gmail only requires mcp>=1.8.0, so the pin is ours to make).
-mcp==1.27.2

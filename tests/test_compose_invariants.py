@@ -20,12 +20,13 @@ _MCP_INTERNAL_NET = "mcp-internal"
 _SANDBOX_NET = "sandbox-net"
 
 # Google MCP services that must stay off the playwright network and sandbox-net.
+# After the issue #52 cutover there is a single Gmail service (mcp-gmail) running the
+# chief-owned image; the transitional mcp-gmail-chief service was removed.
 _GOOGLE_MCP_SERVICES = {
     "mcp-calendar",
     "mcp-drive",
     "mcp-sheets",
     "mcp-gmail",
-    "mcp-gmail-chief",
 }
 
 
@@ -794,7 +795,6 @@ def test_no_service_mounts_legacy_flat_token() -> None:
         "mcp-sheets",
         "mcp-gmail",
         "mcp-calendar",
-        "mcp-gmail-chief",
     ):
         for entry in _token_volumes(compose, svc):
             src = _host_source(entry)
@@ -809,11 +809,11 @@ def test_no_service_mounts_legacy_flat_token() -> None:
 def test_all_token_consumers_source_from_google_tokens_subdir() -> None:
     """All token-consuming services must source tokens from ./secrets/google_tokens/.
 
-    core, mcp-drive, mcp-sheets, and mcp-gmail mount the single file
-    ./secrets/google_tokens/google_token.json; mcp-calendar and mcp-gmail-chief
-    mount the directory ./secrets/google_tokens.  In either case the host-side
-    source must start with ./secrets/google_tokens — never the whole ./secrets dir
-    or the legacy flat path (issue #58).
+    core, mcp-drive, and mcp-sheets mount the single file
+    ./secrets/google_tokens/google_token.json; mcp-calendar and mcp-gmail (chief-owned
+    after the issue #52 cutover) mount the directory ./secrets/google_tokens.  In either
+    case the host-side source must start with ./secrets/google_tokens — never the whole
+    ./secrets dir or the legacy flat path (issue #58).
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     for svc in (
@@ -822,7 +822,6 @@ def test_all_token_consumers_source_from_google_tokens_subdir() -> None:
         "mcp-sheets",
         "mcp-gmail",
         "mcp-calendar",
-        "mcp-gmail-chief",
     ):
         token_vols = _token_volumes(compose, svc)
         assert token_vols, (
@@ -1022,17 +1021,22 @@ def test_mcp_sheets_token_dir_env_set() -> None:
     )
 
 
-# ---- mcp-gmail-chief token directory mount (issue #48) -----------------------
+# ---- mcp-gmail chief-owned token directory mount (issue #48; cutover #52) -----
+#
+# After the issue #52 cutover, the mcp-gmail service runs the chief-owned image
+# (docker/mcp-gmail-chief) and the transitional mcp-gmail-chief service is gone.
+# Like mcp-calendar, it scans the whole token DIRECTORY at /token for multi-account
+# support — not just the single legacy file.
 
-#: The container path where the token directory must be mounted in mcp-gmail-chief.
+#: The container path where the token directory must be mounted in mcp-gmail.
 _GMAIL_CHIEF_TOKEN_DIR = "/token"
-#: The only permitted host-side source for the mcp-gmail-chief /token mount.
+#: The only permitted host-side source for the mcp-gmail /token mount.
 _GMAIL_CHIEF_TOKEN_HOST_SOURCE = "./secrets/google_tokens"
 
 
 def _gmail_chief_token_entry(compose: dict[str, Any]) -> str | None:
-    """Return the volume entry that mounts /token in mcp-gmail-chief, or None."""
-    vols: list[str] = compose["services"]["mcp-gmail-chief"].get("volumes", [])
+    """Return the volume entry that mounts /token in mcp-gmail, or None."""
+    vols: list[str] = compose["services"]["mcp-gmail"].get("volumes", [])
     return next(
         (
             v
@@ -1045,9 +1049,10 @@ def _gmail_chief_token_entry(compose: dict[str, Any]) -> str | None:
     )
 
 
-def test_mcp_gmail_chief_token_dir_mounted() -> None:
-    """mcp-gmail-chief must have a directory bind-mounted at /token.
+def test_mcp_gmail_token_dir_mounted() -> None:
+    """mcp-gmail (chief-owned) must have a directory bind-mounted at /token.
 
+    After the issue #52 cutover, mcp-gmail runs the chief-owned multi-account server.
     Mounting only a single file prevents additional google_token_<label>.json files
     from reaching the container — making multi-account Gmail non-functional.  The
     mount must cover the whole token directory so every google_token*.json is visible.
@@ -1055,15 +1060,15 @@ def test_mcp_gmail_chief_token_dir_mounted() -> None:
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     has_dir_mount = _gmail_chief_token_entry(compose) is not None
     assert has_dir_mount, (
-        f"mcp-gmail-chief is missing a directory bind-mount at "
+        f"mcp-gmail is missing a directory bind-mount at "
         f"{_GMAIL_CHIEF_TOKEN_DIR!r}. "
         f"Add '- {_GMAIL_CHIEF_TOKEN_HOST_SOURCE}:{_GMAIL_CHIEF_TOKEN_DIR}:ro'"
         " so all google_token*.json files reach the container."
     )
 
 
-def test_mcp_gmail_chief_token_dir_is_read_only() -> None:
-    """The token directory mount in mcp-gmail-chief must be read-only (:ro).
+def test_mcp_gmail_token_dir_is_read_only() -> None:
+    """The token directory mount in mcp-gmail must be read-only (:ro).
 
     mcp-sheets is the sole writer of the shared token files.
     """
@@ -1071,16 +1076,16 @@ def test_mcp_gmail_chief_token_dir_is_read_only() -> None:
     entry = _gmail_chief_token_entry(compose)
     assert entry is not None, (
         f"No volume entry mounting {_GMAIL_CHIEF_TOKEN_DIR!r} found in "
-        "mcp-gmail-chief.volumes."
+        "mcp-gmail.volumes."
     )
     assert entry.endswith(":ro"), (
-        f"The token dir mount in mcp-gmail-chief ({entry!r}) must end with ':ro'. "
+        f"The token dir mount in mcp-gmail ({entry!r}) must end with ':ro'. "
         "mcp-sheets is the sole writer; a writable mount risks token corruption."
     )
 
 
-def test_mcp_gmail_chief_token_mount_uses_dedicated_subdir() -> None:
-    """mcp-gmail-chief /token must be from ./secrets/google_tokens, not ./secrets.
+def test_mcp_gmail_token_mount_uses_dedicated_subdir() -> None:
+    """mcp-gmail /token must be from ./secrets/google_tokens, not ./secrets.
 
     Mounting the whole ./secrets directory exposes unrelated secrets inside the
     container.  Only the dedicated google_tokens subdirectory may be mounted at /token
@@ -1089,25 +1094,25 @@ def test_mcp_gmail_chief_token_mount_uses_dedicated_subdir() -> None:
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     entry = _gmail_chief_token_entry(compose)
     assert entry is not None, (
-        f"mcp-gmail-chief has no volume entry mounting {_GMAIL_CHIEF_TOKEN_DIR!r}. "
+        f"mcp-gmail has no volume entry mounting {_GMAIL_CHIEF_TOKEN_DIR!r}. "
         f"Add '- {_GMAIL_CHIEF_TOKEN_HOST_SOURCE}:{_GMAIL_CHIEF_TOKEN_DIR}:ro'."
     )
     host_source = entry.split(":")[0]
     assert host_source != _SECRETS_DIR, (
-        f"mcp-gmail-chief mounts the entire secrets directory ({_SECRETS_DIR!r}) at "
+        f"mcp-gmail mounts the entire secrets directory ({_SECRETS_DIR!r}) at "
         f"{_GMAIL_CHIEF_TOKEN_DIR!r}.  Change the host source to the dedicated subdir: "
         f"'- {_GMAIL_CHIEF_TOKEN_HOST_SOURCE}:{_GMAIL_CHIEF_TOKEN_DIR}:ro'."
     )
     assert host_source == _GMAIL_CHIEF_TOKEN_HOST_SOURCE, (
-        f"mcp-gmail-chief /token host source is {host_source!r}; "
+        f"mcp-gmail /token host source is {host_source!r}; "
         f"expected {_GMAIL_CHIEF_TOKEN_HOST_SOURCE!r}."
     )
 
 
-def test_mcp_gmail_chief_token_dir_env_set() -> None:
-    """mcp-gmail-chief must set TOKEN_DIR so server.py scans the mounted directory."""
+def test_mcp_gmail_token_dir_env_set() -> None:
+    """mcp-gmail must set TOKEN_DIR so server.py scans the mounted directory."""
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    env = compose["services"]["mcp-gmail-chief"].get("environment", {}) or {}
+    env = compose["services"]["mcp-gmail"].get("environment", {}) or {}
     if isinstance(env, list):
         env_dict: dict[str, str] = {}
         for entry in env:
@@ -1116,10 +1121,41 @@ def test_mcp_gmail_chief_token_dir_env_set() -> None:
                 env_dict[k] = v
         env = env_dict
     assert "TOKEN_DIR" in env, (
-        "mcp-gmail-chief environment is missing 'TOKEN_DIR'. "
+        "mcp-gmail environment is missing 'TOKEN_DIR'. "
         "Add 'TOKEN_DIR: /token' so server.py scans the mounted token directory."
     )
     assert env["TOKEN_DIR"] == _GMAIL_CHIEF_TOKEN_DIR, (
-        f"mcp-gmail-chief TOKEN_DIR={env['TOKEN_DIR']!r} "
+        f"mcp-gmail TOKEN_DIR={env['TOKEN_DIR']!r} "
         f"should be {_GMAIL_CHIEF_TOKEN_DIR!r}."
+    )
+
+
+def test_mcp_gmail_runs_chief_owned_image() -> None:
+    """mcp-gmail must build from docker/mcp-gmail-chief after the issue #52 cutover.
+
+    The third-party mcp-google-gmail dependency was dropped; mcp-gmail now runs chief's
+    own FastMCP server image.  Asserting the build context guards against a regression
+    that re-points the service at the removed wrapper.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    build = compose["services"]["mcp-gmail"].get("build", {})
+    context = build.get("context") if isinstance(build, dict) else build
+    assert context == "./docker/mcp-gmail-chief", (
+        f"mcp-gmail build context is {context!r}; after the issue #52 cutover it must "
+        "build from './docker/mcp-gmail-chief' (the chief-owned server). The "
+        "third-party mcp-google-gmail wrapper was dropped."
+    )
+
+
+def test_no_transitional_gmail_chief_service() -> None:
+    """The transitional mcp-gmail-chief service must be gone after the cutover.
+
+    Issue #52 consolidated the two Gmail services into one (mcp-gmail running the
+    chief-owned image).  A lingering mcp-gmail-chief service would mean the cutover
+    was only half-applied.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    assert "mcp-gmail-chief" not in compose["services"], (
+        "mcp-gmail-chief still exists in docker-compose.yml. The issue #52 cutover "
+        "folds it into the mcp-gmail service — remove the transitional service."
     )

@@ -1,6 +1,7 @@
-# chief's own Google Gmail MCP server (FastMCP, streamable-HTTP on :8005).
-# Standalone image — imports nothing from the chief package. Multi-account read slice
-# (issue #48). Runs alongside mcp-gmail (third-party) until cutover in issue #52.
+# chief's own Google Gmail MCP server (FastMCP, streamable-HTTP). Standalone image —
+# imports nothing from the chief package. Multi-account, full read+write surface
+# (issues #48/#51/#52). After the issue #52 cutover this image backs the mcp-gmail
+# compose service on :8004 (the third-party mcp-google-gmail wrapper was dropped).
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

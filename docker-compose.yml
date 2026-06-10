@@ -18,7 +18,8 @@
 #           docker compose up core
 #
 # Google (M5/M8, opt-in):  chief's own FastMCP servers — calendar (:8003), drive (:8001),
-#         sheets (:8002), gmail (:8004) — each a separate container on the internal compose
+#         sheets (:8002), gmail (:8004, chief-owned after the issue #52 cutover) — each a
+#         separate container on the internal compose
 #         network, reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp
 #         (never host-published). Mint the shared token (python -m chief.tools.google.auth)
 #         — it writes directly to secrets/google_tokens/google_token.json, the single
@@ -270,62 +271,24 @@ services:
       retries: 3
       start_period: 20s
 
-  # chief's Google Gmail MCP server (docker/mcp-gmail). Wraps third-party
-  # mcp-google-gmail with a transparent "sent by an assistant" signature appended to
-  # every outbound message. FastMCP, streamable-HTTP at http://mcp-gmail:8004/mcp.
-  # The shared token is mounted READ-ONLY (sheets is the sole writer): mcp-google-gmail
-  # rewrites the token on refresh, so server.py seeds a writable per-container copy at
-  # /tmp from the :ro seed mount and points GMAIL_TOKEN_PATH there — one writer upheld.
-  mcp-gmail:
-    profiles: ["google"]
-    build:
-      context: ./docker/mcp-gmail
-    restart: unless-stopped
-    user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
-    read_only: true
-    cap_drop: [ALL]
-    networks:
-      - mcp-internal
-    environment:
-      PORT: 8004
-      # The package's own auth: OAuth client + the seeded (writable) token copy.
-      GMAIL_CREDENTIALS_PATH: /run/secrets/google_oauth_client.json
-      GMAIL_SEED_TOKEN_PATH: /seed/google_token.json
-      GMAIL_TOKEN_PATH: /tmp/gmail_token.json
-      # Transparent signature appended to every outbound message. Empty → server uses its
-      # own multi-line default. {owner} is filled from OWNER_NAME (else "the owner").
-      GMAIL_SIGNATURE: ${GMAIL_SIGNATURE:-}
-      OWNER_NAME: ${OWNER_NAME:-}
-    secrets:
-      - google_oauth_client.json
-    volumes:
-      # Read-only: the gmail package refreshes the token in a writable /tmp copy (seeded
-      # from here at startup), never this shared file — sheets stays the sole writer.
-      # Sourced from the dedicated google_tokens/ subdir (issue #58).
-      - ./secrets/google_tokens/google_token.json:/seed/google_token.json:ro
-    tmpfs:
-      # GMAIL_TOKEN_PATH defaults to /tmp/gmail_token.json — server.py seeds the writable
-      # per-container token copy here at startup; mcp-google-gmail rewrites it on refresh.
-      - /tmp:uid=1000,gid=1000
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8004/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-
-  # chief's OWN Google Gmail MCP server (docker/mcp-gmail-chief, issue #48). FastMCP,
-  # streamable-HTTP at http://mcp-gmail-chief:8005/mcp. Multi-account: scans
-  # TOKEN_DIR=/token for all google_token*.json files; selects per request via
-  # X-Account-Label header (same pattern as mcp-calendar). Runs ALONGSIDE mcp-gmail
-  # during the transition; cutover happens in issue #52.
+  # chief's OWN Google Gmail MCP server (docker/mcp-gmail-chief, issue #48; cutover #52).
+  # FastMCP, streamable-HTTP at http://mcp-gmail:8004/mcp. The third-party
+  # mcp-google-gmail dependency was dropped here — this service now runs chief's own
+  # multi-account server (the chief-owned image keeps the SDK tool names, so the gate /
+  # tier wiring is unchanged). The transparent "sent by an assistant" signature is
+  # appended server-side to every outbound message (send/reply/draft).
   #
-  # Token directory mount (issue #48, mirrors #57/#58 for calendar):
-  #   TOKEN_DIR=/token is scanned for all google_token*.json files.
-  #   Only ./secrets/google_tokens/ is mounted — never the whole ./secrets dir.
-  mcp-gmail-chief:
+  # Multi-account token directory (issue #48, per-request re-scan issue #60):
+  #   TOKEN_DIR=/token is re-scanned per request for all google_token*.json files;
+  #   each file becomes one registered account, selected via the X-Account-Label header
+  #   (same pattern as mcp-calendar). A token dropped after boot is picked up on the
+  #   next request — no restart needed.
+  #
+  # Token directory mount (mirrors #57/#58 for calendar): only ./secrets/google_tokens/
+  # is mounted at /token — never the whole ./secrets dir. The mount is READ-ONLY
+  # (mcp-sheets is the sole writer of the shared token files); the server refreshes the
+  # access token in memory only and never writes the shared file.
+  mcp-gmail:
     profiles: ["google"]
     build:
       context: ./docker/mcp-gmail-chief
@@ -336,9 +299,11 @@ services:
     networks:
       - mcp-internal
     environment:
-      PORT: 8005
+      PORT: 8004
       GOOGLE_TOKEN_PATH: /token/google_token.json
       TOKEN_DIR: /token
+      # Transparent signature appended to every outbound message. Empty → server uses its
+      # own multi-line default. {owner} is filled from OWNER_NAME (else "the owner").
       GMAIL_SIGNATURE: ${GMAIL_SIGNATURE:-}
       OWNER_NAME: ${OWNER_NAME:-}
     volumes:
@@ -346,11 +311,12 @@ services:
       # Only google_token*.json files live here — unrelated secrets never exposed.
       - ./secrets/google_tokens:/token:ro
     tmpfs:
+      # Python runtime scratch (httplib2 socket temp, googleapiclient, FastMCP internals).
       - /tmp:uid=1000,gid=1000
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8005/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8004/health"]
       interval: 30s
       timeout: 10s
       retries: 3

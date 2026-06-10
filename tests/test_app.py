@@ -60,13 +60,15 @@ def test_build_google_services_includes_gmail_only_when_enabled() -> None:
     def names(s: Settings) -> set[str]:
         return {svc.name for svc in app.build_google_services(s)}
 
-    assert "gmail" not in names(_settings(gmail_enabled=False))  # off → excluded
-    assert "gmail" in names(_settings(gmail_enabled=True))
+    # After the issue #52 cutover the single Gmail service is the chief-owned one
+    # (name "gmail_chief"); the third-party "gmail" service was dropped.
+    assert "gmail_chief" not in names(_settings(gmail_enabled=False))  # off → excluded
+    assert "gmail_chief" in names(_settings(gmail_enabled=True))
     # The gmail service carries its configured URL through to the SDK config.
     (gmail,) = [
         svc
         for svc in app.build_google_services(_settings(gmail_enabled=True))
-        if svc.name == "gmail"
+        if svc.name == "gmail_chief"
     ]
     assert gmail.server_config()["url"] == "http://mcp-gmail:8004/mcp"
 

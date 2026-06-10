@@ -125,6 +125,9 @@ class Settings(BaseSettings):
     sheets_enabled: bool = False
     sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
     gmail_enabled: bool = False
+    # Cutover (issue #52): the mcp-gmail service now runs the chief-owned server on
+    # :8004 (the third-party mcp-google-gmail dependency was dropped). The SDK server
+    # name stays ``gmail_chief`` so the per-thread account rebuild keeps matching.
     gmail_mcp_url: str = "http://mcp-gmail:8004/mcp"
     owner_tz: str = "UTC"
 
