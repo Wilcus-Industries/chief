@@ -1,5 +1,9 @@
-# Pinned to the version whose tool names chief's tools/sheets/mcp.py catalog tracks.
-mcp-google-sheets==0.6.3
-# row1_guard monkeypatches the internal mcp._tool_manager.call_tool; pin mcp so a base-
-# image rebuild can't silently change that contract. (0.6.3 already resolves this version.)
+# chief's own Google Sheets MCP server — first-party implementation replacing
+# the third-party xing5/mcp-google-sheets (issue #47 multi-account rework).
+# Tool implementations directly call the Google Sheets/Drive APIs.
+google-api-python-client>=2.120.0
+google-auth>=2.29.0
+google-auth-httplib2>=0.2.0
 mcp==1.27.2
+uvicorn>=0.30.0
+anyio>=4.4.0

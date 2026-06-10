@@ -843,6 +843,10 @@ def test_mcp_sheets_and_mcp_calendar_share_same_host_token_dir() -> None:
     mcp-sheets persists refresh-token rotations; mcp-calendar scans that directory
     for all google_token*.json files.  If they point at different host paths the
     calendar container reads a stale token after every rotation (issue #58).
+
+    After issue #47 mcp-sheets mounts the full directory (like mcp-calendar) so
+    it can write per-account token files atomically.  Both entries must therefore
+    resolve to the same canonical host directory.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     sheets_vols = _token_volumes(compose, "mcp-sheets")
@@ -851,15 +855,148 @@ def test_mcp_sheets_and_mcp_calendar_share_same_host_token_dir() -> None:
     assert cal_entry is not None, "mcp-calendar has no /token volume entry."
     sheets_src = _host_source(sheets_vols[0])
     cal_src = _host_source(cal_entry)
-    # Both must start with the same canonical directory.  mcp-sheets mounts the
-    # file; mcp-calendar mounts the dir — strip the filename to compare dirs.
-    sheets_dir = (
-        sheets_src.rsplit("/google_token", 1)[0]
-        if "/google_token" in sheets_src
-        else sheets_src
-    )
-    assert sheets_dir == cal_src, (
+    # Normalise both sources to their directory component so we can compare
+    # even when one mounts the dir and the other mounts a file inside it.
+    # A path that already IS the canonical dir has no trailing filename; a
+    # path that ends with ``/google_token*.json`` needs the filename stripped.
+    def _to_dir(src: str) -> str:
+        # If the source ends with a google_token*.json filename, strip it.
+        import re as _re
+        return _re.sub(r"/google_token[^/]*$", "", src) or src
+
+    sheets_dir = _to_dir(sheets_src)
+    cal_dir = _to_dir(cal_src)
+    assert sheets_dir == cal_dir, (
         f"mcp-sheets sources its token from {sheets_src!r} (dir: {sheets_dir!r}) "
-        f"but mcp-calendar mounts {cal_src!r}.  They must share the same host "
-        "directory so refresh-token rotation stays consistent (issue #58)."
+        f"but mcp-calendar mounts {cal_src!r} (dir: {cal_dir!r}).  They must "
+        "share the same host dir for rotation consistency (issue #58)."
+    )
+
+
+# ---- mcp-drive and mcp-sheets directory mounts (issue #47) -------------------
+#
+# After issue #47, mcp-drive and mcp-sheets both scan a token directory (like
+# mcp-calendar) so they can support multiple accounts.  Both must mount the full
+# ./secrets/google_tokens directory at /token, not just the single primary file.
+
+
+_DRIVE_TOKEN_DIR = "/token"
+_SHEETS_TOKEN_DIR = "/token"
+_DRIVE_TOKEN_DIR_ENV = "TOKEN_DIR"
+_SHEETS_TOKEN_DIR_ENV = "TOKEN_DIR"
+
+
+def _has_dir_mount_at(volumes: list[str], target_dir: str) -> bool:
+    """Return True if any volume mounts something to exactly *target_dir*."""
+    for v in volumes:
+        if not isinstance(v, str):
+            continue
+        parts = v.split(":")
+        if len(parts) < 2:
+            continue
+        # Strip a trailing :ro / :rw mode from the target component.
+        mount_target = parts[1].rstrip("/")
+        if mount_target == target_dir:
+            return True
+    return False
+
+
+def test_mcp_drive_token_dir_mounted() -> None:
+    """mcp-drive must have a directory bind-mounted at /token (issue #47).
+
+    A single-file mount prevents additional google_token_<label>.json files
+    from reaching the container, making multi-account drive non-functional.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    drive_volumes: list[str] = compose["services"]["mcp-drive"].get("volumes", [])
+    assert _has_dir_mount_at(drive_volumes, _DRIVE_TOKEN_DIR), (
+        f"mcp-drive is missing a directory bind-mount at {_DRIVE_TOKEN_DIR!r}. "
+        "Add '- ./secrets/google_tokens:/token:ro' so all google_token*.json "
+        "files reach the container for multi-account support (issue #47)."
+    )
+
+
+def test_mcp_drive_token_dir_is_read_only() -> None:
+    """The token directory mount in mcp-drive must be read-only (:ro).
+
+    mcp-sheets is the sole writer of all token files.  A writable drive mount
+    would risk concurrent writes and token corruption.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    drive_volumes: list[str] = compose["services"]["mcp-drive"].get("volumes", [])
+    token_entry = next(
+        (
+            v
+            for v in drive_volumes
+            if isinstance(v, str) and len(v.split(":")) >= 2
+            and v.split(":")[1] == _DRIVE_TOKEN_DIR
+        ),
+        None,
+    )
+    assert token_entry is not None, (
+        f"No volume entry mounting {_DRIVE_TOKEN_DIR!r} found in mcp-drive.volumes."
+    )
+    assert token_entry.endswith(":ro"), (
+        f"The token dir mount in mcp-drive ({token_entry!r}) must end with ':ro'. "
+        "mcp-sheets is the sole writer; a writable drive mount risks token corruption."
+    )
+
+
+def test_mcp_drive_token_dir_env_set() -> None:
+    """mcp-drive must set TOKEN_DIR so server.py scans the mounted dir (issue #47)."""
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    env = compose["services"]["mcp-drive"].get("environment", {}) or {}
+    if isinstance(env, list):
+        env_dict: dict[str, str] = {}
+        for entry in env:
+            if "=" in entry:
+                k, _, v = entry.partition("=")
+                env_dict[k] = v
+        env = env_dict
+    assert _DRIVE_TOKEN_DIR_ENV in env, (
+        f"mcp-drive environment is missing {_DRIVE_TOKEN_DIR_ENV!r}. "
+        f"Add '{_DRIVE_TOKEN_DIR_ENV}: {_DRIVE_TOKEN_DIR}' so server.py "
+        "scans the mounted token directory for all google_token*.json files."
+    )
+    assert env[_DRIVE_TOKEN_DIR_ENV] == _DRIVE_TOKEN_DIR, (
+        f"mcp-drive {_DRIVE_TOKEN_DIR_ENV}={env[_DRIVE_TOKEN_DIR_ENV]!r} "
+        f"should be {_DRIVE_TOKEN_DIR!r}."
+    )
+
+
+def test_mcp_sheets_token_dir_mounted() -> None:
+    """mcp-sheets must have a directory bind-mounted at /token (issue #47).
+
+    A single-file mount prevents per-account token write-back to separate files
+    — the multi-account write-race fix requires all google_token*.json files to
+    be reachable by the sheets server.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    sheets_volumes: list[str] = compose["services"]["mcp-sheets"].get("volumes", [])
+    assert _has_dir_mount_at(sheets_volumes, _SHEETS_TOKEN_DIR), (
+        f"mcp-sheets is missing a directory bind-mount at {_SHEETS_TOKEN_DIR!r}. "
+        "Add '- ./secrets/google_tokens:/token' so all google_token*.json "
+        "files are writable for per-account token persistence (issue #47)."
+    )
+
+
+def test_mcp_sheets_token_dir_env_set() -> None:
+    """mcp-sheets must set TOKEN_DIR so server.py scans the mounted dir (issue #47)."""
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    env = compose["services"]["mcp-sheets"].get("environment", {}) or {}
+    if isinstance(env, list):
+        env_dict2: dict[str, str] = {}
+        for entry in env:
+            if "=" in entry:
+                k, _, v = entry.partition("=")
+                env_dict2[k] = v
+        env = env_dict2
+    assert _SHEETS_TOKEN_DIR_ENV in env, (
+        f"mcp-sheets environment is missing {_SHEETS_TOKEN_DIR_ENV!r}. "
+        f"Add '{_SHEETS_TOKEN_DIR_ENV}: {_SHEETS_TOKEN_DIR}' so server.py "
+        "scans the mounted token directory for all google_token*.json files."
+    )
+    assert env[_SHEETS_TOKEN_DIR_ENV] == _SHEETS_TOKEN_DIR, (
+        f"mcp-sheets {_SHEETS_TOKEN_DIR_ENV}={env[_SHEETS_TOKEN_DIR_ENV]!r} "
+        f"should be {_SHEETS_TOKEN_DIR!r}."
     )

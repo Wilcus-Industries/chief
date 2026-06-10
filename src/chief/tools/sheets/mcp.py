@@ -53,8 +53,17 @@ WRITE_TOOLS: tuple[str, ...] = qualified(
 DEFERRED_TOOLS: tuple[str, ...] = ()
 
 
-def service(url: str) -> GoogleService:
-    """The :class:`GoogleService` for the sheets container at ``url``."""
+def service(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> GoogleService:
+    """The :class:`GoogleService` for the sheets container at ``url``.
+
+    ``headers`` is forwarded to every HTTP call the SDK makes to the MCP server
+    — used to inject ``X-Account-Label`` for multi-account credential selection
+    (issue #47).  ``None`` → no extra headers (single-account / no binding).
+    """
     return GoogleService(
         name="sheets",
         server_name=SERVER_NAME,
@@ -62,4 +71,5 @@ def service(url: str) -> GoogleService:
         read_tools=READ_TOOLS,
         write_tools=WRITE_TOOLS,
         deferred_tools=DEFERRED_TOOLS,
+        headers=headers,
     )
