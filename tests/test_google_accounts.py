@@ -477,10 +477,15 @@ class TestProductionResolverWiring:
     Google userinfo endpoint — it never writes the token back to disk.
     """
 
-    def test_production_path_resolves_legacy_token_email(
+    @pytest.mark.asyncio
+    async def test_production_path_resolves_legacy_token_email(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Legacy token (no 'account' field) must label by email through production."""
+        """Legacy token (no 'account' field) must label by email through production.
+
+        With dynamic re-scan (issue #50), discovery happens at tool-call time so we
+        invoke the tool handler to verify the resolver is used correctly.
+        """
         import json as _json
 
         import chief.app as app_module
@@ -499,7 +504,7 @@ class TestProductionResolverWiring:
             _json.dumps(legacy_data), encoding="utf-8"
         )
 
-        # Patch the resolver used internally so no network call happens
+        # Patch the resolver used internally so no network call happens.
         monkeypatch.setattr(
             app_module,
             "_resolve_email_from_token",
@@ -507,57 +512,38 @@ class TestProductionResolverWiring:
         )
 
         svc = build_list_accounts_service(secrets_dir=tmp_path)
-        # The service must have discovered the account with the resolved email
-        accounts = svc.accounts
-        assert len(accounts) == 1
-        assert accounts[0].label == "legacy@example.com"
-        assert accounts[0].email == "legacy@example.com"
-
-    def test_production_resolver_is_passed_not_none(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """build_list_accounts_service must pass a resolver, not None."""
-        import json as _json
-
-        import chief.app as app_module
-        from chief.app import build_list_accounts_service
-
-        legacy_data = {
-            "token": None,
-            "refresh_token": "rt",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": "cid",
-            "client_secret": "secret",
-        }
-        (tmp_path / "google_token.json").write_text(
-            _json.dumps(legacy_data), encoding="utf-8"
+        # Dynamic mode: discovery happens at tool-call time.
+        tool_obj = svc._build_tool()
+        result = await tool_obj.handler({})
+        text = result["content"][0]["text"]
+        assert "legacy@example.com" in text, (
+            f"Expected resolved email in list_accounts output; got: {text!r}"
         )
 
-        resolver_calls: list[object] = []
+    def test_production_resolver_is_passed_not_none(
+        self, tmp_path: Path
+    ) -> None:
+        """build_list_accounts_service must wire a non-None email_resolver.
 
-        def _capturing_discover(
-            secrets_dir: object,
-            email_resolver: object = None,
-        ) -> list[object]:
-            resolver_calls.append(email_resolver)
-            return []
+        With dynamic re-scan (issue #50) the resolver is stored on the service and
+        passed to discover_accounts at call time — we verify the field is set.
+        """
+        from chief.app import build_list_accounts_service
 
-        # app.py imports discover_accounts directly, so patch the reference in app
-        monkeypatch.setattr(app_module, "discover_accounts", _capturing_discover)
-        monkeypatch.setattr(app_module, "_resolve_email_from_token", lambda p: None)
-
-        build_list_accounts_service(secrets_dir=tmp_path)
-
-        assert len(resolver_calls) == 1
-        assert resolver_calls[0] is not None, (
-            "build_list_accounts_service passed email_resolver=None; "
+        svc = build_list_accounts_service(secrets_dir=tmp_path)
+        assert svc.email_resolver is not None, (
+            "build_list_accounts_service email_resolver is None; "
             "legacy tokens will never resolve their email"
         )
 
-    def test_production_resolver_degrades_gracefully_on_failure(
+    @pytest.mark.asyncio
+    async def test_production_resolver_degrades_gracefully_on_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If the resolver raises, discover_accounts falls back to the slug label."""
+        """If the resolver raises, list_accounts falls back to the slug label.
+
+        With dynamic re-scan (issue #50), discovery happens at tool-call time.
+        """
         import json as _json
 
         import chief.app as app_module
@@ -581,8 +567,11 @@ class TestProductionResolverWiring:
 
         # Must not raise — graceful degradation to slug
         svc = build_list_accounts_service(secrets_dir=tmp_path)
-        accounts = svc.accounts
-        assert len(accounts) == 1
-        # Resolver raised -> _to_account caught it -> falls back to slug
-        assert accounts[0].label == "google_token"
-        assert accounts[0].email is None
+        tool_obj = svc._build_tool()
+        result = await tool_obj.handler({})
+        # Resolver raised -> _to_account caught it -> falls back to slug "google_token"
+        text = result["content"][0]["text"]
+        assert "google_token" in text, (
+            f"Expected slug label 'google_token' in fallback output; got: {text!r}"
+        )
+        assert result["is_error"] is False

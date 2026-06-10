@@ -140,10 +140,15 @@ def _calendar_id_from_list(sse_body: str) -> str:
 
 @pytest.fixture()
 def calendar_server(tmp_path: Path) -> types.ModuleType:
-    """Load a fresh calendar server module with two fake service accounts."""
+    """Load a fresh calendar server module with two fake service accounts.
+
+    Patches ``_build_service_registry`` on the loaded module so every per-request
+    rescan (issue #50) returns the same deterministic fake registry — the two
+    mocked services are always "visible" regardless of TOKEN_DIR contents.
+    """
     srv = _load_calendar_server(tmp_path)
 
-    # Replace service registry with per-label fakes.
+    # Build per-label fake services.
     main_svc = MagicMock()
     main_svc.calendarList().list().execute.return_value = {
         "items": [{"id": "cal_main", "summary": "Main", "accessRole": "owner"}]
@@ -152,12 +157,16 @@ def calendar_server(tmp_path: Path) -> types.ModuleType:
     work_svc.calendarList().list().execute.return_value = {
         "items": [{"id": "cal_work", "summary": "Work", "accessRole": "owner"}]
     }
-
-    srv._service_registry = {  # type: ignore[attr-defined]
+    fake_registry = {
         "main@example.com": main_svc,
         "work@corp.com": work_svc,
     }
-    srv._default_service = main_svc  # type: ignore[attr-defined]
+
+    # Patch _build_service_registry so the dynamic rescan always returns the
+    # fake registry instead of scanning the real filesystem.
+    srv._build_service_registry = (  # type: ignore[attr-defined]
+        lambda: (fake_registry, main_svc)
+    )
     return srv
 
 
