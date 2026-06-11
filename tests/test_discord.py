@@ -1115,7 +1115,11 @@ async def test_taskio_create_thread_returns_key() -> None:
     key = await io.create_thread(like_thread_key="100:0", title="do a thing")
 
     assert key == "100:88"
-    channel.create_thread.assert_awaited_once_with(name="do a thing")
+    # Must be a PUBLIC thread — discord.py defaults create_thread to a *private*
+    # thread the owner is never added to, so a spawned topic would be invisible.
+    channel.create_thread.assert_awaited_once_with(
+        name="do a thing", type=discord.ChannelType.public_thread
+    )
 
 
 async def test_taskio_archive_edits_thread() -> None:

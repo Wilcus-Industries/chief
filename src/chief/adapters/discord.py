@@ -204,7 +204,11 @@ class DiscordTaskIO:
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         channel_id, _ = _parse(like_thread_key)
         channel = cast(discord.TextChannel, await self._resolve(channel_id))
-        thread = await channel.create_thread(name=title[:THREAD_NAME_LIMIT])
+        # Public, not the discord.py default private_thread: a private thread only
+        # admits the bot, so the owner would never see the spawned topic or its work.
+        thread = await channel.create_thread(
+            name=title[:THREAD_NAME_LIMIT], type=discord.ChannelType.public_thread
+        )
         return f"{channel_id}:{thread.id}"
 
     async def archive_thread(self, thread_key: str) -> None:
