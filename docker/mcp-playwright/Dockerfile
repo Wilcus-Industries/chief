@@ -29,6 +29,16 @@ EXPOSE 3000
 #               imply --no-sandbox; both flags must be present.
 # --port: bind the MCP HTTP server on 3000
 # --host: bind on all interfaces so core can reach it over the compose network
+# --allowed-hosts: @playwright/mcp 0.0.76 has a DNS-rebinding guard that 403s any
+#               request whose Host header isn't in this allowlist (it defaults to the
+#               bound host, which it reports as localhost:3000). --host 0.0.0.0 only
+#               widens the *bind*, NOT this Host check. Core reaches the server at
+#               http://mcp-playwright:3000/mcp, so its Host header is "mcp-playwright:3000"
+#               — without that here the MCP handshake gets "Access is only allowed at
+#               localhost:3000" (403), the browser tools never load into the owner agent,
+#               and every browser call fails (browser was dead from rollout until this).
+#               localhost:3000 + 127.0.0.1:3000 are kept for the in-container healthcheck.
+#               Do NOT remove this thinking --host alone is enough — it is not.
 # --user-data-dir: Chromium writes its full profile (cookies, localStorage, IndexedDB,
 #               session state) directly to this path on every page visit.  Because the
 #               path sits on the browser-profile named volume, the data outlives the
@@ -37,5 +47,7 @@ EXPOSE 3000
 #               shared mcp-playwright container, serialised owner turns), so a single
 #               persistent profile has no parallel-session collision risk.
 CMD ["node", "node_modules/@playwright/mcp/cli.js", "--headless", "--no-sandbox", \
-     "--port", "3000", "--host", "0.0.0.0", "--output-dir", "/screenshots", \
+     "--port", "3000", "--host", "0.0.0.0", \
+     "--allowed-hosts", "mcp-playwright:3000,localhost:3000,127.0.0.1:3000", \
+     "--output-dir", "/screenshots", \
      "--user-data-dir", "/browser-profile"]

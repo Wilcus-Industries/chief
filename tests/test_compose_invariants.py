@@ -483,6 +483,37 @@ def test_mcp_playwright_healthcheck_probes_the_served_mcp_endpoint() -> None:
     )
 
 
+def test_playwright_dockerfile_allows_the_cross_container_host() -> None:
+    """The mcp-playwright Dockerfile CMD must allowlist core's Host header.
+
+    @playwright/mcp 0.0.76 has a DNS-rebinding guard: it 403s any request whose
+    Host header isn't in --allowed-hosts (defaulting to the bound host, which it
+    reports as localhost:3000). Core reaches the server at
+    http://mcp-playwright:3000/mcp, so its Host header is 'mcp-playwright:3000' —
+    without that host in the allowlist the MCP handshake gets
+    'Access is only allowed at localhost:3000' (403), the browser tools never load
+    into the owner agent, and every browser call fails. --host 0.0.0.0 only widens
+    the *bind*, not the Host-header check; --allowed-hosts is the lever that widens
+    the check (prod rollout: browser dead since launch).
+    """
+    dockerfile = (
+        Path(__file__).parent.parent / "docker" / "mcp-playwright" / "Dockerfile"
+    )
+    content = dockerfile.read_text()
+    assert "--allowed-hosts" in content, (
+        "docker/mcp-playwright/Dockerfile CMD does not include --allowed-hosts. "
+        "@playwright/mcp 0.0.76 403s requests whose Host header isn't allowlisted; "
+        "core reaches the server as 'mcp-playwright:3000'. Add '--allowed-hosts', "
+        "'mcp-playwright:3000' (the cross-container Host) to the CMD."
+    )
+    assert "mcp-playwright:3000" in content, (
+        "docker/mcp-playwright/Dockerfile --allowed-hosts must include "
+        "'mcp-playwright:3000' — that is the Host header core sends "
+        "(http://mcp-playwright:3000/mcp). Without it the MCP handshake 403s and "
+        "the browser tools never load."
+    )
+
+
 # ---- sandbox network isolation (issue #40 regression fix, issue #42) ----------
 
 
