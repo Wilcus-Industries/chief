@@ -317,3 +317,86 @@ def test_workspace_guidance_does_not_claim_only_writable_location() -> None:
     assert "memory" in prompt.lower() or "User.md" in prompt
     # Writes outside the allowed set are still described as blocked.
     assert "blocked" in prompt
+
+
+# ---- platform-aware formatting guidance (issue #65) --------------------------
+
+
+def test_telegram_owner_prompt_contains_no_markdown_guidance() -> None:
+    """An owner turn on Telegram must warn that Markdown is not rendered."""
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="telegram",
+    )
+
+    assert "Markdown" in prompt
+    assert "plain text" in prompt.lower()
+
+
+def test_discord_owner_prompt_contains_markdown_renders_guidance() -> None:
+    """An owner turn on Discord must state that Markdown renders normally."""
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="discord",
+    )
+
+    assert "Markdown" in prompt
+    # Discord guidance should mention that Markdown renders
+    assert "render" in prompt.lower() or "markdown" in prompt.lower()
+
+
+def test_telegram_guest_prompt_contains_no_markdown_guidance() -> None:
+    """A guest turn on Telegram must also carry the plain-text guidance."""
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="telegram",
+    )
+
+    assert "plain text" in prompt.lower()
+
+
+def test_discord_guest_prompt_contains_markdown_renders_guidance() -> None:
+    """A guest turn on Discord must also carry the Markdown-renders guidance."""
+    prompt = build_system_prompt(
+        tier="guest",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="discord",
+    )
+
+    assert "Markdown" in prompt
+
+
+def test_telegram_platform_guidance_differs_from_discord() -> None:
+    """The Telegram and Discord prompts must contain different formatting guidance."""
+    tg = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="telegram",
+    )
+    dc = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+        platform="discord",
+    )
+
+    assert tg != dc
+
+
+def test_no_platform_produces_no_format_guidance_crash() -> None:
+    """Omitting platform must not crash — it's optional (backwards compat)."""
+    # Should not raise; the prompt just won't include a platform-formatting block.
+    prompt = build_system_prompt(
+        tier="owner",
+        memory=FakeMemory(),
+        owner_name="Will",
+    )
+    assert isinstance(prompt, str)

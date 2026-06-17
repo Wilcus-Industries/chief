@@ -165,6 +165,26 @@ _SHELL_GUIDANCE = (
     "confirm it."
 )
 
+#: Platform-aware reply formatting guidance (issue #65). Telegram does not render
+#: Markdown, so the model must default to plain text there. Discord renders Markdown
+#: normally, so the model can use headers, bold, code blocks, and lists freely.
+_PLATFORM_GUIDANCE: dict[str, str] = {
+    "telegram": (
+        "## Reply formatting\n"
+        "You are replying on Telegram. Telegram does not render Markdown — asterisks, "
+        "underscores, backticks, and pound signs appear as literal characters, not "
+        "formatting. Prefer plain text. Use light structure (short paragraphs, "
+        "dashes for lists) rather than Markdown syntax. Reserve code blocks only when "
+        "sharing actual code snippets where the raw text still reads clearly."
+    ),
+    "discord": (
+        "## Reply formatting\n"
+        "You are replying on Discord. Markdown renders normally — use bold, italics, "
+        "inline code, fenced code blocks, and bullet lists freely where they aid "
+        "clarity."
+    ),
+}
+
 
 def build_system_prompt(
     *,
@@ -177,6 +197,7 @@ def build_system_prompt(
     shell_enabled: bool = False,
     guest_admin_enabled: bool = False,
     skills: Sequence[str] = (),
+    platform: str | None = None,
 ) -> str:
     """Assemble the system prompt for a ``tier`` session against ``memory``.
 
@@ -187,6 +208,9 @@ def build_system_prompt(
     guidance; the web block is always present for the owner (web tools are always
     wired). ``skills`` (M10, owner only) names the enabled packaged skills, adding a
     block that points chief at them. Guests get none of these.
+    ``platform`` (issue #65) names the reply surface (``"telegram"`` or ``"discord"``);
+    when set, a formatting guidance block is appended so the model knows whether
+    Markdown renders. Omitting it leaves out the block (backwards compat).
     """
     if tier == "owner":
         listing = memory.facts_listing()
@@ -218,4 +242,8 @@ def build_system_prompt(
             sections.append(
                 _GUEST_CALENDAR_GUIDANCE.format(owner=owner_name, tz=tz)
             )
+    if platform is not None:
+        fmt = _PLATFORM_GUIDANCE.get(platform)
+        if fmt is not None:
+            sections.append(fmt)
     return "\n\n".join(section.strip() for section in sections if section.strip())
