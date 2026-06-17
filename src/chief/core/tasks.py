@@ -773,6 +773,7 @@ class TaskManager:
             shell_enabled=shell_on,
             guest_admin_enabled=admin is not None,
             skills=self._default_skills if skills_on else (),
+            platform=self._platform,
         )
         if surface is Surface.GROUP:
             # Same owner toolset, but a reminder the room is public and approvals are
@@ -871,6 +872,7 @@ class TaskManager:
                     frozenset({cal.name}) if cal is not None else frozenset()
                 ),
                 owner_tz=self._owner_tz,
+                platform=self._platform,
             ),
             allowed_tools=allowed,
         )
