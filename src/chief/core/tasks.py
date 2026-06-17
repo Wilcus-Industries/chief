@@ -71,6 +71,7 @@ from ..persistence.tasks import (
     list_active,
     set_active_account,
     set_session_id,
+    set_spinner_msg_ref,
     set_status,
     set_task_model,
 )
@@ -623,14 +624,37 @@ class TaskManager:
             return await list_active(session, platform=self._platform)
 
     async def recover(self) -> None:
-        """Ping the owner about tasks left mid-flight by a restart (no auto-resume)."""
+        """Ping the owner about tasks left mid-flight by a restart (no auto-resume).
+
+        Also sweeps orphaned spinners: any task that crashed while a spinner was
+        posted (``spinner_msg_ref`` is set) gets its spinner deleted now so a
+        ticking clock is never left stranded in a chat after a restart.
+        """
         async with self._session_factory() as session:
             active = await list_active(session, platform=self._platform)
             pings: list[tuple[str, str | None]] = []
+            orphan_refs: list[str] = []
             for db in active:
                 if db.status in (RUNNING, WAITING):
                     pings.append((db.thread_key, db.title))
+                    # Collect any orphaned spinner ref before clearing it from the DB.
+                    if db.spinner_msg_ref is not None:
+                        orphan_refs.append(db.spinner_msg_ref)
+                        await set_spinner_msg_ref(session, db, None)
                     await set_status(session, db, OPEN)
+        # Delete orphaned spinners after the DB session is closed, so a failed
+        # platform delete can't leave the session dangling.
+        if orphan_refs and hasattr(self._io, "delete_status"):
+            status_io = cast("_StatusIO", self._io)
+            for msg_ref in orphan_refs:
+                try:
+                    await status_io.delete_status(msg_ref)
+                except Exception:
+                    logger.debug(
+                        "orphan spinner delete failed for ref %r",
+                        msg_ref,
+                        exc_info=True,
+                    )
         for thread_key, title in pings:
             label = title or thread_key
             await self._io.send(
@@ -1354,6 +1378,8 @@ class TaskManager:
         ack: asyncio.Task[None] | None = None
         if self._shows_spinner(task):
             spinner = await self._start_spinner(task)
+            if spinner is not None:
+                await self._persist_spinner_ref(task, spinner.msg_ref)
         else:
             ack = asyncio.create_task(self._ack_after_grace(task))
         task.transcript.append(("owner", turn.text))
@@ -1398,6 +1424,8 @@ class TaskManager:
                 if spinner is not None:
                     await spinner.stop()
                     spinner = None
+                    # Clear the persisted ref: clean completion — nothing left to sweep.
+                    await self._persist_spinner_ref(task, None)
                 if task.cancelled:
                     return
                 if per_block:
@@ -1708,3 +1736,23 @@ class TaskManager:
             )
             if db is not None:
                 await set_session_id(session, db, sdk_session_id)
+
+    async def _persist_spinner_ref(
+        self, task: _RunningTask, msg_ref: str | None
+    ) -> None:
+        """Write (or clear) the spinner message reference for ``task`` (issue #68).
+
+        Called after posting the spinner (to persist the ref so recovery can find
+        it) and after stopping it cleanly (to clear the ref so recovery has nothing
+        to sweep for finished turns).  Best-effort: a DB failure is logged but does
+        not break the turn, because the spinner itself is cosmetic.
+        """
+        try:
+            async with self._session_factory() as session:
+                db = await get_task(
+                    session, platform=self._platform, thread_key=task.thread_key
+                )
+                if db is not None:
+                    await set_spinner_msg_ref(session, db, msg_ref)
+        except Exception:
+            logger.debug("persist_spinner_ref failed", exc_info=True)
