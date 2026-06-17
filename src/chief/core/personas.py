@@ -181,7 +181,10 @@ _PLATFORM_GUIDANCE: dict[str, str] = {
         "## Reply formatting\n"
         "You are replying on Discord. Markdown renders normally — use bold, italics, "
         "inline code, fenced code blocks, and bullet lists freely where they aid "
-        "clarity."
+        "clarity. Each block of text you write is sent as its own message the moment "
+        "you write it — say what you need to say once. Do not post a line that reads "
+        "as your conclusion, keep working, and then restate it: the repeat lands as a "
+        "near-duplicate message."
     ),
 }
 
