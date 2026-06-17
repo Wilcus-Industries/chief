@@ -86,6 +86,8 @@ def _rate_limit(status: str) -> RateLimitEvent:
 
 
 async def test_run_turn_streams_milestones_then_final() -> None:
+    # Per-block streaming (issue #64): each TextBlock yields its own Final event as
+    # it arrives, interleaved with Milestone events, not accumulated into one.
     client = FakeClient(ClaudeAgentOptions())
     client.messages = [
         _assistant(ToolUseBlock(id="t1", name="Bash", input={})),
@@ -96,7 +98,12 @@ async def test_run_turn_streams_milestones_then_final() -> None:
 
     events = [event async for event in session.run_turn("do it")]
 
-    assert events == [Milestone(text="using Bash"), Final(text="hello world!")]
+    assert events == [
+        Milestone(text="using Bash"),
+        Final(text="hello "),
+        Final(text="world"),
+        Final(text="!"),
+    ]
     assert client.connected is True
     assert client.queries == ["do it"]
     assert session.session_id == "sess-1"

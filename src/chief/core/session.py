@@ -201,11 +201,16 @@ class TaskSession:
 
         No media → the SDK's plain ``str`` path. With media → a one-item async-iterable
         of the user envelope (the only way to carry content blocks into ``query``).
+
+        Each ``TextBlock`` in the stream yields its own ``Final`` event as it arrives,
+        so the engine can surface each block to the owner individually (per-block reply
+        streaming, issue #64). A turn that produces no text block still yields exactly
+        one ``Final(text=NO_REPLY)`` so callers never see an empty stream.
         """
         await self._ensure_connected()
         await self._client.query(self._prompt(text, attachments))
         self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
-        parts: list[str] = []
+        text_blocks_seen = 0
         async for message in self._client.receive_response():
             session_id = getattr(message, "session_id", None)
             if session_id:
@@ -213,14 +218,16 @@ class TaskSession:
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
-                        parts.append(block.text)
+                        text_blocks_seen += 1
+                        yield Final(text=block.text)
                     elif isinstance(block, ToolUseBlock):
                         yield Milestone(text=f"using {block.name}")
             elif isinstance(message, ResultMessage):
                 self.last_cost_usd = message.total_cost_usd or 0.0
             elif isinstance(message, RateLimitEvent):
                 self.last_rate_limit_status = message.rate_limit_info.status
-        yield Final(text="".join(parts).strip() or NO_REPLY)
+        if text_blocks_seen == 0:
+            yield Final(text=NO_REPLY)
 
     @staticmethod
     def _prompt(
