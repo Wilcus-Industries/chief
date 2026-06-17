@@ -1234,6 +1234,7 @@ class TaskManager:
                 # preserving unchanged behaviour for those surfaces.
                 per_block = self._owner_streams_per_block(task)
                 block_parts: list[str] = []
+                per_block_sent = 0  # non-empty blocks delivered in per-block mode
                 # Watchdog: a turn whose stream never reaches a terminal result (wedged
                 # SDK / hung tool call) must not pin the semaphore and generating=True
                 # forever. The timeout cancels the loop; exiting the semaphore block
@@ -1246,7 +1247,13 @@ class TaskManager:
                             break  # interrupted — stop streaming its milestones
                         if isinstance(event, Final):
                             if per_block:
-                                await self._emit_final(task, event.text)
+                                # Guard against empty/whitespace-only blocks that the
+                                # SDK emits as separators around tool calls (#69).
+                                # Both Telegram and Discord reject empty content.
+                                stripped = event.text.strip()
+                                if stripped:
+                                    await self._emit_final(task, stripped)
+                                    per_block_sent += 1
                             else:
                                 block_parts.append(event.text)
                         else:
@@ -1254,7 +1261,12 @@ class TaskManager:
                 ack.cancel()
                 if task.cancelled:
                     return
-                if not per_block:
+                if per_block:
+                    # Genuinely text-free turns (tools only, all blocks whitespace)
+                    # still need one acknowledgement so the owner isn't left in silence.
+                    if per_block_sent == 0:
+                        await self._emit_final(task, NO_REPLY)
+                else:
                     # Accumulated path (group/guest): join and emit as one message,
                     # reproducing the original single-Final behaviour.
                     joined = "".join(block_parts).strip() or NO_REPLY
