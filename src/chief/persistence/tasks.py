@@ -94,19 +94,6 @@ async def set_active_account(
     await session.commit()
 
 
-async def set_spinner_msg_ref(
-    session: AsyncSession, task: Task, msg_ref: str | None
-) -> None:
-    """Persist (or clear) the in-flight spinner message reference (issue #68).
-
-    Set when the spinner is posted; cleared on clean turn completion.  Recovery
-    reads this column and calls ``delete_status`` to remove any orphaned spinner
-    left by a crash mid-turn.
-    """
-    task.spinner_msg_ref = msg_ref
-    await session.commit()
-
-
 async def list_active(
     session: AsyncSession, *, platform: str | None = None
 ) -> list[Task]:

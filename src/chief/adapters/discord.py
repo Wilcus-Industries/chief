@@ -218,32 +218,6 @@ class DiscordTaskIO:
         thread = cast(discord.Thread, await self._resolve(thread_id))
         await thread.edit(archived=True, locked=True)
 
-    async def send_status(self, thread_key: str, text: str) -> str:
-        """Post a transient status message; return ``"{target_id}:{message_id}"``."""
-        channel_id, thread_id = _parse(thread_key)
-        target_id = thread_id or channel_id
-        target = cast(discord.abc.Messageable, await self._resolve(target_id))
-        sent = await target.send(text)
-        return f"{target_id}:{sent.id}"
-
-    async def edit_status(self, msg_ref: str, text: str) -> None:
-        """Overwrite a status message in-place."""
-        channel_str, message_str = msg_ref.split(":")
-        channel = cast(
-            discord.abc.Messageable, await self._resolve(int(channel_str))
-        )
-        message = await channel.fetch_message(int(message_str))
-        await message.edit(content=text)
-
-    async def delete_status(self, msg_ref: str) -> None:
-        """Delete a status message."""
-        channel_str, message_str = msg_ref.split(":")
-        channel = cast(
-            discord.abc.Messageable, await self._resolve(int(channel_str))
-        )
-        message = await channel.fetch_message(int(message_str))
-        await message.delete()
-
     async def send_card(self, route: str, card: ApprovalCard) -> str:
         """Post an approval card to ``route`` (a ``thread_key``); return its msg ref."""
         channel_id, thread_id = _parse(route)
