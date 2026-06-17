@@ -158,10 +158,10 @@ outside agent-reachable paths (see Config & secrets).
 What happens between "you send a task" and "it's done." **Decided:** hybrid execution,
 bounded parallelism, milestone progress, live steering.
 
-- **Hybrid inline/background.** Every task runs as a live background session from the
-  start. The adapter waits a short grace window (~5–8s) for the first result: if the task
-  finishes fast → reply **inline** (feels synchronous); if not → post a "working…" ack and
-  let it keep running, posting milestones. One mechanism, both feels.
+- **Live background sessions.** Every task runs as a live background session from the
+  start, posting milestones as it works. Owner home/DM turns show a ticking ⏳ spinner
+  while generating (issue #66); other surfaces stay silent until the reply. One
+  mechanism, every surface.
 - **Lifecycle:** `running → waiting(input|approval) → done | failed | cancelled`. Plus an
   idle **open** state (session alive, awaiting your next message). Persisted, so chief
   survives a restart mid-task (resume the SDK session by id).
@@ -695,7 +695,8 @@ chief/
    **gate** (allow/ask/deny); ASK → **approval flow** blocks the call (task → `waiting`);
    allowed calls execute (MCP / sandbox / workspace), and **tool results are untrusted data**.
    Milestones post on tool events; **usage is metered per call** against the budget.
-4. **Reply** streams back, smart-split / as files. Fast finish → inline; slow → "working…".
+4. **Reply** streams back, smart-split / as files. Owner home/DM show a ⏳ spinner while
+   generating; other surfaces stay silent until the reply.
 5. **Memory writes** happen in-session whenever chief judges something worth keeping (auto-
    notify on save). **Idle ~1 hr →** mark done + **auto-archive** the thread (reopens on
    next message).

@@ -37,7 +37,6 @@ guest_enabled: false
 
 # Task engine (M2).
 concurrency: 3              # max tasks actively generating a turn at once
-grace_seconds: 6.0         # inline reply if the turn finishes within this, else "working…"
 turn_timeout_seconds: 300  # watchdog: a turn past this (wedged stream) is torn down, not frozen
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
 classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments

@@ -20,7 +20,6 @@ from chief.core.tasks import (
     SPINNER_FRAMES,
     TURN_TIMEOUT_NOTE,
     WEB_META_TOOLS,
-    WORKING_ACK,
     SessionProto,
     TaskManager,
 )
@@ -254,7 +253,6 @@ def _manager(
     stop: Callable[..., Any] = _no,
     warrants: Callable[..., Any] = _no,
     concurrency: int = 3,
-    grace: float = 5.0,
     turn_timeout: float = 1000.0,
     idle: float = 1000.0,
     compaction: float = 1000.0,
@@ -275,7 +273,6 @@ def _manager(
         owner_model="claude-sonnet-4-6",
         classifier_model="claude-haiku-4-5",
         concurrency=concurrency,
-        grace_seconds=grace,
         turn_timeout=turn_timeout,
         idle_archive_seconds=idle,
         compaction_idle_seconds=compaction,
@@ -305,7 +302,7 @@ async def _until(pred: Callable[[], bool], timeout: float = 1.0) -> None:
     raise AssertionError("condition not met in time")
 
 
-async def test_fast_turn_replies_inline_without_ack(
+async def test_turn_replies_inline_without_ack(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     io = FakeIO()
@@ -316,7 +313,8 @@ async def test_fast_turn_replies_inline_without_ack(
     await _until(lambda: ("-100:5", "reply:hi") in io.sends)
 
     assert ("-100:5", "· using Bash") in io.sends  # milestone posted
-    assert ("-100:5", WORKING_ACK) not in io.sends  # fast → no working ack
+    # No "working on it…" ack on any surface — the auto-message is gone.
+    assert all("working on it" not in text for _, text in io.sends)
     await mgr.shutdown()
 
 
@@ -743,17 +741,19 @@ async def test_owner_per_block_stripped_text_is_sent(
     await mgr.shutdown()
 
 
-async def test_slow_group_turn_acks_then_replies(
+async def test_slow_group_turn_stays_silent_then_replies(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """GROUP owner turns use the grace-delayed ack; spinner is owner home/DM only."""
+    """GROUP owner turns post no "working on it…" ack; the reply still arrives."""
     io = FakeIO()
     gate = asyncio.Event()
     sess = FakeSession(model="m", gate=gate)
-    mgr = _manager(session_factory, io, factory=_one(sess), grace=0.01)
+    mgr = _manager(session_factory, io, factory=_one(sess))
 
     await mgr.dispatch(thread_key="-100:grp", text="slow", surface=Surface.GROUP)
-    await _until(lambda: ("-100:grp", WORKING_ACK) in io.sends)
+    # Let the turn start and block on the gate, then assert no ack was posted.
+    await _until(lambda: bool(sess.queries))
+    assert all("working on it" not in text for _, text in io.sends)
     assert ("-100:grp", "reply:slow") not in io.sends
 
     gate.set()

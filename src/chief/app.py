@@ -330,7 +330,6 @@ def build_engine(
         opus_auto_detect=settings.opus_auto_detect,
         classifier_model=settings.classifier_model,
         concurrency=settings.concurrency,
-        grace_seconds=settings.grace_seconds,
         turn_timeout=settings.turn_timeout_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
         compaction_idle_seconds=settings.compaction_idle_seconds,
