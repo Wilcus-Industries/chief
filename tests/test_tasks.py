@@ -38,6 +38,7 @@ from chief.persistence.tasks import (
     get_or_create_task,
     get_task,
     set_session_id,
+    set_spinner_msg_ref,
     set_status,
 )
 from chief.tools.calendar import mcp as calendar_mcp
@@ -1304,6 +1305,102 @@ async def test_recover_pings_without_autoresume_then_resumes(
 
     await mgr.dispatch(thread_key="-100:7", text="resume please")
     await _until(lambda: captured == ["sess-prior"])
+    await mgr.shutdown()
+
+
+async def test_recover_deletes_orphaned_spinner(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Simulated crash: a task left RUNNING with a spinner_msg_ref is swept on recover.
+
+    Acceptance criterion from issue #68: after a restart, recovery deletes any
+    orphaned spinner whose turn did not finish — no ticking clock is left stranded.
+    """
+    # Simulate a crash mid-turn: the task is RUNNING and the spinner was posted
+    # (msg_ref persisted) but the process never got to stop it cleanly.
+    async with session_factory() as session:
+        db = await get_or_create_task(
+            session,
+            platform="telegram",
+            thread_key="-100:8",
+            tier="owner",
+            title="orphan job",
+        )
+        await set_status(session, db, RUNNING)
+        await set_spinner_msg_ref(session, db, "-100:orphan-ref")
+
+    io = SpinnerIO()
+    mgr = _manager(session_factory, io, factory=lambda **_: FakeSession(model="m"))
+    await mgr.recover()
+
+    # The orphaned spinner must have been deleted.
+    assert "-100:orphan-ref" in io.status_deleted, (
+        "recover() must call delete_status for each persisted spinner_msg_ref"
+    )
+    # The ref must be cleared from the DB.
+    async with session_factory() as session:
+        reloaded = await get_task(session, platform="telegram", thread_key="-100:8")
+    assert reloaded is not None and reloaded.spinner_msg_ref is None
+    # The task must be pinged and reset to OPEN.
+    assert any(tk == "-100:8" and "interrupted" in txt for tk, txt in io.sends)
+    assert reloaded.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_recover_clean_turn_leaves_no_spinner_ref(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A cleanly-finished turn clears the spinner ref so recovery has nothing to sweep.
+
+    Acceptance criterion from issue #68: after a clean turn, the DB ref is None
+    and recover() has nothing to delete.
+    """
+    io = SpinnerIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:9", text="do thing")
+    await _until(lambda: len(io.status_deleted) >= 1)
+    # Let the turn settle.
+    await asyncio.sleep(0.05)
+
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:9")
+    assert db is not None and db.spinner_msg_ref is None, (
+        "spinner_msg_ref must be cleared after a clean turn"
+    )
+    await mgr.shutdown()
+
+
+async def test_spinner_msg_ref_persisted_during_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The spinner handle is persisted to the DB while a turn is in flight.
+
+    Acceptance criterion from issue #68: the spinner_msg_ref column is set
+    (non-None) while the turn is running, so a mid-turn crash leaves a sweepable
+    ref for recovery.
+    """
+    gate = asyncio.Event()
+    io = SpinnerIO()
+    sess = FakeSession(model="m", gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess), spinner_tick=1000.0)
+
+    await mgr.dispatch(thread_key="-100:10", text="slow task")
+    # Wait until the spinner appears (status_sent non-empty) — the ref should
+    # be persisted at about the same time.
+    await _until(lambda: len(io.status_sent) >= 1)
+    # Give the async persist a moment to commit.
+    await asyncio.sleep(0.05)
+
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:10")
+    assert db is not None and db.spinner_msg_ref is not None, (
+        "spinner_msg_ref must be set in the DB while the turn is running"
+    )
+    # Unblock the session and let it finish.
+    gate.set()
+    await _until(lambda: len(io.status_deleted) >= 1)
     await mgr.shutdown()
 
 
