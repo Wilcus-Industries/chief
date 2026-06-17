@@ -218,6 +218,28 @@ class TelegramTaskIO:
             chat_id=chat_id, message_thread_id=thread_id
         )
 
+    async def send_status(self, thread_key: str, text: str) -> str:
+        """Post a transient status message; return ``"{chat_id}:{message_id}"``."""
+        chat_id, thread_id = _parse(thread_key)
+        sent = await self._bot.send_message(
+            chat_id=chat_id, text=text, message_thread_id=thread_id or None
+        )
+        return f"{chat_id}:{sent.message_id}"
+
+    async def edit_status(self, msg_ref: str, text: str) -> None:
+        """Overwrite a status message in-place."""
+        chat_str, message_str = msg_ref.split(":")
+        await self._bot.edit_message_text(
+            text=text, chat_id=int(chat_str), message_id=int(message_str)
+        )
+
+    async def delete_status(self, msg_ref: str) -> None:
+        """Delete a status message (best-effort; ignores already-gone errors)."""
+        chat_str, message_str = msg_ref.split(":")
+        await self._bot.delete_message(
+            chat_id=int(chat_str), message_id=int(message_str)
+        )
+
     async def send_card(self, route: str, card: ApprovalCard) -> str:
         """Post an approval card to ``route`` (a ``thread_key``); return its msg ref."""
         chat_id, thread_id = _parse(route)

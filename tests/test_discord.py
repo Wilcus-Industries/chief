@@ -1198,6 +1198,46 @@ async def test_send_budget_card_posts_three_choice_buttons() -> None:
     ]
 
 
+# ---- status message methods (spinner, issue #66) ----------------------------
+
+
+async def test_taskio_send_status_returns_ref() -> None:
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=42))
+    io = DiscordTaskIO(cast(discord.Client, _io_client(channel)))
+
+    ref = await io.send_status("100:7", "⏳")
+
+    assert ref == "7:42"  # target is the thread id (7)
+    channel.send.assert_awaited_once_with("⏳")
+
+
+async def test_taskio_edit_status_updates_message() -> None:
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    io = DiscordTaskIO(cast(discord.Client, _io_client(channel)))
+
+    await io.edit_status("7:42", "⌛")
+
+    channel.fetch_message.assert_awaited_once_with(42)
+    message.edit.assert_awaited_once_with(content="⌛")
+
+
+async def test_taskio_delete_status_removes_message() -> None:
+    message = MagicMock()
+    message.delete = AsyncMock()
+    channel = MagicMock()
+    channel.fetch_message = AsyncMock(return_value=message)
+    io = DiscordTaskIO(cast(discord.Client, _io_client(channel)))
+
+    await io.delete_status("7:42")
+
+    channel.fetch_message.assert_awaited_once_with(42)
+    message.delete.assert_awaited_once()
+
+
 # ---- on_interaction (approval button taps) -----------------------------------
 
 
