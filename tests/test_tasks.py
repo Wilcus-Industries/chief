@@ -11,6 +11,7 @@ from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
+from chief.core.agent import NO_REPLY
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     GROUP_MODE_NOTE,
@@ -677,6 +678,51 @@ async def test_owner_per_block_no_text_blocks_posts_nothing(
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_group_empty_turn_posts_no_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Tool-only GROUP turn posts exactly one NO_REPLY; no spinner status is sent.
+
+    Issue #70: the branch ``if per_block_sent == 0 and not self._shows_spinner(task)``
+    must fire for GROUP surface (spinner=False, per_block=True) and deliver NO_REPLY
+    so the owner gets an acknowledgement in the group thread.
+    """
+    io = SpinnerIO()
+    sess = MultiBlockSession(model="m", blocks=[])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:grp", text="go", surface=Surface.GROUP)
+    await _until(lambda: ("-100:grp", NO_REPLY) in io.sends)
+
+    group_sends = [t for k, t in io.sends if k == "-100:grp"]
+    assert group_sends == [NO_REPLY]
+    # GROUP surface never shows a spinner.
+    assert io.status_sent == []
+    await mgr.shutdown()
+
+
+async def test_group_whitespace_only_turn_posts_no_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """All-whitespace GROUP turn posts exactly one NO_REPLY; no spinner status.
+
+    Issue #70: whitespace-only blocks are stripped and discarded (per_block_sent stays
+    zero), so the same NO_REPLY branch fires as for a tool-only turn.
+    """
+    io = SpinnerIO()
+    sess = MultiBlockSession(model="m", blocks=["\n", "   "])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:grp", text="go", surface=Surface.GROUP)
+    await _until(lambda: ("-100:grp", NO_REPLY) in io.sends)
+
+    group_sends = [t for k, t in io.sends if k == "-100:grp"]
+    assert group_sends == [NO_REPLY]
+    # GROUP surface never shows a spinner.
+    assert io.status_sent == []
     await mgr.shutdown()
 
 
