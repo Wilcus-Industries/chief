@@ -1301,11 +1301,19 @@ class TaskManager:
         else:
             task.auto_escalate_suppressed = True
 
-    def _owner_streams_per_block(self, task: _RunningTask) -> bool:
-        """True when the owner's reply should be streamed one block at a time.
+    def _streams_per_block(self, task: _RunningTask) -> bool:
+        """True when the reply should be streamed one text block at a time.
 
-        Scoped to owner home/DM (issue #64): GROUP turns and all guest turns
-        accumulate into a single message (unchanged behaviour for this slice).
+        Owner home/DM (issue #64) and owner GROUP (issue #67) all stream per-block.
+        Guest turns accumulate into a single joined message (unchanged behaviour).
+        """
+        return task.tier == "owner"
+
+    def _shows_spinner(self, task: _RunningTask) -> bool:
+        """True when a ticking spinner status message should run during generation.
+
+        Scoped to owner home/DM (issue #66): GROUP is a shared room where a ticking
+        clock is noise, and guest turns do not get a spinner either.
         """
         return task.tier == "owner" and task.surface in (Surface.HOME, Surface.DM)
 
@@ -1339,13 +1347,12 @@ class TaskManager:
         if not await self._budget_admits():
             return  # paused at budget — skip without spending (owner already nudged)
         await self._maybe_auto_escalate(task, turn.text)
-        per_block = self._owner_streams_per_block(task)
         # Owner home/DM: immediate spinner (replaces the grace-delayed ack).
-        # All other surfaces: the old grace-delayed "working…" ack.
+        # All other surfaces (GROUP, guest): the old grace-delayed "working…" ack.
         # Both are cleaned up in the finally block (ack via cancel; spinner via stop).
         spinner: _SpinnerHandle | None = None
         ack: asyncio.Task[None] | None = None
-        if per_block:
+        if self._shows_spinner(task):
             spinner = await self._start_spinner(task)
         else:
             ack = asyncio.create_task(self._ack_after_grace(task))
@@ -1354,10 +1361,10 @@ class TaskManager:
             async with self._semaphore:
                 task.generating = True
                 await self._set_status(task, RUNNING)
-                # For owner home/DM, each text block is delivered immediately as it
-                # arrives (per-block streaming, issue #64). For group turns and guest
-                # sessions the blocks are accumulated into a single joined message,
-                # preserving unchanged behaviour for those surfaces.
+                # Owner turns (home, DM, group) stream each text block immediately as
+                # it arrives (per-block streaming, issues #64/#67).  Guest turns
+                # accumulate all blocks into a single joined message (unchanged).
+                per_block = self._streams_per_block(task)
                 block_parts: list[str] = []
                 per_block_sent = 0  # non-empty blocks delivered in per-block mode
                 # Watchdog: a turn whose stream never reaches a terminal result (wedged
@@ -1393,13 +1400,17 @@ class TaskManager:
                     spinner = None
                 if task.cancelled:
                     return
-                if not per_block:
-                    # Accumulated path (group/guest): join and emit as one message,
+                if per_block:
+                    # Empty per-block turn: for surfaces without a spinner (GROUP), post
+                    # NO_REPLY so the owner gets an acknowledgement. For home/DM the
+                    # spinner already showed — stay silent.
+                    if per_block_sent == 0 and not self._shows_spinner(task):
+                        await self._emit_final(task, NO_REPLY)
+                else:
+                    # Accumulated path (guest): join and emit as one message,
                     # reproducing the original single-Final behaviour.
                     joined = "".join(block_parts).strip() or NO_REPLY
                     await self._emit_final(task, joined)
-                # Empty per-block turn (tools only, all blocks whitespace): spinner is
-                # already removed; post nothing — the owner saw the spinner flash.
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
