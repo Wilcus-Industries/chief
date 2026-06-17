@@ -515,6 +515,120 @@ async def test_owner_per_block_transcript_records_each_block(
     await mgr.shutdown()
 
 
+# ---- per-block streaming: empty/whitespace block guard (issue #69) ------------
+
+
+class StrictFakeIO(FakeIO):
+    """FakeIO that raises on empty sends, mirroring Telegram/Discord behaviour."""
+
+    async def send(self, thread_key: str, text: str) -> None:
+        if not text.strip():
+            raise ValueError(f"empty send on {thread_key!r}: {text!r}")
+        await super().send(thread_key, text)
+
+
+async def test_owner_per_block_whitespace_block_is_dropped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Whitespace-only block alongside real text is silently dropped; turn succeeds."""
+    io = StrictFakeIO()
+    # SDK sometimes emits a trailing-newline block after a tool call.
+    sess = MultiBlockSession(model="m", blocks=["real reply", "\n", "  "])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "real reply") in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert "real reply" in block_sends
+    # Whitespace blocks must never reach the platform.
+    assert "" not in block_sends
+    assert "\n" not in block_sends
+    assert "  " not in block_sends
+    # The turn must not be marked FAILED.
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_owner_per_block_empty_block_is_dropped(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Empty-string block is silently dropped; the real text still arrives."""
+    io = StrictFakeIO()
+    sess = MultiBlockSession(model="m", blocks=["", "hello", ""])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "hello") in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert block_sends == ["hello"]
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_owner_per_block_all_whitespace_sends_no_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """All-whitespace per-block turn (tool-only) still delivers exactly one NO_REPLY."""
+    io = StrictFakeIO()
+    sess = MultiBlockSession(model="m", blocks=["\n", "   "])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    from chief.core.agent import NO_REPLY
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", NO_REPLY) in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert block_sends == [NO_REPLY]
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_owner_per_block_no_text_blocks_sends_no_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Tool-only turn with zero Final events still posts one NO_REPLY (unchanged)."""
+    io = StrictFakeIO()
+    sess = MultiBlockSession(model="m", blocks=[])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    from chief.core.agent import NO_REPLY
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", NO_REPLY) in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert block_sends == [NO_REPLY]
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.status == OPEN
+    await mgr.shutdown()
+
+
+async def test_owner_per_block_stripped_text_is_sent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Non-empty block with surrounding whitespace is sent stripped."""
+    io = StrictFakeIO()
+    sess = MultiBlockSession(model="m", blocks=["  trimmed reply  "])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "trimmed reply") in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert block_sends == ["trimmed reply"]
+    await mgr.shutdown()
+
+
 async def test_slow_turn_acks_then_replies(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
