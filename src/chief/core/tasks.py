@@ -5,9 +5,9 @@ in a registry. Each task owns an input queue drained by a single consumer, so it
 run in order. Concurrency across tasks is bounded by a semaphore (only *generating*
 turns hold a slot — idle sessions cost nothing). Behaviours:
 
-- **Hybrid inline/background.** A turn taking longer than ``grace_seconds`` posts a
-  "working…" ack; fast turns just reply, feeling synchronous. All output goes through
-  :class:`TaskIO`, so "inline" and "background" share a code path — only timing differs.
+- **Progress feedback.** Owner home/DM turns show a ticking ⏳ spinner while generating
+  (issue #66); other surfaces stay silent until the reply. All output goes through
+  :class:`TaskIO`, so every surface shares one code path.
 - **Steering (auto-detect with Haiku).** A message arriving mid-turn is queued as the
   next turn; if ``stop_intent`` flags it as a stop/redirect it also ``interrupt()``s the
   running turn. ``/cancel`` interrupts deterministically.
@@ -98,7 +98,6 @@ from .session import Final, TaskSession, TurnEvent
 
 logger = logging.getLogger("chief.core.tasks")
 
-WORKING_ACK = "working on it…"
 #: Spinner frames that alternate while an owner home/DM turn is running (issue #66).
 SPINNER_FRAMES: tuple[str, str] = ("⏳", "⌛")
 #: How often (seconds) the spinner frame toggles.
@@ -368,7 +367,6 @@ class TaskManager:
         classifier_model: str,
         platform: str = "telegram",
         concurrency: int = 3,
-        grace_seconds: float = 6.0,
         turn_timeout: float = 300.0,
         idle_archive_seconds: float = 3600.0,
         compaction_idle_seconds: float = 3600.0,
@@ -415,7 +413,6 @@ class TaskManager:
         self._owner_model = owner_model
         self._classifier_model = classifier_model
         self._platform = platform
-        self._grace_seconds = grace_seconds
         self._turn_timeout = turn_timeout
         self._idle_archive_seconds = idle_archive_seconds
         self._compaction_idle_seconds = compaction_idle_seconds
@@ -1371,17 +1368,14 @@ class TaskManager:
         if not await self._budget_admits():
             return  # paused at budget — skip without spending (owner already nudged)
         await self._maybe_auto_escalate(task, turn.text)
-        # Owner home/DM: immediate spinner (replaces the grace-delayed ack).
-        # All other surfaces (GROUP, guest): the old grace-delayed "working…" ack.
-        # Both are cleaned up in the finally block (ack via cancel; spinner via stop).
+        # Owner home/DM: immediate ticking spinner while generating (issue #66). Other
+        # surfaces (GROUP, guest) stay silent until the reply. The spinner is cleaned up
+        # in the finally block (via stop).
         spinner: _SpinnerHandle | None = None
-        ack: asyncio.Task[None] | None = None
         if self._shows_spinner(task):
             spinner = await self._start_spinner(task)
             if spinner is not None:
                 await self._persist_spinner_ref(task, spinner.msg_ref)
-        else:
-            ack = asyncio.create_task(self._ack_after_grace(task))
         task.transcript.append(("owner", turn.text))
         try:
             async with self._semaphore:
@@ -1416,11 +1410,8 @@ class TaskManager:
                                 block_parts.append(event.text)
                         else:
                             await self._io.send(task.thread_key, f"· {event.text}")
-                # Stop the spinner/ack now (clean path), so the spinner is gone before
-                # any reply blocks arrive and before the timeout/error notes.
-                if ack is not None:
-                    ack.cancel()
-                    ack = None
+                # Stop the spinner now (clean path), so it is gone before any reply
+                # blocks arrive and before the timeout/error notes.
                 if spinner is not None:
                     await spinner.stop()
                     spinner = None
@@ -1459,11 +1450,8 @@ class TaskManager:
             await self._set_status(task, FAILED)
             await self._io.send(task.thread_key, "⚠️ that task hit an error.")
         finally:
-            # Ensure the ack timer and spinner are always cleaned up — including on
-            # timeout and error paths where the try block exits before reaching the
-            # mid-body cleanup above.
-            if ack is not None:
-                ack.cancel()
+            # Ensure the spinner is always cleaned up — including on timeout and error
+            # paths where the try block exits before the mid-body cleanup above.
             if spinner is not None:
                 await spinner.stop()
             task.generating = False
@@ -1505,13 +1493,6 @@ class TaskManager:
         else:
             await self._io.send(task.thread_key, text)
         task.transcript.append(("chief", text))
-
-    async def _ack_after_grace(self, task: _RunningTask) -> None:
-        try:
-            await asyncio.sleep(self._grace_seconds)
-        except asyncio.CancelledError:
-            return
-        await self._io.send(task.thread_key, WORKING_ACK)
 
     def _arm_idle(self, task: _RunningTask) -> None:
         if task.cancelled or self._tasks.get(task.thread_key) is not task:
