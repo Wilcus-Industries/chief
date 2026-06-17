@@ -60,10 +60,6 @@ class Task(Base):
     sdk_session_id: Mapped[str | None]
     #: Per-thread active Google account label (issue #45). None = no account pinned.
     active_account: Mapped[str | None]
-    #: Opaque platform message reference for the in-flight spinner (issue #68).
-    #: Set when the spinner is posted; cleared on clean turn completion. Recovery
-    #: reads this to delete any orphaned spinner after a process crash mid-turn.
-    spinner_msg_ref: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

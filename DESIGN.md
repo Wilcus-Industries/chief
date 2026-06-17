@@ -159,9 +159,8 @@ What happens between "you send a task" and "it's done." **Decided:** hybrid exec
 bounded parallelism, milestone progress, live steering.
 
 - **Live background sessions.** Every task runs as a live background session from the
-  start, posting milestones as it works. Owner home/DM turns show a ticking ⏳ spinner
-  while generating (issue #66); other surfaces stay silent until the reply. One
-  mechanism, every surface.
+  start, posting milestones as it works. All surfaces stay silent until the reply
+  streams back. One mechanism, every surface.
 - **Lifecycle:** `running → waiting(input|approval) → done | failed | cancelled`. Plus an
   idle **open** state (session alive, awaiting your next message). Persisted, so chief
   survives a restart mid-task (resume the SDK session by id).
@@ -695,8 +694,8 @@ chief/
    **gate** (allow/ask/deny); ASK → **approval flow** blocks the call (task → `waiting`);
    allowed calls execute (MCP / sandbox / workspace), and **tool results are untrusted data**.
    Milestones post on tool events; **usage is metered per call** against the budget.
-4. **Reply** streams back, smart-split / as files. Owner home/DM show a ⏳ spinner while
-   generating; other surfaces stay silent until the reply.
+4. **Reply** streams back, smart-split / as files. All surfaces stay silent until the
+   reply streams back.
 5. **Memory writes** happen in-session whenever chief judges something worth keeping (auto-
    notify on save). **Idle ~1 hr →** mark done + **auto-archive** the thread (reopens on
    next message).
