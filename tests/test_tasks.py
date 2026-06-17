@@ -481,26 +481,53 @@ async def test_owner_milestones_interleaved_with_blocks(
     await mgr.shutdown()
 
 
-async def test_group_owner_turn_accumulates_blocks_into_one_message(
+async def test_group_owner_turn_streams_each_block_as_separate_message(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A GROUP owner turn accumulates all blocks into one joined message (unchanged)."""
+    """A GROUP owner turn delivers each text block as its own message (issue #67)."""
     io = FakeIO()
     sess = MultiBlockSession(model="m", blocks=["part one", "part two"])
     mgr = _manager(session_factory, io, factory=_one(sess))
 
     await mgr.dispatch(thread_key="-100:grp", text="go", surface=Surface.GROUP)
-    await _until(lambda: any("part one" in t for _, t in io.sends))
+    await _until(lambda: ("-100:grp", "part two") in io.sends)
 
-    # The two blocks should appear joined in a single send, not two separate ones.
+    # Each block is a separate send, in order — NOT joined into one message.
     group_sends = [t for k, t in io.sends if k == "-100:grp"]
-    joined = "".join(group_sends)
-    assert "part one" in joined and "part two" in joined
-    # Exactly one send contains the content (not two separate block sends).
-    assert sum(1 for t in group_sends if "part one" in t) == 1
-    assert sum(1 for t in group_sends if "part two" in t) == 1
-    content_send = next(t for t in group_sends if "part one" in t)
-    assert "part two" in content_send  # both blocks in the same message
+    assert "part one" in group_sends
+    assert "part two" in group_sends
+    assert group_sends.index("part one") < group_sends.index("part two")
+    # They must be distinct sends (not concatenated).
+    assert not any("part one" in t and "part two" in t for t in group_sends)
+    await mgr.shutdown()
+
+
+async def test_group_owner_turn_no_spinner_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GROUP turns stream per-block but do not post a spinner status message."""
+    io = FakeIO()
+    sess = MultiBlockSession(
+        model="m",
+        blocks=["group reply"],
+        milestones=[Milestone(text="using Bash")],
+    )
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:grp", text="go", surface=Surface.GROUP)
+    await _until(lambda: ("-100:grp", "group reply") in io.sends)
+
+    # The reply itself must arrive per-block.
+    group_sends = [t for k, t in io.sends if k == "-100:grp"]
+    assert "group reply" in group_sends
+    # Spinner predicate: the TaskManager must report that group turns do NOT show a
+    # spinner (separate from per-block streaming).  We verify the predicate directly
+    # rather than the not-yet-implemented spinner UI (#66), so the test stays stable
+    # during the parallel merge.
+    task = mgr._tasks["-100:grp"]
+    assert not mgr._shows_spinner(task), (
+        "_shows_spinner must be False for GROUP surface"
+    )
     await mgr.shutdown()
 
 
