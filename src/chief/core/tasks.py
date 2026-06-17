@@ -31,7 +31,7 @@ import logging
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
@@ -98,6 +98,10 @@ from .session import Final, TaskSession, TurnEvent
 logger = logging.getLogger("chief.core.tasks")
 
 WORKING_ACK = "working on it…"
+#: Spinner frames that alternate while an owner home/DM turn is running (issue #66).
+SPINNER_FRAMES: tuple[str, str] = ("⏳", "⌛")
+#: How often (seconds) the spinner frame toggles.
+SPINNER_TICK = 2.0
 #: User-visible note when the per-turn watchdog fires: a turn ran past
 #: ``turn_timeout`` without a terminal result (a wedged SDK stream / hung tool call),
 #: so the engine tears the session down rather than freezing the task forever.
@@ -182,6 +186,9 @@ class TaskIO(Protocol):
     ) -> None: ...
     async def create_thread(self, *, like_thread_key: str, title: str) -> str: ...
     async def archive_thread(self, thread_key: str) -> None: ...
+    # Adapters may also implement send_status / edit_status / delete_status for
+    # the owner home/DM spinner (issue #66). The engine checks via hasattr before
+    # calling them, so omitting these methods is fully backward-compatible.
 
 
 class SessionProto(Protocol):
@@ -271,6 +278,83 @@ class _RunningTask:
     auto_escalate_suppressed: bool = False
 
 
+class _StatusIO(Protocol):
+    """The optional status-message slice of :class:`TaskIO` (spinner, issue #66).
+
+    Adapters implement these three methods to enable the ticking spinner on owner
+    home/DM turns. The engine detects support via ``hasattr`` and casts to this
+    Protocol — adapters that omit it stay compatible (no spinner, no error).
+    """
+
+    async def send_status(self, thread_key: str, text: str) -> str:
+        """Post a transient status message; return an opaque handle (``msg_ref``)."""
+        ...
+
+    async def edit_status(self, msg_ref: str, text: str) -> None:
+        """Overwrite a previously posted status message in-place."""
+        ...
+
+    async def delete_status(self, msg_ref: str) -> None:
+        """Remove a previously posted status message."""
+        ...
+
+
+@dataclass
+class _SpinnerHandle:
+    """A live spinner for an owner home/DM turn (issue #66).
+
+    Holds the platform message reference (``msg_ref``) so the tick loop can
+    edit it in place, the asyncio task driving the tick loop so the engine can
+    cancel it from any exit path, and the status-capable IO slice used for the
+    delete-on-stop call.
+    """
+
+    msg_ref: str
+    tick_task: "asyncio.Task[None]"
+    status_io: "_StatusIO"
+
+    async def stop(self) -> None:
+        """Stop the tick loop and delete the spinner message.
+
+        Best-effort: a failed delete is logged but does not re-raise, because
+        cleanup must not block or swallow an outer error.
+        """
+        self.tick_task.cancel()
+        try:
+            await self.tick_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await self.status_io.delete_status(self.msg_ref)
+        except Exception:
+            logger.debug("spinner delete failed", exc_info=True)
+
+
+async def _tick_spinner(
+    io: "_StatusIO",
+    msg_ref: str,
+    *,
+    tick: float = SPINNER_TICK,
+    sleep: "Callable[[float], Awaitable[None]] | None" = None,
+) -> None:
+    """Alternate SPINNER_FRAMES every ``tick`` seconds until cancelled.
+
+    The ``sleep`` parameter is injectable for testing (fake clock).
+    """
+    _sleep = sleep if sleep is not None else asyncio.sleep
+    frame_index = 0
+    while True:
+        try:
+            await _sleep(tick)
+        except asyncio.CancelledError:
+            return
+        frame_index = 1 - frame_index
+        try:
+            await io.edit_status(msg_ref, SPINNER_FRAMES[frame_index])
+        except Exception:
+            logger.debug("spinner edit failed", exc_info=True)
+
+
 class TaskManager:
     """Owns the live task sessions and the rules that drive them."""
 
@@ -322,6 +406,8 @@ class TaskManager:
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
+        spinner_tick: float = SPINNER_TICK,
+        spinner_sleep: "Callable[[float], Awaitable[None]] | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -373,6 +459,11 @@ class TaskManager:
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
+        # Spinner (issue #66): tick interval and injectable sleep for testing.
+        self._spinner_tick = spinner_tick
+        self._spinner_sleep: Callable[[float], Awaitable[None]] = (
+            spinner_sleep if spinner_sleep is not None else asyncio.sleep
+        )
         #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
         #: next time the budget reports a non-paused mode, so each pause acks once.
         self._paused_ack_sent = False
@@ -1218,11 +1309,46 @@ class TaskManager:
         """
         return task.tier == "owner" and task.surface in (Surface.HOME, Surface.DM)
 
+    async def _start_spinner(self, task: _RunningTask) -> _SpinnerHandle | None:
+        """Post the initial spinner frame and start the tick loop (owner home/DM only).
+
+        Returns ``None`` if the IO does not support status messages (no ``send_status``
+        method), so existing adapters that have not implemented the three status methods
+        stay compatible.
+        """
+        if not hasattr(self._io, "send_status"):
+            return None
+        # Cast is safe: hasattr confirmed the three methods are present.
+        status_io = cast("_StatusIO", self._io)
+        try:
+            msg_ref = await status_io.send_status(task.thread_key, SPINNER_FRAMES[0])
+        except Exception:
+            logger.debug("spinner post failed", exc_info=True)
+            return None
+        tick_task = asyncio.create_task(
+            _tick_spinner(
+                status_io,
+                msg_ref,
+                tick=self._spinner_tick,
+                sleep=self._spinner_sleep,
+            )
+        )
+        return _SpinnerHandle(msg_ref=msg_ref, tick_task=tick_task, status_io=status_io)
+
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
         if not await self._budget_admits():
             return  # paused at budget — skip without spending (owner already nudged)
         await self._maybe_auto_escalate(task, turn.text)
-        ack = asyncio.create_task(self._ack_after_grace(task))
+        per_block = self._owner_streams_per_block(task)
+        # Owner home/DM: immediate spinner (replaces the grace-delayed ack).
+        # All other surfaces: the old grace-delayed "working…" ack.
+        # Both are cleaned up in the finally block (ack via cancel; spinner via stop).
+        spinner: _SpinnerHandle | None = None
+        ack: asyncio.Task[None] | None = None
+        if per_block:
+            spinner = await self._start_spinner(task)
+        else:
+            ack = asyncio.create_task(self._ack_after_grace(task))
         task.transcript.append(("owner", turn.text))
         try:
             async with self._semaphore:
@@ -1232,7 +1358,6 @@ class TaskManager:
                 # arrives (per-block streaming, issue #64). For group turns and guest
                 # sessions the blocks are accumulated into a single joined message,
                 # preserving unchanged behaviour for those surfaces.
-                per_block = self._owner_streams_per_block(task)
                 block_parts: list[str] = []
                 per_block_sent = 0  # non-empty blocks delivered in per-block mode
                 # Watchdog: a turn whose stream never reaches a terminal result (wedged
@@ -1258,19 +1383,23 @@ class TaskManager:
                                 block_parts.append(event.text)
                         else:
                             await self._io.send(task.thread_key, f"· {event.text}")
-                ack.cancel()
+                # Stop the spinner/ack now (clean path), so the spinner is gone before
+                # any reply blocks arrive and before the timeout/error notes.
+                if ack is not None:
+                    ack.cancel()
+                    ack = None
+                if spinner is not None:
+                    await spinner.stop()
+                    spinner = None
                 if task.cancelled:
                     return
-                if per_block:
-                    # Genuinely text-free turns (tools only, all blocks whitespace)
-                    # still need one acknowledgement so the owner isn't left in silence.
-                    if per_block_sent == 0:
-                        await self._emit_final(task, NO_REPLY)
-                else:
+                if not per_block:
                     # Accumulated path (group/guest): join and emit as one message,
                     # reproducing the original single-Final behaviour.
                     joined = "".join(block_parts).strip() or NO_REPLY
                     await self._emit_final(task, joined)
+                # Empty per-block turn (tools only, all blocks whitespace): spinner is
+                # already removed; post nothing — the owner saw the spinner flash.
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
@@ -1282,7 +1411,6 @@ class TaskManager:
                 # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
         except TimeoutError:
-            ack.cancel()
             logger.warning("task turn timed out", extra={"thread_key": task.thread_key})
             await self._set_status(task, FAILED)
             await self._io.send(task.thread_key, TURN_TIMEOUT_NOTE)
@@ -1292,7 +1420,13 @@ class TaskManager:
             await self._set_status(task, FAILED)
             await self._io.send(task.thread_key, "⚠️ that task hit an error.")
         finally:
-            ack.cancel()
+            # Ensure the ack timer and spinner are always cleaned up — including on
+            # timeout and error paths where the try block exits before reaching the
+            # mid-body cleanup above.
+            if ack is not None:
+                ack.cancel()
+            if spinner is not None:
+                await spinner.stop()
             task.generating = False
 
     async def _reset_session(self, task: _RunningTask) -> None:

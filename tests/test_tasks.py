@@ -16,6 +16,7 @@ from chief.core.tasks import (
     GROUP_MODE_NOTE,
     MEMORY_TOOLS,
     PAUSED_BUDGET_ACK,
+    SPINNER_FRAMES,
     TURN_TIMEOUT_NOTE,
     WEB_META_TOOLS,
     WORKING_ACK,
@@ -199,6 +200,33 @@ class FakeIO:
         self.archived.append(thread_key)
 
 
+class SpinnerIO(FakeIO):
+    """FakeIO extended with status-message methods (send/edit/delete) for spinner tests.
+
+    Tracks sent status messages as (thread_key, text), edits by msg_ref, and deletes.
+    A sequential message-id counter keeps refs unique per test.
+    """
+
+    def __init__(self, next_thread: str = "-100:99") -> None:
+        super().__init__(next_thread=next_thread)
+        self.status_sent: list[tuple[str, str]] = []
+        self.status_edits: list[tuple[str, str]] = []
+        self.status_deleted: list[str] = []
+        self._next_msg_id = 100
+
+    async def send_status(self, thread_key: str, text: str) -> str:
+        self.status_sent.append((thread_key, text))
+        msg_id = self._next_msg_id
+        self._next_msg_id += 1
+        return f"{thread_key.split(':')[0]}:{msg_id}"
+
+    async def edit_status(self, msg_ref: str, text: str) -> None:
+        self.status_edits.append((msg_ref, text))
+
+    async def delete_status(self, msg_ref: str) -> None:
+        self.status_deleted.append(msg_ref)
+
+
 async def _no(*args: Any, **kwargs: Any) -> bool:
     return False
 
@@ -218,7 +246,7 @@ def _one(session: FakeSession) -> Factory:
 
 def _manager(
     session_factory: async_sessionmaker[AsyncSession],
-    io: FakeIO,
+    io: Any,
     *,
     factory: Factory,
     stop: Callable[..., Any] = _no,
@@ -236,6 +264,8 @@ def _manager(
     opus_auto_detect: bool = False,
     is_complex: Callable[..., Any] = _no,
     owner_model_opus: str = "claude-opus-4-8",
+    spinner_tick: float = 1000.0,
+    spinner_sleep: Callable[..., Any] | None = None,
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -258,6 +288,8 @@ def _manager(
         opus_auto_detect=opus_auto_detect,
         is_complex=is_complex,
         owner_model_opus=owner_model_opus,
+        spinner_tick=spinner_tick,
+        spinner_sleep=spinner_sleep,
     )
 
 
@@ -571,42 +603,50 @@ async def test_owner_per_block_empty_block_is_dropped(
     await mgr.shutdown()
 
 
-async def test_owner_per_block_all_whitespace_sends_no_reply(
+async def test_owner_per_block_all_whitespace_posts_nothing(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """All-whitespace per-block turn (tool-only) still delivers exactly one NO_REPLY."""
+    """All-whitespace owner DM turn posts nothing — spinner removed silently.
+
+    Issue #66: the spinner is deleted and no NO_REPLY is sent for owner
+    home/DM; the owner saw the spinner flash, so silence is correct.
+    """
     io = StrictFakeIO()
     sess = MultiBlockSession(model="m", blocks=["\n", "   "])
     mgr = _manager(session_factory, io, factory=_one(sess))
 
-    from chief.core.agent import NO_REPLY
-
     await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
-    await _until(lambda: ("-100:5", NO_REPLY) in io.sends)
+    # Wait for the turn to settle — generating=False means the consumer exited cleanly.
+    await _until(lambda: not mgr._tasks["-100:5"].generating)
+    await asyncio.sleep(0.05)  # let the consumer fully drain
 
     block_sends = [t for k, t in io.sends if k == "-100:5"]
-    assert block_sends == [NO_REPLY]
+    # Nothing should be posted: the spinner (if any) was deleted, no NO_REPLY sent.
+    assert block_sends == []
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == OPEN
     await mgr.shutdown()
 
 
-async def test_owner_per_block_no_text_blocks_sends_no_reply(
+async def test_owner_per_block_no_text_blocks_posts_nothing(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Tool-only turn with zero Final events still posts one NO_REPLY (unchanged)."""
+    """Tool-only owner DM turn with zero Final events posts nothing (issue #66).
+
+    Previously posted NO_REPLY; now the spinner is the only indicator and is
+    deleted silently when the turn ends.
+    """
     io = StrictFakeIO()
     sess = MultiBlockSession(model="m", blocks=[])
     mgr = _manager(session_factory, io, factory=_one(sess))
 
-    from chief.core.agent import NO_REPLY
-
     await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
-    await _until(lambda: ("-100:5", NO_REPLY) in io.sends)
+    await _until(lambda: not mgr._tasks["-100:5"].generating)
+    await asyncio.sleep(0.05)
 
     block_sends = [t for k, t in io.sends if k == "-100:5"]
-    assert block_sends == [NO_REPLY]
+    assert block_sends == []
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == OPEN
@@ -629,20 +669,233 @@ async def test_owner_per_block_stripped_text_is_sent(
     await mgr.shutdown()
 
 
-async def test_slow_turn_acks_then_replies(
+async def test_slow_group_turn_acks_then_replies(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """GROUP owner turns use the grace-delayed ack; spinner is owner home/DM only."""
     io = FakeIO()
     gate = asyncio.Event()
     sess = FakeSession(model="m", gate=gate)
     mgr = _manager(session_factory, io, factory=_one(sess), grace=0.01)
 
-    await mgr.dispatch(thread_key="-100:5", text="slow")
-    await _until(lambda: ("-100:5", WORKING_ACK) in io.sends)
-    assert ("-100:5", "reply:slow") not in io.sends
+    await mgr.dispatch(thread_key="-100:grp", text="slow", surface=Surface.GROUP)
+    await _until(lambda: ("-100:grp", WORKING_ACK) in io.sends)
+    assert ("-100:grp", "reply:slow") not in io.sends
 
     gate.set()
-    await _until(lambda: ("-100:5", "reply:slow") in io.sends)
+    await _until(lambda: ("-100:grp", "reply:slow") in io.sends)
+    await mgr.shutdown()
+
+
+# ---- spinner (issue #66) -------------------------------------------------------
+
+
+async def test_spinner_appears_at_turn_start_and_deleted_on_completion(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Spinner is posted immediately and deleted when the turn finishes cleanly."""
+    io = SpinnerIO()
+    gate = asyncio.Event()
+    sess = FakeSession(model="m", gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi", surface=Surface.DM)
+    await _until(lambda: len(io.status_sent) == 1)
+    assert io.status_sent[0] == ("-100:5", SPINNER_FRAMES[0])
+    assert io.status_deleted == []  # spinner still alive
+
+    gate.set()
+    await _until(lambda: len(io.status_deleted) == 1)
+    assert io.status_deleted[0] == "-100:100"  # the spinner's msg_ref
+    await mgr.shutdown()
+
+
+async def test_spinner_fast_turn_flashes_then_removed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fast turn posts the spinner immediately, then removes it on completion."""
+    io = SpinnerIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="quick", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "reply:quick") in io.sends)
+
+    # Spinner was posted at start and deleted at end (even for a fast turn).
+    assert len(io.status_sent) == 1
+    assert len(io.status_deleted) == 1
+    await mgr.shutdown()
+
+
+async def test_spinner_frame_advances_on_tick(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Injected clock: spinner alternates frames on each tick."""
+    io = SpinnerIO()
+    gate = asyncio.Event()
+    sess = FakeSession(model="m", gate=gate)
+
+    # Use a fake sleep that resolves immediately after the first tick is observed.
+    tick_count = {"n": 0}
+    tick_event = asyncio.Event()
+
+    async def fake_sleep(seconds: float) -> None:
+        tick_count["n"] += 1
+        tick_event.set()
+        # Yield control so the edit call can run before we loop.
+        await asyncio.sleep(0)
+
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        spinner_sleep=fake_sleep,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    # Wait for at least one tick edit.
+    await _until(lambda: len(io.status_edits) >= 1)
+
+    # The edit should contain the second frame (frame index toggled by the tick).
+    assert any(text == SPINNER_FRAMES[1] for _, text in io.status_edits)
+
+    gate.set()
+    await _until(lambda: len(io.status_deleted) == 1)
+    await mgr.shutdown()
+
+
+async def test_spinner_deleted_on_cancel(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Cancel stops the spinner and deletes the message before posting nothing."""
+    io = SpinnerIO()
+    gate = asyncio.Event()
+    sess = FakeSession(model="m", gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="long", surface=Surface.DM)
+    await _until(lambda: len(io.status_sent) == 1)
+
+    await mgr.cancel("-100:5")
+    await _until(lambda: len(io.status_deleted) == 1)
+    # No text reply after cancel.
+    assert not any("reply:" in t for _, t in io.sends if _ == "-100:5")
+    await mgr.shutdown()
+
+
+async def test_spinner_deleted_on_turn_timeout(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Turn timeout stops the tick loop and deletes the spinner."""
+    io = SpinnerIO()
+
+    class HangIO(SpinnerIO):
+        pass
+
+    io = HangIO()
+    sess = HangSession(model="m")
+    mgr = _manager(
+        session_factory, io, factory=_one(sess), turn_timeout=0.05
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hang", surface=Surface.DM)
+    await _until(lambda: ("-100:5", TURN_TIMEOUT_NOTE) in io.sends)
+
+    assert len(io.status_deleted) == 1  # spinner was cleaned up before the note
+    await mgr.shutdown()
+
+
+async def test_spinner_deleted_on_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An exception in the turn stops the tick loop and deletes the spinner."""
+
+    class BoomSession(FakeSession):
+        async def run_turn(
+            self, text: str, attachments: Sequence[Attachment] = ()
+        ) -> AsyncIterator[TurnEvent]:
+            self.queries.append(text)
+            for _ in ():
+                yield Final(text="")
+            raise RuntimeError("boom")
+
+    io = SpinnerIO()
+    sess = BoomSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "⚠️ that task hit an error.") in io.sends)
+
+    assert len(io.status_deleted) == 1  # spinner cleaned up before error note
+    await mgr.shutdown()
+
+
+async def test_spinner_empty_turn_deletes_and_posts_nothing(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Empty owner DM turn (tool-only): spinner deleted, no text reply posted."""
+    io = SpinnerIO()
+    sess = MultiBlockSession(model="m", blocks=[])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: len(io.status_deleted) == 1)
+
+    assert io.sends == []  # no text was posted
+    assert len(io.status_sent) == 1
+    assert len(io.status_deleted) == 1
+    await mgr.shutdown()
+
+
+async def test_spinner_not_shown_for_group_turns(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GROUP turns get no spinner; only owner home/DM turns use it."""
+    io = SpinnerIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:grp", text="hi", surface=Surface.GROUP)
+    await _until(lambda: any("reply:" in t for _, t in io.sends))
+
+    assert io.status_sent == []  # no spinner for GROUP
+    await mgr.shutdown()
+
+
+async def test_spinner_not_shown_for_guest_turns(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Guest turns get no spinner; only owner home/DM turns use it."""
+    io = SpinnerIO()
+    sessions: list[FakeSession] = []
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        sess = FakeSession(model=model)
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(session_factory, io, factory=factory)
+
+    await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
+    await _until(lambda: any("reply:" in t for _, t in io.sends))
+
+    assert io.status_sent == []  # no spinner for guest
+    await mgr.shutdown()
+
+
+async def test_spinner_not_shown_when_io_lacks_send_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Adapters without send_status (legacy IO) work as before — no spinner."""
+    io = FakeIO()  # no send_status method
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    # FakeIO has no send_status so no spinner — turn completes cleanly.
+    assert ("-100:5", "reply:hi") in io.sends
     await mgr.shutdown()
 
 

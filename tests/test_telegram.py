@@ -1147,6 +1147,39 @@ async def test_taskio_archive_skips_general() -> None:
     bot.close_forum_topic.assert_not_awaited()
 
 
+# ---- status message methods (spinner, issue #66) ----------------------------
+
+
+async def test_taskio_send_status_returns_ref() -> None:
+    bot = AsyncMock()
+    bot.send_message.return_value = SimpleNamespace(message_id=42)
+
+    ref = await TelegramTaskIO(bot).send_status("-100:7", "⏳")
+
+    assert ref == "-100:42"
+    bot.send_message.assert_awaited_once_with(
+        chat_id=-100, text="⏳", message_thread_id=7
+    )
+
+
+async def test_taskio_edit_status_calls_edit() -> None:
+    bot = AsyncMock()
+
+    await TelegramTaskIO(bot).edit_status("-100:42", "⌛")
+
+    bot.edit_message_text.assert_awaited_once_with(
+        text="⌛", chat_id=-100, message_id=42
+    )
+
+
+async def test_taskio_delete_status_calls_delete() -> None:
+    bot = AsyncMock()
+
+    await TelegramTaskIO(bot).delete_status("-100:42")
+
+    bot.delete_message.assert_awaited_once_with(chat_id=-100, message_id=42)
+
+
 # ---- split_message -----------------------------------------------------------
 
 
