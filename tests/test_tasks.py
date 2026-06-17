@@ -335,6 +335,186 @@ async def test_short_reply_sent_as_text_not_file(
     await mgr.shutdown()
 
 
+# ---- per-block reply streaming (issue #64) -----------------------------------
+
+
+class MultiBlockSession(FakeSession):
+    """A session that yields one Final per entry in ``blocks``, interleaved with
+    ``milestones`` and then ``after_milestones``.  Models the new per-block stream
+    the real TaskSession now produces.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        blocks: list[str],
+        milestones: list[Milestone] | None = None,
+        after_milestones: list[Milestone] | None = None,
+    ) -> None:
+        super().__init__(model=model)
+        self._blocks = blocks
+        self._milestones_before = milestones or []
+        self._milestones_after = after_milestones or []
+
+    async def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        self.queries.append(text)
+        self.attachments_seen.append(tuple(attachments))
+        self.last_cost_usd = 0.0
+        for ms in self._milestones_before:
+            yield ms
+        for block_text in self._blocks:
+            yield Final(text=block_text)
+        for ms in self._milestones_after:
+            yield ms
+        self.session_id = f"sess-{text}"
+
+
+async def test_owner_dm_multi_block_sends_each_block_immediately(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Owner DM turn with multiple text blocks delivers each as a separate message."""
+    io = FakeIO()
+    sess = MultiBlockSession(model="m", blocks=["first block", "second block", "third"])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "third") in io.sends)
+
+    # Each block is a separate send, in order, with no joining.
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert "first block" in block_sends
+    assert "second block" in block_sends
+    assert "third" in block_sends
+    assert block_sends.index("first block") < block_sends.index("second block")
+    assert block_sends.index("second block") < block_sends.index("third")
+    await mgr.shutdown()
+
+
+async def test_owner_home_multi_block_sends_each_block_immediately(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An owner HOME turn delivers each block separately (same as DM)."""
+    io = FakeIO()
+    sess = MultiBlockSession(model="m", blocks=["block A", "block B"])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.HOME)
+    await _until(lambda: ("-100:5", "block B") in io.sends)
+
+    block_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert "block A" in block_sends
+    assert "block B" in block_sends
+    assert block_sends.index("block A") < block_sends.index("block B")
+    await mgr.shutdown()
+
+
+async def test_owner_single_block_still_one_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A plain no-tool turn with one text block still arrives as a single message."""
+    io = FakeIO()
+    sess = MultiBlockSession(model="m", blocks=["just one reply"])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "just one reply") in io.sends)
+
+    assert [t for k, t in io.sends if k == "-100:5"] == ["just one reply"]
+    await mgr.shutdown()
+
+
+async def test_owner_milestones_interleaved_with_blocks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Milestone lines appear interleaved with per-block Final deliveries."""
+    io = FakeIO()
+    sess = MultiBlockSession(
+        model="m",
+        blocks=["result text"],
+        milestones=[Milestone(text="using Bash")],
+    )
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "result text") in io.sends)
+
+    thread_sends = [t for k, t in io.sends if k == "-100:5"]
+    assert "· using Bash" in thread_sends
+    assert "result text" in thread_sends
+    # milestone comes before the block text (milestones emit before Finals here)
+    assert thread_sends.index("· using Bash") < thread_sends.index("result text")
+    await mgr.shutdown()
+
+
+async def test_group_owner_turn_accumulates_blocks_into_one_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A GROUP owner turn accumulates all blocks into one joined message (unchanged)."""
+    io = FakeIO()
+    sess = MultiBlockSession(model="m", blocks=["part one", "part two"])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:grp", text="go", surface=Surface.GROUP)
+    await _until(lambda: any("part one" in t for _, t in io.sends))
+
+    # The two blocks should appear joined in a single send, not two separate ones.
+    group_sends = [t for k, t in io.sends if k == "-100:grp"]
+    joined = "".join(group_sends)
+    assert "part one" in joined and "part two" in joined
+    # Exactly one send contains the content (not two separate block sends).
+    assert sum(1 for t in group_sends if "part one" in t) == 1
+    assert sum(1 for t in group_sends if "part two" in t) == 1
+    content_send = next(t for t in group_sends if "part one" in t)
+    assert "part two" in content_send  # both blocks in the same message
+    await mgr.shutdown()
+
+
+async def test_guest_dm_turn_accumulates_blocks_into_one_message(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A guest DM turn accumulates all blocks into one joined message (unchanged)."""
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        sess = MultiBlockSession(model=model, blocks=["guest A", "guest B"])
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(session_factory, io, factory=factory)
+
+    await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
+    await _until(lambda: any("guest A" in t for _, t in io.sends))
+
+    guest_sends = [t for k, t in io.sends if k == "555:0"]
+    # Both blocks joined into one send.
+    assert sum(1 for t in guest_sends if "guest A" in t) == 1
+    content_send = next(t for t in guest_sends if "guest A" in t)
+    assert "guest B" in content_send
+    await mgr.shutdown()
+
+
+async def test_owner_per_block_transcript_records_each_block(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each delivered block is recorded in the task transcript (issue #64)."""
+    io = FakeIO()
+    sess = MultiBlockSession(model="m", blocks=["block1", "block2"])
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
+    await _until(lambda: ("-100:5", "block2") in io.sends)
+
+    task = mgr._tasks["-100:5"]
+    chief_entries = [text for role, text in task.transcript if role == "chief"]
+    assert "block1" in chief_entries
+    assert "block2" in chief_entries
+    await mgr.shutdown()
+
+
 async def test_slow_turn_acks_then_replies(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

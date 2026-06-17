@@ -91,6 +91,7 @@ from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
 from . import classify
+from .agent import NO_REPLY
 from .personas import build_system_prompt
 from .session import Final, TaskSession, TurnEvent
 
@@ -1207,6 +1208,14 @@ class TaskManager:
         else:
             task.auto_escalate_suppressed = True
 
+    def _owner_streams_per_block(self, task: _RunningTask) -> bool:
+        """True when the owner's reply should be streamed one block at a time.
+
+        Scoped to owner home/DM (issue #64): GROUP turns and all guest turns
+        accumulate into a single message (unchanged behaviour for this slice).
+        """
+        return task.tier == "owner" and task.surface in (Surface.HOME, Surface.DM)
+
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
         if not await self._budget_admits():
             return  # paused at budget — skip without spending (owner already nudged)
@@ -1217,7 +1226,12 @@ class TaskManager:
             async with self._semaphore:
                 task.generating = True
                 await self._set_status(task, RUNNING)
-                final: Final | None = None
+                # For owner home/DM, each text block is delivered immediately as it
+                # arrives (per-block streaming, issue #64). For group turns and guest
+                # sessions the blocks are accumulated into a single joined message,
+                # preserving unchanged behaviour for those surfaces.
+                per_block = self._owner_streams_per_block(task)
+                block_parts: list[str] = []
                 # Watchdog: a turn whose stream never reaches a terminal result (wedged
                 # SDK / hung tool call) must not pin the semaphore and generating=True
                 # forever. The timeout cancels the loop; exiting the semaphore block
@@ -1229,14 +1243,20 @@ class TaskManager:
                         if task.cancelled:
                             break  # interrupted — stop streaming its milestones
                         if isinstance(event, Final):
-                            final = event
+                            if per_block:
+                                await self._emit_final(task, event.text)
+                            else:
+                                block_parts.append(event.text)
                         else:
                             await self._io.send(task.thread_key, f"· {event.text}")
                 ack.cancel()
                 if task.cancelled:
                     return
-                if final is not None:
-                    await self._emit_final(task, final.text)
+                if not per_block:
+                    # Accumulated path (group/guest): join and emit as one message,
+                    # reproducing the original single-Final behaviour.
+                    joined = "".join(block_parts).strip() or NO_REPLY
+                    await self._emit_final(task, joined)
                 if task.session.session_id:
                     await self._set_session_id(task, task.session.session_id)
                 await self._record_spend(task)
@@ -1408,12 +1428,17 @@ class TaskManager:
 
     @staticmethod
     async def _run_silent_turn(session: SessionProto, text: str) -> str:
-        """Drive one turn on ``session`` silently (not surfaced); return its text."""
-        final: Final | None = None
+        """Drive one turn on ``session`` silently (not surfaced); return its text.
+
+        The session now yields one ``Final`` per text block (issue #64); we accumulate
+        all of them so the caller (compaction/prime) sees the full turn text, not just
+        the last block.
+        """
+        parts: list[str] = []
         async for event in session.run_turn(text):
             if isinstance(event, Final):
-                final = event
-        return final.text if final is not None else ""
+                parts.append(event.text)
+        return "".join(parts)
 
     async def branch(self, thread_key: str, title: str) -> str:
         """Promote a casual chat into a full-memory thread carrying its current context.
