@@ -8,6 +8,7 @@ files. At least one chat platform (Telegram and/or Discord) must be fully config
 """
 
 import os
+import re
 from datetime import time
 from typing import Any
 
@@ -18,6 +19,8 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from .gate.blacklist import DEFAULT_SHELL_PATTERNS
 
 
 class PolicySeed(BaseModel):
@@ -81,15 +84,21 @@ class Settings(BaseSettings):
     compaction_idle_seconds: float = 3600.0
     classifier_model: str = "claude-haiku-4-5"
 
-    # Permission gate + approval flow (M3). approval_timeout_seconds is the fail-closed
-    # deny window; never_seed/approved_seed prime the NEVER/APPROVED lists on boot;
-    # audit_log_path is the append-only JSONL sink; front_desk_thread_key is the thread
+    # Permission gate + approval flow (M3, flipped to default-allow for the owner in
+    # the host-native rework). approval_timeout_seconds is the fail-closed deny window;
+    # never_seed/approved_seed prime the NEVER/APPROVED lists on boot; audit_log_path
+    # is the append-only JSONL sink; front_desk_thread_key is the thread
     # guest-originated approvals, admission cards, and relayed messages post to (M6).
+    # blacklist_shell_patterns are regexes over shell commands (and blacklist_tools
+    # whole tool names) that still raise an approval card under the owner's
+    # default-allow posture; guests stay default-ask regardless.
     approval_timeout_seconds: float = 600.0
     never_seed: list[PolicySeed] = []
     approved_seed: list[PolicySeed] = []
-    audit_log_path: str = "/data/audit.jsonl"
+    audit_log_path: str = "data/audit.jsonl"
     front_desk_thread_key: str | None = None
+    blacklist_shell_patterns: tuple[str, ...] = DEFAULT_SHELL_PATTERNS
+    blacklist_tools: tuple[str, ...] = ()
 
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
     # tier-isolated session (take-a-message + calendar free/busy + owner-approved
@@ -253,6 +262,23 @@ class Settings(BaseSettings):
         """
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("blacklist_shell_patterns")
+    @classmethod
+    def _validate_blacklist_patterns(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Each blacklist entry must be a valid regex — a typo fails the boot, not the
+        first shell command (which would then run un-carded)."""
+        for pattern in value:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"blacklist_shell_patterns entry {pattern!r} is not a valid "
+                    f"regex: {exc}"
+                ) from exc
         return value
 
     @field_validator("quiet_hours_start", "quiet_hours_end")

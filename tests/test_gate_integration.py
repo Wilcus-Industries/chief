@@ -17,6 +17,7 @@ from claude_agent_sdk import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.gate.approvals import ApprovalAction, ApprovalManager
+from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
 from test_approvals import FakeIO, RecordingAudit, _settle
@@ -51,6 +52,7 @@ class _Gate:
             tier="owner",
             policy=policy,
             audit=audit,
+            blacklist=Blacklist.from_config(),
             extra_read_only=extra_read_only,
         )
         self.can_use_tool = build_can_use_tool(
@@ -63,6 +65,7 @@ class _Gate:
             audit=audit,
             on_waiting=on_waiting,
             on_running=on_running,
+            blacklist=Blacklist.from_config(),
             extra_read_only=extra_read_only,
         )
 
@@ -179,7 +182,7 @@ async def test_ask_approved_flips_waiting_then_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     gate = await _gate(session_factory)
-    call = {"command": "git push"}
+    call = {"command": "git push --force origin main"}
 
     assert await gate.run_hook("mcp__chief_shell__bash", call) == "ask"
     parked = asyncio.ensure_future(
@@ -199,9 +202,9 @@ async def test_ask_approved_flips_waiting_then_allows(
 async def test_shell_tool_ask_approved_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # The sandbox shell tool routes through ASK → approval, like Bash (M7).
+    # A blacklisted shell command routes through ASK → approval.
     gate = await _gate(session_factory)
-    call = {"command": "pip install httpx"}
+    call = {"command": "npm install -g httpx"}
 
     assert await gate.run_hook("mcp__chief_shell__bash", call) == "ask"
     parked = asyncio.ensure_future(
@@ -225,7 +228,7 @@ async def test_ask_denied_returns_deny(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     gate = await _gate(session_factory)
-    call = {"command": "git push"}
+    call = {"command": "git push --force origin main"}
 
     parked = asyncio.ensure_future(
         gate.can_use_tool("mcp__chief_shell__bash", call, ToolPermissionContext())
@@ -250,7 +253,9 @@ async def test_ask_timeout_fails_closed(
     gate = await _gate(session_factory, timeout=0.01)
 
     result = await gate.can_use_tool(
-        "mcp__chief_shell__bash", {"command": "git push"}, ToolPermissionContext()
+        "mcp__chief_shell__bash",
+        {"command": "git push --force origin main"},
+        ToolPermissionContext(),
     )
 
     assert isinstance(result, PermissionResultDeny)
