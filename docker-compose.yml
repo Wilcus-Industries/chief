@@ -1,129 +1,25 @@
-# chief core stack (M0/M1) + chief's own Google MCP servers (M5/M8).
-# Outbound-only — Telegram long-poll / Discord gateway, no public ingress.
-# Secrets are Docker secrets (files under ./secrets/, mounted at /run/secrets, read by
-# config.py).
+# chief's MCP sidecars (M5/M8 Google servers + the playwright browser). The core
+# process itself runs NATIVELY ON THE HOST (host-native rework) — `chief` /
+# `uv run python -m chief.entrypoint` from the repo root — and reaches these
+# containers over localhost: every service publishes its port on 127.0.0.1 only,
+# so nothing is exposed beyond this machine.
 #
-# Setup:  put ./secrets/claude_code_oauth_token, then configure either or both chat
-#         platforms (config rejects boot with neither):
-#           Telegram — ./secrets/telegram_bot_token + OWNER_TELEGRAM_ID
-#           Discord  — ./secrets/discord_bot_token  + OWNER_DISCORD_ID (enable the
-#                      privileged message_content intent in the Developer Portal)
-#         A referenced docker-secret file must exist, so for the platform you skip,
-#         `touch` its empty token file (e.g. `touch secrets/discord_bot_token`). Then:
-#           docker compose up core
+# Setup:  ./install.sh scaffolds secrets + data dirs and builds/starts this stack.
 #
 # Google (M5/M8, opt-in):  chief's own FastMCP servers — calendar (:8003), drive (:8001),
 #         sheets (:8002), gmail (:8004, chief-owned after the issue #52 cutover) — each a
-#         separate container on the internal compose
-#         network, reached by core over streamable-HTTP at http://mcp-<svc>:<port>/mcp
-#         (never host-published). Mint the shared token (python -m chief.tools.google.auth)
+#         separate container, reached by core at http://127.0.0.1:<port>/mcp.
+#         Mint the shared token (python -m chief.tools.google.auth)
 #         — it writes directly to secrets/google_tokens/google_token.json, the single
-#         canonical location all five consumers mount (issue #58). Flip the matching
+#         canonical location all consumers mount (issue #58). Flip the matching
 #         *_enabled in config.yaml, then:
-#           docker compose --profile google up
+#           docker compose --profile google up -d
 #         The four sit behind the "google" profile, so a plain `up` skips them.
+#
+# Playwright (opt-in): headless-Chromium browser automation behind the "playwright"
+#         profile; screenshots land in ./data/screenshots (bind mount) for core to
+#         deliver.
 services:
-  core:
-    build:
-      context: .
-      dockerfile: Dockerfile.core
-    restart: unless-stopped
-    # Non-root, matching the MCP services pattern. uid/gid 1000 is "chief"
-    # (created in Dockerfile.core). Volumes are pre-chowned to 1000:1000 in the image;
-    # for pre-existing named volumes run the one-time chown step in secrets/README.md.
-    user: "1000:1000"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    # core bridges both internal networks: it must reach the Google MCP services on
-    # mcp-internal and the browser on playwright-net. The two never overlap, so a
-    # compromised playwright container has no route to calendar/drive/sheets/gmail.
-    networks:
-      - mcp-internal
-      - playwright-net
-    environment:
-      # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
-      # Both owner ids are optional here — config requires at least one platform fully set
-      # (id + token). Leave one blank to run the other platform only.
-      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:-}
-      OWNER_DISCORD_ID: ${OWNER_DISCORD_ID:-}
-      # Per-deploy instance config — set in the gitignored .env, never in committed
-      # config.yaml (keeps personal ids out of a public repo). Each overrides its
-      # config.yaml default only when non-empty.
-      PRIMARY_PLATFORM: ${PRIMARY_PLATFORM:-}
-      PRIMARY_THREAD_KEY: ${PRIMARY_THREAD_KEY:-}
-      OWNER_HOME_GUILD_ID: ${OWNER_HOME_GUILD_ID:-}
-      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-}
-      GROUP_CHAT_ENABLED: ${GROUP_CHAT_ENABLED:-}
-      BUDGET_ENABLED: ${BUDGET_ENABLED:-}
-      DRIVE_ENABLED: ${DRIVE_ENABLED:-}
-      PLAYWRIGHT_ENABLED: ${PLAYWRIGHT_ENABLED:-}
-      SKILLS_ENABLED: ${SKILLS_ENABLED:-}
-      OPUS_AUTO_DETECT: ${OPUS_AUTO_DETECT:-}
-      # Relocate the claude CLI's top-level config dir from $HOME (read-only rootfs) into
-      # the persisted claude-home volume. Without this, the CLI writes .claude.json (and
-      # its lock) directly under $HOME=/home/chief, hitting EROFS on a read_only container.
-      # With CLAUDE_CONFIG_DIR set the SDK places .claude.json at
-      # $CLAUDE_CONFIG_DIR/.claude.json = /home/chief/.claude/.claude.json (inside the
-      # volume). Transcripts remain at $CLAUDE_CONFIG_DIR/projects/... as before, so
-      # session resume is unaffected.
-      CLAUDE_CONFIG_DIR: /home/chief/.claude
-    secrets:
-      # Docker secrets are always mounted read-only at /run/secrets/<name> (tmpfs,
-      # mode 0444 inside the container). No explicit :ro needed; it is guaranteed by Docker.
-      - telegram_bot_token
-      - discord_bot_token
-      - claude_code_oauth_token
-    volumes:
-      # Mounted read-only over the image's baked copy (Dockerfile COPYs it as a fallback)
-      # so a config.yaml edit takes effect on `up -d` with no rebuild. config.py reads
-      # ./config.yaml relative to WORKDIR /app, so this is the exact path it loads.
-      - ./config.yaml:/app/config.yaml:ro
-      - sqlite-data:/data
-      - memory:/memory
-      # Scratch (M7) for chief's built-in Read/Write/Edit tools. Harmless when the
-      # workspace is disabled.
-      - workspace:/workspace
-      # Persisted claude CLI state: transcripts (projects/), credentials (.credentials.json),
-      # and top-level config (.claude.json + .claude.json.lock). CLAUDE_CONFIG_DIR (set
-      # above) points the CLI here so all three land inside this volume rather than on the
-      # read-only rootfs. Without persistence a recreate wipes every stored session, leaving
-      # sqlite's sdk_session_ids pointing at sessions that no longer exist → CLI exits 1 on
-      # resume. Pre-chowned to uid 1000 in Dockerfile.core so Docker init copies correct
-      # ownership into a freshly-created volume.
-      - claude-home:/home/chief/.claude
-      # Screenshot delivery (issue #34): core reads screenshot files written by
-      # mcp-playwright to deliver them to the owner via send_file. Read-only — core
-      # never writes to this volume; playwright is the sole writer.
-      - screenshots:/screenshots:ro
-      # Google account registry (issue #54): core scans /token for google_token*.json
-      # files to populate list_accounts / set_account. Sourced from the dedicated
-      # google_tokens/ subdir (issue #58: single canonical host path shared by all five
-      # token-consuming services).
-      #
-      # Read-WRITE (issue #53): the runtime add-account flow (chat consent) writes the
-      # newly-minted token here as google_token_<email-slug>.json, picked up by the
-      # per-request re-scan with no restart. The dir (not the single legacy file) is
-      # mounted so new files appear; host dir must be writable by uid 1000 (see
-      # secrets/README.md chown step).
-      - ./secrets/google_tokens:/token
-      # The shared Desktop-app OAuth client (issue #53): add_account reads client_id /
-      # client_secret from it to build the consent URL and exchange the code. Read-only;
-      # named so it never collides with the google_token*.json scan.
-      - ./secrets/google_oauth_client.json:/token/google_oauth_client.json:ro
-    tmpfs:
-      # /tmp: git temp files (memory versioner), alembic scratch, claude CLI ephemeral
-      # state, and Python/Node runtime scratch — all write to /tmp on a read-only rootfs.
-      - /tmp:uid=1000,gid=1000
-    healthcheck:
-      # init_db creates the sqlite file on boot, so its presence means the app got past startup.
-      test: ["CMD", "test", "-f", "/data/chief.db"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
   # chief's own Google Calendar MCP server (docker/mcp-calendar). FastMCP, streamable-HTTP
   # at http://mcp-calendar:8003/mcp on the internal network (no host ports). Replaces the
   # nspady mcp-gcal: FastMCP gives each connection its own transport, so the per-task MCP
@@ -145,6 +41,8 @@ services:
     build:
       context: ./docker/mcp-calendar
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8003:8003"  # host-native core connects via localhost
     # Refreshes the access token in memory only — never writes the shared token file, so
     # a read-only mount is correct (the sheets container is the sole writer).
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
@@ -193,6 +91,8 @@ services:
     build:
       context: ./docker/mcp-drive
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8001"  # host-native core connects via localhost
     # Read-only token: refreshes in memory only (sheets is the sole token writer).
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
@@ -239,6 +139,8 @@ services:
     build:
       context: ./docker/mcp-sheets
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8002"  # host-native core connects via localhost
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
@@ -294,6 +196,8 @@ services:
     build:
       context: ./docker/mcp-gmail-chief
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8004:8004"  # host-native core connects via localhost
     user: "${MCP_GOOGLE_UID:-1000}:${MCP_GOOGLE_GID:-1000}"
     read_only: true
     cap_drop: [ALL]
@@ -324,8 +228,8 @@ services:
       start_period: 20s
 
   # Playwright browser automation (docker/mcp-playwright). Stock @playwright/mcp 0.0.76,
-  # headless Chromium with --no-sandbox, streamable HTTP at
-  # http://mcp-playwright:3000/mcp on the internal compose network (no host ports).
+  # headless Chromium with --no-sandbox, streamable HTTP published on
+  # 127.0.0.1:3000 for the host-native core.
   # Read tools (navigate, snapshot, screenshot, inspection) are pre-approved; write
   # tools (click, type, JS) are approval-gated. Owner-only — guests never receive the
   # playwright MCP server.
@@ -336,6 +240,8 @@ services:
     build:
       context: ./docker/mcp-playwright
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"  # host-native core connects via localhost
     # --no-sandbox is required in the CMD because this hardened profile (non-root user,
     # cap_drop ALL + SYS_ADMIN only, no-new-privileges:true) blocks the setuid
     # chrome-sandbox helper Chromium uses for its own process sandbox. SYS_ADMIN is
@@ -354,10 +260,11 @@ services:
       # Chromium writes profile data, crash dumps, and devtools sockets to /tmp.
       - /tmp
     volumes:
-      # Shared output directory: screenshot files written by playwright server land here;
-      # core reads them (read-only mount below) to deliver via send_file. The
-      # --output-dir /screenshots flag in the CMD keeps the path deterministic.
-      - screenshots:/screenshots
+      # Shared output directory: screenshot files written by the playwright server
+      # land in ./data/screenshots on the host, where core (host-native) reads them
+      # to deliver via send_file. The --output-dir /screenshots flag in the CMD
+      # keeps the container-side path deterministic.
+      - ./data/screenshots:/screenshots
       # Persistent browser profile (issue #35): Chromium writes its full profile
       # (cookies, localStorage, IndexedDB, session state) here via --user-data-dir.
       # Because this is a named volume, all state survives container restarts —
@@ -375,33 +282,12 @@ services:
       retries: 5
       start_period: 30s
 
-secrets:
-  telegram_bot_token:
-    file: ./secrets/telegram_bot_token
-  discord_bot_token:
-    file: ./secrets/discord_bot_token
-  claude_code_oauth_token:
-    file: ./secrets/claude_code_oauth_token
-  google_oauth_client.json:
-    file: ./secrets/google_oauth_client.json
-
 volumes:
-  sqlite-data:
-  memory:
-  claude-home:
-  workspace:  # M7 scratch for core's Read/Write/Edit tools
-  screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
   browser-profile:  # issue #35: Chromium --user-data-dir; cookies/session survive restarts
 
-# Two named networks provide SSRF isolation (issue #33).
-#
-# mcp-internal  — shared by core + the four Google MCP sidecars (calendar, drive,
-#                 sheets, gmail).  Invisible to mcp-playwright (hostile page cannot
-#                 SSRF into Google services).
-# playwright-net — shared by core + mcp-playwright. Has full internet egress (no
-#                 internal_only flag). Google MCP services are never attached here.
-#
-# core sits on both so it can dispatch tasks to either group.
+# Two named networks keep the sidecars apart (issue #33): a hostile page in the
+# playwright container cannot SSRF into the Google MCP services over the container
+# network (their ports are published on the host's loopback only).
 networks:
   mcp-internal:
   playwright-net:

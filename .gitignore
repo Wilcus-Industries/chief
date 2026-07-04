@@ -13,7 +13,9 @@ dist/
 .claude/review-history.jsonl
 .claude/settings.local.json
 .env
-# Docker secrets — keep dir structure, never the real secret files
+# Runtime data (host-native): sqlite, audit log, memory, workspace, screenshots
+/data/
+# Secrets — keep dir structure, never the real secret files
 /secrets/*
 !/secrets/README.md
 !/secrets/google_tokens/
