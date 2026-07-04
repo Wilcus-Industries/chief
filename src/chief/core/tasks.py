@@ -93,6 +93,7 @@ from ..tools.shell import ShellService
 from . import classify
 from .agent import NO_REPLY
 from .personas import build_system_prompt
+from .screening import Screener, build_screening_hook, prefix_flagged
 from .session import Final, TaskSession, TurnEvent
 
 logger = logging.getLogger("chief.core.tasks")
@@ -321,6 +322,9 @@ class TaskManager:
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
+        screener: Screener | None = None,
+        screening_tools: tuple[str, ...] = (),
+        screening_block: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -372,6 +376,12 @@ class TaskManager:
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
+        # Untrusted-content screening (host-native): when a screener is wired, the
+        # named tools' results get a PostToolUse injection screen and the guest relay
+        # annotates flagged messages before they reach the Front Desk.
+        self._screener = screener
+        self._screening_tools = frozenset(screening_tools)
+        self._screening_block = screening_block
         #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
         #: next time the budget reports a non-paused mode, so each pause acks once.
         self._paused_ack_sent = False
@@ -854,7 +864,9 @@ class TaskManager:
         if front_desk is not None:
 
             async def relay(text: str) -> None:
-                await self._io.send(front_desk, text)
+                # Guest text is untrusted: a flagged message is still delivered, but
+                # annotated so it reads as data, not instructions (host-native seam).
+                await self._io.send(front_desk, await self._screen_relay(text))
 
             guest_svc = GuestService(relay=relay, from_label=from_label or "a visitor")
             allowed.append(guest_svc.tool_name)
@@ -882,6 +894,21 @@ class TaskManager:
         gate_kwargs["disallowed_tools"] = gate_kwargs["disallowed_tools"] + GUEST_DENIED
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
+
+    async def _screen_relay(self, text: str) -> str:
+        """Screen a guest-relayed message; prepend the warning when flagged.
+
+        Never drops or blocks the message — the owner should still see it — and never
+        lets a screener error break the relay (fail-safe: deliver unannotated).
+        """
+        if self._screener is None:
+            return text
+        try:
+            flagged = await self._screener(text)
+        except Exception:
+            logger.warning("relay screening failed; delivering as-is", exc_info=True)
+            return text
+        return prefix_flagged(text) if flagged else text
 
     def _build_services_with_account(
         self, active_account_label: str | None
@@ -1032,6 +1059,7 @@ class TaskManager:
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "PreToolUse": [HookMatcher(hooks=[hook])]
         }
+        post_hooks: list[HookMatcher] = []
         # Screenshot delivery: owner sessions with a configured screenshots dir get
         # a PostToolUse hook that reads the saved file and delivers it via send_file.
         # Guest sessions never have browser tools — owner-only by construction.
@@ -1041,7 +1069,19 @@ class TaskManager:
                 io=self._io,
                 screenshots_dir=self._screenshots_dir,
             )
-            hooks["PostToolUse"] = [HookMatcher(hooks=[screenshot_hook])]
+            post_hooks.append(HookMatcher(hooks=[screenshot_hook]))
+        # Untrusted-content screening (host-native): owner web/browser results get an
+        # injection screen; a hit is annotated (or blocked, per config). Guests have no
+        # web tools, so their sessions skip it.
+        if tier == "owner" and self._screener is not None and self._screening_tools:
+            screening_hook = build_screening_hook(
+                tools=self._screening_tools,
+                screener=self._screener,
+                block=self._screening_block,
+            )
+            post_hooks.append(HookMatcher(hooks=[screening_hook]))
+        if post_hooks:
+            hooks["PostToolUse"] = post_hooks
         return can_use_tool, hooks
 
     async def _submit(self, task: _RunningTask, turn: Turn) -> None:
