@@ -11,6 +11,7 @@ tasks left mid-flight.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from .adapters.base import Adapter, ReadyHook
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
+from .core import screening
 from .core.budget import BudgetGate, BudgetIO
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
@@ -395,6 +397,17 @@ def build_engine(
             if settings.playwright_enabled
             else None
         ),
+        # Untrusted-content screening (host-native): web/browser tool results and the
+        # guest relay get a cheap Haiku injection screen; inert (None) when disabled.
+        screener=(
+            functools.partial(
+                screening.screen_text, model=settings.screening_model
+            )
+            if settings.screening_enabled
+            else None
+        ),
+        screening_tools=settings.screening_tools,
+        screening_block=settings.screening_block,
     )
 
 

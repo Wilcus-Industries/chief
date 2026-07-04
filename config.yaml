@@ -41,15 +41,39 @@ turn_timeout_seconds: 300  # watchdog: a turn past this (wedged stream) is torn 
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
 classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments
 
-# Permission gate + approval flow (M3). The gate classifies every tool call; an ASK posts
-# an approval card and blocks until a button tap or this timeout (then fail-closed deny).
+# Permission gate + approval flow (M3, flipped host-native). Owner tool calls are
+# ALLOWED by default; only a blacklist match posts an approval card (which blocks until
+# a button tap or this timeout, then fail-closed deny). Guests stay default-ask.
 approval_timeout_seconds: 600  # no decision within this window = deny
-audit_log_path: /data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
+audit_log_path: data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
 # front_desk_thread_key:           # required by guest_enabled — admissions/relays/approvals land here
 # Boot-seeded policy rules (idempotent). Each item: {tool, arg_pattern?}; arg_pattern
-# omitted = whole-tool rule. Real entries arrive with the tools they guard (M5/M7/M8).
+# omitted = whole-tool rule. NEVER still hard-denies with no prompt; APPROVED entries
+# (and "always allow" taps) beat the blacklist.
 never_seed: []      # tools/commands hard-denied with no prompt
 approved_seed: []   # tools/commands pre-allowed with no prompt
+# Approval blacklist — what still asks under the default-allow posture. Shell patterns
+# are regexes matched against the bash tool's command; tools are whole tool names that
+# always ask. Omit blacklist_shell_patterns to get the built-in default set (sudo/doas,
+# rm -rf on a root, mkfs / dd to devices, shutdown/reboot, kill -9 1, curl|sh,
+# git push --force main, chmod -R 777, global package installs). Listing patterns here
+# REPLACES the default set, so include the defaults you want to keep.
+# blacklist_shell_patterns: []
+# blacklist_tools: []              # e.g. [mcp__gmail_chief__send-email]
+
+# Untrusted-content screening (host-native security seam). Web/browser tool results and
+# guest messages are screened for prompt injection by a cheap model call; a hit is
+# annotated with a warning so the agent treats it as data (screening_block: true blocks
+# the tool result outright instead). Fail-safe: screener errors pass content through.
+screening_enabled: true
+screening_model: claude-haiku-4-5
+screening_block: false
+# screening_tools:                 # which tools' results get screened (defaults shown)
+#   - WebFetch
+#   - WebSearch
+#   - mcp__playwright__browser_snapshot
+#   - mcp__playwright__browser_navigate
+#   - mcp__playwright__browser_navigate_back
 
 # Long-term memory (M4). Namespaced markdown facts; the facts/ listing is auto-generated
 # at prompt-build time (no stored index file). Chief reads fact files on demand and writes

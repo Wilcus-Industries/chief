@@ -48,7 +48,7 @@ _COMPLEX_SYSTEM = (
 )
 
 
-async def _ask_yes_no(prompt: str, *, model: str, system: str) -> bool:
+async def ask_yes_no(prompt: str, *, model: str, system: str) -> bool:
     """Run one Haiku turn and return ``True`` iff the answer starts with 'yes'.
 
     ``tools=[]`` gives the model an empty base tool set so it cannot call anything —
@@ -75,17 +75,17 @@ async def _ask_yes_no(prompt: str, *, model: str, system: str) -> bool:
 
 async def stop_intent(text: str, *, model: str) -> bool:
     """True if a mid-turn ``text`` asks to stop/redirect the running turn."""
-    return await _ask_yes_no(text, model=model, system=_STOP_SYSTEM)
+    return await ask_yes_no(text, model=model, system=_STOP_SYSTEM)
 
 
 async def warrants_task(text: str, *, model: str) -> bool:
     """True if a casual ``text`` should spawn a tracked task topic."""
-    return await _ask_yes_no(text, model=model, system=_WARRANTS_SYSTEM)
+    return await ask_yes_no(text, model=model, system=_WARRANTS_SYSTEM)
 
 
 async def is_complex(text: str, *, model: str) -> bool:
     """True if an owner ``text`` needs the stronger model (deep reasoning/planning)."""
-    return await _ask_yes_no(text, model=model, system=_COMPLEX_SYSTEM)
+    return await ask_yes_no(text, model=model, system=_COMPLEX_SYSTEM)
 
 
 async def ask_condition(

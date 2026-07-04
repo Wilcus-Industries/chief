@@ -100,6 +100,22 @@ class Settings(BaseSettings):
     blacklist_shell_patterns: tuple[str, ...] = DEFAULT_SHELL_PATTERNS
     blacklist_tools: tuple[str, ...] = ()
 
+    # Untrusted-content screening (host-native security seam). Material arriving from
+    # the internet (screening_tools results) or from guests (the Front Desk relay) is
+    # screened by a cheap screening_model call for prompt injection before the owner
+    # agent acts on it; a hit is annotated with a warning (screening_block=true blocks
+    # the result outright instead). Fail-safe: a screener error passes content through.
+    screening_enabled: bool = True
+    screening_model: str = "claude-haiku-4-5"
+    screening_block: bool = False
+    screening_tools: tuple[str, ...] = (
+        "WebFetch",
+        "WebSearch",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_navigate_back",
+    )
+
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
     # tier-isolated session (take-a-message + calendar free/busy + owner-approved
     # booking) instead of the canned ack — and front_desk_thread_key MUST be set (the
