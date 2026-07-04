@@ -1627,7 +1627,9 @@ def _shell_manager(
 ) -> TaskManager:
     service = (
         ShellService(
-            host="sandbox", port=8765, timeout_seconds=120.0, output_limit=64_000
+            workspace_dir="data/workspace",
+            timeout_seconds=120.0,
+            output_limit=64_000,
         )
         if shell
         else None
@@ -1663,7 +1665,7 @@ async def test_owner_shell_and_workspace_wired(
     assert "chief_shell" in captured["mcp_servers"]
     allowed = captured["allowed_tools"]
     assert "mcp__chief_shell__bash" not in allowed
-    # Workspace write tools are pre-allowed (the gate confines them to /workspace).
+    # Workspace write tools are pre-allowed (host-native: writes are unconfined).
     assert "Write" in allowed and "Edit" in allowed
     await mgr.shutdown()
 

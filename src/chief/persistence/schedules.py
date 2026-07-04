@@ -26,10 +26,10 @@ KIND_MONITOR = "monitor"  # checks a predicate on a cron cadence, fires on a fli
 #: Action types — what a fire does (the dispatch path in the scheduler).
 ACTION_MESSAGE = "message"  # direct text send, no model, free
 ACTION_WAKEUP = "wakeup"  # inject a full agent turn (gate + tools apply)
-ACTION_BASH = "bash"  # run a command in the sandbox, no agent
+ACTION_BASH = "bash"  # run a command on the host shell, no agent
 
 #: Predicate types — how a monitor evaluates its watched condition each cadence tick.
-PREDICATE_BASH = "bash"  # a sandbox command; exit 0 ⇒ true
+PREDICATE_BASH = "bash"  # a shell command; exit 0 ⇒ true
 PREDICATE_AGENT = "agent"  # a read-only Haiku yes/no judgment
 
 

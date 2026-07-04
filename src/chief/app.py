@@ -111,12 +111,11 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
 
 
 def build_shell_service(settings: Settings) -> ShellService | None:
-    """The sandbox shell client (M7), or ``None`` when the shell is disabled."""
+    """The host shell service (M7, host-native), or ``None`` when disabled."""
     if not settings.shell_enabled:
         return None
     return ShellService(
-        host=settings.sandbox_host,
-        port=settings.sandbox_port,
+        workspace_dir=settings.workspace_dir,
         timeout_seconds=settings.shell_timeout_seconds,
         output_limit=settings.shell_output_limit,
     )

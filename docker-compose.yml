@@ -1,12 +1,7 @@
-# chief core stack (M0/M1) + chief's own Google MCP servers (M5/M8) + the shell/code
-# sandbox (M7). Outbound-only — Telegram long-poll / Discord gateway, no public ingress.
+# chief core stack (M0/M1) + chief's own Google MCP servers (M5/M8).
+# Outbound-only — Telegram long-poll / Discord gateway, no public ingress.
 # Secrets are Docker secrets (files under ./secrets/, mounted at /run/secrets, read by
 # config.py).
-#
-# Sandbox (M7, opt-in):  a secret-free, locked-down worker behind the "sandbox" profile
-#         that runs the owner's gated bash commands. Core reaches it over a stdlib socket
-#         at sandbox:8765 (never host-published). Flip shell_enabled/workspace_enabled in
-#         config.yaml, then:  docker compose --profile sandbox up
 #
 # Setup:  put ./secrets/claude_code_oauth_token, then configure either or both chat
 #         platforms (config rejects boot with neither):
@@ -33,7 +28,7 @@ services:
       context: .
       dockerfile: Dockerfile.core
     restart: unless-stopped
-    # Non-root, matching the MCP services + sandbox pattern. uid/gid 1000 is "chief"
+    # Non-root, matching the MCP services pattern. uid/gid 1000 is "chief"
     # (created in Dockerfile.core). Volumes are pre-chowned to 1000:1000 in the image;
     # for pre-existing named volumes run the one-time chown step in secrets/README.md.
     user: "1000:1000"
@@ -41,15 +36,12 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    # core bridges all three internal networks: it must reach the Google MCP services
-    # on mcp-internal, the browser on playwright-net, and the sandbox shell on
-    # sandbox-net. No two of these networks overlap, so a compromised playwright
-    # container has no route to calendar/drive/sheets/gmail, and the sandbox cannot
-    # reach the Google MCP services directly.
+    # core bridges both internal networks: it must reach the Google MCP services on
+    # mcp-internal and the browser on playwright-net. The two never overlap, so a
+    # compromised playwright container has no route to calendar/drive/sheets/gmail.
     networks:
       - mcp-internal
       - playwright-net
-      - sandbox-net
     environment:
       # Non-secret: overrides config.yaml. Must NOT set ANTHROPIC_API_KEY (config rejects it).
       # Both owner ids are optional here — config requires at least one platform fully set
@@ -90,8 +82,8 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - sqlite-data:/data
       - memory:/memory
-      # Shared scratch (M7): chief's built-in Read/Write/Edit (core) and the sandbox
-      # shell operate on the same files. Harmless when the shell/workspace are disabled.
+      # Scratch (M7) for chief's built-in Read/Write/Edit tools. Harmless when the
+      # workspace is disabled.
       - workspace:/workspace
       # Persisted claude CLI state: transcripts (projects/), credentials (.credentials.json),
       # and top-level config (.claude.json + .claude.json.lock). CLAUDE_CONFIG_DIR (set
@@ -383,53 +375,6 @@ services:
       retries: 5
       start_period: 30s
 
-  # chief's shell/code sandbox (docker/sandbox, M7). A locked-down worker behind the
-  # "sandbox" profile (a plain `up` skips it). Core forwards each gated bash command here
-  # over a stdlib socket on :8765 (no host ports). NO secrets, restricted FS (read-only
-  # rootfs + the shared workspace volume + tmpfs scratch), non-root, resource-limited.
-  # Enable with: flip shell_enabled/workspace_enabled in config.yaml, then
-  #   docker compose --profile sandbox up
-  sandbox:
-    profiles: ["sandbox"]
-    build:
-      # Repo root so the Dockerfile can copy the stdlib server out of the chief package.
-      context: .
-      dockerfile: docker/sandbox/Dockerfile
-    restart: unless-stopped
-    user: "1000:1000"
-    # Deliberately NO `secrets:` block — the sandbox must never hold the Max token.
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /home/sandbox
-    security_opt:
-      - no-new-privileges:true
-    # sandbox-net only — core resolves sandbox:8765 over this dedicated two-member
-    # network (core + sandbox).  Intentionally off mcp-internal so arbitrary bash
-    # commands cannot reach the unauthenticated Google MCP sidecars (issue #42).
-    # Intentionally off playwright-net so the browser container has no route to
-    # the shell server.
-    networks:
-      - sandbox-net
-    # Blast-radius caps for a process running arbitrary owner commands.
-    mem_limit: 1g
-    pids_limit: 256
-    cpus: 1.0
-    environment:
-      SANDBOX_PORT: 8765
-      # Mirror config.yaml's shell limits so the sandbox enforces the same bounds.
-      SHELL_TIMEOUT_SECONDS: ${SHELL_TIMEOUT_SECONDS:-900}
-      SHELL_OUTPUT_LIMIT: ${SHELL_OUTPUT_LIMIT:-64000}
-    volumes:
-      # The ONLY writable persistent mount — shared rw with core.
-      - workspace:/workspace
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8765), 3).close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
 secrets:
   telegram_bot_token:
     file: ./secrets/telegram_bot_token
@@ -444,27 +389,19 @@ volumes:
   sqlite-data:
   memory:
   claude-home:
-  workspace:  # M7 scratch, shared rw between core (Read/Write/Edit) and the sandbox shell
+  workspace:  # M7 scratch for core's Read/Write/Edit tools
   screenshots:  # M13 screenshot delivery: mcp-playwright writes, core reads (ro)
   browser-profile:  # issue #35: Chromium --user-data-dir; cookies/session survive restarts
 
-# Three named networks provide SSRF isolation (issue #33) and sandbox isolation
-# (issue #42).
+# Two named networks provide SSRF isolation (issue #33).
 #
 # mcp-internal  — shared by core + the four Google MCP sidecars (calendar, drive,
 #                 sheets, gmail).  Invisible to mcp-playwright (hostile page cannot
-#                 SSRF into Google services) and invisible to sandbox (a bash command
-#                 cannot reach the unauthenticated Google MCP endpoints).
+#                 SSRF into Google services).
 # playwright-net — shared by core + mcp-playwright. Has full internet egress (no
-#                 internal_only flag). Google MCP services and sandbox are never
-#                 attached here.
-# sandbox-net   — dedicated two-member network: core + sandbox only. Core resolves
-#                 sandbox:8765 here. Keeping sandbox off mcp-internal ensures arbitrary
-#                 bash commands cannot act on the owner's Google account by hitting the
-#                 unauthenticated MCP sidecars directly (issue #42).
+#                 internal_only flag). Google MCP services are never attached here.
 #
-# core sits on all three so it can dispatch tasks to any group.
+# core sits on both so it can dispatch tasks to either group.
 networks:
   mcp-internal:
   playwright-net:
-  sandbox-net:

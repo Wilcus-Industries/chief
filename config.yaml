@@ -85,16 +85,14 @@ owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America
 playwright_enabled: false
 playwright_mcp_url: http://mcp-playwright:3000/mcp
 
-# Shell sandbox + file workspace (M7, owner-only, opt-in). Bring up the secret-free
-# sandbox container (docker compose --profile sandbox up) and flip these on. shell_enabled
-# gives the owner a bash tool that forwards to the sandbox; every command is approval-gated
-# unless pre-blessed. workspace_enabled adds Write/Edit, gate-confined to /workspace (a
-# volume shared with the sandbox). The sandbox holds NO secrets and a restricted FS.
+# Host shell + file workspace (M7, host-native, owner-only). shell_enabled gives the
+# owner a bash tool that runs a persistent per-task shell directly on this machine
+# ($SHELL, else bash, else zsh) with the full environment; commands run without approval
+# unless they match the blacklist above. workspace_enabled adds Write/Edit (pre-approved);
+# workspace_dir is the shell's starting cwd and the suggested scratch area.
 shell_enabled: true
 workspace_enabled: true
-workspace_dir: /workspace            # scratch volume, mounted rw in both core and sandbox
-sandbox_host: sandbox                # internal compose service name (no host ports)
-sandbox_port: 8765
+workspace_dir: data/workspace        # shell cwd + scratch area (repo-local, gitignored)
 shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 

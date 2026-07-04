@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..persistence.policy import APPROVED, NEVER, add_entry, list_entries
 
 #: Tools whose effect is a shell command string under ``tool_input["command"]``. The
-#: sandbox shell tool (``chief.tools.shell.TOOL_NAME``) is treated exactly like ``Bash``
+#: host shell tool (``chief.tools.shell.TOOL_NAME``) is treated exactly like ``Bash``
 #: — its ``command`` arg is safe-matched so blessed always-allow rules parse the same
 #: (literal here, not imported, to keep this hot-path gate module free of the SDK).
 COMMAND_TOOLS = frozenset({"Bash", "mcp__chief_shell__bash"})

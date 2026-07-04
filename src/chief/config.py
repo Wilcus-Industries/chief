@@ -151,18 +151,17 @@ class Settings(BaseSettings):
     # to deliver them via send_file after browser_take_screenshot runs.
     playwright_screenshots_dir: str = "/screenshots"
 
-    # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google
-    # profile pattern). shell_enabled wires the in-process bash tool that forwards to
-    # the secret-free sandbox container at sandbox_host:sandbox_port; every command is
-    # default-ask gated. workspace_enabled adds Write/Edit, gate-confined to
-    # workspace_dir (a volume shared rw with the sandbox). shell_timeout_seconds bounds
-    # one command (the sandbox SIGINTs then respawns a hung shell); shell_output_limit
-    # caps captured bytes.
+    # Host shell + file workspace (M7, host-native rework), owner-only.
+    # shell_enabled wires the in-process bash tool that runs a persistent per-task
+    # shell directly on the host ($SHELL, else bash, else zsh) with the full process
+    # environment; commands run freely unless they match the approval blacklist.
+    # workspace_enabled adds Write/Edit to the pre-approved tool list; workspace_dir is
+    # the shell's starting cwd and the suggested scratch area (writes are no longer
+    # confined to it). shell_timeout_seconds bounds one command (a hung shell is
+    # SIGINT'd then respawned); shell_output_limit caps captured bytes.
     shell_enabled: bool = False
     workspace_enabled: bool = False
-    workspace_dir: str = "/workspace"
-    sandbox_host: str = "sandbox"
-    sandbox_port: int = 8765
+    workspace_dir: str = "data/workspace"
     shell_timeout_seconds: float = 120.0
     shell_output_limit: int = 64_000
 

@@ -14,7 +14,7 @@ no locking needed.
   — so a slot missed during downtime fires once on restart rather than replaying every
   miss — while ``once`` is disabled.
 - **Monitor.** A ``monitor`` row treats its cron ``spec`` as a check *cadence*: each due
-  tick evaluates its predicate (a sandbox command, or a read-only Haiku yes/no) and
+  tick evaluates its predicate (a shell command, or a read-only Haiku yes/no) and
   fires the action only on a false→true flip, then advances like ``recurring``. A
   non-urgent flip caught inside quiet hours is deferred coarsely (noticed at the next
   ``quiet_end``), so a transient quiet-window flip can be missed.
@@ -30,10 +30,10 @@ Three fire paths, by ``action_type``:
 - ``message`` — :meth:`SchedulerIO.send` to the target. No model, free.
 - ``wakeup``  — :meth:`Waker.wake`, which boots a full agent turn that re-passes the
   permission gate, so any effectful tool it reaches still raises an approval card.
-- ``bash``    — runs the command in the M7 sandbox (no agent), delivering output the way
-  ``tasks.py`` delivers a long reply (a file when big, else split messages). Creating a
-  bash schedule is itself the gated act (``tools/schedule.py``), since the fire bypasses
-  the per-turn gate.
+- ``bash``    — runs the command on the host shell (no agent), delivering output the
+  way ``tasks.py`` delivers a long reply (a file when big, else split messages).
+  Creating a bash schedule is itself the gated act (``tools/schedule.py``), since the
+  fire bypasses the per-turn gate.
 
 A parallel heartbeat loop (:meth:`heartbeat_once`) GETs ``heartbeat_url`` every
 ``heartbeat_interval_seconds`` as a dead-man's-switch; ping failures are logged, never
@@ -73,7 +73,6 @@ from ..persistence.schedules import (
 )
 from ..tools.google import GoogleService
 from ..tools.shell import ShellService, format_result
-from ..tools.shell import run_command as _run_command
 from . import classify
 from .schedule_time import defer_target, in_quiet_hours, next_fire
 
@@ -85,7 +84,9 @@ _HEARTBEAT_TIMEOUT = 10.0
 #: Read-only web tools an agent monitor always gets (plus the owner's Google reads).
 _WEB_READ_TOOLS = ("WebFetch", "WebSearch")
 
-RunCommand = Callable[..., Awaitable[dict[str, Any]]]
+#: Runs one shell command on a session's persistent shell — the
+#: :meth:`ShellService.run` seam, injectable so tests skip real subprocesses.
+RunCommand = Callable[[str, str], Awaitable[dict[str, Any]]]
 #: An agent monitor's predicate: judge whether ``question`` holds now (injectable so
 #: tests skip the live model; the default builds a read-only Haiku call in __init__).
 AgentPredicate = Callable[[str], Awaitable[bool]]
@@ -131,7 +132,7 @@ class Scheduler:
         waker: Waker,
         primary_thread_key: str,
         shell_service: ShellService | None = None,
-        run_command: RunCommand = _run_command,
+        run_command: RunCommand | None = None,
         google_services: Sequence[GoogleService] = (),
         classifier_model: str = "claude-haiku-4-5",
         agent_predicate: AgentPredicate | None = None,
@@ -248,7 +249,7 @@ class Scheduler:
         return False
 
     async def _evaluate_bash_predicate(self, schedule_id: int, command: str) -> bool:
-        """True iff the sandbox command exits 0; ``False`` if the shell is off/down."""
+        """True iff the shell command exits 0; ``False`` if the shell is off/down."""
         shell = self._shell_service
         if shell is None:
             logger.warning(
@@ -256,15 +257,10 @@ class Scheduler:
                 schedule_id,
             )
             return False
+        runner = self._run_command or shell.run
         try:
-            result = await self._run_command(
-                shell.host,
-                shell.port,
-                f"monitor:{schedule_id}",
-                command,
-                read_timeout=shell.read_timeout,
-            )
-        except Exception as exc:  # sandbox down/unreachable — treat as "not true"
+            result = await runner(f"monitor:{schedule_id}", command)
+        except Exception as exc:  # shell spawn failed — treat as "not true"
             logger.warning(
                 "monitor %s predicate failed: %s (treating as false)", schedule_id, exc
             )
@@ -313,15 +309,10 @@ class Scheduler:
                 schedule_id,
             )
             return
+        runner = self._run_command or shell.run
         try:
-            result = await self._run_command(
-                shell.host,
-                shell.port,
-                f"schedule:{schedule_id}",
-                command,
-                read_timeout=shell.read_timeout,
-            )
-        except Exception as exc:  # sandbox down/unreachable — surface, don't crash
+            result = await runner(f"schedule:{schedule_id}", command)
+        except Exception as exc:  # shell spawn failed — surface, don't crash
             logger.warning("scheduled bash failed (schedule %s): %s", schedule_id, exc)
             await self._io.send(target, f"⚠️ scheduled command failed: {exc}")
             return
