@@ -124,8 +124,8 @@ MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: DENY).
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
-#: gate's hard DENY) — they run inside core where the Max token lives, so the model can
-#: never reach them; it uses the sandbox shell (``mcp__chief_shell__bash``) instead.
+#: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
+#: (``mcp__chief_shell__bash``), so its blacklist matching can't be bypassed.
 DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
 #: Read-only web + meta tools the owner agent always gets (the gate treats all three as
 #: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.

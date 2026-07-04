@@ -1,9 +1,11 @@
-# Docker secrets
+# Secrets
 
-Drop one secret per file here (no extension, no trailing newline needed). These are
-mounted at `/run/secrets/<name>` and read by `config.py`. **Never commit the real
-files** — `.gitignore` keeps everything in this directory except this README and the
-`google_tokens/` subdirectory placeholder out of git.
+Drop one secret per file here (no extension, no trailing newline needed). The
+host-native core reads this directory directly (`app.load_settings` — a
+`~/.config/chief/secrets` dir or the `CHIEF_SECRETS_DIR` env var work too, and plain
+env vars of the same name always win). **Never commit the real files** — `.gitignore`
+keeps everything in this directory except this README and the `google_tokens/`
+subdirectory placeholder out of git.
 
 ## Directory layout
 
@@ -21,54 +23,22 @@ secrets/
 ```
 
 Google account tokens live exclusively in `google_tokens/` — **not** directly under
-`secrets/`.  All five Google-consuming services (`core`, `mcp-calendar`, `mcp-drive`,
-`mcp-sheets`, `mcp-gmail`) source their token from this single subdirectory (issue #58),
-which lets each container mount only the tokens it needs and keeps
-`claude_code_oauth_token`, `discord_bot_token`, `google_oauth_client.json`, and
-`telegram_bot_token` out of those containers (issue #57).
+`secrets/`.  The host-native core scans it directly, and the four Google MCP
+containers (`mcp-calendar`, `mcp-drive`, `mcp-sheets`, `mcp-gmail`) bind-mount this
+single subdirectory (issue #58), which keeps `claude_code_oauth_token`,
+`discord_bot_token`, `google_oauth_client.json`, and `telegram_bot_token` out of those
+containers (issue #57).
 
-## Host file permissions
+## File permissions
 
-Secret files **must be owner-readable only** (`0600`) on the host. Docker reads them as
-root when building the secret tmpfs, but keeping them `0600` prevents other host
-processes or users from reading them:
+Secret files **must be owner-readable only** (`0600`) so other host processes or users
+cannot read them:
 
 ```sh
 chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
            secrets/google_oauth_client.json secrets/telegram_bot_token \
            secrets/google_tokens/google_token.json
 ```
-
-## Secret mounts are read-only
-
-Docker mounts each secret as a tmpfs file at `/run/secrets/<name>` with mode `0444`
-(read-only) inside the container. This is enforced by Docker — no extra `:ro` flag is
-needed and it cannot be overridden from the container process.
-
-## One-time volume chown (pre-existing installs)
-
-The core container now runs as **uid/gid 1000** (`chief`). On a **fresh deploy** Docker
-initialises the named volumes from the image's pre-chowned directories, so no manual step
-is needed.
-
-On an **existing deploy** where the `sqlite-data`, `memory`, `workspace`, or `claude-home`
-volumes were created when core ran as root, their contents are still owned by `uid 0`.
-Run this once before the first non-root `compose up`:
-
-```sh
-# Re-own all four volumes in one shot using a throwaway busybox container.
-docker run --rm \
-  -v chief_sqlite-data:/data \
-  -v chief_memory:/memory \
-  -v chief_workspace:/workspace \
-  -v chief_claude-home:/home/chief/.claude \
-  busybox \
-  chown -R 1000:1000 /data /memory /workspace /home/chief/.claude
-```
-
-Adjust the volume name prefix (`chief_`) if your `docker compose` project name differs
-(check with `docker volume ls | grep chief`). After this, `docker compose up -d core`
-will start cleanly as uid 1000.
 
 | File | Value |
 |------|-------|
@@ -83,13 +53,12 @@ will start cleanly as uid 1000.
 Configure **either or both** — the app refuses to boot with neither. Each platform needs
 its token (above) **and** its owner id (set as an env var, not a secret):
 
-| Env var | Value |
+| Setting (config.yaml or env var) | Value |
 |---------|-------|
-| `OWNER_TELEGRAM_ID` | Your numeric Telegram user id (ask @userinfobot) |
-| `OWNER_DISCORD_ID` | Your numeric Discord user id (Developer Mode → right-click yourself → Copy User ID) |
+| `owner_telegram_id` / `OWNER_TELEGRAM_ID` | Your numeric Telegram user id (ask @userinfobot) |
+| `owner_discord_id` / `OWNER_DISCORD_ID` | Your numeric Discord user id (Developer Mode → right-click yourself → Copy User ID) |
 
-Docker requires every referenced secret file to exist, so for a platform you skip, create
-an empty token file (e.g. `touch secrets/discord_bot_token`). The Discord bot also needs
+For a platform you skip, simply leave its token file absent. The Discord bot also needs
 the privileged **message_content** intent — enable it under Bot → Privileged Gateway
 Intents in the Developer Portal, or Discord delivers empty message content.
 
@@ -98,17 +67,14 @@ API instead of the Max subscription. The app refuses to start if it is set.
 
 ## Google OAuth (M5/M8) — Calendar + Drive + Sheets + Gmail
 
-`google_tokens/google_token.json` is **one** refresh token minted **once, locally** (no
-callback server on the VPS — DESIGN), covering all four scopes (`calendar`, `drive`,
-`spreadsheets`, `gmail.modify`). It is bind-mounted from `secrets/google_tokens/` into
-all five Google-consuming containers — `core`, `mcp-calendar`, `mcp-drive`, `mcp-sheets`,
-`mcp-gmail` (the `google` compose profile). This is the **single canonical host path**
-(issue #58): no two different paths, no manual copy step.
-
-`mcp-calendar` mounts the entire `google_tokens/` directory at `/token:ro` so additional
-per-account tokens (`google_token_<label>.json`) can be added there without changing the
-compose file. The other four containers mount the single file
-`google_tokens/google_token.json` directly.
+`google_tokens/google_token.json` is **one** refresh token minted **once, locally**,
+covering all four scopes (`calendar`, `drive`, `spreadsheets`, `gmail.modify`). The
+host-native core scans `secrets/google_tokens/` directly, and the directory is
+bind-mounted into the four Google MCP containers — `mcp-calendar`, `mcp-drive`,
+`mcp-sheets`, `mcp-gmail` (the `google` compose profile). This is the **single
+canonical host path** (issue #58): no two different paths, no manual copy step.
+Additional per-account tokens (`google_token_<label>.json`) can be added there without
+changing the compose file.
 
 Producing the token:
 
@@ -127,7 +93,7 @@ Producing the token:
    No move or copy step is needed.
 
 The bind-mount must stay writable for the **mcp-sheets** container (the sole writer — it
-persists the refreshed token; `core` and the calendar/drive containers refresh in memory
+persists the refreshed token; core and the calendar/drive containers refresh in memory
 only, and **mcp-gmail** seeds a throwaway `/tmp` copy at startup). Run the containers as
 the host owner of the file: `MCP_GOOGLE_UID`/`MCP_GOOGLE_GID` default to `1000`, override
 if you aren't uid 1000.
