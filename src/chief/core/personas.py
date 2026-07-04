@@ -16,7 +16,7 @@ with no owner tools at all.
 from collections.abc import Sequence
 
 from ..memory.store import MemoryStore
-from ..tools.shell import SANDBOX_SHELL_CONTRACT
+from ..tools.shell import HOST_SHELL_CONTRACT
 
 _OWNER_FRAMING = (
     "You are operating for your owner directly. You are a capable, trusted operator: "
@@ -138,10 +138,10 @@ _WEB_GUIDANCE = (
 #: Owner-only workspace guidance (M7), included when the workspace is enabled.
 _WORKSPACE_GUIDANCE = (
     "## Workspace\n"
-    "/workspace is a scratch directory you can Read, Write, and Edit freely with no "
-    "approval — it is shared with your shell (the shell's working directory is "
-    "/workspace). Keep working files there. You can write to memory (User.md and the "
-    "facts/ tree) and to /workspace; writes outside memory ∪ workspace are blocked."
+    "You have a scratch workspace directory you can Read, Write, and Edit freely — it "
+    "is where your shell starts, so working files are shared between the two. Prefer "
+    "keeping scratch work there, but you can read and write files anywhere on the "
+    "host when the task calls for it."
 )
 
 #: Owner-only skills guidance (M10), included when packaged skills are enabled. Names
@@ -153,16 +153,16 @@ _SKILLS_GUIDANCE = (
     "Available: {skills}."
 )
 
-#: Owner-only shell guidance (M7), included when the sandbox shell is enabled.
+#: Owner-only shell guidance (M7, host-native), included when the shell is enabled.
 _SHELL_GUIDANCE = (
     "## Shell\n"
-    "You can run bash commands in a sandboxed Linux container (the bash tool). Its "
-    "working directory is /workspace and it has internet access (pip, git, curl all "
-    "work). Shell state — environment variables, the current directory, background "
-    "jobs — persists across commands within a task, but not across a restart. "
-    f"{SANDBOX_SHELL_CONTRACT} Running a command needs your owner's approval unless "
-    "they have pre-approved it, so prefer one clear command and let the approval card "
-    "confirm it."
+    "You can run shell commands directly on your owner's machine (the bash tool). The "
+    "working directory starts at the workspace and the command has internet access "
+    "(pip, git, curl all work). Shell state — environment variables, the current "
+    "directory, background jobs — persists across commands within a task, but not "
+    f"across a restart. {HOST_SHELL_CONTRACT} Commands run without approval unless "
+    "they match the owner's blacklist (sudo, destructive operations, and similar), "
+    "which raises an approval card first."
 )
 
 #: Platform-aware reply formatting guidance (issue #65). Telegram does not render
@@ -207,7 +207,7 @@ def build_system_prompt(
     ``google_services`` names the wired Google MCP servers (owner only) — e.g.
     ``{"calendar", "drive"}``. Each contributes a guidance block so chief knows the
     service's rules (calendar booking states times in ``owner_tz``).
-    ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + sandbox-shell
+    ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + host-shell
     guidance; the web block is always present for the owner (web tools are always
     wired). ``skills`` (M10, owner only) names the enabled packaged skills, adding a
     block that points chief at them. Guests get none of these.
