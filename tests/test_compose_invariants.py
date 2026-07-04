@@ -1,10 +1,11 @@
-"""Regression tests for docker-compose.yml invariants (issue #16, #33, #40).
+"""Regression tests for docker-compose.yml invariants (host-native stack).
 
 These tests parse the compose file directly so CI catches config regressions
-without needing Docker. They cover the read-only-rootfs writable-path contract
-(issue #16), the playwright-network SSRF isolation contract (issue #33), and
-the sandbox network reachability contract (issue #40) — none require Docker at
-runtime.
+without needing Docker. The compose stack now contains ONLY the MCP sidecars —
+core runs natively on the host — so the invariants cover: no core/sandbox
+service creeps back in, every sidecar publishes its port on 127.0.0.1 only,
+the playwright-network SSRF isolation contract (issue #33), and the shared
+token-directory contract (issues #56-#58).
 """
 
 from pathlib import Path
@@ -28,96 +29,59 @@ _GOOGLE_MCP_SERVICES = {
 }
 
 
-def _load_core_env() -> dict[str, str]:
-    """Return the core service environment block as a flat dict."""
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    raw = compose["services"]["core"]["environment"]
-    # docker-compose environment can be a list of "KEY=VAL" strings or a mapping.
-    if isinstance(raw, dict):
-        return {k: str(v) if v is not None else "" for k, v in raw.items()}
-    env: dict[str, str] = {}
-    for entry in raw:
-        if "=" in entry:
-            key, _, val = entry.partition("=")
-            env[key] = val
-        else:
-            env[entry] = ""
-    return env
+#: Every service expected in the host-native compose stack, with its loopback port.
+_EXPECTED_PORTS = {
+    "mcp-calendar": 8003,
+    "mcp-drive": 8001,
+    "mcp-sheets": 8002,
+    "mcp-gmail": 8004,
+    "mcp-playwright": 3000,
+}
 
 
-def test_claude_config_dir_is_set_on_core_service() -> None:
-    """CLAUDE_CONFIG_DIR must be set for the core service.
+def test_core_and_sandbox_services_are_absent() -> None:
+    """The compose stack must contain only MCP sidecars (host-native rework).
 
-    Without it the claude CLI writes .claude.json directly under $HOME
-    (/home/chief/.claude.json), which is on the read-only rootfs → EROFS.
-    Setting CLAUDE_CONFIG_DIR to a path inside the persisted claude-home
-    volume relocates the write to a writable mount.
-    """
-    env = _load_core_env()
-    assert "CLAUDE_CONFIG_DIR" in env, (
-        "core service is missing CLAUDE_CONFIG_DIR — the claude CLI will "
-        "attempt to write .claude.json on the read-only rootfs (EROFS). "
-        "Add CLAUDE_CONFIG_DIR: /home/chief/.claude to the core environment."
-    )
-
-
-def test_claude_config_dir_points_inside_claude_home_volume() -> None:
-    """CLAUDE_CONFIG_DIR must resolve to a path covered by the claude-home volume.
-
-    The claude-home volume is mounted at /home/chief/.claude.  The env var must
-    point at or inside that directory so .claude.json lands on the volume
-    (writable + persisted across recreates) rather than on the rootfs.
-    """
-    env = _load_core_env()
-    config_dir = env.get("CLAUDE_CONFIG_DIR", "")
-    claude_home_mount = "/home/chief/.claude"
-    assert config_dir == claude_home_mount or config_dir.startswith(
-        claude_home_mount + "/"
-    ), (
-        f"CLAUDE_CONFIG_DIR={config_dir!r} does not resolve inside the "
-        f"claude-home volume ({claude_home_mount}). .claude.json will land "
-        "outside the volume and either hit the read-only rootfs (EROFS) or "
-        "be lost on a recreate."
-    )
-
-
-def _service_networks(compose: dict[str, Any], service: str) -> set[str]:
-    """Return the set of network names attached to *service* in *compose*.
-
-    Handles both the list form (``networks: [a, b]``) and the mapping form
-    (``networks: {a: ..., b: ...}``) that docker-compose allows.  Returns an
-    empty set when the service has no explicit ``networks`` key (which means it
-    is attached to the implicit default network, not to any named network we
-    care about here).
-    """
-    raw = compose["services"][service].get("networks")
-    if raw is None:
-        return set()
-    if isinstance(raw, list):
-        return set(raw)
-    # mapping form: {net_name: {aliases: [...], ...} | null}
-    return set(raw.keys())
-
-
-def test_claude_home_volume_mounted_on_core() -> None:
-    """The claude-home named volume must be mounted in the core service.
-
-    Without this mount, CLAUDE_CONFIG_DIR=/home/chief/.claude would still
-    point at the read-only rootfs (the directory would not be a volume mount
-    point) and every write would fail with EROFS.
+    core runs natively on the host and the shell sandbox is gone; if either
+    service reappears the deployment story has silently regressed to the old
+    containerized design.
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
-    has_claude_home = any(
-        (isinstance(v, str) and "claude-home" in v)
-        or (isinstance(v, dict) and v.get("source") == "claude-home")
-        for v in core_volumes
+    services = set(compose["services"].keys())
+    assert "core" not in services, (
+        "a 'core' service is back in docker-compose.yml — core runs natively "
+        "on the host (host-native rework); remove the service."
     )
-    assert has_claude_home, (
-        "claude-home volume is not mounted in the core service. "
-        "CLAUDE_CONFIG_DIR=/home/chief/.claude will write to the "
-        "read-only rootfs instead of the persisted volume."
+    assert "sandbox" not in services, (
+        "a 'sandbox' service is back in docker-compose.yml — the owner shell "
+        "runs natively on the host; remove the service."
     )
+    assert services == set(_EXPECTED_PORTS), (
+        f"unexpected compose services {services ^ set(_EXPECTED_PORTS)}; update "
+        "_EXPECTED_PORTS if a new sidecar is intentional."
+    )
+
+
+def test_every_sidecar_publishes_on_loopback_only() -> None:
+    """Each MCP sidecar must publish its port bound to 127.0.0.1.
+
+    The host-native core reaches the sidecars via localhost, so each must
+    publish its port — but bound to the loopback interface only, never 0.0.0.0,
+    so the unauthenticated MCP endpoints are unreachable from the network.
+    """
+    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
+    for svc, port in _EXPECTED_PORTS.items():
+        ports = compose["services"][svc].get("ports", [])
+        expected = f"127.0.0.1:{port}:{port}"
+        assert any(str(entry) == expected for entry in ports), (
+            f"{svc} must publish '{expected}' (loopback-only) so the "
+            f"host-native core can reach it; found {ports!r}."
+        )
+        for entry in ports:
+            assert str(entry).startswith("127.0.0.1:"), (
+                f"{svc} publishes {entry!r} beyond loopback — the MCP "
+                "endpoints are unauthenticated and must stay host-local."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +106,11 @@ def test_networks_block_declares_all_isolation_networks() -> None:
         f"Top-level networks block is missing {_MCP_INTERNAL_NET!r}. "
         "Add it so the Google MCP services share a dedicated internal network."
     )
+
+
+def _service_networks(compose: dict[str, Any], service: str) -> set[str]:
+    """The set of networks a service is attached to (empty when unset)."""
+    return set(compose["services"][service].get("networks", []) or [])
 
 
 def test_mcp_playwright_is_on_playwright_net() -> None:
@@ -169,23 +138,6 @@ def test_mcp_playwright_is_not_on_mcp_internal() -> None:
     assert _MCP_INTERNAL_NET not in nets, (
         f"mcp-playwright is attached to {_MCP_INTERNAL_NET!r} — this allows "
         "SSRF from a hostile page into the Google MCP services. Remove it."
-    )
-
-
-def test_core_is_on_both_networks() -> None:
-    """core must be attached to both networks so it can reach all MCP services.
-
-    core talks to the Google MCP services over mcp-internal and to the browser
-    over playwright-net; it must sit on both.
-    """
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    nets = _service_networks(compose, "core")
-    assert _PLAYWRIGHT_NET in nets, (
-        f"core is not on {_PLAYWRIGHT_NET!r} — it cannot reach mcp-playwright."
-    )
-    assert _MCP_INTERNAL_NET in nets, (
-        f"core is not on {_MCP_INTERNAL_NET!r} — it cannot reach the Google "
-        "MCP services."
     )
 
 
@@ -250,73 +202,32 @@ def _volume_targets(volumes: list[str]) -> dict[str, str]:
     return targets
 
 
-def test_screenshots_volume_declared_in_top_level_volumes() -> None:
-    """A named 'screenshots' volume must be declared at the top-level volumes key.
+def test_screenshots_is_a_host_bind_mount_in_mcp_playwright() -> None:
+    """mcp-playwright must bind-mount ./data/screenshots at /screenshots.
 
-    Without this declaration the per-service mounts refer to an undeclared volume,
-    which Docker Compose rejects at start time.
-    """
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    top_volumes = compose.get("volumes", {}) or {}
-    assert "screenshots" in top_volumes, (
-        "'screenshots' is not declared in the top-level volumes block. "
-        "Add 'screenshots:' under volumes: in docker-compose.yml."
-    )
-
-
-def test_screenshots_volume_mounted_in_mcp_playwright() -> None:
-    """The screenshots volume must be mounted in the mcp-playwright service.
-
-    The playwright server writes screenshots to --output-dir; that dir must be
-    the shared volume mount so core can read the files.
+    The playwright server writes screenshots to --output-dir /screenshots; the
+    host-native core reads the same files from ./data/screenshots (the
+    playwright_screenshots_dir config default) to deliver them via send_file.
+    A named volume here would hide the files from the host process.
     """
     volumes = _service_volumes("mcp-playwright")
-    sources = _volume_sources(volumes)
-    assert "screenshots" in sources, (
-        "'screenshots' volume is not mounted in the mcp-playwright service. "
-        "Add '- screenshots:/screenshots' to mcp-playwright.volumes."
+    entry = next(
+        (
+            v
+            for v in volumes
+            if isinstance(v, str) and v.split(":")[1] == "/screenshots"
+        ),
+        None,
     )
-
-
-def test_screenshots_volume_mounted_in_core() -> None:
-    """The screenshots volume must be mounted in the core service.
-
-    Core reads screenshot files from this volume to deliver them via send_file;
-    the mount must exist for the path-mapping to resolve to a readable path.
-    """
-    volumes = _service_volumes("core")
-    sources = _volume_sources(volumes)
-    assert "screenshots" in sources, (
-        "'screenshots' volume is not mounted in the core service. "
-        "Add '- screenshots:/screenshots:ro' to core.volumes."
+    assert entry is not None, (
+        "mcp-playwright has no mount targeting /screenshots. Add "
+        "'- ./data/screenshots:/screenshots' so core (on the host) can read "
+        "the files."
     )
-
-
-def test_screenshots_volume_same_target_in_both_services() -> None:
-    """The screenshots volume must be mounted at the SAME path in both services.
-
-    The path-mapping logic converts a filename to an absolute path; if the
-    mount point differs between mcp-playwright and core the path would resolve
-    incorrectly in core.
-    """
-    pw_targets = _volume_targets(_service_volumes("mcp-playwright"))
-    core_targets = _volume_targets(_service_volumes("core"))
-    # Find the target where screenshots volume is mounted in each service.
-    pw_mount = next(
-        (t for t, s in pw_targets.items() if s == "screenshots"), None
-    )
-    core_mount = next(
-        (t for t, s in core_targets.items() if s == "screenshots"), None
-    )
-    assert pw_mount is not None, "screenshots volume not found in mcp-playwright"
-    assert core_mount is not None, "screenshots volume not found in core"
-    # Strip trailing :ro / :rw — only the path matters.
-    pw_path = pw_mount.split(":")[0]
-    core_path = core_mount.split(":")[0]
-    assert pw_path == core_path, (
-        f"screenshots volume mounted at different paths: "
-        f"mcp-playwright={pw_path!r}, core={core_path!r}. "
-        "Both must use the same mount path so path-mapping works."
+    assert entry.split(":")[0] == "./data/screenshots", (
+        f"mcp-playwright screenshots mount ({entry!r}) must source from "
+        "./data/screenshots — the host dir the host-native core reads "
+        "(playwright_screenshots_dir)."
     )
 
 
@@ -522,68 +433,6 @@ _HOST_TOKEN_DIR = "./secrets/google_tokens"
 _LEGACY_HOST_TOKEN = "./secrets/google_token.json"
 
 
-def _core_token_dir_entry(compose: dict[str, Any]) -> str | None:
-    """Return core's volume entry whose target is exactly /token, else None.
-
-    Matches the directory mount (source:/token[:mode]) but not the
-    google_oauth_client.json file mount (source:/token/google_oauth_client.json).
-    """
-    core_volumes: list[str] = compose["services"]["core"].get("volumes", [])
-    for v in core_volumes:
-        if not isinstance(v, str):
-            continue
-        parts = v.split(":")
-        # source:target  or  source:target:mode
-        if len(parts) >= 2 and parts[1] == _CORE_TOKEN_DIR_MOUNT:
-            return v
-    return None
-
-
-def test_google_token_mounted_in_core() -> None:
-    """core must have the token directory bind-mounted at /token.
-
-    build_list_accounts_service() defaults to Path('/token') as the discovery
-    directory.  Without the directory mount, core's /token is absent or empty
-    and discover_accounts() returns [] — zero accounts on a live deployment
-    (issue #54 Defect 1).  A directory (not single-file) mount is required so
-    every google_token*.json — including accounts added at runtime (issue #53)
-    — is visible.
-    """
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    entry = _core_token_dir_entry(compose)
-    assert entry is not None, (
-        f"core service is missing a bind-mount of the token directory at "
-        f"{_CORE_TOKEN_DIR_MOUNT!r}. Add "
-        f"'- {_HOST_TOKEN_DIR}:{_CORE_TOKEN_DIR_MOUNT}' to core.volumes so "
-        "discover_accounts() can find every token at /token."
-    )
-    assert entry.startswith(_HOST_TOKEN_DIR + ":"), (
-        f"core's /token mount ({entry!r}) must be sourced from "
-        f"{_HOST_TOKEN_DIR!r} (issue #58 canonical path)."
-    )
-
-
-def test_google_token_mount_in_core_is_writable() -> None:
-    """core's /token directory mount must be writable (NOT :ro) — issue #53.
-
-    The runtime add-account flow mints a new google_token_<email-slug>.json into
-    /token from inside core, so discover_accounts() picks it up with no restart.
-    core writes only *new* per-account files and never the shared
-    google_token.json, so it does not contend with mcp-sheets (which solely
-    refreshes existing account files); the writes target distinct files.
-    """
-    compose = yaml.safe_load(_COMPOSE_PATH.read_text())
-    entry = _core_token_dir_entry(compose)
-    assert entry is not None, (
-        f"No volume entry targeting {_CORE_TOKEN_DIR_MOUNT!r} found in core.volumes."
-    )
-    assert not entry.endswith(":ro"), (
-        f"core's /token mount ({entry!r}) must be read-write so the add-account "
-        "flow (issue #53) can mint new google_token_<slug>.json files there. "
-        "Remove the ':ro' suffix."
-    )
-
-
 # ---- mcp-calendar token directory mount (issue #56) --------------------------
 
 #: The container path where the token directory must be mounted in mcp-calendar.
@@ -750,15 +599,11 @@ def test_mcp_calendar_token_mount_is_read_only_subdir() -> None:
 
 # ---- unified google token path invariants (issue #58) -------------------------
 #
-# ALL five token-consuming services (core, mcp-calendar, mcp-drive, mcp-sheets,
-# mcp-gmail) must source their token from ./secrets/google_tokens/ — the single
-# canonical subdirectory.  The legacy flat path (./secrets/google_token.json) must
-# not appear anywhere in a token-related bind-mount after this fix.
-#
-# mcp-calendar mounts the whole directory (multi-account scan); the other four
-# mount the single file google_token.json inside that directory.  Either way the
-# host-side source resolves inside ./secrets/google_tokens/ — never directly
-# under ./secrets/.
+# ALL token-consuming services (mcp-calendar, mcp-drive, mcp-sheets, mcp-gmail)
+# must source their token from ./secrets/google_tokens/ — the single canonical
+# subdirectory (which the host-native core also scans directly, no mount needed).
+# The legacy flat path (./secrets/google_token.json) must not appear anywhere in
+# a token-related bind-mount after this fix.
 
 
 def _token_volumes(compose: dict[str, Any], service: str) -> list[str]:
@@ -782,7 +627,6 @@ def test_no_service_mounts_legacy_flat_token() -> None:
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     for svc in (
-        "core",
         "mcp-drive",
         "mcp-sheets",
         "mcp-gmail",
@@ -809,7 +653,6 @@ def test_all_token_consumers_source_from_google_tokens_subdir() -> None:
     """
     compose = yaml.safe_load(_COMPOSE_PATH.read_text())
     for svc in (
-        "core",
         "mcp-drive",
         "mcp-sheets",
         "mcp-gmail",
@@ -824,7 +667,7 @@ def test_all_token_consumers_source_from_google_tokens_subdir() -> None:
             src = _host_source(entry)
             assert src.startswith(_HOST_TOKEN_DIR), (
                 f"{svc} mounts a token from {src!r}, which is outside the "
-                f"canonical {_HOST_TOKEN_DIR!r} subdirectory.  All six "
+                f"canonical {_HOST_TOKEN_DIR!r} subdirectory.  All "
                 "token-consuming services must share a single host path so "
                 "mcp-sheets rotation stays consistent (issue #58)."
             )

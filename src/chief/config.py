@@ -2,7 +2,8 @@
 
 Non-secret values come from ``config.yaml`` (committed) with environment-variable
 overrides; secrets (the per-platform bot tokens + the Claude OAuth token) come from a
-Docker ``secrets_dir`` (``/run/secrets``) with an environment fallback for local runs.
+``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` or the repo-local
+``./secrets`` — see :func:`chief.app.load_settings`) with an environment fallback.
 Precedence, highest first: explicit init kwargs → environment → ``config.yaml`` → secret
 files. At least one chat platform (Telegram and/or Discord) must be fully configured.
 """
@@ -37,8 +38,8 @@ class PolicySeed(BaseModel):
 class Settings(BaseSettings):
     """Validated configuration for the chief core process."""
 
-    # Enable secrets_dir only when the Docker mount exists (app.load_settings).
-    # Otherwise local runs read tokens from env, avoiding a missing-dir warning.
+    # secrets_dir is enabled only when one of the candidate dirs exists
+    # (app.load_settings); otherwise tokens come from env (no missing-dir warning).
     model_config = SettingsConfigDict(
         yaml_file="config.yaml",
         extra="ignore",
@@ -66,7 +67,7 @@ class Settings(BaseSettings):
     owner_model_opus: str = "claude-opus-4-8"
     opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
-    db_path: str = "chief.db"
+    db_path: str = "data/chief.db"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
     )
@@ -127,32 +128,34 @@ class Settings(BaseSettings):
     guest_rate_window_seconds: int = 3600
     guest_global_rate_per_window: int = 60
 
-    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a persisted
-    # volume in the container); memory_git versions every write op via subprocess git
-    # under the configured author identity.
-    memory_dir: str = "/memory"
+    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a host directory,
+    # gitignored); memory_git versions every write op via subprocess git under the
+    # configured author identity.
+    memory_dir: str = "data/memory"
     memory_git: bool = True
     git_author_name: str = "chief"
     git_author_email: str = "chief@localhost"
 
     # Google services (M5/M8). Each enabled server wires its own MCP container over
-    # streamable HTTP at <svc>_mcp_url (MCP at /mcp) into owner sessions: reads ALLOWed,
-    # writes approval-gated, deferred ops blocked. One shared OAuth token covers all
-    # four (see secrets/README.md). owner_tz frames calendar booking times (an IANA
+    # streamable HTTP at <svc>_mcp_url into owner sessions — the containers publish
+    # their ports on 127.0.0.1 so the host-native core reaches them via localhost:
+    # reads ALLOWed, writes approval-gated, deferred ops blocked. One shared OAuth
+    # token covers all four (see secrets/README.md). owner_tz frames calendar booking
+    # times (an IANA
     # name, e.g. America/New_York). The gmail container's transparent signature is not a
     # Settings field: it reads the GMAIL_SIGNATURE compose env at its own startup (see
     # secrets/README.md). Each defaults off until its token + container exist.
     calendar_enabled: bool = False
-    calendar_mcp_url: str = "http://mcp-calendar:8003/mcp"
+    calendar_mcp_url: str = "http://127.0.0.1:8003/mcp"
     drive_enabled: bool = False
-    drive_mcp_url: str = "http://mcp-drive:8001/mcp"
+    drive_mcp_url: str = "http://127.0.0.1:8001/mcp"
     sheets_enabled: bool = False
-    sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
+    sheets_mcp_url: str = "http://127.0.0.1:8002/mcp"
     gmail_enabled: bool = False
     # Cutover (issue #52): the mcp-gmail service now runs the chief-owned server on
     # :8004 (the third-party mcp-google-gmail dependency was dropped). The SDK server
     # name stays ``gmail_chief`` so the per-thread account rebuild keeps matching.
-    gmail_mcp_url: str = "http://mcp-gmail:8004/mcp"
+    gmail_mcp_url: str = "http://127.0.0.1:8004/mcp"
     owner_tz: str = "UTC"
 
     # Browser automation (M13+), owner-only, default off (mirror the opt-in pattern).
@@ -161,11 +164,11 @@ class Settings(BaseSettings):
     # (navigate, snapshot, screenshot, inspection) ALLOWed, write tools (click, type,
     # JS evaluation) approval-gated. Guest sessions never see browser tools.
     playwright_enabled: bool = False
-    playwright_mcp_url: str = "http://mcp-playwright:3000/mcp"
-    # Mount point of the shared screenshots volume inside the core container (and
-    # inside mcp-playwright at the same path). Core reads screenshot files from here
-    # to deliver them via send_file after browser_take_screenshot runs.
-    playwright_screenshots_dir: str = "/screenshots"
+    playwright_mcp_url: str = "http://127.0.0.1:3000/mcp"
+    # Host directory bind-mounted into mcp-playwright at /screenshots. Core reads
+    # screenshot files from here to deliver them via send_file after
+    # browser_take_screenshot runs.
+    playwright_screenshots_dir: str = "data/screenshots"
 
     # Host shell + file workspace (M7, host-native rework), owner-only.
     # shell_enabled wires the in-process bash tool that runs a persistent per-task
@@ -278,6 +281,22 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator(
+        "db_path",
+        "audit_log_path",
+        "memory_dir",
+        "workspace_dir",
+        "playwright_screenshots_dir",
+    )
+    @classmethod
+    def _expand_user_paths(cls, value: str) -> str:
+        """Expand a leading ``~`` so host configs can point at home-dir paths.
+
+        Relative paths stay relative (resolved against the process cwd — the repo
+        root under the ``chief`` launcher), matching how ``config.yaml`` is found.
+        """
+        return os.path.expanduser(value)
 
     @field_validator("blacklist_shell_patterns")
     @classmethod

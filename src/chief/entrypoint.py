@@ -1,10 +1,11 @@
-"""Container entrypoint: run Alembic migrations then exec the app.
+"""Process entrypoint: run Alembic migrations then exec the app.
 
-This module is the container's ENTRYPOINT wrapper. It runs ``alembic upgrade head``
-(fail-loud: non-zero exit + clear log on failure) before handing control to the app
-via ``os.execv``. The app never boots on a half-migrated schema.
+This module is the launcher wrapper (the ``chief`` script installed by install.sh runs
+it). It runs ``alembic upgrade head`` (fail-loud: non-zero exit + clear log on failure)
+before handing control to the app via ``os.execv``. The app never boots on a
+half-migrated schema.
 
-Invoke as the container entrypoint::
+Invoke::
 
     python -m chief.entrypoint
 
@@ -57,9 +58,9 @@ def main() -> None:
 
     configure_logging()
 
-    # DB_PATH mirrors the Docker volume mount used in docker-compose.yml (sqlite-data).
-    # Falls back to /data/chief.db — the same default used by config.py.
-    db_path = os.environ.get("DB_PATH", "/data/chief.db")
+    # Falls back to data/chief.db — the same default used by config.py / config.yaml
+    # (relative to the repo root, where the chief launcher runs).
+    db_path = os.environ.get("DB_PATH", "data/chief.db")
     app_argv = [sys.executable, "-m", "chief.app"]
     migrate_then_exec(db_path, app_argv)
 
