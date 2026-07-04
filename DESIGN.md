@@ -1,10 +1,39 @@
 # chief — Design
 
-A personal AI agent, self-hosted on a VPS. DM it from Telegram or Discord and it does
-things for you — and for other people, like a real assistant screens for its boss.
-Backed by your Claude Max subscription via the Claude Agent SDK.
+A personal AI agent, running natively on your own machine. DM it from Telegram or
+Discord and it does things for you — and for other people, like a real assistant
+screens for its boss. Backed by your Claude Max subscription via the Claude Agent SDK.
 
-Status: **design complete (v1)** — ready to build; open items are technical verifications.
+Status: **design complete (v1)**, built through M13 — and **reworked host-native
+(2026-07)**, see the next section.
+
+## Host-native rework (2026-07)
+
+An owner-approved architectural reversal from the original fully-containerized,
+sandbox-isolated design to a host-native, highly-autonomous one. What changed:
+
+- **Core runs natively on the host** (Linux + macOS): `chief` /
+  `uv run python -m chief.entrypoint` from the repo root. Only the MCP sidecars
+  (Google servers, playwright) remain in docker compose, publishing their ports on
+  `127.0.0.1` for core to reach over localhost. Secrets are plain files in a secrets
+  dir (`./secrets` or `~/.config/chief/secrets`) or env vars; data lives in the
+  gitignored repo-local `data/`.
+- **The shell is real.** The owner's bash tool spawns persistent per-task shells
+  directly on the host (`$SHELL`, else bash, else zsh) with the full environment —
+  the sandbox container and its RPC are gone. The owner accepts that shell children
+  see the process env (OAuth token included).
+- **Gate flipped to default-allow (owner tier).** Effectful owner calls run freely;
+  only an **approval blacklist** (configurable regexes over shell commands + tool
+  names: sudo, `rm -rf` on a root, disk writes, power state, pipe-to-shell,
+  force-push main, global installs, …) still raises the approval card. NEVER and the
+  self-curating APPROVED list are kept. Guests are exactly as locked down as before.
+- **Untrusted-content screening** replaces container isolation as the injection seam:
+  web/browser tool results and guest messages pass a cheap Haiku screen; hits are
+  annotated with a warning (optionally blocked).
+- **No prod.** The VPS deploy is gone; chief ships as a local install (`install.sh`).
+
+Sections below marked *(superseded — host-native)* keep the original design for the
+record; the rest of this section is the current truth.
 
 ## Goals
 
@@ -12,10 +41,11 @@ Status: **design complete (v1)** — ready to build; open items are technical ve
 - **Two tiers of caller:** one privileged **owner** per platform = you; everyone else is
   a **guest**, explicitly *not you*, and gets a restricted "assistant" experience.
 - Agent acts via MCP servers: **Google Drive, Gmail, Google Calendar** (owner only).
-- Plus **web search/fetch**, a **file workspace**, and **shell/code** on the VPS under a
-  strict command policy.
+- Plus **web search/fetch**, a **file workspace**, and a real **shell** on the owner's
+  machine (blacklist-gated).
 - Use the **Claude Agent SDK** (Python) so it runs on **Claude Max**, not API billing.
-- Ship as one **docker compose** stack, deployable to a VPS.
+- Ship as a **local install**: native core + a small docker compose stack of MCP
+  sidecars.
 
 ## Design completeness — areas to settle
 
@@ -56,7 +86,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Guest capabilities | Take a message, check availability, request a booking (only) |
 | Guest bookings | Require owner approval before landing on the calendar |
 | Email | Gmail is a **tool only** for now — not a chat channel |
-| Permission gate | One gate, **default-ask on effect**: NEVER refuse · read-only allow · APPROVED allow · else ASK |
+| Permission gate | One gate, tier-split (host-native): **owner default-allow** — NEVER deny · APPROVED allow · blacklist ASK · else allow; **guest default-ask** unchanged |
 | Approval routing | In task topic for owner work; **Front Desk** topic for guest-originated |
 | Approval buttons | Approve/Deny once + Always-allow/deny (self-curating allowlist) |
 | Models | Owner: Sonnet default, Opus on demand. Guests: Sonnet, never Opus |
@@ -66,17 +96,17 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Tier isolation | Guest sessions built with *only* guest tools (not prompt-instructed) |
 | Guest admission | Notify-on-first-contact (owner allows new senders; known senders skip) |
 | Guest rate limits | Per-guest cap + global guest budget (protect Max limits) |
-| Shell sandbox | Dedicated locked-down worker container; no secrets, restricted FS/network |
+| Shell | Host-native (2026-07): persistent per-task shells on the owner's machine, full env; blacklist-gated (was: sandbox container) |
 | Audit | Log every tool call, approval decision, memory write |
 | Persistence | One sqlite (tasks/contacts/approvals/policy/limits) + md memory + JSONL transcripts/audit |
 | Restart | Interrupted tasks: notify + ask before resuming. Approvals survive restart |
 | Transcripts | Keep, auto-prune after 90 days; memory written directly by chief persists |
 | Transport / ingress | Telegram long-polling; outbound-only, no public HTTP ingress |
-| MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
-| Deploy | CI/CD: GH Actions done-check + smoke-test → SSH `git pull && compose up -d --build` (git-build model, no registry) |
+| MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP on `127.0.0.1:<port>`) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
+| Deploy | Local install (host-native): `install.sh` + `chief` launcher; CI keeps done-check + smoke test, no VPS deploy |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
-| Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (Docker secret); never set `ANTHROPIC_API_KEY`; regen yearly |
+| Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (secrets-dir file or env); never set `ANTHROPIC_API_KEY`; regen yearly |
 | Gate mechanism | `PreToolUse` hook (every tool) + `canUseTool` (ask→approval) — verified |
 | Usage budget | Track month-to-date `total_cost_usd` vs monthly Agent SDK credit ($100/$200); warn 75/90%; on cap ask owner. (Post-June-15: separate from interactive limits) |
 | Credit overflow | Hard pause at exhaustion; overflow to paid API rates only if owner approves |
@@ -98,7 +128,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Opus escalation | Always owner-approved: command pre-approves, auto-detect asks |
 | Skill authoring | chief drafts, owner approves via review/merge; never self-deployed |
 | Acting-as identity | Transparent — assistant signature on outgoing email/messages |
-| Encryption at rest | Secrets encrypted (age); transcripts/memory via host perms + backups |
+| Encryption at rest | Secrets = `0600` files in the secrets dir; transcripts/memory via host perms + backups |
 | Memory mgmt | `/memory`, `/forget` + direct file edit; auto-notify on save |
 | Blocklist | Owner block/mute; chief self-blocks only on clear abuse (notifies owner) |
 | Language | Match the sender |
@@ -150,8 +180,8 @@ bot token**: owner-in-supergroup (topic-routed tasks), guest-in-DM, and group-me
 tags tier by **sender ID**, not chat type. See "Channels, media & onboarding".
 
 A task has a small lifecycle (full states in "Task execution engine"). Task/session
-metadata lives in sqlite; **auth tokens do not** — they're Docker secrets (encrypted),
-outside agent-reachable paths (see Config & secrets).
+metadata lives in sqlite; **auth tokens do not** — they're files in the secrets dir
+(see Config & secrets).
 
 ## Task execution engine
 
@@ -193,10 +223,11 @@ Wraps the Claude Agent SDK. One **session per task**, kept open in streaming-inp
 - **Tool exposure (gate mechanism verified — see "Verified"):** the permission gate is a
   **`PreToolUse` hook** (fires on every built-in + MCP tool call, returns allow/deny/ask);
   **`canUseTool`** drives the "ask" → approval round-trip.
-  - **Shell** → SDK built-in Bash tool, gated by the hook against the command policy
-    (NEVER/APPROVED/else-ask). Owner-only; executes in the sandbox container.
-  - **File workspace** → SDK built-in Read/Write/Edit, confined to a workspace dir set as
-    the session cwd. Owner-only.
+  - **Shell** → chief's in-process `mcp__chief_shell__bash` tool (the SDK built-in
+    Bash stays refused: one shell surface), running persistent per-task shells on the
+    host, blacklist-gated. Owner-only.
+  - **File workspace** → SDK built-in Read/Write/Edit; host-native: unconfined for the
+    owner, with `data/workspace` as the suggested scratch dir + shell cwd. Owner-only.
   - **Web search/fetch** → SDK built-in (or a web MCP). Owner-only.
   - **Google (Calendar/Gmail/Drive)** → MCP server(s). Owner-only.
   - **Guest tools** → small custom MCP/in-process tools, the only ones in a guest session.
@@ -280,24 +311,30 @@ direct hand-editing of the git-tracked markdown files. chief still auto-notifies
   JSONL, 9 tools); mem0 = semantic+graph. Strong for relational contact queries; cost is
   manual graph upkeep + opacity. **Deferred** as a future upgrade for chief.
 
-## Permission gate (default-ask)
+## Permission gate (default-allow + blacklist — host-native)
 
-One gate classifies **every** tool call, not just shell. Posture: **default-ask on
-effect** — you curate what's auto-allowed; everything effectful else needs a tap (not a
-silent refusal — unlisted effectful actions prompt, they don't fail).
+One gate classifies **every** tool call, split by tier (2026-07 rework; the original
+default-ask posture survives unchanged on the guest tier).
 
-Decision order for a call:
+**Owner tier — default-allow.** Decision order:
 
-1. **NEVER list** → hard refuse, no prompt, no override (e.g. `rm -rf /`, disk wipes,
-   curl-pipe-sh, reading secret/credential paths).
-2. **Read-only / safe** → **allow**, no prompt. Reading files, web search/fetch (GET),
-   calendar free/busy, listing, and **writes inside memory or the scratch workspace**. Low blast radius.
-3. **APPROVED allowlist** → **allow**, no prompt. Specific effectful actions you've blessed
-   (e.g. `git status`, a named script, email to a known contact).
-4. **Everything else effectful** → **ASK** (the approval flow). Shell not on the allowlist,
-   send-email, deletes/overwrites outside memory ∪ workspace, web POST/forms, calendar/Drive writes.
+1. **NEVER list** → hard refuse, no prompt, no override. Still covers the truly
+   destructive Google ops (per-service `deferred_tools`, also refused at the SDK
+   layer) and anything the owner "always-denies".
+2. **APPROVED allowlist** → **allow**, no prompt — an explicit blessing (the
+   "always allow" button) beats the blacklist.
+3. **Approval blacklist** → **ASK** (the approval flow). Configurable in
+   `config.yaml`: regexes over shell commands (`blacklist_shell_patterns` — default
+   set: sudo/doas, `rm -rf` on `/`/`$HOME`/`~`, mkfs / `dd of=/dev/`,
+   shutdown/reboot, `kill -9 1`, `curl … | sh`, `git push --force` to main/master,
+   `chmod -R 777`, global package installs) plus whole tool names
+   (`blacklist_tools`).
+4. **Everything else** → **allow**. Writes anywhere on the host, sends, bookings —
+   the owner chose autonomy; the audit log still records every call.
 
-Only the **owner** triggers effectful tools at all; guest sessions don't have them wired in.
+**Guest tier — default-ask (unchanged):** NEVER → deny · file ops → deny · read-only →
+allow · APPROVED → allow · else effectful → ASK. Guests still never have owner tools
+wired in at all.
 
 **Self-curation is the hard part (flagged).** "Always allow" must add a *precise, safe*
 allowlist entry — argument-aware and metacharacter-free. Approving `git status` must not
@@ -349,36 +386,40 @@ nothing; the permission gate is a real code callback that runs regardless of wha
 
 **Threats → mitigations:**
 
-- **Prompt injection** (poisoned email/web/file says "email X / delete Y") → gate forces
-  approval on effectful actions; tool content treated as untrusted; effect is owner-visible.
+- **Prompt injection** (poisoned email/web/file says "email X / delete Y") →
+  **untrusted-content screening** (host-native): web/browser results and guest
+  messages pass a cheap Haiku screen and a hit is annotated with a warning (or
+  blocked, `screening_block`); the blacklist still cards the destructive shapes; tool
+  content treated as untrusted; every call is audited.
 - **Guest jailbreak to owner tools** → impossible by construction (tools absent), not by
   instruction.
 - **Self-escalation** via editing `Soul.md`/memory → those never grant tools; gate is code.
-- **Secret exfiltration** via shell/file read → secrets live **outside** the agent-reachable
-  filesystem (never in workspace/cwd/memory repo); NEVER list blocks credential paths;
-  shell runs in a **separate sandbox container** with no secrets mounted (below).
+- **Secret exfiltration** via shell/file read → **accepted risk (host-native)**: the
+  shell runs as the owner's user with the full environment, OAuth token included —
+  the owner explicitly traded this isolation away for autonomy. The blacklist +
+  screening + audit log are the remaining controls.
 - **Guest abuse / cost** (spam, burning Max limits) → notify-on-first-contact admission +
   **per-guest rate limit AND a global guest budget** (so neither one guest nor a crowd
   drains your Max limits) + **block/mute**. The owner can block (ignore entirely) or mute
   (take messages silently). **chief may also self-block, but only for clear abuse**, and
   always notifies the owner when it does (owner can override).
-- **Destructive ops** → default-ask gate + NEVER list + sandbox blast-radius limits.
+- **Destructive ops** → approval blacklist (cards the classic destructive shapes) +
+  NEVER list. No sandbox blast-radius bound anymore — blacklist coverage is the line.
 - **Identity spoofing** → platform user-IDs trusted; owner = exact ID match, no fuzzy.
 
-**Shell sandbox.** Shell/code executes in a **dedicated, locked-down worker container** —
-no secrets/tokens mounted, restricted filesystem (only a scratch workspace volume),
-resource-capped (mem/PID/CPU). Outbound network is allowed (so the owner can `git
-clone`/`pull` and pull deps); the secret-free FS + caps bound the blast radius. The
-permission gate decides *what* runs; the sandbox bounds the *damage* if something slips
-past. The agent core talks to it over a narrow RPC.
+**Shell (host-native).** Shell/code executes **directly on the owner's machine** as
+their user: a persistent per-task shell (`$SHELL`, else bash, else zsh) with the full
+environment, cwd at the workspace dir, per-command timeout + output cap. The approval
+blacklist decides *what still needs a tap*; there is no container bounding the damage —
+that is the deliberate trade. *(Superseded: the M7 sandbox container + RPC.)*
 
 **Always-on:** an **audit log** of every tool call, approval decision, and memory write
 (who/what/when/verdict). Least-privilege containers. Secrets via env/secret-mount only,
 never on agent-reachable paths.
 
-**Encryption at rest:** **secrets/OAuth tokens encrypted** (Docker secrets + age) so the
-repo/disk can't leak them in plaintext; transcripts/memory/sqlite rely on host disk + file
-perms + VPS backups (pragmatic — not a full encrypted volume).
+**Encryption at rest:** secrets are `0600` files in the secrets dir (or env vars);
+transcripts/memory/sqlite rely on host disk + file perms + backups (pragmatic — not a
+full encrypted volume).
 
 ## Architecture (draft)
 
@@ -436,10 +477,13 @@ gone.
 Split **non-secret config** (version-controllable) from **secrets** (never committed, never
 on agent-reachable paths).
 
-**Secrets → Docker secrets** (mounted at `/run/secrets`, not baked into images):
-`TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN` (later), `CLAUDE_CODE_OAUTH_TOKEN` (from
-`claude setup-token`), Google OAuth client id/secret + refresh token. Hard rule — secrets
-reach only the core process; absent from the shell sandbox, the workspace, the memory repo.
+**Secrets → a secrets dir** (one file per secret; host-native): the first existing of
+`$CHIEF_SECRETS_DIR`, `~/.config/chief/secrets`, or the repo-local `./secrets`, read by
+pydantic-settings; env vars of the same name always work. Holds `telegram_bot_token`,
+`discord_bot_token`, `claude_code_oauth_token` (from `claude setup-token`), the Google
+OAuth client + tokens (`secrets/google_tokens/`). Files are `0600`. Note the shell now
+runs on the host, so secrets in the process env are visible to shell children — an
+accepted trade (see Security model).
 
 **Non-secret config → committed `config.yaml` + `.env` overrides**, read by
 **pydantic-settings** (typed, env-overridable). Holds owner IDs (`OWNER_TELEGRAM_ID`, …),
@@ -449,44 +493,40 @@ model posture, concurrency cap, rate limits, timeouts (staleness 10 m, approval 
 **Policy note:** the seed NEVER/APPROVED lists come from config; runtime "always allow/deny"
 mutations are written to the sqlite `policy` table, not back to the config file.
 
-## Deployment & docker topology (draft)
+## Deployment & topology (host-native)
 
-Single VPS, one `docker compose`. **Outbound-only** (no public HTTP ingress); Telegram via
-**long-polling**.
+One machine — the owner's. **Outbound-only** (no public HTTP ingress); Telegram via
+**long-polling**, Discord via the gateway.
 
-**Services:**
+- **core** — runs **natively on the host**: `chief` (the installed launcher) or
+  `uv run python -m chief.entrypoint` from the repo root, which migrates the DB then
+  execs `chief.app`. Data (sqlite, audit log, memory git repo, workspace, screenshots)
+  lives in the gitignored repo-local `data/`.
+- **`mcp-calendar` / `mcp-drive` / `mcp-sheets` / `mcp-gmail`** — chief's own FastMCP
+  servers in docker compose behind the **`google` profile**, each publishing its port
+  on **`127.0.0.1` only** (:8003/:8001/:8002/:8004); core connects via localhost. One
+  shared Google token dir (`secrets/google_tokens/`) is bind-mounted into all four;
+  `mcp-sheets` is the sole writer.
+- **`mcp-playwright`** — the browser sidecar behind the `playwright` profile,
+  `127.0.0.1:3000`; screenshots land in `./data/screenshots` for core to deliver.
 
-- **`core`** — chat adapters (Telegram long-poll + Discord gateway), agent orchestrator,
-  memory, permission gate, sqlite. Holds the secrets. `restart: unless-stopped`, healthcheck.
-- **`sandbox`** — locked-down shell/code worker: no secrets, restricted FS (scratch
-  workspace only), resource-capped; outbound network allowed (git/deps). Talks to `core`
-  over a narrow RPC. *Built (M7).*
-- **`mcp-calendar` / `mcp-drive` / `mcp-sheets`** — chief's own FastMCP servers, one per
-  service (streamable-HTTP at `http://mcp-<svc>:<port>/mcp`, :8003/:8001/:8002, never
-  host-published), behind the **`google` compose profile** (a plain `up` skips them). One
-  shared Google token is bind-mounted into all three: `mcp-sheets` is the sole writer (it
-  persists refreshed tokens), calendar + drive mount it read-only and refresh in memory.
+**Google OAuth:** run the consent dance **once locally**
+(`python -m chief.tools.google.auth`) — the token lands in `secrets/google_tokens/`.
 
-**Volumes:** `sqlite-data`, `memory` (git repo), `workspace` (scratch — shared core↔sandbox),
-`transcripts`. **Docker secrets** for all tokens.
-
-**Google OAuth with no ingress:** run the consent dance **once locally**
-(`python -m chief.tools.google.auth`), mounting the resulting refresh token for the MCP
-containers — no callback server on the VPS.
-
-**Deploy = CI/CD (git-build model).** Push to main → GitHub Actions runs the done-check
-and container smoke-test, then deploys over SSH: the VPS holds a git clone, so deploy is
-`git pull --ff-only && docker compose up -d --build` — images are built **on the VPS**,
-no registry. Deploy restarts are absorbed by the **notify-and-ask** task recovery. (SSH
-only; still no HTTP ingress.)
+**Install = `install.sh`** — checks prerequisites (git, uv, docker+compose), scaffolds
+`data/` + `secrets/`, `uv sync`, runs migrations, optionally
+`docker compose --profile google --profile playwright up -d --build`, and installs the
+`chief` launcher to `~/.local/bin`. **No prod:** CI runs the done-check + a host smoke
+test (migrate-before-app + compose validity); the VPS deploy job is gone.
 
 ## Ops & observability (draft)
 
 - **Logging** — structured **JSON to stdout**; docker captures it. Greppable, zero infra.
 - **Uptime** — chief pings an **external dead-man's-switch** on a heartbeat; silence →
   off-box alert. Catches full-host death (a self-ping can't report its own host dying).
-- **Backup** — VPS provider auto-backups cover volumes (sqlite/transcripts); the **memory
-  git repo also pushes to a private remote** so chief's learned knowledge survives VPS loss.
+- **Backup** — back up the repo-local `data/` dir (sqlite/audit/memory); the **memory
+  git repo can also push to a private remote** so chief's learned knowledge survives
+  machine loss.
 - **Error surfacing** — tool/API failures are reported in-thread to the owner, not swallowed.
 
 ### Usage budgeting (reworked for the June-15-2026 model)
@@ -592,10 +632,11 @@ card:
   atomic per-account token write-back. *Live (M8).*
 - **Web** — search + fetch (read-only GET is un-gated; POST/forms are effectful → gated).
   SDK built-ins (WebSearch/WebFetch). *Live (M7).*
-- **Shell/code** — sandbox container, permission-gated (default-ask per command). *Built M7,
-  opt-in (`shell_enabled`).*
-- **File workspace** — scratch dir (Read/Write/Edit), gate-confined to memory ∪ workspace. *Built
-  M7, opt-in (`workspace_enabled`).*
+- **Shell/code** — persistent per-task shells on the host, blacklist-gated (host-native
+  rework; was the M7 sandbox container). Opt-in (`shell_enabled`).
+- **File workspace** — scratch dir (Read/Write/Edit) at `data/workspace`; host-native:
+  writes anywhere are allowed, the workspace is just the suggested scratch area +
+  shell cwd. Opt-in (`workspace_enabled`).
 - **Memory, scheduler/monitors** — owner-tier management tools.
 
 **Guest toolset (v1):** take-a-message, check-availability (free/busy only), request-booking.
@@ -645,8 +686,8 @@ permission gate, command-policy safe-matching, the scheduler/monitors, and tier 
 ```
 chief/
   config.yaml                # non-secret config
-  docker-compose.yml
-  Dockerfile.core            # core image; per-service images live under docker/ (mcp-*, sandbox)
+  docker-compose.yml         # MCP sidecars only (host-native core)
+  install.sh                 # local install: prereqs, scaffold, deps, migrations, launcher
   BOOTSTRAP.md               # agent-followed setup runbook
   src/chief/
     config.py                # pydantic-settings
@@ -662,7 +703,8 @@ chief/
       tasks.py               # lifecycle, semaphore, live steering, auto-archive, recovery
       personas.py            # owner/guest system-prompt assembly (Soul.md/User.md)
     gate/
-      gate.py                # default-ask classifier (allow/ask/deny)
+      gate.py                # tier-split classifier (owner default-allow / guest default-ask)
+      blacklist.py           # the approval blacklist (shell regexes + tool names)
       policy.py              # NEVER/APPROVED safe-matching (argument-aware)
       approvals.py           # approval state machine + routing + buttons
     memory/
@@ -672,14 +714,13 @@ chief/
     tools/
       google/auth.py         # host-only one-time OAuth → shared token (cal+drive+sheets)
       calendar/mcp.py  drive/mcp.py  sheets/mcp.py   # per-server tool catalogs (read/write split)
-      shell.py               # owner bash → sandbox RPC (M7); web=SDK WebSearch/WebFetch, workspace=gate-confined dir (no module)
+      shell.py               # owner bash → persistent per-task host shells (host-native)
       guest.py               # M6: GuestService (leave_message relay) + GuestAdminService (manage_guest); availability/booking reuse calendar/mcp.guest_service
     scheduler/scheduler.py   # reminders / recurring / monitors
     skills/                  # registry + setup_morning_brief/
     usage/budget.py          # own-share accounting + citizenship backoff
     persistence/             # sqlite (tasks/contacts/approvals/policy/limits/schedules)
     obs/                     # logging / audit / uptime heartbeat
-  docker/sandbox/            # locked-down worker image; RPC server = src/chief/sandbox/shell_server.py
   tests/
 ```
 
@@ -692,7 +733,8 @@ chief/
    persona. If the task is already running → **steer** (push input); else start it.
 3. **Hybrid wait:** adapter awaits the grace window. The agent loops: each tool call hits the
    **gate** (allow/ask/deny); ASK → **approval flow** blocks the call (task → `waiting`);
-   allowed calls execute (MCP / sandbox / workspace), and **tool results are untrusted data**.
+   allowed calls execute (MCP / host shell / workspace), and **tool results are untrusted
+   data** (screened for injection when they arrive from the web/browser).
    Milestones post on tool events; **usage is metered per call** against the budget.
 4. **Reply** streams back, smart-split / as files. All surfaces stay silent until the
    reply streams back.
@@ -830,7 +872,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (Sonnet, never Opus); guest transcripts are never distilled into owner memory. Opt-in
   (`guest_enabled` default off; requires `front_desk_thread_key`). DM-only — group
   @mention stays M11.
-- **M7 shell + workspace + web — ✅ done.** Secret-free **sandbox** worker container
+- **M7 shell + workspace + web — ✅ done.** *(Shell + workspace posture superseded by
+  the 2026-07 host-native rework — see the top section; web is unchanged.)* Secret-free **sandbox** worker container
   (`docker/sandbox`, compose profile `sandbox`): read-only rootfs + tmpfs, no secrets, mem/
   PID/CPU caps, a long-lived bash per task over a narrow stdlib-asyncio TCP RPC
   (`src/chief/sandbox/shell_server.py` ← `tools/shell.py`). The owner bash tool is
@@ -899,7 +942,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 - **M12 Discord adapter** ✅ *(built early)***:** private server, threads = tasks; full
   parity with Telegram (commands, 4-button approval cards, guest ack), runs alongside it
   off one DB on its own platform-bound engine stack.
-- **M13 hardening:** CI/CD (git-build + SSH), encryption-at-rest (age), memory-repo backup,
+- **M13 hardening:** CI/CD (git-build + SSH; *deploy since removed — host-native*),
+  encryption-at-rest (age), memory-repo backup,
   least-privilege, `BOOTSTRAP.md` onboarding, live sandbox tests. **Schema migrations:**
   Alembic is adopted; the schema is fully migration-driven. `init_db` runs
   `alembic upgrade head` at startup (via `_run_migrations`); `create_all` is not used
@@ -914,7 +958,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   `importlib.resources` (`_ALEMBIC_INI` in `db.py`). New revisions go in
   `src/chief/alembic/versions/` only — there is no second dev-only copy.
 
-  **Non-root core (issue #6):** The `core` container runs as **uid/gid 1000** (`chief`),
+  **Non-root core (issue #6, superseded — core no longer runs in a container):** The
+  `core` container ran as **uid/gid 1000** (`chief`),
   matching the MCP services and sandbox. `Dockerfile.core` creates the user, pre-chowns
   `/data /memory /workspace /home/chief/.claude`, and sets `HOME=/home/chief`.
   `docker-compose.yml` pins `user: "1000:1000"` and `security_opt: no-new-privileges:true`.
@@ -924,7 +969,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   volumes need a one-time `chown -R 1000:1000` pass; the exact command is in
   `secrets/README.md`.
 
-  **Writable paths under `read_only: true` (issue #16):** The `core` rootfs is read-only.
+  **Writable paths under `read_only: true` (issue #16, superseded — host-native):**
+  The `core` rootfs was read-only.
   All writes go to one of three writable mount points:
 
   | Path | Mount | What lives there |
@@ -941,7 +987,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   (which is on the read-only rootfs). Transcripts land at `$CLAUDE_CONFIG_DIR/projects/…`
   as before, so session resume is unaffected.
 
-  **SSH deploy (live — git-build model):** The `deploy` job in `.github/workflows/ci.yml`
+  **SSH deploy (superseded — host-native, 2026-07):** the VPS deploy was removed;
+  chief ships as a local install (`install.sh`). Kept for the record: The `deploy` job in `.github/workflows/ci.yml`
   runs on every green push to main — `needs: [done-check, smoke-test]`. There is **no
   registry publish step**: the VPS holds a git clone of this repo (secrets/`.env`
   transferred out-of-band — they're gitignored and never travel through git or CI), and
