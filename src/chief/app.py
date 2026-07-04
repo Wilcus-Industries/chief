@@ -30,6 +30,7 @@ from .core.budget import BudgetGate, BudgetIO
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
+from .gate.blacklist import Blacklist
 from .gate.policy import PolicyStore
 from .memory.markdown_backend import MarkdownMemory
 from .memory.store import MemoryStore
@@ -338,6 +339,10 @@ def build_engine(
         policy=policy,
         approvals=approvals,
         audit=audit,
+        # Owner default-allow posture: only these patterns/tools still raise a card.
+        blacklist=Blacklist.from_config(
+            settings.blacklist_shell_patterns, settings.blacklist_tools
+        ),
         front_desk_thread_key=settings.front_desk_thread_key,
         memory=memory,
         memory_dir=settings.memory_dir,

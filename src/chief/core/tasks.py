@@ -44,6 +44,7 @@ from ..adapters.base import (
     should_send_as_file,
 )
 from ..gate.approvals import OPUS_ESCALATION_KIND, ApprovalManager
+from ..gate.blacklist import Blacklist
 from ..gate.gate import (
     BUILTIN_SHELL_TOOLS,
     FILE_OP_TOOLS,
@@ -294,6 +295,7 @@ class TaskManager:
         policy: PolicyStore | None = None,
         approvals: ApprovalManager | None = None,
         audit: AuditLog | None = None,
+        blacklist: Blacklist | None = None,
         front_desk_thread_key: str | None = None,
         memory: MemoryStore | None = None,
         memory_dir: str | None = None,
@@ -341,6 +343,7 @@ class TaskManager:
         self._policy = policy
         self._approvals = approvals
         self._audit = audit
+        self._blacklist = blacklist
         self._front_desk_thread_key = front_desk_thread_key
         self._memory = memory
         self._memory_dir = memory_dir
@@ -994,19 +997,16 @@ class TaskManager:
         route = self._approval_route(
             tier=tier, thread_key=thread_key, surface=surface
         )
-        # Both file roots are owner-only. A guest has no file tools at all, so its gate
-        # carries neither a memory nor a workspace root — total isolation by
-        # construction (matches the cwd=None treatment in _wire_guest_session).
-        owner = tier == "owner"
-        memory_dir = self._memory_dir if owner else None
-        workspace_dir = self._workspace_dir if owner else None
+        # The approval blacklist drives the owner's default-allow posture; a guest
+        # session carries none and stays on the default-ask path (tier-split in
+        # gate.classify — guests never gain the owner's open posture).
+        blacklist = self._blacklist if tier == "owner" else None
         hook = build_pretool_hook(
             thread_key=thread_key,
             tier=tier,
             policy=self._policy,
             audit=self._audit,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
 
@@ -1026,8 +1026,7 @@ class TaskManager:
             audit=self._audit,
             on_waiting=on_waiting,
             on_running=on_running,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
         hooks: dict[HookEvent, list[HookMatcher]] = {
