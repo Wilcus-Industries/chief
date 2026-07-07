@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
+from copilot import ProviderConfig
 
 from .copilot_session import (
     CopilotClientFactory,
@@ -40,7 +41,9 @@ class AgentBackend(Protocol):
     resume pointer, permission callback + pre-tool hook (``can_use_tool`` / ``hooks``),
     and the in-process tools + MCP servers (``allowed_tools`` / ``disallowed_tools`` /
     ``mcp_servers`` / ``plugins`` / ``skills``), and returns a
-    :class:`~chief.core.session.SessionProto`.
+    :class:`~chief.core.session.SessionProto`. ``provider`` (#90, part of #72) is an
+    optional BYOK provider-target override (e.g. OpenRouter) — Copilot-specific, so
+    :class:`ClaudeBackend` accepts and ignores it.
     """
 
     def create_session(
@@ -58,6 +61,7 @@ class AgentBackend(Protocol):
         mcp_servers: dict[str, Any] | None = None,
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
+        provider: ProviderConfig | None = None,
     ) -> SessionProto: ...
 
 
@@ -88,7 +92,10 @@ class ClaudeBackend:
         mcp_servers: dict[str, Any] | None = None,
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
+        provider: ProviderConfig | None = None,
     ) -> SessionProto:
+        # `provider` is a Copilot BYOK concept (#90) — claude-agent-sdk has no analogue,
+        # so it's accepted (to satisfy AgentBackend) and intentionally not forwarded.
         return TaskSession(
             model=model,
             resume=resume,
@@ -116,13 +123,16 @@ class CopilotBackend:
     third-party boundary): production spawns the real runtime, tests inject a fake so a
     real turn can be dispatched through the backend without a subprocess.
 
-    This slice wires the minimal surface for one owner turn — ``model``, ``resume``, and
-    ``cwd``. The tool/gate/persona kwargs (``can_use_tool``, ``hooks``,
-    ``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``,
-    ``system_prompt``, ``fork_session``) are accepted to satisfy the
+    This slice wires the minimal surface for one owner turn — ``model``, ``resume``,
+    ``cwd``, and ``provider``. The tool/gate/persona kwargs (``can_use_tool``,
+    ``hooks``, ``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``, ``plugins``,
+    ``skills``, ``system_prompt``, ``fork_session``) are accepted to satisfy the
     :class:`AgentBackend` contract but not
     yet forwarded; later #72 slices map them onto the Copilot SDK's permission callback,
-    hooks, and custom tools.
+    hooks, and custom tools. ``provider`` (#90, part of #72) is an optional BYOK
+    provider-target override (``None`` stays on plain Copilot quota) —
+    :func:`~chief.core.copilot_session.openrouter_provider_config` builds one for the
+    ``openrouter`` target class.
     """
 
     def __init__(
@@ -145,12 +155,14 @@ class CopilotBackend:
         mcp_servers: dict[str, Any] | None = None,
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
+        provider: ProviderConfig | None = None,
     ) -> SessionProto:
         return CopilotTaskSession(
             model=model,
             resume=resume,
             cwd=cwd,
             client_factory=self._client_factory,
+            provider=provider,
         )
 
 
