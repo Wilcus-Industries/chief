@@ -80,6 +80,13 @@ SYNTAX_ERROR_EXIT_CODE = 2
 #: than this without a newline is beyond scope; the output cap is far smaller anyway).
 _STREAM_LIMIT = 1 << 20
 
+#: Bound on the pre-flight ``-n`` parse-check subprocess (LOW finding: every other
+#: shell path is bounded by the command's own ``asyncio.wait_for`` timeout; this
+#: throwaway parser had none, so a wedged parse process could hang a command forever).
+#: The check itself does no I/O beyond ``DEVNULL`` stdin, so this only needs to be
+#: generous enough for a slow host, not the command's own budget.
+_SYNTAX_CHECK_TIMEOUT_SECONDS = 5.0
+
 
 def resolve_shell() -> tuple[str, ...]:
     """The shell argv to spawn: ``$SHELL`` if set, else ``bash``, else ``zsh``.
@@ -177,6 +184,17 @@ async def _shell_syntax_error(argv: tuple[str, ...], command: str) -> str | None
     A trailing **line continuation** (an odd run of unescaped backslashes at the very
     end) passes ``-n`` but would splice onto the appended sentinel line and corrupt
     both the output and the exit code — so it is rejected here explicitly.
+
+    Bounded by :data:`_SYNTAX_CHECK_TIMEOUT_SECONDS`: a wedged parse process must not
+    hang the command forever the way every other shell path is already guarded against
+    (via the caller's own ``asyncio.wait_for``). A timeout here is treated as "no syntax
+    error found" rather than a rejection — this check is a fast-fail heuristic, not a
+    security boundary (the approval blacklist is), so the least-surprising behavior is
+    to let the real command still attempt to run rather than block it on a check that
+    itself misbehaved. Its own process group (mirroring :meth:`_Shell._terminate`) lets
+    the timeout kill any grandchild the ``-c`` command spawned too — killing only the
+    parser's own pid would leave a grandchild holding the stderr pipe open, hanging the
+    ``communicate()`` cleanup until that grandchild exits on its own.
     """
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -186,8 +204,19 @@ async def _shell_syntax_error(argv: tuple[str, ...], command: str) -> str | None
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
-    _, raw = await proc.communicate()
+    try:
+        _, raw = await asyncio.wait_for(
+            proc.communicate(), timeout=_SYNTAX_CHECK_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        logger.warning("shell syntax pre-check timed out; letting the command proceed")
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return None
     diagnostic = raw.decode(ENCODING, errors="replace").strip()
     if proc.returncode != 0 or diagnostic:
         return diagnostic or "syntax error"

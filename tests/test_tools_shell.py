@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from chief.tools import shell as shell_module
 from chief.tools.shell import (
     SHELL_DIED_EXIT_CODE,
     SYNTAX_ERROR_EXIT_CODE,
@@ -177,6 +178,21 @@ async def test_dangling_line_continuation_rejected(shell: ShellService) -> None:
     result = await shell.run("s1", "echo hi \\")
     assert result["exit_code"] == SYNTAX_ERROR_EXIT_CODE
     await shell.aclose()
+
+
+async def test_syntax_check_timeout_lets_the_command_proceed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A parse-check process that never returns must not hang the real command forever
+    # — it is killed by its own bounded timeout and treated as "no syntax error found".
+    hang_script = tmp_path / "hang_shell.sh"
+    hang_script.write_text("#!/bin/sh\nsleep 30\n")
+    hang_script.chmod(0o755)
+    monkeypatch.setattr(shell_module, "_SYNTAX_CHECK_TIMEOUT_SECONDS", 0.2)
+
+    result = await shell_module._shell_syntax_error((str(hang_script),), "echo hi")
+
+    assert result is None
 
 
 async def test_shell_death_reports_distinct_code(shell: ShellService) -> None:
