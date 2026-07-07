@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from copilot import ProviderConfig
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -26,12 +27,14 @@ from copilot.session_events import (
 )
 
 from chief.adapters.base import Attachment
+from chief.config import Settings
 from chief.core.backend import CopilotBackend
 from chief.core.copilot_session import (
     CopilotTaskSession,
     CopilotTurnError,
     build_persona_system_message,
     find_vendor_identity_leak,
+    openrouter_provider_config,
 )
 from chief.core.personas import build_system_prompt
 from chief.core.session import Final, Milestone
@@ -53,8 +56,18 @@ def _msg(content: str) -> AssistantMessageData:
     return AssistantMessageData(content=content, message_id=uuid4().hex)
 
 
-def _usage(cost: float | None) -> AssistantUsageData:
-    return AssistantUsageData(model="auto", cost=cost)
+def _usage(cost: float | None, model: str = "auto") -> AssistantUsageData:
+    return AssistantUsageData(model=model, cost=cost)
+
+
+def _settings(**overrides: object) -> Settings:
+    base: dict[str, object] = dict(
+        owner_telegram_id=42,
+        telegram_bot_token="tg-secret",
+        claude_code_oauth_token="oauth-secret",
+    )
+    base.update(overrides)
+    return Settings(**base)  # type: ignore[arg-type]
 
 
 class FakeCopilotSession:
@@ -221,6 +234,35 @@ async def test_cost_resets_each_turn() -> None:
     assert task.last_cost_usd == 0.0
 
 
+async def test_served_model_captured_from_usage_event() -> None:
+    # #90: the actually-served model (event data.model) is readable off the session —
+    # how the openrouter target class's live test asserts the requested model was used.
+    backend, _client, _session = _backend_with(
+        [_usage(0.1, model="anthropic/claude-haiku-4.5"), _msg("hi"), SessionIdleData()]
+    )
+    task = backend.create_session(model="anthropic/claude-haiku-4.5")
+    assert isinstance(task, CopilotTaskSession)  # narrows past SessionProto's slice
+
+    [event async for event in task.run_turn("go")]
+
+    assert task.last_served_model == "anthropic/claude-haiku-4.5"
+
+
+async def test_served_model_resets_each_turn() -> None:
+    session = FakeCopilotSession(
+        "sess-1", [_usage(0.1, model="gpt-5-mini"), _msg("hi"), SessionIdleData()]
+    )
+    client = FakeCopilotClient(session)
+    task = CopilotTaskSession(model="auto", client_factory=lambda: client)
+
+    [event async for event in task.run_turn("first")]
+    assert task.last_served_model == "gpt-5-mini"
+
+    session._script = [_msg("hi again"), SessionIdleData()]
+    [event async for event in task.run_turn("second")]
+    assert task.last_served_model is None
+
+
 async def test_rate_limit_synthesised_on_limits_exhausted() -> None:
     # Copilot has no allowed/warning status; quota exhaustion synthesises "rejected".
     backend, _client, _session = _backend_with(
@@ -269,6 +311,50 @@ async def test_resume_opens_resume_session() -> None:
     assert client.resume_args[0] == "sess-9"
     assert client.create_kwargs is None
     assert task.session_id == "sess-9"
+
+
+async def test_provider_forwarded_to_create_session() -> None:
+    # #90: a BYOK provider config (e.g. openrouter_provider_config's result) reaches the
+    # SDK's create_session call unchanged, alongside the requested model.
+    provider = ProviderConfig(
+        base_url="https://openrouter.ai/api/v1",
+        api_key="or-key",
+        type="openai",
+    )
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="anthropic/claude-haiku-4.5", provider=provider)
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["provider"] is provider
+    assert client.create_kwargs["model"] == "anthropic/claude-haiku-4.5"
+
+
+async def test_provider_forwarded_to_resume_session() -> None:
+    provider = ProviderConfig(base_url="https://openrouter.ai/api/v1", api_key="or-key")
+    backend, client, _session = _backend_with(
+        [_msg("resumed"), SessionIdleData()], session_id="sess-9"
+    )
+    task = backend.create_session(
+        model="auto", resume="sess-9", provider=provider
+    )
+
+    [event async for event in task.run_turn("continue")]
+
+    assert client.resume_args is not None
+    assert client.resume_args[1]["provider"] is provider
+
+
+async def test_no_provider_defaults_to_none() -> None:
+    # Plain Copilot quota (no BYOK override) — provider=None reaches the SDK call too.
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto")
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["provider"] is None
 
 
 async def test_interrupt_set_model_and_aclose_delegate() -> None:
@@ -493,3 +579,41 @@ async def test_leak_detector_would_catch_an_unconfigured_vendor_reply() -> None:
 
     finals = [e.text for e in events if isinstance(e, Final)]
     assert any(find_vendor_identity_leak(text) is not None for text in finals)
+
+
+# --- Provider target classes / OpenRouter BYOK (#90) -------------------------------
+
+
+def test_openrouter_provider_config_shape() -> None:
+    # #90: type openai, OpenRouter's endpoint, key sourced from settings.
+    settings = _settings(openrouter_api_key="or-secret-key")
+
+    provider = openrouter_provider_config(settings)
+
+    assert provider["type"] == "openai"
+    assert provider["base_url"] == "https://openrouter.ai/api/v1"
+    assert provider["api_key"] == "or-secret-key"
+
+
+def test_openrouter_provider_config_key_is_not_hardcoded() -> None:
+    # The key tracks whatever settings.openrouter_api_key holds, never a fixed literal.
+    settings_a = _settings(openrouter_api_key="key-a")
+    settings_b = _settings(openrouter_api_key="key-b")
+
+    assert openrouter_provider_config(settings_a)["api_key"] == "key-a"
+    assert openrouter_provider_config(settings_b)["api_key"] == "key-b"
+
+
+def test_openrouter_provider_config_omits_key_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # total=False: an unset key stays absent rather than masked as an empty string, so
+    # a misconfigured deploy surfaces as an OpenRouter auth error, not a silent no-op.
+    # Hermetic: an ambient OPENROUTER_API_KEY on the host must not leak in here — the
+    # env source would otherwise fill the field pydantic-settings sees as "unset".
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings = _settings()
+
+    provider = openrouter_provider_config(settings)
+
+    assert "api_key" not in provider

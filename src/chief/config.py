@@ -240,6 +240,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     discord_bot_token: str | None = None
     claude_code_oauth_token: str
+    # OpenRouter BYOK provider target class (#90, part of #72): the key for the SDK's
+    # "openai" provider pointed at OpenRouter. Optional — only required when a session
+    # is actually spawned on an ``openrouter`` target. Never the Copilot token itself,
+    # which is CLI-managed in ``~/.copilot/config.json`` and never touches secrets_dir.
+    openrouter_api_key: str | None = None
 
     @field_validator(
         "owner_telegram_id",
