@@ -8,9 +8,10 @@ the model (``set_model``).
 
 :class:`ClaudeBackend` is the incumbent over claude-agent-sdk — it wraps
 :class:`~chief.core.session.TaskSession`, so today's live owner/guest turns flow through
-the seam unchanged. Later backends (a Copilot backend, #72) implement the same contract
-against a different SDK and event model; :func:`select_backend` maps the config name to
-one, and only ``claude`` is valid for now.
+the seam unchanged. :class:`CopilotBackend` (#76, part of #72) implements the same
+contract over the **GitHub Copilot SDK** and its event model, wrapping
+:class:`~chief.core.copilot_session.CopilotTaskSession`. :func:`select_backend` maps the
+config name to one; a config flag picks ``claude`` vs ``copilot`` per deployment.
 """
 
 from typing import Any, Protocol
@@ -18,10 +19,17 @@ from typing import Any, Protocol
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
 
+from .copilot_session import (
+    CopilotClientFactory,
+    CopilotTaskSession,
+    _default_copilot_client,
+)
 from .session import ClientFactory, SessionProto, TaskSession, _default_client
 
-#: The only backend wired today; :func:`select_backend` rejects anything else.
+#: The claude-agent-sdk backend (the incumbent).
 CLAUDE_BACKEND = "claude"
+#: The GitHub Copilot SDK backend (#76, part of #72).
+COPILOT_BACKEND = "copilot"
 
 
 class AgentBackend(Protocol):
@@ -98,14 +106,66 @@ class ClaudeBackend:
         )
 
 
+class CopilotBackend:
+    """An :class:`AgentBackend` over the GitHub Copilot SDK (#76, part of #72).
+
+    ``create_session`` constructs a
+    :class:`~chief.core.copilot_session.CopilotTaskSession` that owns the live Copilot
+    session and maps its event stream onto chief's ``Milestone`` / ``Final`` events.
+    ``client_factory`` is the SDK-client seam (the
+    third-party boundary): production spawns the real runtime, tests inject a fake so a
+    real turn can be dispatched through the backend without a subprocess.
+
+    This slice wires the minimal surface for one owner turn — ``model``, ``resume``, and
+    ``cwd``. The tool/gate/persona kwargs (``can_use_tool``, ``hooks``,
+    ``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``,
+    ``system_prompt``, ``fork_session``) are accepted to satisfy the
+    :class:`AgentBackend` contract but not
+    yet forwarded; later #72 slices map them onto the Copilot SDK's permission callback,
+    hooks, and custom tools.
+    """
+
+    def __init__(
+        self, *, client_factory: CopilotClientFactory = _default_copilot_client
+    ) -> None:
+        self._client_factory = client_factory
+
+    def create_session(
+        self,
+        *,
+        model: str,
+        resume: str | None = None,
+        fork_session: bool = False,
+        can_use_tool: CanUseTool | None = None,
+        hooks: dict[HookEvent, list[HookMatcher]] | None = None,
+        system_prompt: str | None = None,
+        cwd: str | None = None,
+        allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        mcp_servers: dict[str, Any] | None = None,
+        plugins: list[Any] | None = None,
+        skills: list[str] | None = None,
+    ) -> SessionProto:
+        return CopilotTaskSession(
+            model=model,
+            resume=resume,
+            cwd=cwd,
+            client_factory=self._client_factory,
+        )
+
+
 def select_backend(name: str) -> AgentBackend:
     """Return the :class:`AgentBackend` named by config; raise on an unknown name.
 
-    Only ``claude`` is valid for now — an unknown name is a config error, never a silent
-    fallback. A future Copilot backend (#72) registers its name here.
+    ``claude`` and ``copilot`` are valid — an unknown name is a config error, never a
+    silent fallback. The config validator (:class:`chief.config.Settings`) enforces the
+    same allow-list at load time.
     """
     if name == CLAUDE_BACKEND:
         return ClaudeBackend()
+    if name == COPILOT_BACKEND:
+        return CopilotBackend()
     raise ValueError(
-        f"unknown agent_backend {name!r} — only {CLAUDE_BACKEND!r} is supported."
+        f"unknown agent_backend {name!r} — expected "
+        f"{CLAUDE_BACKEND!r} or {COPILOT_BACKEND!r}."
     )
