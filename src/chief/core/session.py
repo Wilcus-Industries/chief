@@ -54,6 +54,29 @@ class Final:
 TurnEvent = Milestone | Final
 
 
+class SessionProto(Protocol):
+    """The slice of :class:`TaskSession` the engine drives (structural).
+
+    The engine (:class:`~chief.core.tasks.TaskManager`) only ever touches a session
+    through this contract, so an :class:`~chief.core.backend.AgentBackend` may build any
+    conforming object — :class:`TaskSession` over claude-agent-sdk today, a different
+    SDK later (#72).
+    """
+
+    session_id: str | None
+    #: This turn's SDK cost and latest rate-limit status, captured by the session and
+    #: read by the engine after a clean turn to drive the budget (M9).
+    last_cost_usd: float
+    last_rate_limit_status: str | None
+
+    def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]: ...
+    async def interrupt(self) -> None: ...
+    async def set_model(self, model: str) -> None: ...
+    async def aclose(self) -> None: ...
+
+
 class _Client(Protocol):
     """The slice of :class:`ClaudeSDKClient` the session uses (structural)."""
 
