@@ -18,6 +18,10 @@ owner_model_opus: claude-opus-4-8
 opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
+# Agent backend seam (#75, part of #72). Every session the engine drives is built through
+# an AgentBackend; only "claude" (the claude-agent-sdk path) is valid today.
+agent_backend: claude
+
 # sqlite file path (inside the container this is on the persisted volume).
 db_path: /data/chief.db
 
