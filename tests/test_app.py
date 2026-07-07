@@ -26,7 +26,9 @@ def test_load_settings_uses_env_when_no_secrets_dir(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-tg")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-oauth")
-    monkeypatch.setattr(app, "DOCKER_SECRETS_DIR", str(tmp_path / "absent"))
+    monkeypatch.setattr(
+        app, "SECRETS_DIR_CANDIDATES", (str(tmp_path / "absent"),)
+    )
 
     settings = app.load_settings()
 
@@ -70,7 +72,7 @@ def test_build_google_services_includes_gmail_only_when_enabled() -> None:
         for svc in app.build_google_services(_settings(gmail_enabled=True))
         if svc.name == "gmail_chief"
     ]
-    assert gmail.server_config()["url"] == "http://mcp-gmail:8004/mcp"
+    assert gmail.server_config()["url"] == "http://127.0.0.1:8004/mcp"
 
 
 def test_build_google_services_includes_browser_only_when_playwright_enabled() -> None:
@@ -87,7 +89,7 @@ def test_build_google_services_includes_browser_only_when_playwright_enabled() -
         if svc.name == "browser"
     ]
     assert browser.server_name == "playwright"
-    assert browser.server_config()["url"] == "http://mcp-playwright:3000/mcp"
+    assert browser.server_config()["url"] == "http://127.0.0.1:3000/mcp"
 
 
 def test_build_telegram_stack_wires_gate_into_engine_and_adapter(

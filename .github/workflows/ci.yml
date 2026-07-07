@@ -32,172 +32,42 @@ jobs:
       - name: mypy
         run: uv run mypy .
 
+  # Host-native smoke test. Core no longer ships as a container (it runs natively
+  # via the `chief` launcher / `python -m chief.entrypoint`), so the smoke test
+  # asserts the two boot invariants directly on the runner:
+  #   1. migrate-on-start — the entrypoint runs `alembic upgrade head` and logs
+  #      "migration complete" BEFORE handing off to the app (which then exits
+  #      non-zero on the runner's missing secrets — expected and harmless).
+  #   2. the MCP sidecar compose file is structurally valid for every profile.
   smoke-test:
-    name: Container smoke test — non-root + migrate-on-start
-    # Gate: done-check must be green first.  Runs on every push/PR (not just main)
-    # so invariant regressions are caught before they can land.
+    name: Host smoke test — migrate-on-start + compose config
     needs: done-check
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # The core Dockerfile guards on the skills submodule; must be present.
           submodules: true
 
-      - name: Build core image
-        run: |
-          docker build -f Dockerfile.core -t chief-smoke .
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
-      # ── Invariant 1: non-root ───────────────────────────────────────────────
-      # The Dockerfile sets USER chief (uid 1000). Override the entrypoint to
-      # run `id -u` inside the container as the configured user; uid must be
-      # non-zero (root is 0).
-      - name: Assert container runs as non-root
-        run: |
-          uid=$(docker run --rm --entrypoint id chief-smoke -u)
-          echo "Container uid: $uid"
-          if [ "$uid" = "0" ]; then
-            echo "FAIL: container is running as root (uid 0)" >&2
-            exit 1
-          fi
-          echo "PASS: container is non-root (uid=$uid)"
+      - name: Install dependencies
+        run: uv sync
 
-      # ── Invariant 2: migrate-on-start ordering ──────────────────────────────
-      # Run the container with a tmpfs at /data so the migration can write the
-      # SQLite file (uid=1000 matches the container user).  The app will crash
-      # after migration on missing secrets — that's expected and harmless; we
-      # only care that the migration log line appears BEFORE the container exits.
-      #
-      # chief.entrypoint logs (JSON to stdout):
-      #   "migration complete — starting app"
-      # This line is emitted immediately before os.execv hands off to chief.app,
-      # proving that alembic ran first.
       - name: Assert migration runs before app
         run: |
-          logs=$(docker run --rm \
-            --tmpfs /data:uid=1000,gid=1000 \
-            -e DB_PATH=/data/chief.db \
-            chief-smoke 2>&1 || true)
-          echo "--- container logs ---"
+          logs=$(DB_PATH=/tmp/smoke-chief.db uv run python -m chief.entrypoint 2>&1 || true)
+          echo "--- entrypoint logs ---"
           echo "$logs"
           echo "--- end logs ---"
           if echo "$logs" | grep -qF 'migration complete'; then
             echo "PASS: migration log found — alembic ran before app handoff"
           else
-            echo "FAIL: 'migration complete' not found in container logs" >&2
+            echo "FAIL: 'migration complete' not found in entrypoint output" >&2
             exit 1
           fi
+          test -f /tmp/smoke-chief.db || { echo "FAIL: sqlite file missing" >&2; exit 1; }
 
-      # ── Invariant 3: claude CLI config write under read-only rootfs ─────────
-      # Regression for issue #16: with read_only: true the claude CLI tries to
-      # write $HOME/.claude.json on every invocation (numStartups bump).
-      # CLAUDE_CONFIG_DIR=/home/chief/.claude (set in docker-compose.yml) moves
-      # that write into the persisted claude-home volume instead of the rootfs.
-      #
-      # This step simulates that layout: read-only rootfs + tmpfs mounted at
-      # /home/chief/.claude (stand-in for the named volume).  It then runs
-      # `claude mcp list` — the lightest no-secret invocation that deterministically
-      # creates $CLAUDE_CONFIG_DIR/.claude.json (verified empirically: --version does
-      # NOT write anything).  The step asserts the concrete artifact exists, not just
-      # exit 0.
-      #
-      # CONTROL: also runs the same command with CLAUDE_CONFIG_DIR unset on the
-      # read-only rootfs.  In that case the CLI cannot write $HOME/.claude.json
-      # (EROFS) so the file is absent — proving this check would catch a reverted
-      # #16 fix where CLAUDE_CONFIG_DIR is not forwarded to the container.
-      - name: Assert claude CLI config write works under read-only rootfs
-        run: |
-          config_dir=/home/chief/.claude
-
-          # ── Happy path: CLAUDE_CONFIG_DIR set, tmpfs backing it ──────────────
-          docker run --rm \
-            --read-only \
-            --tmpfs /tmp:uid=1000,gid=1000 \
-            --tmpfs "${config_dir}:uid=1000,gid=1000" \
-            -e CLAUDE_CONFIG_DIR="${config_dir}" \
-            -e HOME=/home/chief \
-            --entrypoint /bin/sh \
-            chief-smoke -c "
-              claude mcp list 2>&1
-              test -f \"${config_dir}/.claude.json\" \
-                && echo 'ARTIFACT: .claude.json present' \
-                || { echo 'FAIL: .claude.json missing after mcp list' >&2; exit 1; }
-            "
-          echo "PASS: claude CLI wrote ${config_dir}/.claude.json without EROFS"
-
-          # ── Control: CLAUDE_CONFIG_DIR unset → file absent (regression proof) ─
-          # Without CLAUDE_CONFIG_DIR the CLI targets $HOME/.claude.json on the
-          # read-only rootfs.  The write fails silently (EROFS), so the file is
-          # absent — exactly the broken state a reverted #16 fix would produce.
-          ctrl_result=$(docker run --rm \
-            --read-only \
-            --tmpfs /tmp:uid=1000,gid=1000 \
-            --entrypoint /bin/sh \
-            chief-smoke -c "
-              unset CLAUDE_CONFIG_DIR
-              claude mcp list 2>&1
-              test -f /home/chief/.claude.json \
-                && echo FILE_EXISTS \
-                || echo FILE_ABSENT
-            " 2>&1)
-          echo "Control output: $ctrl_result"
-          if echo "$ctrl_result" | grep -q FILE_ABSENT; then
-            echo "CONTROL PASS: without CLAUDE_CONFIG_DIR config write fails (EROFS)"
-          else
-            echo "CONTROL UNEXPECTED: file appeared without CLAUDE_CONFIG_DIR — investigate" >&2
-          fi
-
-  # ---------------------------------------------------------------------------
-  # Deploy (git-build model)
-  #
-  # The VPS holds a git clone of this repo (with secrets/.env transferred
-  # out-of-band — they're gitignored and never travel through git or CI).
-  # Deploying = SSH in, pull the latest main, and rebuild in place.  Compose is
-  # build-based (no image: refs), so there is no registry publish step; images
-  # are built on the VPS itself.  `up -d --build` restarts core, which triggers
-  # the migrate-on-start path before the app boots.
-  #
-  # Required repo settings (Settings → Secrets and variables → Actions):
-  #   secret  VPS_HOST    — hostname or IP of the target VPS
-  #   secret  VPS_USER    — SSH user on that host
-  #   secret  VPS_SSH_KEY — private key (OpenSSH format) whose public half is
-  #                         in ~/.ssh/authorized_keys on the VPS
-  #   variable DEPLOY_DIR — absolute path of the clone on the VPS; doubles as
-  #                         the activation switch (job is skipped while unset,
-  #                         so the workflow stays green with no VPS configured).
-  #
-  # The `secrets` context is NOT available in job-level `if` (only github,
-  # needs, vars, inputs) — that's why the activation guard checks DEPLOY_DIR.
-  # ---------------------------------------------------------------------------
-  deploy:
-    name: SSH deploy to VPS
-    # Gate: full done-check + container invariants must be green first.
-    needs: [done-check, smoke-test]
-    # Only deploy on pushes to main (not PRs), and only once the DEPLOY_DIR
-    # variable exists (see activation note above).
-    if: >
-      github.event_name == 'push' &&
-      github.ref == 'refs/heads/main' &&
-      vars.DEPLOY_DIR != ''
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          # Compose profiles are NOT hardcoded here — they live in the VPS's
-          # gitignored .env as COMPOSE_PROFILES (e.g. `google,sandbox,playwright`),
-          # which `docker compose` reads natively for profile activation. That keeps
-          # the enabled sidecar set in lockstep with the same .env that carries the
-          # feature flags, so toggling a feature (PLAYWRIGHT_ENABLED, etc.) is a
-          # one-file change on the box — no CI edit + redeploy round-trip.
-          script: |
-            set -e
-            cd "${{ vars.DEPLOY_DIR }}"
-            git pull --ff-only
-            git submodule update --init --recursive
-            docker compose up -d --build
+      - name: Validate the MCP compose stack
+        run: docker compose --profile google --profile playwright config --quiet

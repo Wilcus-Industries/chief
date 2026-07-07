@@ -32,6 +32,7 @@ from chief.core.tasks import (
     TaskManager,
 )
 from chief.gate.approvals import ApprovalAction, ApprovalManager
+from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact
@@ -294,12 +295,13 @@ async def test_browser_disabled_owner_keeps_memory_and_web_tools(
 # These tests use the low-level gate helpers (build_pretool_hook / build_can_use_tool)
 # directly so they exercise the hook + approval machinery without needing a real SDK
 # subprocess.  The pattern mirrors test_gate_integration — the _BrowserGate harness
-# binds a gate with the browser read tools in extra_read_only (matching how tasks.py
-# wires them) so read tools ALLOW and write tools ASK.
+# binds an owner gate the way tasks.py does. Under the default-allow posture browser
+# write tools run freely; only a blacklist entry (configurable blacklist_tools) still
+# routes one to the approval card.
 
 
 class _BrowserGate:
-    """Gate bound with browser read tools pre-approved, write tools reaching ASK."""
+    """Owner gate: default-allow, with an optional blacklist re-gating named tools."""
 
     def __init__(
         self,
@@ -308,6 +310,7 @@ class _BrowserGate:
         approvals: ApprovalManager,
         audit: RecordingAudit,
         io: FakeIO,
+        blacklist: Blacklist | None = None,
     ) -> None:
         self.policy = policy
         self.approvals = approvals
@@ -330,6 +333,7 @@ class _BrowserGate:
             tier="owner",
             policy=policy,
             audit=audit,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
         self.can_use_tool = build_can_use_tool(
@@ -342,6 +346,7 @@ class _BrowserGate:
             audit=audit,
             on_waiting=on_waiting,
             on_running=on_running,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
 
@@ -362,6 +367,7 @@ async def _browser_gate(
     *,
     approved: list[tuple[str, str | None]] | None = None,
     timeout: float = 600.0,
+    blacklist_tools: tuple[str, ...] = (),
 ) -> _BrowserGate:
     io, audit = FakeIO(), RecordingAudit()
     policy = PolicyStore(session_factory, audit=audit)
@@ -373,10 +379,16 @@ async def _browser_gate(
         audit=audit,
         timeout_seconds=timeout,
     )
-    return _BrowserGate(policy=policy, approvals=approvals, audit=audit, io=io)
+    return _BrowserGate(
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        io=io,
+        blacklist=Blacklist.from_config(tools=blacklist_tools),
+    )
 
 
-# ---- write tools route to approval card -------------------------------------
+# ---- write tools allowed by default ------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -398,20 +410,38 @@ async def _browser_gate(
         "mcp__playwright__browser_resize",
     ],
 )
-async def test_write_tool_routes_to_approval_card(
+async def test_write_tool_allows_by_default(
     tool_name: str,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Every write tool must route to ASK (hook) and then park at the approval card.
+    # Default-allow posture: an owner browser write runs with no card unless the
+    # owner has blacklisted it.
     gate = await _browser_gate(session_factory)
     tool_input: dict[str, Any] = {}
 
     hook_decision = await gate.run_hook(tool_name, tool_input)
-    assert hook_decision == "ask", (
-        f"{tool_name}: PreToolUse hook returned {hook_decision!r} but expected 'ask'"
-    )
+    result = await gate.can_use_tool(tool_name, tool_input, ToolPermissionContext())
 
-    # Confirm it actually parks at the approval card when can_use_tool is called.
+    assert hook_decision == "allow"
+    assert isinstance(result, PermissionResultAllow)
+    assert gate.io.cards == []
+
+
+# ---- a blacklisted browser tool still routes to the card ----------------------
+
+
+async def test_blacklisted_browser_tool_routes_to_approval_card(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # blacklist_tools re-gates a named tool: hook ASKs and can_use_tool parks at the
+    # approval card, exactly like the old default-ask flow.
+    tool_name = "mcp__playwright__browser_run_code_unsafe"
+    gate = await _browser_gate(session_factory, blacklist_tools=(tool_name,))
+    tool_input: dict[str, Any] = {}
+
+    hook_decision = await gate.run_hook(tool_name, tool_input)
+    assert hook_decision == "ask"
+
     parked = asyncio.ensure_future(
         gate.can_use_tool(tool_name, tool_input, ToolPermissionContext())
     )
@@ -455,9 +485,10 @@ async def test_read_tool_allows_with_no_card(
 async def test_always_allow_suppresses_subsequent_card_for_that_tool(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # After an always-allow tap, the same write tool auto-ALLOWs on the next call.
-    gate = await _browser_gate(session_factory)
+    # After an always-allow tap on a blacklisted tool, the same call auto-ALLOWs next
+    # time (the APPROVED rule beats the blacklist).
     tool_name = "mcp__playwright__browser_click"
+    gate = await _browser_gate(session_factory, blacklist_tools=(tool_name,))
     tool_input: dict[str, Any] = {}
 
     # First call: routes to card, resolved with always-allow.
@@ -489,9 +520,9 @@ async def test_always_allow_suppresses_subsequent_card_for_that_tool(
 async def test_one_time_allow_does_not_suppress_subsequent_card(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # After an approve-once tap, the same write tool still routes to a new card.
-    gate = await _browser_gate(session_factory)
+    # After an approve-once tap, the same blacklisted tool still routes to a new card.
     tool_name = "mcp__playwright__browser_fill_form"
+    gate = await _browser_gate(session_factory, blacklist_tools=(tool_name,))
     tool_input: dict[str, Any] = {}
 
     # First call: routes to card, resolved with approve-once.
@@ -523,44 +554,15 @@ async def test_one_time_allow_does_not_suppress_subsequent_card(
     )
 
 
-# ---- evaluate / run_code_unsafe cannot be pre-approved via extra_read_only --
+# ---- evaluate / run_code_unsafe stay out of the read partition ----------------
 
 
-async def test_evaluate_never_pre_approved_via_extra_read_only(
+async def test_arbitrary_js_tools_stay_out_of_read_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Even if someone mistakenly adds evaluate to extra_read_only, classify() routes
-    # them to ASK because they are not in the gate's built-in READ_ONLY dict and the
-    # policy has no APPROVED entry for them.
-    #
-    # More directly: with the standard browser gate (READ_TOOLS in extra_read_only),
-    # evaluate always ASKs — it is absent from READ_TOOLS by design.
-    gate = await _browser_gate(session_factory)
-
-    for tool_name in (
-        "mcp__playwright__browser_evaluate",
-        "mcp__playwright__browser_run_code_unsafe",
-    ):
-        # Verify absent from extra_read_only (the READ_TOOLS set).
-        assert tool_name not in frozenset(browser_mcp.READ_TOOLS), (
-            f"{tool_name} must NOT be in READ_TOOLS"
-        )
-        hook_decision = await gate.run_hook(tool_name, {})
-        assert hook_decision == "ask", (
-            f"{tool_name}: hook returned {hook_decision!r} instead of 'ask' — "
-            "arbitrary-JS tools must always reach the approval card"
-        )
-
-
-async def test_evaluate_not_pre_approved_even_if_injected_into_extra_read_only(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Belt-and-braces: even if a caller explicitly injects browser_evaluate into
-    # extra_read_only, the approval flow still works correctly — the gate's classify()
-    # would ALLOW it in that (mis)configuration, but this test confirms the standard
-    # wiring (mirroring tasks.py) never puts it there.
-    # The standard gate uses only READ_TOOLS in extra_read_only; evaluate is in
-    # WRITE_TOOLS and absent from READ_TOOLS, so it always reaches ASK under normal use.
+    # The arbitrary-JS tools stay in the write partition (never READ_TOOLS), so an
+    # owner who blacklists them (blacklist_tools) re-gates them cleanly and a guest
+    # never sees them at all.
     read_only_names = frozenset(browser_mcp.READ_TOOLS)
     assert "mcp__playwright__browser_evaluate" not in read_only_names
     assert "mcp__playwright__browser_run_code_unsafe" not in read_only_names

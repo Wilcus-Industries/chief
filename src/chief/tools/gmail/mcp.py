@@ -12,8 +12,11 @@ which reads ``X-Account-Label`` for per-request account selection identical to t
 calendar server (issue #46/#56).
 
 Wiring rules (DESIGN: reads ALLOW, writes ASK): list/get/search reads are pre-approved;
-sending, replying, drafting, and label/trash mutations stay out of ``allowed_tools`` so
-each reaches the owner's approval card. Permanent deletes are deferred (hard-blocked):
+sending, replying, drafting, and label/trash mutations stay out of ``allowed_tools`` —
+under the owner's default-allow gate that alone would no longer be enough to card them,
+so :data:`WRITE_TOOLS` is also seeded into ``Settings.blacklist_tools`` by default
+(``chief.config``), which is what actually routes each to the owner's approval card.
+Permanent deletes are deferred (hard-blocked):
 ``gmail_delete_draft`` / ``gmail_delete_label`` are not even registered as tools on the
 server, AND are listed in ``disallowed_tools`` here — belt and suspenders. Trashing is
 reversible (``untrash``) so it stays a gated write, mirroring how the calendar keeps

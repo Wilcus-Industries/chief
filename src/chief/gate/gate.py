@@ -1,9 +1,16 @@
 """The classifier and the two SDK callbacks it drives.
 
-One function, :func:`classify`, is the single source of truth for every tool call,
-implementing DESIGN's decision order:
+One function, :func:`classify`, is the single source of truth for every tool call. The
+posture is split by tier (host-native rework):
 
-    NEVER → DENY · read-only/safe → ALLOW · APPROVED → ALLOW · else effectful → ASK
+- **Owner — default-allow.** Effectful calls run freely; only a call matching the
+  approval :class:`~chief.gate.blacklist.Blacklist` raises a card (ASK). Decision
+  order: NEVER → DENY · built-in shell → DENY · APPROVED → ALLOW · blacklist → ASK ·
+  else ALLOW. The self-curating APPROVED list still wins over the blacklist, so an
+  "always allow" tap keeps meaning something.
+- **Guest — default-ask (unchanged).** NEVER → DENY · file ops → DENY · read-only →
+  ALLOW · APPROVED → ALLOW · else effectful → ASK. Tier isolation stays by
+  construction: guests never have owner tools wired in at all.
 
 Two SDK wiring points consume it (DESIGN: Verified — gate split):
 
@@ -20,7 +27,6 @@ Both factories bind to one session's ``(thread_key, tier, policy, audit)`` plus,
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any, Protocol, cast
 
 from claude_agent_sdk import (
@@ -31,6 +37,7 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import HookCallback, HookContext
 
 from ..persistence.policy import NEVER
+from .blacklist import Blacklist
 from .policy import PolicyStore
 
 
@@ -54,9 +61,8 @@ def _always(_: dict[str, Any]) -> bool:
     return True
 
 
-#: Read-only tool → predicate over its input. Seeded with the built-ins later milestones
-#: use; effectful tools (calendar writes, shell, Gmail send) are deliberately absent, so
-#: they fall through to ASK. Unknown tool ⇒ ASK (safe default).
+#: Read-only tool → predicate over its input. Drives the guest tier's read-only ALLOW
+#: (the owner tier allows by default anyway). Unknown tool ⇒ guest ASK (safe default).
 READ_ONLY: dict[str, Callable[[dict[str, Any]], bool]] = {
     "Read": _always,
     "Glob": _always,
@@ -77,52 +83,17 @@ def is_read_only(tool_name: str, tool_input: dict[str, Any]) -> bool:
     return predicate is not None and predicate(tool_input)
 
 
-#: Read-only file-op tools (M4). Confined to memory at M4; to memory ∪ workspace at M7.
-#: A relative/absent path resolves against the session ``cwd`` (the memory root), so it
-#: is in-bounds; an absolute path that escapes every allowed root is denied.
+#: Read-only file-op tools. Guests never get these — a guest call is a hard DENY (the
+#: gate classifies them read-only otherwise, which would grant reads anywhere).
 FILE_OP_TOOLS = frozenset({"Read", "Glob", "Grep"})
-#: Write-op tools (M7/M19). Confined to *memory ∪ workspace* — the agent can persist
-#: facts to memory and produce artifacts in the workspace; writes outside both deny.
+#: Write-op tools. Unconfined for the owner (host-native: writes anywhere, allowed by
+#: default); a guest call is a hard DENY.
 WRITE_OP_TOOLS = frozenset({"Write", "Edit"})
-#: The SDK's built-in shell tools. They execute **inside core**, where the Max OAuth
-#: token lives in the process env — so they are HARD-DENIED here (and refused at the SDK
-#: layer via ``disallowed_tools``, see core.tasks). The model must use the secret-free
-#: sandbox shell (``mcp__chief_shell__bash``) instead. The deny overrides even an
-#: APPROVED rule: the token must never be reachable, no matter what the owner clicked.
+#: The SDK's built-in shell tools. chief keeps ONE shell surface — the persistent
+#: per-task host shell (``mcp__chief_shell__bash``, :mod:`chief.tools.shell`) — so the
+#: built-ins stay refused (here and via ``disallowed_tools``, see core.tasks) rather
+#: than running as a second, un-blacklisted shell path.
 BUILTIN_SHELL_TOOLS = frozenset({"Bash", "BashOutput", "KillShell"})
-
-
-def confined_to(
-    tool_input: dict[str, Any], root: str, *, cwd: str | None = None
-) -> bool:
-    """Whether a file-op call's path stays within ``root``.
-
-    A relative path resolves against ``cwd`` (the session cwd — the memory root) if
-    given, else against ``root`` itself; an absolute or ``..``-escaping path is checked
-    against the resolved ``root``. An absent/empty path is in-bounds.
-    """
-    raw = tool_input.get("file_path") or tool_input.get("path")
-    if not isinstance(raw, str) or not raw:
-        return True
-    base = Path(cwd) if cwd else Path(root)
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = base / candidate
-    # Confinement leans on ``resolve()`` to collapse ``..`` and follow symlinks before
-    # the containment check — that normalization is the load-bearing security property
-    # (it resolves a not-yet-existing write tail lexically, so it holds for new files).
-    try:
-        candidate.resolve().relative_to(Path(root).resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def confined_to_any(
-    tool_input: dict[str, Any], roots: list[str], *, cwd: str | None = None
-) -> bool:
-    """Whether a file-op call's path stays within *any* of ``roots`` (memory ∪ ws)."""
-    return any(confined_to(tool_input, root, cwd=cwd) for root in roots)
 
 
 def classify(
@@ -130,53 +101,40 @@ def classify(
     tool_input: dict[str, Any],
     policy: PolicyStore,
     *,
-    memory_dir: str | None = None,
-    workspace_dir: str | None = None,
+    tier: str = "guest",
+    blacklist: Blacklist | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> Verdict:
-    """Rule on a tool call: NEVER→DENY, read-only→ALLOW, APPROVED→ALLOW, else ASK.
+    """Rule on a tool call per the tier's posture (see the module doc).
 
-    The SDK's built-in shell tools (``Bash``/``BashOutput``/``KillShell``) are a hard
-    DENY — they run inside core, where the Max token lives — overriding even an APPROVED
-    rule (:data:`BUILTIN_SHELL_TOOLS`); the model gets the sandbox shell instead (M7).
-
-    File scoping (M4/M7), enforced before the read-only/approved rules so a path escape
-    is a hard DENY even on an otherwise-allowed tool:
-
-    - **Read/Glob/Grep** ALLOW only while the path stays inside *memory ∪ workspace*
-      (just memory until the workspace is wired), else DENY.
-    - **Write/Edit** ALLOW inside *memory ∪ workspace* (the same roots reads span),
-      else DENY. A guest with no roots gets DENY for any write (M7 + M19).
-
-    ``extra_read_only`` names tools an MCP layer has declared read-only (e.g. the
-    calendar list/free-busy tools, M5); they ALLOW like the built-ins, keeping
-    :mod:`gate` decoupled from any specific MCP. NEVER still wins over them.
+    ``tier`` defaults to ``"guest"`` — the locked-down posture — so a caller that
+    forgets to pass it fails closed, never open. ``blacklist`` is the owner tier's
+    approval blacklist (``None`` ⇒ nothing asks). ``extra_read_only`` names tools an
+    MCP layer has declared read-only (e.g. calendar free/busy); they ALLOW on the guest
+    path like the built-ins. NEVER wins over everything on both tiers.
     """
     listed = policy.classify_against(tool_name, tool_input)
     if listed == NEVER:
         return Verdict(GateDecision.DENY, f"{tool_name} is on the NEVER list")
     if tool_name in BUILTIN_SHELL_TOOLS:
-        # Overrides APPROVED below: a blessed rule must never resurrect the in-core
-        # shell. The owner's sandbox shell tool is the only way to run commands.
+        # Overrides APPROVED: one shell surface only — the per-task host shell tool.
         return Verdict(
             GateDecision.DENY,
-            f"{tool_name} (built-in shell) is disabled — use the sandbox shell",
+            f"{tool_name} (built-in shell) is disabled — use the bash tool",
         )
-    read_roots = [r for r in (memory_dir, workspace_dir) if r is not None]
-    if tool_name in FILE_OP_TOOLS:
-        # A file read needs a configured root to be inside. No root (e.g. a guest, who
-        # gets no file tools) ⇒ DENY — never fall through to the read-only ALLOW below,
+    if tier == "owner":
+        if listed is not None:  # APPROVED — an explicit blessing beats the blacklist
+            return Verdict(GateDecision.ALLOW, f"{tool_name} is pre-approved")
+        if blacklist is not None:
+            reason = blacklist.match(tool_name, tool_input)
+            if reason is not None:
+                return Verdict(GateDecision.ASK, reason)
+        return Verdict(GateDecision.ALLOW, f"{tool_name} is allowed by default")
+    # Guest tier — the original default-ask posture, unchanged.
+    if tool_name in FILE_OP_TOOLS or tool_name in WRITE_OP_TOOLS:
+        # Guests have no file tools; never fall through to the read-only ALLOW below,
         # which would grant reads anywhere on the host.
-        if read_roots and confined_to_any(tool_input, read_roots, cwd=memory_dir):
-            return Verdict(GateDecision.ALLOW, f"{tool_name} reads within scope")
-        return Verdict(GateDecision.DENY, f"{tool_name} path is outside scope")
-    if tool_name in WRITE_OP_TOOLS:
-        # Writes are confined to memory ∪ workspace. A guest session with no roots
-        # configured gets DENY — writes must never escape to arbitrary host paths.
-        write_roots = read_roots  # memory ∪ workspace, same set
-        if write_roots and confined_to_any(tool_input, write_roots, cwd=memory_dir):
-            return Verdict(GateDecision.ALLOW, f"{tool_name} writes within scope")
-        return Verdict(GateDecision.DENY, f"{tool_name} write is outside scope")
+        return Verdict(GateDecision.DENY, f"{tool_name} is not available to guests")
     if is_read_only(tool_name, tool_input) or tool_name in extra_read_only:
         return Verdict(GateDecision.ALLOW, f"{tool_name} is read-only")
     if listed is not None:  # APPROVED
@@ -212,8 +170,7 @@ def build_pretool_hook(
     tier: str,
     policy: PolicyStore,
     audit: _Audit,
-    memory_dir: str | None = None,
-    workspace_dir: str | None = None,
+    blacklist: Blacklist | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> HookCallback:
     """A ``PreToolUse`` hook: classify, audit, return the permission decision."""
@@ -229,8 +186,8 @@ def build_pretool_hook(
             tool_name,
             tool_input,
             policy,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            tier=tier,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
         audit.log(
@@ -268,8 +225,7 @@ def build_can_use_tool(
     audit: _Audit,
     on_waiting: StatusHook | None = None,
     on_running: StatusHook | None = None,
-    memory_dir: str | None = None,
-    workspace_dir: str | None = None,
+    blacklist: Blacklist | None = None,
     extra_read_only: frozenset[str] = frozenset(),
 ) -> Callable[
     [str, dict[str, Any], ToolPermissionContext],
@@ -292,8 +248,8 @@ def build_can_use_tool(
             tool_name,
             tool_input,
             policy,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            tier=tier,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
         if verdict.decision is GateDecision.ALLOW:

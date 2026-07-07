@@ -11,6 +11,7 @@ tasks left mid-flight.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -26,10 +27,12 @@ from .adapters.base import Adapter, ReadyHook
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
+from .core import screening
 from .core.budget import BudgetGate, BudgetIO
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
+from .gate.blacklist import Blacklist
 from .gate.policy import PolicyStore
 from .memory.markdown_backend import MarkdownMemory
 from .memory.store import MemoryStore
@@ -53,7 +56,14 @@ from .tools.shell import ShellService
 
 logger = logging.getLogger("chief.app")
 
-DOCKER_SECRETS_DIR = "/run/secrets"
+#: Candidate secrets directories, first existing one wins (host-native). Each holds
+#: one file per secret field (telegram_bot_token, claude_code_oauth_token, …) — the
+#: pydantic-settings ``secrets_dir`` convention the old Docker mount used. The
+#: CHIEF_SECRETS_DIR env var overrides; env vars alone also work (no dir needed).
+SECRETS_DIR_CANDIDATES = (
+    os.path.expanduser("~/.config/chief/secrets"),
+    "secrets",
+)
 
 # The bundled skills plugin (M10) lives at repo-root vendor/chief-skills. The owner
 # session runs with cwd=memory_dir and the CLI resolves --plugin-dir against that cwd,
@@ -67,13 +77,17 @@ Stack = tuple[TaskManager, Adapter, ApprovalManager]
 
 
 def load_settings() -> Settings:
-    """Load settings, using Docker secrets when mounted and env otherwise.
+    """Load settings, using the first existing secrets dir and env otherwise.
 
-    Disabling the secrets source when ``/run/secrets`` is absent avoids a noisy
-    "directory does not exist" warning on local runs, where tokens come from env.
+    ``CHIEF_SECRETS_DIR`` overrides the candidate list (``~/.config/chief/secrets``,
+    then the repo-local ``./secrets``). Skipping the secrets source when no dir exists
+    avoids a noisy "directory does not exist" warning on env-only runs.
     """
-    if os.path.isdir(DOCKER_SECRETS_DIR):
-        return Settings(_secrets_dir=DOCKER_SECRETS_DIR)  # type: ignore[call-arg]
+    override = os.environ.get("CHIEF_SECRETS_DIR")
+    candidates = (override,) if override else SECRETS_DIR_CANDIDATES
+    for candidate in candidates:
+        if candidate and os.path.isdir(candidate):
+            return Settings(_secrets_dir=candidate)  # type: ignore[call-arg]
     return Settings()  # type: ignore[call-arg]
 
 
@@ -110,12 +124,11 @@ def build_google_services(settings: Settings) -> list[GoogleService]:
 
 
 def build_shell_service(settings: Settings) -> ShellService | None:
-    """The sandbox shell client (M7), or ``None`` when the shell is disabled."""
+    """The host shell service (M7, host-native), or ``None`` when disabled."""
     if not settings.shell_enabled:
         return None
     return ShellService(
-        host=settings.sandbox_host,
-        port=settings.sandbox_port,
+        workspace_dir=settings.workspace_dir,
         timeout_seconds=settings.shell_timeout_seconds,
         output_limit=settings.shell_output_limit,
     )
@@ -170,13 +183,13 @@ def _resolve_email_from_token(token_path: Path) -> str | None:
 
 
 def build_list_accounts_service(
-    secrets_dir: Path | str = Path("/token"),
+    secrets_dir: Path | str = Path("secrets/google_tokens"),
 ) -> ListAccountsService:
     """Build the owner-only list_accounts tool backed by dynamic token-dir re-scan.
 
-    Scans ``secrets_dir`` (defaults to ``/token``) for ``google_token*.json`` files.
-    In production docker-compose.yml, ``./secrets/google_token.json`` is bind-mounted
-    into core at ``/token/google_token.json``, so the default aligns with that path.
+    Scans ``secrets_dir`` (defaults to the repo-local ``secrets/google_tokens``) for
+    ``google_token*.json`` files — the same host directory the MCP containers
+    bind-mount at ``/token``, so both sides see the same accounts.
     Always returns a :class:`ListAccountsService` — with an empty account list when the
     dir is absent or empty — so the tool is available even when no Google account has
     been set up yet.
@@ -201,7 +214,7 @@ def build_set_account_service(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     platform: str,
-    secrets_dir: Path | str = Path("/token"),
+    secrets_dir: Path | str = Path("secrets/google_tokens"),
 ) -> SetAccountService:
     """Build the owner-only ``set_account`` tool backed by dynamic token-dir re-scan.
 
@@ -221,16 +234,15 @@ def build_set_account_service(
 
 
 def build_add_account_service(
-    secrets_dir: Path | str = Path("/token"),
-    client_secrets: Path | str = Path("/token/google_oauth_client.json"),
+    secrets_dir: Path | str = Path("secrets/google_tokens"),
+    client_secrets: Path | str = Path("secrets/google_oauth_client.json"),
 ) -> AddAccountService:
     """Build the owner-only ``add_account`` tool — runtime chat-consent flow (#53).
 
     Writes the minted token into ``secrets_dir`` (the same dir ``list_accounts`` /
     ``set_account`` re-scan on every call), so a newly added account is selectable
-    with no restart. ``client_secrets`` is the shared Desktop-app OAuth client JSON;
-    in docker-compose it is bind-mounted alongside the tokens at
-    ``/token/google_oauth_client.json``. The default production OAuth seams hit
+    with no restart. ``client_secrets`` is the shared Desktop-app OAuth client JSON
+    under the repo-local ``secrets/`` dir. The default production OAuth seams hit
     Google's token + userinfo endpoints; tests inject their own.
     """
     return AddAccountService(
@@ -288,7 +300,7 @@ def build_engine(
         else None
     )
     # Account registry: always wired into owner sessions (read-only, no card).
-    # Scans the secrets dir at build time so restarts pick up newly added tokens.
+    # Re-scans the tokens dir per call so new tokens appear with no restart.
     list_accounts = build_list_accounts_service()
     # Per-thread active-account binding: owner-only, pre-approved (no card).
     set_account = build_set_account_service(
@@ -338,6 +350,10 @@ def build_engine(
         policy=policy,
         approvals=approvals,
         audit=audit,
+        # Owner default-allow posture: only these patterns/tools still raise a card.
+        blacklist=Blacklist.from_config(
+            settings.blacklist_shell_patterns, settings.blacklist_tools
+        ),
         front_desk_thread_key=settings.front_desk_thread_key,
         memory=memory,
         memory_dir=settings.memory_dir,
@@ -391,6 +407,17 @@ def build_engine(
             if settings.playwright_enabled
             else None
         ),
+        # Untrusted-content screening (host-native): web/browser tool results and the
+        # guest relay get a cheap Haiku injection screen; inert (None) when disabled.
+        screener=(
+            functools.partial(
+                screening.screen_text, model=settings.screening_model
+            )
+            if settings.screening_enabled
+            else None
+        ),
+        screening_tools=settings.screening_tools,
+        screening_block=settings.screening_block,
     )
 
 

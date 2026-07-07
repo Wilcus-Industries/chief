@@ -270,14 +270,14 @@ class TestBuildAccountsService:
         # still returns a service (owner can call it; it just reports 0 accounts)
         assert svc is not None
 
-    def test_build_list_accounts_service_default_path_is_production_mount(
+    def test_build_list_accounts_service_default_path_is_production_dir(
         self,
     ) -> None:
-        """Default secrets_dir must be /token — the compose bind-mount for core.
+        """Default secrets_dir must be secrets/google_tokens — the host token dir.
 
-        docker-compose.yml mounts ./secrets/google_token.json into core at
-        /token/google_token.json.  Using the cwd-relative ``secrets/`` would
-        scan an empty/absent directory and always return zero accounts.
+        The host-native core runs from the repo root (the chief launcher), where
+        secrets/google_tokens/ is the canonical token directory the MCP
+        containers also bind-mount (issue #58).
         """
         import inspect
 
@@ -285,11 +285,10 @@ class TestBuildAccountsService:
 
         sig = inspect.signature(build_list_accounts_service)
         default = sig.parameters["secrets_dir"].default
-        # The production default must be Path("/token"), matching the compose mount.
-        assert default == Path("/token"), (
+        assert default == Path("secrets/google_tokens"), (
             f"build_list_accounts_service default secrets_dir is {default!r}; "
-            "expected Path('/token') (the compose bind-mount for core). "
-            "A cwd-relative 'secrets/' scans an empty dir and always returns zero."
+            "expected Path('secrets/google_tokens') (the canonical host token "
+            "dir shared with the MCP containers)."
         )
 
 

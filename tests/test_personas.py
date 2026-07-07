@@ -160,10 +160,11 @@ def test_owner_shell_and_workspace_guidance_when_enabled() -> None:
     )
 
     assert "## Workspace" in prompt
-    assert "/workspace" in prompt  # the scratch dir is named
+    assert "workspace" in prompt.lower()  # the scratch dir is described
     assert "## Shell" in prompt
-    assert "internet" in prompt  # sandbox has egress
-    assert "no secrets" in prompt  # the model is told the sandbox is secret-free
+    assert "internet" in prompt  # the host shell has egress
+    assert "owner's machine" in prompt  # the model knows this is the real host
+    assert "blacklist" in prompt  # and that only blacklisted commands raise a card
 
 
 def test_owner_shell_and_workspace_absent_when_disabled() -> None:
@@ -313,10 +314,9 @@ def test_workspace_guidance_does_not_claim_only_writable_location() -> None:
     assert "## Workspace" in prompt
     # The old contradictory claim must be gone.
     assert "only place you can write" not in prompt
-    # The true picture: memory AND workspace are both writable.
-    assert "memory" in prompt.lower() or "User.md" in prompt
-    # Writes outside the allowed set are still described as blocked.
-    assert "blocked" in prompt
+    # The true picture (host-native): writes anywhere on the host are allowed.
+    assert "anywhere" in prompt
+    assert "blocked" not in prompt
 
 
 # ---- platform-aware formatting guidance (issue #65) --------------------------

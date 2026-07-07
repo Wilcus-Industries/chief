@@ -12,7 +12,7 @@ as :mod:`chief.tools.guest`:
   raises an approval card. All are safe to create off the allow-list — no card needed.
 - :class:`ScheduleBashService` (server ``chief_schedule_bash``) — ``schedule_bash`` and
   a gated ``create_monitor``, which mint a ``bash`` action and/or ``bash`` predicate. A
-  ``bash`` fire runs a command in the sandbox with no agent and **no per-fire gate**, so
+  ``bash`` fire runs a host shell command with no agent and **no per-fire gate**, so
   creating one is itself the gated act: these tools are left off the owner's allow-list
   and raise an approval card at creation time. The benign tools refuse
   ``action_type="bash"`` (and a bash predicate), so this is the only path to one.
@@ -91,7 +91,7 @@ _LIST_DESCRIPTION = (
 _CANCEL_DESCRIPTION = "Cancel an active schedule by its id (from list_schedules)."
 
 _BASH_DESCRIPTION = (
-    "Schedule a shell command to run unattended in the sandbox. Give the `command` and "
+    "Schedule a shell command to run unattended on the host. Give the `command` and "
     "exactly one of `cron` (a 5-field cron expression, recurring) or `when` (an "
     "ISO-8601 timestamp, one-off), read in the owner's local time. Output is delivered "
     "to `thread_key` (default: the primary inbox), as a file if long. Set `urgent` to "
@@ -111,7 +111,7 @@ _MONITOR_DESCRIPTION = (
 )
 
 _MONITOR_BASH_DESCRIPTION = (
-    "Set up a monitor whose predicate or action uses the sandbox shell. `cadence` is a "
+    "Set up a monitor whose predicate or action uses the host shell. `cadence` is a "
     "5-field cron expression read in the owner's local time. `predicate` is the "
     "condition to watch and `predicate_type` is 'bash' (a shell command — exit 0 means "
     "true) or 'agent' (a read-only model yes/no). On the false→true flip, `action` "
@@ -527,7 +527,7 @@ class ScheduleService:
 
 @dataclass(frozen=True)
 class ScheduleBashService:
-    """The owner's gated ``schedule_bash`` tool (mints an ungated sandbox command)."""
+    """The owner's gated ``schedule_bash`` tool (mints an ungated shell command)."""
 
     session_factory: async_sessionmaker[AsyncSession]
     owner_tz: str = "UTC"

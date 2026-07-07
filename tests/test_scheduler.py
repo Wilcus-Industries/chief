@@ -161,14 +161,12 @@ async def test_bash_fire_runs_in_sandbox_and_sends_output(
 ) -> None:
     calls: list[tuple[Any, ...]] = []
 
-    async def fake_rc(
-        host: str, port: int, session_id: str, command: str, *, read_timeout: float
-    ) -> dict[str, Any]:
-        calls.append((host, port, session_id, command, read_timeout))
+    async def fake_rc(session_id: str, command: str) -> dict[str, Any]:
+        calls.append((session_id, command))
         return {"stdout": "disk ok\n", "exit_code": 0}
 
     shell = ShellService(
-        host="sandbox", port=8765, timeout_seconds=120.0, output_limit=64_000
+        workspace_dir="data/workspace", timeout_seconds=120.0, output_limit=64_000
     )
     io = FakeIO()
     async with session_factory() as s:
@@ -183,10 +181,9 @@ async def test_bash_fire_runs_in_sandbox_and_sends_output(
     await _make(session_factory, io=io, shell_service=shell, run_command=fake_rc).tick()
 
     assert len(calls) == 1
-    host, port, session_id, command, read_timeout = calls[0]
-    assert (host, port, command) == ("sandbox", 8765, "df -h")
+    session_id, command = calls[0]
+    assert command == "df -h"
     assert session_id == f"schedule:{sched.id}"
-    assert read_timeout == 150.0  # timeout_seconds (120) + client grace (30)
     assert len(io.sent) == 1
     target, body = io.sent[0]
     assert target == "inbox"
@@ -201,7 +198,9 @@ async def test_bash_long_output_sent_as_file(
     async def fake_rc(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"stdout": big, "exit_code": 0}
 
-    shell = ShellService(host="h", port=1, timeout_seconds=1.0, output_limit=10)
+    shell = ShellService(
+        workspace_dir="data/workspace", timeout_seconds=1.0, output_limit=10
+    )
     io = FakeIO()
     async with session_factory() as s:
         await create_schedule(
@@ -327,7 +326,9 @@ async def test_bash_run_failure_notifies_owner_and_advances(
     async def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
         raise ConnectionError("sandbox down")
 
-    shell = ShellService(host="h", port=1, timeout_seconds=1.0, output_limit=10)
+    shell = ShellService(
+        workspace_dir="data/workspace", timeout_seconds=1.0, output_limit=10
+    )
     io = FakeIO()
     async with session_factory() as s:
         sched = await create_schedule(
