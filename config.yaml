@@ -19,7 +19,8 @@ opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
 # Agent backend seam (#75, part of #72). Every session the engine drives is built through
-# an AgentBackend; only "claude" (the claude-agent-sdk path) is valid today.
+# an AgentBackend: "claude" (the claude-agent-sdk path) or "copilot" (the GitHub Copilot
+# SDK, #76). Switch per deployment; "claude" stays the default.
 agent_backend: claude
 
 # sqlite file path (inside the container this is on the persisted volume).

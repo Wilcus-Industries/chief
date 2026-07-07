@@ -64,9 +64,9 @@ class Settings(BaseSettings):
     opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
     # Agent backend seam (#75, part of #72 — the strangler scaffold). Every session the
-    # engine drives is built through an AgentBackend; ``claude`` (the claude-agent-sdk
-    # path) is the sole implementation today. Config-selectable so a later Copilot
-    # backend is a one-line swap — only ``claude`` validates for now.
+    # engine drives is built through an AgentBackend; ``claude`` (claude-agent-sdk) is
+    # the incumbent and ``copilot`` (the GitHub Copilot SDK, #76) is the alternative.
+    # Config-selectable so the harness swap is a one-line change per deployment.
     agent_backend: str = "claude"
     db_path: str = "chief.db"
     guest_ack: str = (
@@ -263,14 +263,15 @@ class Settings(BaseSettings):
     @field_validator("agent_backend")
     @classmethod
     def _validate_agent_backend(cls, value: str) -> str:
-        """Only ``claude`` is a valid backend for now (#75).
+        """Only ``claude`` or ``copilot`` are valid backends (#75 / #76).
 
         Fails the boot on an unknown name rather than at first turn; the runtime
         registry (:func:`chief.core.backend.select_backend`) enforces the same rule.
         """
-        if value != "claude":
+        valid = ("claude", "copilot")
+        if value not in valid:
             raise ValueError(
-                f"agent_backend must be 'claude' (the only backend), got {value!r}"
+                f"agent_backend must be one of {valid}, got {value!r}"
             )
         return value
 

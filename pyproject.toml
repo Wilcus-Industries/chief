@@ -5,6 +5,7 @@ description = "Personal AI assistant on Claude Max — foundations (M0/M1)."
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.2",
+    "github-copilot-sdk>=1",
     "python-telegram-bot>=21",
     "sqlalchemy>=2",
     "aiosqlite>=0.20",

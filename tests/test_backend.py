@@ -22,7 +22,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import HookEvent
 
-from chief.core.backend import ClaudeBackend, select_backend
+from chief.core.backend import ClaudeBackend, CopilotBackend, select_backend
 from chief.core.session import Final
 
 
@@ -116,8 +116,13 @@ def test_select_backend_claude_returns_claude_backend() -> None:
     assert isinstance(select_backend("claude"), ClaudeBackend)
 
 
+def test_select_backend_copilot_returns_copilot_backend() -> None:
+    # The Copilot backend (#76) is now registered alongside claude.
+    assert isinstance(select_backend("copilot"), CopilotBackend)
+
+
 def test_select_backend_rejects_unknown() -> None:
-    # Only "claude" is valid for now; an unknown name is a config error, not a
-    # silent fallback (a future Copilot backend registers here — #72).
-    with pytest.raises(ValueError, match="claude"):
-        select_backend("copilot")
+    # "claude" and "copilot" are valid; an unknown name is a config error, not a
+    # silent fallback.
+    with pytest.raises(ValueError, match="unknown agent_backend"):
+        select_backend("gemini")

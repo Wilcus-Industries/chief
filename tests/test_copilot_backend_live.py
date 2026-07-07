@@ -1,0 +1,60 @@
+"""Opt-in live test: one real owner turn through CopilotBackend (#76, part of #72).
+
+Skipped unless ``CHIEF_COPILOT_LIVE`` is set — the manual "does a real Copilot-SDK turn
+actually return a reply through the backend" check, not a CI test. It spawns the real
+Copilot runtime, opens a streaming session on a Copilot-quota model, sends one owner
+text message, and asserts a non-empty ``Final`` streamed back with the turn ending
+cleanly.
+
+Auth comes from the logged-in GitHub Copilot user (the spike's ``copilot`` CLI login) —
+no token is passed. On the Student plan model choice is ``auto`` regardless of the name
+sent, so the served model is whatever GitHub picks.
+
+Run it:
+
+1. Log in once with the Copilot CLI so the SDK can spawn an authenticated runtime.
+2. Download the pinned runtime (or let the SDK fetch it on first use)::
+
+       uv run python -m copilot download-runtime
+
+3. Set ``CHIEF_COPILOT_LIVE=1``, then run::
+
+       CHIEF_COPILOT_LIVE=1 uv run pytest tests/test_copilot_backend_live.py
+
+``CHIEF_COPILOT_MODEL`` (default ``auto``) overrides the requested model.
+"""
+
+import os
+
+import pytest
+
+from chief.core.backend import CopilotBackend
+from chief.core.session import Final, Milestone
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("CHIEF_COPILOT_LIVE"),
+    reason="live Copilot test — set CHIEF_COPILOT_LIVE=1 (needs a Copilot login)",
+)
+
+
+@pytest.mark.timeout(120)  # live runtime spawn + model round-trip; override 30s cap
+async def test_live_owner_turn_returns_reply() -> None:
+    model = os.environ.get("CHIEF_COPILOT_MODEL", "auto")
+    backend = CopilotBackend()
+    session = backend.create_session(model=model)
+    try:
+        events = [
+            event
+            async for event in session.run_turn(
+                "Reply with exactly the word: pong"
+            )
+        ]
+    finally:
+        await session.aclose()
+
+    finals = [e.text for e in events if isinstance(e, Final)]
+    assert finals, f"expected at least one Final reply, got {events!r}"
+    assert any(text.strip() for text in finals), "reply text was empty"
+    # Milestones (if any) precede the reply; the turn ended cleanly (run_turn returned).
+    assert all(isinstance(e, (Final, Milestone)) for e in events)
+    assert session.session_id, "a resumable session id should have been captured"
