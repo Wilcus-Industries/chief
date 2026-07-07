@@ -28,10 +28,12 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
   ``assistant.turn_end``, which fires once per inner tool round-trip (#72 spike).
 * ``session.error`` / ``model.call_failure`` → raise, aborting the turn.
 
-This slice wires only what one owner text turn needs (model, resume, cwd). Tools, the
-permission gate, and the persona are accepted at the backend seam but not yet
-forwarded — later #72 slices map them onto the SDK's permission callback, hooks, and
-custom tools.
+The permission gate is wired here (#77, part of #72): the backend hands this session a
+Copilot ``on_permission_request`` handler and ``SessionHooks`` (built from chief's gate
+by :mod:`chief.core.copilot_gate`), and :meth:`CopilotTaskSession._ensure_connected`
+threads them into the live session. They are non-persisted SDK callbacks, so **both**
+the create and the resume branch re-register them on every connect. Tools and the
+persona are accepted at the backend seam but not forwarded — later #72 slices map them.
 """
 
 import asyncio
@@ -39,7 +41,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Protocol
 
-from copilot import CopilotClient
+from copilot import CopilotClient, SessionHooks
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -53,6 +55,7 @@ from copilot.session_events import (
 
 from ..adapters.base import Attachment
 from .agent import NO_REPLY
+from .copilot_gate import PermissionHandlerFn
 from .session import Final, Milestone, TurnEvent
 
 logger = logging.getLogger("chief.core.copilot_session")
@@ -90,6 +93,8 @@ class _CopilotClient(Protocol):
         *,
         model: str | None = ...,
         working_directory: str | None = ...,
+        on_permission_request: PermissionHandlerFn | None = ...,
+        hooks: SessionHooks | None = ...,
     ) -> _CopilotSession: ...
     async def resume_session(
         self,
@@ -97,6 +102,8 @@ class _CopilotClient(Protocol):
         *,
         model: str | None = ...,
         working_directory: str | None = ...,
+        on_permission_request: PermissionHandlerFn | None = ...,
+        hooks: SessionHooks | None = ...,
     ) -> _CopilotSession: ...
 
 
@@ -129,11 +136,17 @@ class CopilotTaskSession:
         model: str,
         resume: str | None = None,
         cwd: str | None = None,
+        on_permission_request: PermissionHandlerFn | None = None,
+        hooks: SessionHooks | None = None,
         client_factory: CopilotClientFactory = _default_copilot_client,
     ) -> None:
         self._model = model
         self._resume = resume
         self._cwd = cwd
+        #: chief's gate, adapted onto the Copilot boundary by the backend. Non-persisted
+        #: SDK callbacks, so re-registered on every connect (create *and* resume) below.
+        self._on_permission_request = on_permission_request
+        self._hooks = hooks
         self._client_factory = client_factory
         self._client: _CopilotClient | None = None
         self._session: _CopilotSession | None = None
@@ -166,13 +179,22 @@ class CopilotTaskSession:
         self._loop = asyncio.get_running_loop()
         client = self._client_factory()
         await client.start()
+        # The gate callbacks are non-persisted, so both branches re-register them fresh;
+        # a resumed session is gated identically to a freshly created one (#77).
         if self._resume is not None:
             session = await client.resume_session(
-                self._resume, model=self._model, working_directory=self._cwd
+                self._resume,
+                model=self._model,
+                working_directory=self._cwd,
+                on_permission_request=self._on_permission_request,
+                hooks=self._hooks,
             )
         else:
             session = await client.create_session(
-                model=self._model, working_directory=self._cwd
+                model=self._model,
+                working_directory=self._cwd,
+                on_permission_request=self._on_permission_request,
+                hooks=self._hooks,
             )
         session.on(self._on_event)
         self._client = client

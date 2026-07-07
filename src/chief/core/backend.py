@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
 
+from .copilot_gate import build_permission_handler, build_session_hooks
 from .copilot_session import (
     CopilotClientFactory,
     CopilotTaskSession,
@@ -116,13 +117,14 @@ class CopilotBackend:
     third-party boundary): production spawns the real runtime, tests inject a fake so a
     real turn can be dispatched through the backend without a subprocess.
 
-    This slice wires the minimal surface for one owner turn — ``model``, ``resume``, and
-    ``cwd``. The tool/gate/persona kwargs (``can_use_tool``, ``hooks``,
-    ``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``,
-    ``system_prompt``, ``fork_session``) are accepted to satisfy the
-    :class:`AgentBackend` contract but not
-    yet forwarded; later #72 slices map them onto the Copilot SDK's permission callback,
-    hooks, and custom tools.
+    The permission gate is wired (#77, part of #72): ``can_use_tool`` and ``hooks`` are
+    chief's SDK-agnostic gate callbacks, adapted by :mod:`chief.core.copilot_gate` onto
+    the Copilot SDK's ``on_permission_request`` handler and ``SessionHooks`` and passed
+    into the session (re-registered on every connect, so resume is gated too). The
+    remaining tool/persona kwargs (``allowed_tools`` / ``disallowed_tools``,
+    ``mcp_servers``, ``plugins``, ``skills``, ``system_prompt``, ``fork_session``) are
+    accepted to satisfy the :class:`AgentBackend` contract but not yet forwarded; later
+    #72 slices map them onto the SDK's custom tools and MCP servers.
     """
 
     def __init__(
@@ -146,10 +148,18 @@ class CopilotBackend:
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
     ) -> SessionProto:
+        on_permission_request = (
+            build_permission_handler(can_use_tool)
+            if can_use_tool is not None
+            else None
+        )
+        copilot_hooks = build_session_hooks(hooks) if hooks is not None else None
         return CopilotTaskSession(
             model=model,
             resume=resume,
             cwd=cwd,
+            on_permission_request=on_permission_request,
+            hooks=copilot_hooks,
             client_factory=self._client_factory,
         )
 
