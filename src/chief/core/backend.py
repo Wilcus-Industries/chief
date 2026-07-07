@@ -116,13 +116,14 @@ class CopilotBackend:
     third-party boundary): production spawns the real runtime, tests inject a fake so a
     real turn can be dispatched through the backend without a subprocess.
 
-    This slice wires the minimal surface for one owner turn — ``model``, ``resume``, and
-    ``cwd``. The tool/gate/persona kwargs (``can_use_tool``, ``hooks``,
-    ``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``,
-    ``system_prompt``, ``fork_session``) are accepted to satisfy the
-    :class:`AgentBackend` contract but not
-    yet forwarded; later #72 slices map them onto the Copilot SDK's permission callback,
-    hooks, and custom tools.
+    This slice wires ``model``, ``resume``, ``cwd``, and — since #78 — ``system_prompt``
+    (mapped onto the Copilot SDK's ``customize``-mode system message; see
+    :func:`~chief.core.copilot_session.build_persona_system_message`). The remaining
+    tool/gate kwargs (``can_use_tool``, ``hooks``, ``allowed_tools`` /
+    ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``, ``fork_session``)
+    are accepted to satisfy the :class:`AgentBackend` contract but not yet forwarded;
+    later #72 slices map them onto the Copilot SDK's permission callback, hooks, and
+    custom tools.
     """
 
     def __init__(
@@ -150,6 +151,7 @@ class CopilotBackend:
             model=model,
             resume=resume,
             cwd=cwd,
+            system_prompt=system_prompt,
             client_factory=self._client_factory,
         )
 
