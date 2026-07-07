@@ -1,9 +1,16 @@
-"""classify() — the single source of truth for the gate's decision order."""
+"""classify() — the single source of truth for the gate's per-tier decision order.
+
+Owner: NEVER → DENY · built-in shell → DENY · APPROVED → ALLOW · blacklist → ASK ·
+else ALLOW (default-allow). Guest: the original default-ask posture, unchanged.
+"""
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.gate.blacklist import Blacklist
 from chief.gate.gate import GateDecision, classify, is_read_only
 from chief.gate.policy import PolicyStore
+
+BLACKLIST = Blacklist.from_config()
 
 
 async def _store(
@@ -22,102 +29,236 @@ def test_is_read_only_known_and_unknown() -> None:
     assert is_read_only("Bash", {"command": "ls"}) is False
 
 
-async def test_never_denies_with_no_prompt(
+# ---- both tiers: NEVER + built-in shell ---------------------------------------
+
+
+async def test_never_denies_on_both_tiers(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     store = await _store(
         session_factory, never=[("mcp__chief_shell__bash", "rm -rf /tmp/x")]
     )
 
-    verdict = classify(
-        "mcp__chief_shell__bash", {"command": "rm -rf /tmp/x"}, store
-    )
-
-    assert verdict.decision is GateDecision.DENY
+    for tier in ("owner", "guest"):
+        verdict = classify(
+            "mcp__chief_shell__bash",
+            {"command": "rm -rf /tmp/x"},
+            store,
+            tier=tier,
+            blacklist=BLACKLIST,
+        )
+        assert verdict.decision is GateDecision.DENY, tier
 
 
 async def test_never_wins_over_read_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A NEVER rule on a normally read-only tool still hard-denies.
-    store = await _store(session_factory, never=[("Read", None)])
+    # A NEVER rule on a normally allowed tool still hard-denies, on both tiers.
+    store = await _store(session_factory, never=[("WebSearch", None)])
 
-    verdict = classify("Read", {"file_path": "/etc/shadow"}, store)
+    for tier in ("owner", "guest"):
+        verdict = classify("WebSearch", {"query": "x"}, store, tier=tier)
+        assert verdict.decision is GateDecision.DENY, tier
+
+
+async def test_builtin_shell_tools_denied_on_both_tiers(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # One shell surface only: the built-ins are refused so every command runs through
+    # the per-task host shell tool (and its blacklist matching).
+    store = await _store(session_factory)
+
+    for tier in ("owner", "guest"):
+        for name in ("Bash", "BashOutput", "KillShell"):
+            verdict = classify(name, {"command": "env"}, store, tier=tier)
+            assert verdict.decision is GateDecision.DENY, (tier, name)
+            assert "bash tool" in verdict.reason
+
+
+async def test_builtin_shell_denied_over_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An APPROVED rule must NOT resurrect the built-in shell — one surface only.
+    store = await _store(session_factory, approved=[("Bash", "env")])
+
+    verdict = classify("Bash", {"command": "env"}, store, tier="owner")
 
     assert verdict.decision is GateDecision.DENY
 
 
-async def test_read_only_allows(
+# ---- owner tier: default-allow + blacklist -------------------------------------
+
+
+async def test_owner_effectful_tool_allows_by_default(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A non-file read-only tool ALLOWs with no card and needs no configured root.
     store = await _store(session_factory)
 
-    verdict = classify("WebSearch", {"query": "x"}, store)
+    verdict = classify(
+        "mcp__gcal__create-event",
+        {"summary": "standup"},
+        store,
+        tier="owner",
+        blacklist=BLACKLIST,
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+    assert "default" in verdict.reason
+
+
+async def test_owner_shell_command_allows_by_default(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__chief_shell__bash",
+        {"command": "git status"},
+        store,
+        tier="owner",
+        blacklist=BLACKLIST,
+    )
 
     assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_file_op_with_no_root_denies(
+async def test_owner_blacklisted_command_asks(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A file read with no configured root (e.g. a guest, who gets no file tools) must
-    # DENY — never fall through to the read-only ALLOW, which would read anywhere.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__chief_shell__bash",
+        {"command": "sudo rm -rf /var/lib"},
+        store,
+        tier="owner",
+        blacklist=BLACKLIST,
+    )
+
+    assert verdict.decision is GateDecision.ASK
+    assert "blacklist" in verdict.reason
+
+
+async def test_owner_blacklisted_tool_asks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+    blacklist = Blacklist.from_config(tools=("mcp__gmail_chief__send-email",))
+
+    verdict = classify(
+        "mcp__gmail_chief__send-email",
+        {"to": "x@y.z"},
+        store,
+        tier="owner",
+        blacklist=blacklist,
+    )
+
+    assert verdict.decision is GateDecision.ASK
+
+
+async def test_owner_approved_rule_beats_blacklist(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An explicit "always allow" blessing wins over a blacklist match — the
+    # self-curating APPROVED list keeps meaning something under default-allow.
+    store = await _store(
+        session_factory,
+        approved=[("mcp__chief_shell__bash", "sudo systemctl restart chief")],
+    )
+
+    verdict = classify(
+        "mcp__chief_shell__bash",
+        {"command": "sudo systemctl restart chief"},
+        store,
+        tier="owner",
+        blacklist=BLACKLIST,
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_owner_writes_anywhere_allow(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Path confinement is gone: owner Write/Edit/Read anywhere is ALLOW by default.
+    store = await _store(session_factory)
+
+    for tool, args in (
+        ("Write", {"file_path": "/etc/motd", "content": "x"}),
+        ("Edit", {"file_path": "/home/owner/notes.md"}),
+        ("Read", {"file_path": "/var/log/syslog"}),
+        ("Glob", {"pattern": "**/*", "path": "/"}),
+    ):
+        verdict = classify(tool, args, store, tier="owner", blacklist=BLACKLIST)
+        assert verdict.decision is GateDecision.ALLOW, tool
+
+
+async def test_owner_no_blacklist_still_allows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # blacklist=None (unwired) means nothing asks — allowed by default.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__chief_shell__bash", {"command": "sudo ls"}, store, tier="owner"
+    )
+
+    assert verdict.decision is GateDecision.ALLOW
+
+
+# ---- guest tier: default-ask, unchanged ----------------------------------------
+
+
+async def test_guest_effectful_tool_asks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    store = await _store(session_factory)
+
+    verdict = classify("mcp__gcal__create-event", {}, store, tier="guest")
+
+    assert verdict.decision is GateDecision.ASK
+    assert "approval" in verdict.reason
+
+
+async def test_default_tier_is_guest(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A caller that forgets tier fails closed (ASK), never open.
+    store = await _store(session_factory)
+
+    verdict = classify("mcp__notion__create-page", {"title": "x"}, store)
+
+    assert verdict.decision is GateDecision.ASK
+
+
+async def test_guest_file_ops_deny(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Guests have no file tools; a call must DENY, never fall through to read-only.
     store = await _store(session_factory)
 
     for tool, args in (
         ("Read", {"file_path": "/etc/passwd"}),
         ("Glob", {"pattern": "**/*"}),
         ("Grep", {"pattern": "x"}),
+        ("Write", {"file_path": "/tmp/x", "content": "x"}),
+        ("Edit", {"file_path": "/tmp/x"}),
     ):
-        verdict = classify(tool, args, store)
-        assert verdict.decision is GateDecision.DENY
+        verdict = classify(tool, args, store, tier="guest")
+        assert verdict.decision is GateDecision.DENY, tool
 
 
-async def test_builtin_shell_denied_over_approved(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # The built-in Bash runs inside core (Max token in env). An APPROVED rule must NOT
-    # resurrect it — the hard DENY overrides the allow-list. (APPROVED → ALLOW for a
-    # normal command tool is covered by test_shell_tool_approved_allows.)
-    store = await _store(session_factory, approved=[("Bash", "env")])
-
-    verdict = classify("Bash", {"command": "env"}, store)
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_unknown_effectful_tool_asks(
+async def test_guest_read_only_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     store = await _store(session_factory)
 
-    verdict = classify("mcp__notion__create-page", {"title": "x"}, store)
+    verdict = classify("WebSearch", {"query": "x"}, store, tier="guest")
 
-    assert verdict.decision is GateDecision.ASK
-    assert "approval" in verdict.reason
-
-
-async def test_builtin_shell_tools_denied(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Bash/BashOutput/KillShell all execute in core — each is a hard DENY so the model
-    # is forced onto the secret-free sandbox shell, even with file scoping wired.
-    store = await _store(session_factory)
-
-    for name in ("Bash", "BashOutput", "KillShell"):
-        verdict = classify(
-            name,
-            {"command": "env"},
-            store,
-            memory_dir="/memory",
-            workspace_dir="/workspace",
-        )
-        assert verdict.decision is GateDecision.DENY, name
-        assert "sandbox shell" in verdict.reason
+    assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_extra_read_only_tool_allows(
+async def test_guest_extra_read_only_tool_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     # An MCP read tool the caller declared read-only (e.g. calendar free/busy) ALLOWs.
@@ -127,22 +268,24 @@ async def test_extra_read_only_tool_allows(
         "mcp__gcal__get-freebusy",
         {},
         store,
+        tier="guest",
         extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
     )
 
     assert verdict.decision is GateDecision.ALLOW
 
 
-async def test_calendar_write_not_in_read_set_asks(
+async def test_guest_calendar_write_not_in_read_set_asks(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A write tool absent from extra_read_only falls through to ASK → approval.
+    # The guest booking write still reaches the Front Desk card.
     store = await _store(session_factory)
 
     verdict = classify(
         "mcp__gcal__create-event",
         {},
         store,
+        tier="guest",
         extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
     )
 
@@ -158,334 +301,38 @@ async def test_never_wins_over_extra_read_only(
         "mcp__gcal__get-freebusy",
         {},
         store,
+        tier="guest",
         extra_read_only=frozenset({"mcp__gcal__get-freebusy"}),
     )
 
     assert verdict.decision is GateDecision.DENY
 
 
-async def test_file_op_within_memory_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Read", {"file_path": "/memory/facts/owner/x.md"}, store, memory_dir="/memory"
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_relative_file_op_resolves_under_memory(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # A relative path resolves against the session cwd (the memory root) → in-bounds.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Glob", {"path": "facts/owner"}, store, memory_dir="/memory"
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_file_op_outside_memory_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Read", {"file_path": "/etc/shadow"}, store, memory_dir="/memory"
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_file_op_traversal_escape_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Read", {"file_path": "/memory/../etc/shadow"}, store, memory_dir="/memory"
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_never_still_wins_over_memory_confinement(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory, never=[("Read", None)])
-
-    verdict = classify(
-        "Read", {"file_path": "/memory/x.md"}, store, memory_dir="/memory"
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-# ---- workspace scoping (M7) --------------------------------------------------
-
-
-async def test_read_in_workspace_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Read",
-        {"file_path": "/workspace/build/out.txt"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_read_in_memory_still_allows_with_workspace(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Reads span memory ∪ workspace: a memory path is still in-bounds.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Grep",
-        {"path": "/memory/facts/owner"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_read_outside_memory_and_workspace_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Read",
-        {"file_path": "/etc/shadow"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_write_in_workspace_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/workspace/draft.md", "content": "x"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_edit_in_workspace_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Edit",
-        {"file_path": "/workspace/draft.md"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_write_into_memory_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Issue-19: memory writes are now allowed — the gate widens Write/Edit to memory ∪
-    # workspace so the agent can persist facts without an approval card.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/memory/facts/owner/x.md", "content": "x"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_edit_into_memory_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Edit",
-        {"file_path": "/memory/facts/owner/x.md"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_relative_write_resolves_to_memory_cwd_and_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # A relative path resolves against the session cwd (the memory root) → inside
-    # memory → now ALLOW (Issue-19 widened writes to memory ∪ workspace).
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "draft.md", "content": "x"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_write_outside_memory_and_workspace_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # A write outside both memory and workspace is still a hard DENY.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/etc/shadow", "content": "x"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_write_guest_no_roots_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Guest sessions have no memory or workspace roots → any write is DENY.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/tmp/anything.md", "content": "x"},
-        store,
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_write_into_memory_no_workspace_allows(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Production default: workspace_enabled=False → workspace_dir is None.
-    # Memory writes must ALLOW on this path so fact persistence works out of the box.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/memory/facts/x.md", "content": "x"},
-        store,
-        memory_dir="/memory",
-    )
-
-    assert verdict.decision is GateDecision.ALLOW
-
-
-async def test_write_outside_memory_no_workspace_denies(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # Same production default (memory only, no workspace): a write outside /memory
-    # must still DENY — the gate must not open up the whole filesystem.
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/tmp/anything.md", "content": "x"},
-        store,
-        memory_dir="/memory",
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_never_wins_over_memory_write(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # A NEVER rule on Write still hard-denies, even for a memory path.
-    store = await _store(session_factory, never=[("Write", None)])
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/memory/facts/x.md", "content": "y"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_never_wins_over_workspace_write(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    store = await _store(session_factory, never=[("Write", None)])
-
-    verdict = classify(
-        "Write",
-        {"file_path": "/workspace/x", "content": "y"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.DENY
-
-
-async def test_shell_tool_asks_by_default(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    # The sandbox shell tool is effectful → ASK unless pre-approved (like Bash).
-    store = await _store(session_factory)
-
-    verdict = classify(
-        "mcp__chief_shell__bash",
-        {"command": "ls /workspace"},
-        store,
-        memory_dir="/memory",
-        workspace_dir="/workspace",
-    )
-
-    assert verdict.decision is GateDecision.ASK
-
-
-async def test_shell_tool_approved_allows(
+async def test_guest_approved_rule_allows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     store = await _store(
-        session_factory, approved=[("mcp__chief_shell__bash", "git status")]
+        session_factory, approved=[("mcp__gcal__create-event", None)]
     )
 
-    verdict = classify(
-        "mcp__chief_shell__bash", {"command": "git status"}, store
-    )
+    verdict = classify("mcp__gcal__create-event", {}, store, tier="guest")
 
     assert verdict.decision is GateDecision.ALLOW
+
+
+async def test_guest_never_gains_owner_blacklist_posture(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Even if a blacklist is (wrongly) passed for a guest, an unlisted effectful tool
+    # still ASKs — the default-allow branch is owner-only.
+    store = await _store(session_factory)
+
+    verdict = classify(
+        "mcp__notion__create-page",
+        {"title": "x"},
+        store,
+        tier="guest",
+        blacklist=BLACKLIST,
+    )
+
+    assert verdict.decision is GateDecision.ASK

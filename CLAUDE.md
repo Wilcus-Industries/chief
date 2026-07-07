@@ -9,6 +9,13 @@ Project-specific rules only. The universal working rules — boundaries, when-st
 secrets, done-honesty — live in the global `~/.claude/CLAUDE.md` and apply underneath
 this. Only add a rule here when it differs from, or isn't covered by, the global.
 
+## Run story (host-native)
+
+Core runs natively on this machine — no core container. One-time setup: `./install.sh`
+(prereqs, secrets/data scaffold, deps, migrations, `chief` launcher; `--google` /
+`--playwright` also start the MCP sidecars). Run with `chief` or
+`uv run python -m chief.entrypoint`. Sidecars: `docker compose --profile google up -d`.
+
 ## Definition of done
 
 The project's full check — the global done-rule points here for the exact commands. All

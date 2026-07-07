@@ -2,12 +2,14 @@
 
 Non-secret values come from ``config.yaml`` (committed) with environment-variable
 overrides; secrets (the per-platform bot tokens + the Claude OAuth token) come from a
-Docker ``secrets_dir`` (``/run/secrets``) with an environment fallback for local runs.
+``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` or the repo-local
+``./secrets`` — see :func:`chief.app.load_settings`) with an environment fallback.
 Precedence, highest first: explicit init kwargs → environment → ``config.yaml`` → secret
 files. At least one chat platform (Telegram and/or Discord) must be fully configured.
 """
 
 import os
+import re
 from datetime import time
 from typing import Any
 
@@ -17,6 +19,26 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
+)
+
+from .gate.blacklist import DEFAULT_SHELL_PATTERNS
+from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
+from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
+from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
+from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
+
+#: Default ``blacklist_tools`` seed (MEDIUM-1 fix): under the owner's default-allow
+#: gate, being absent from ``allowed_tools`` no longer routes a call to an approval
+#: card by itself — ``classify()`` (chief.gate.gate) ALLOWs anything not APPROVED or
+#: blacklisted. Every Google write tool (Gmail send/reply/draft/label/trash, calendar
+#: create/update, Drive upload, Sheets writes) is seeded here so the "reads ALLOW,
+#: writes ASK" design each service's ``tools/<svc>/mcp.py`` module documents actually
+#: holds under the new posture, instead of running silently uncarded.
+_DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
+    _GMAIL_WRITE_TOOLS
+    + _CALENDAR_WRITE_TOOLS
+    + _DRIVE_WRITE_TOOLS
+    + _SHEETS_WRITE_TOOLS
 )
 
 
@@ -34,8 +56,8 @@ class PolicySeed(BaseModel):
 class Settings(BaseSettings):
     """Validated configuration for the chief core process."""
 
-    # Enable secrets_dir only when the Docker mount exists (app.load_settings).
-    # Otherwise local runs read tokens from env, avoiding a missing-dir warning.
+    # secrets_dir is enabled only when one of the candidate dirs exists
+    # (app.load_settings); otherwise tokens come from env (no missing-dir warning).
     model_config = SettingsConfigDict(
         yaml_file="config.yaml",
         extra="ignore",
@@ -63,7 +85,7 @@ class Settings(BaseSettings):
     owner_model_opus: str = "claude-opus-4-8"
     opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
-    db_path: str = "chief.db"
+    db_path: str = "data/chief.db"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
     )
@@ -81,15 +103,64 @@ class Settings(BaseSettings):
     compaction_idle_seconds: float = 3600.0
     classifier_model: str = "claude-haiku-4-5"
 
-    # Permission gate + approval flow (M3). approval_timeout_seconds is the fail-closed
-    # deny window; never_seed/approved_seed prime the NEVER/APPROVED lists on boot;
-    # audit_log_path is the append-only JSONL sink; front_desk_thread_key is the thread
+    # Permission gate + approval flow (M3, flipped to default-allow for the owner in
+    # the host-native rework). approval_timeout_seconds is the fail-closed deny window;
+    # never_seed/approved_seed prime the NEVER/APPROVED lists on boot; audit_log_path
+    # is the append-only JSONL sink; front_desk_thread_key is the thread
     # guest-originated approvals, admission cards, and relayed messages post to (M6).
+    # blacklist_shell_patterns are regexes over shell commands (and blacklist_tools
+    # whole tool names) that still raise an approval card under the owner's
+    # default-allow posture; guests stay default-ask regardless. Being absent from a
+    # session's ``allowed_tools`` is NOT enough on its own to card an owner call
+    # anymore — ``classify()`` (chief.gate.gate) ALLOWs anything not APPROVED or on
+    # one of these two blacklists, so blacklist_tools is what actually restores
+    # "writes ASK" for the Google services (default-seeded — see
+    # ``_DEFAULT_BLACKLIST_TOOLS`` above).
     approval_timeout_seconds: float = 600.0
     never_seed: list[PolicySeed] = []
     approved_seed: list[PolicySeed] = []
-    audit_log_path: str = "/data/audit.jsonl"
+    audit_log_path: str = "data/audit.jsonl"
     front_desk_thread_key: str | None = None
+    blacklist_shell_patterns: tuple[str, ...] = DEFAULT_SHELL_PATTERNS
+    blacklist_tools: tuple[str, ...] = _DEFAULT_BLACKLIST_TOOLS
+
+    # Untrusted-content screening (host-native security seam). Material arriving from
+    # the internet (screening_tools results) or from guests (the Front Desk relay) is
+    # screened by a cheap screening_model call for prompt injection before the owner
+    # agent acts on it; a hit is annotated with a warning (screening_block=true blocks
+    # the result outright instead). Fail-safe: a screener error passes content through.
+    # screening_block defaults False, i.e. screening is advisory/annotate-only — it
+    # never itself blocks a turn unless flipped on (MEDIUM/LOW finding).
+    screening_enabled: bool = True
+    screening_model: str = "claude-haiku-4-5"
+    screening_block: bool = False
+    # MEDIUM-2 fix: Gmail reads (email bodies are attacker-controlled), the Drive read,
+    # and the playwright browser action tools that return an updated page
+    # snapshot/result alongside the interaction (click/type/hover/drag/drop/
+    # select_option/press_key/fill_form/file_upload/handle_dialog) are untrusted
+    # channels too, not just the original fetch/search/navigate/snapshot set.
+    screening_tools: tuple[str, ...] = (
+        "WebFetch",
+        "WebSearch",
+        "mcp__playwright__browser_snapshot",
+        "mcp__playwright__browser_navigate",
+        "mcp__playwright__browser_navigate_back",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+        "mcp__playwright__browser_hover",
+        "mcp__playwright__browser_drag",
+        "mcp__playwright__browser_drop",
+        "mcp__playwright__browser_select_option",
+        "mcp__playwright__browser_press_key",
+        "mcp__playwright__browser_fill_form",
+        "mcp__playwright__browser_file_upload",
+        "mcp__playwright__browser_handle_dialog",
+        "mcp__gmail_chief__gmail_list_messages",
+        "mcp__gmail_chief__gmail_get_message",
+        "mcp__gmail_chief__gmail_search_messages",
+        "mcp__gmail_chief__gmail_list_drafts",
+        "mcp__drive__ReadDriveFile",
+    )
 
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
     # tier-isolated session (take-a-message + calendar free/busy + owner-approved
@@ -102,32 +173,34 @@ class Settings(BaseSettings):
     guest_rate_window_seconds: int = 3600
     guest_global_rate_per_window: int = 60
 
-    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a persisted
-    # volume in the container); memory_git versions every write op via subprocess git
-    # under the configured author identity.
-    memory_dir: str = "/memory"
+    # Long-term memory (M4). memory_dir holds Soul/User + facts/ (a host directory,
+    # gitignored); memory_git versions every write op via subprocess git under the
+    # configured author identity.
+    memory_dir: str = "data/memory"
     memory_git: bool = True
     git_author_name: str = "chief"
     git_author_email: str = "chief@localhost"
 
     # Google services (M5/M8). Each enabled server wires its own MCP container over
-    # streamable HTTP at <svc>_mcp_url (MCP at /mcp) into owner sessions: reads ALLOWed,
-    # writes approval-gated, deferred ops blocked. One shared OAuth token covers all
-    # four (see secrets/README.md). owner_tz frames calendar booking times (an IANA
+    # streamable HTTP at <svc>_mcp_url into owner sessions — the containers publish
+    # their ports on 127.0.0.1 so the host-native core reaches them via localhost:
+    # reads ALLOWed, writes approval-gated, deferred ops blocked. One shared OAuth
+    # token covers all four (see secrets/README.md). owner_tz frames calendar booking
+    # times (an IANA
     # name, e.g. America/New_York). The gmail container's transparent signature is not a
     # Settings field: it reads the GMAIL_SIGNATURE compose env at its own startup (see
     # secrets/README.md). Each defaults off until its token + container exist.
     calendar_enabled: bool = False
-    calendar_mcp_url: str = "http://mcp-calendar:8003/mcp"
+    calendar_mcp_url: str = "http://127.0.0.1:8003/mcp"
     drive_enabled: bool = False
-    drive_mcp_url: str = "http://mcp-drive:8001/mcp"
+    drive_mcp_url: str = "http://127.0.0.1:8001/mcp"
     sheets_enabled: bool = False
-    sheets_mcp_url: str = "http://mcp-sheets:8002/mcp"
+    sheets_mcp_url: str = "http://127.0.0.1:8002/mcp"
     gmail_enabled: bool = False
     # Cutover (issue #52): the mcp-gmail service now runs the chief-owned server on
     # :8004 (the third-party mcp-google-gmail dependency was dropped). The SDK server
     # name stays ``gmail_chief`` so the per-thread account rebuild keeps matching.
-    gmail_mcp_url: str = "http://mcp-gmail:8004/mcp"
+    gmail_mcp_url: str = "http://127.0.0.1:8004/mcp"
     owner_tz: str = "UTC"
 
     # Browser automation (M13+), owner-only, default off (mirror the opt-in pattern).
@@ -136,24 +209,23 @@ class Settings(BaseSettings):
     # (navigate, snapshot, screenshot, inspection) ALLOWed, write tools (click, type,
     # JS evaluation) approval-gated. Guest sessions never see browser tools.
     playwright_enabled: bool = False
-    playwright_mcp_url: str = "http://mcp-playwright:3000/mcp"
-    # Mount point of the shared screenshots volume inside the core container (and
-    # inside mcp-playwright at the same path). Core reads screenshot files from here
-    # to deliver them via send_file after browser_take_screenshot runs.
-    playwright_screenshots_dir: str = "/screenshots"
+    playwright_mcp_url: str = "http://127.0.0.1:3000/mcp"
+    # Host directory bind-mounted into mcp-playwright at /screenshots. Core reads
+    # screenshot files from here to deliver them via send_file after
+    # browser_take_screenshot runs.
+    playwright_screenshots_dir: str = "data/screenshots"
 
-    # Shell sandbox + file workspace (M7), owner-only, default off (mirror the Google
-    # profile pattern). shell_enabled wires the in-process bash tool that forwards to
-    # the secret-free sandbox container at sandbox_host:sandbox_port; every command is
-    # default-ask gated. workspace_enabled adds Write/Edit, gate-confined to
-    # workspace_dir (a volume shared rw with the sandbox). shell_timeout_seconds bounds
-    # one command (the sandbox SIGINTs then respawns a hung shell); shell_output_limit
-    # caps captured bytes.
+    # Host shell + file workspace (M7, host-native rework), owner-only.
+    # shell_enabled wires the in-process bash tool that runs a persistent per-task
+    # shell directly on the host ($SHELL, else bash, else zsh) with the full process
+    # environment; commands run freely unless they match the approval blacklist.
+    # workspace_enabled adds Write/Edit to the pre-approved tool list; workspace_dir is
+    # the shell's starting cwd and the suggested scratch area (writes are no longer
+    # confined to it). shell_timeout_seconds bounds one command (a hung shell is
+    # SIGINT'd then respawned); shell_output_limit caps captured bytes.
     shell_enabled: bool = False
     workspace_enabled: bool = False
-    workspace_dir: str = "/workspace"
-    sandbox_host: str = "sandbox"
-    sandbox_port: int = 8765
+    workspace_dir: str = "data/workspace"
     shell_timeout_seconds: float = 120.0
     shell_output_limit: int = 64_000
 
@@ -253,6 +325,39 @@ class Settings(BaseSettings):
         """
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator(
+        "db_path",
+        "audit_log_path",
+        "memory_dir",
+        "workspace_dir",
+        "playwright_screenshots_dir",
+    )
+    @classmethod
+    def _expand_user_paths(cls, value: str) -> str:
+        """Expand a leading ``~`` so host configs can point at home-dir paths.
+
+        Relative paths stay relative (resolved against the process cwd — the repo
+        root under the ``chief`` launcher), matching how ``config.yaml`` is found.
+        """
+        return os.path.expanduser(value)
+
+    @field_validator("blacklist_shell_patterns")
+    @classmethod
+    def _validate_blacklist_patterns(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Each blacklist entry must be a valid regex — a typo fails the boot, not the
+        first shell command (which would then run un-carded)."""
+        for pattern in value:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"blacklist_shell_patterns entry {pattern!r} is not a valid "
+                    f"regex: {exc}"
+                ) from exc
         return value
 
     @field_validator("quiet_hours_start", "quiet_hours_end")

@@ -1,9 +1,9 @@
-# Non-secret configuration (committed). Secrets live in Docker secrets / env — never here.
+# Non-secret configuration (committed). Secrets live in the secrets dir / env — never here.
 # Every value here is overridable by an environment variable of the same name (uppercased).
 
 # Owner ids — the one privileged user per platform. Configure at least one platform
 # (id + token); 0 means "unset / platform off". Telegram id: ask @userinfobot. Discord id:
-# Developer Mode → right-click yourself → Copy User ID. Tokens live in Docker secrets.
+# Developer Mode → right-click yourself → Copy User ID. Tokens live in the secrets dir.
 owner_telegram_id: 0
 owner_discord_id: 0
 owner_name: William Chastain
@@ -18,8 +18,8 @@ owner_model_opus: claude-opus-4-8
 opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
-# sqlite file path (inside the container this is on the persisted volume).
-db_path: /data/chief.db
+# sqlite file path (repo-local data/ dir, gitignored; ~ expands).
+db_path: data/chief.db
 
 # What a guest hears back: the canned ack when guest mode is off, and the holding ack
 # while a new contact awaits admission when it's on.
@@ -41,37 +41,87 @@ turn_timeout_seconds: 300  # watchdog: a turn past this (wedged stream) is torn 
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
 classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments
 
-# Permission gate + approval flow (M3). The gate classifies every tool call; an ASK posts
-# an approval card and blocks until a button tap or this timeout (then fail-closed deny).
+# Permission gate + approval flow (M3, flipped host-native). Owner tool calls are
+# ALLOWED by default; only a blacklist match posts an approval card (which blocks until
+# a button tap or this timeout, then fail-closed deny). Guests stay default-ask.
 approval_timeout_seconds: 600  # no decision within this window = deny
-audit_log_path: /data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
+audit_log_path: data/audit.jsonl  # append-only JSONL: tool calls + approval decisions
 # front_desk_thread_key:           # required by guest_enabled — admissions/relays/approvals land here
 # Boot-seeded policy rules (idempotent). Each item: {tool, arg_pattern?}; arg_pattern
-# omitted = whole-tool rule. Real entries arrive with the tools they guard (M5/M7/M8).
+# omitted = whole-tool rule. NEVER still hard-denies with no prompt; APPROVED entries
+# (and "always allow" taps) beat the blacklist.
 never_seed: []      # tools/commands hard-denied with no prompt
 approved_seed: []   # tools/commands pre-allowed with no prompt
+# Approval blacklist — what still asks under the default-allow posture. Shell patterns
+# are regexes matched against the bash tool's command; tools are whole tool names that
+# always ask. Being off a session's allowed_tools list is NOT enough by itself to card
+# a call anymore (owner default-allow) — one of these two lists is what does it. Omit
+# blacklist_shell_patterns to get the built-in default set (sudo/doas, rm -rf on a root,
+# mkfs / dd to devices, shutdown/reboot, kill -9 1, curl|sh, git push --force main,
+# chmod -R 777, global package installs). Omit blacklist_tools to get its default set —
+# every Google write tool (Gmail send/reply/draft/label/trash, calendar create/update,
+# Drive upload, Sheets writes; see config.py's _DEFAULT_BLACKLIST_TOOLS for the exact
+# list). Listing either key here REPLACES its whole default set, so include the
+# defaults you want to keep alongside anything you add.
+# blacklist_shell_patterns: []
+# blacklist_tools: []              # e.g. [mcp__gmail_chief__gmail_send_message]
+
+# Untrusted-content screening (host-native security seam). Web/browser tool results,
+# Gmail/Drive reads, and guest messages are screened for prompt injection by a cheap
+# model call; a hit is annotated with a warning so the agent treats it as data
+# (screening_block: true blocks the tool result outright instead — leaving it false
+# keeps screening advisory/annotate-only). Fail-safe: a screener error passes content
+# through un-annotated rather than blocking the turn. Content past the ~20k-char head
+# window screened (screening.py's _MAX_SCREEN_CHARS) is not inspected, and content
+# fetched via the host shell (curl/wget) bypasses this seam entirely — both are
+# accepted residual gaps, not bugs.
+screening_enabled: true
+screening_model: claude-haiku-4-5
+screening_block: false
+# screening_tools:                 # which tools' results get screened (defaults shown)
+#   - WebFetch
+#   - WebSearch
+#   - mcp__playwright__browser_snapshot
+#   - mcp__playwright__browser_navigate
+#   - mcp__playwright__browser_navigate_back
+#   - mcp__playwright__browser_click
+#   - mcp__playwright__browser_type
+#   - mcp__playwright__browser_hover
+#   - mcp__playwright__browser_drag
+#   - mcp__playwright__browser_drop
+#   - mcp__playwright__browser_select_option
+#   - mcp__playwright__browser_press_key
+#   - mcp__playwright__browser_fill_form
+#   - mcp__playwright__browser_file_upload
+#   - mcp__playwright__browser_handle_dialog
+#   - mcp__gmail_chief__gmail_list_messages
+#   - mcp__gmail_chief__gmail_get_message
+#   - mcp__gmail_chief__gmail_search_messages
+#   - mcp__gmail_chief__gmail_list_drafts
+#   - mcp__drive__ReadDriveFile
 
 # Long-term memory (M4). Namespaced markdown facts; the facts/ listing is auto-generated
 # at prompt-build time (no stored index file). Chief reads fact files on demand and writes
 # memory directly in-session via its Write tool; every write is git-versioned.
-memory_dir: /memory          # persisted volume holding Soul/User + facts/
+memory_dir: data/memory      # host dir holding Soul/User + facts/ (gitignored)
 memory_git: true             # version every memory write op with local git
 git_author_name: chief
 git_author_email: chief@localhost
 
 # Google services (M5/M8). Flip each *_enabled on once its MCP container is up and the
 # shared OAuth token is minted (secrets/README.md). Owner sessions then read freely;
-# writes post an approval card. URLs are internal compose addresses (no public ingress);
-# the MCP endpoint is mounted at /mcp. Enabling drive/sheets/gmail needs the token
-# re-minted with their scopes (M8) — see secrets/README.md.
+# writes post an approval card. The containers publish their ports on 127.0.0.1 only,
+# so the host-native core reaches them via localhost (never exposed beyond this
+# machine). Enabling drive/sheets/gmail needs the token re-minted with their scopes
+# (M8) — see secrets/README.md.
 calendar_enabled: true    # mcp-calendar container up; token is calendar-scope only
-calendar_mcp_url: http://mcp-calendar:8003/mcp
+calendar_mcp_url: http://127.0.0.1:8003/mcp
 drive_enabled: false
-drive_mcp_url: http://mcp-drive:8001/mcp
+drive_mcp_url: http://127.0.0.1:8001/mcp
 sheets_enabled: true
-sheets_mcp_url: http://mcp-sheets:8002/mcp
+sheets_mcp_url: http://127.0.0.1:8002/mcp
 gmail_enabled: true
-gmail_mcp_url: http://mcp-gmail:8004/mcp
+gmail_mcp_url: http://127.0.0.1:8004/mcp
 # Transparent signature appended server-side to every message chief sends. Not a config
 # key — set the GMAIL_SIGNATURE environment variable (see secrets/README.md); {owner}
 # fills from OWNER_NAME. Default: "Sent by {owner}'s assistant on their behalf."
@@ -83,18 +133,16 @@ owner_tz: America/Los_Angeles          # IANA tz for booking times, e.g. America
 # pre-approved; write tools (click, type, fill, drag, JS) reach the approval card.
 # Bring up the container first: docker compose --profile playwright up
 playwright_enabled: false
-playwright_mcp_url: http://mcp-playwright:3000/mcp
+playwright_mcp_url: http://127.0.0.1:3000/mcp
 
-# Shell sandbox + file workspace (M7, owner-only, opt-in). Bring up the secret-free
-# sandbox container (docker compose --profile sandbox up) and flip these on. shell_enabled
-# gives the owner a bash tool that forwards to the sandbox; every command is approval-gated
-# unless pre-blessed. workspace_enabled adds Write/Edit, gate-confined to /workspace (a
-# volume shared with the sandbox). The sandbox holds NO secrets and a restricted FS.
+# Host shell + file workspace (M7, host-native, owner-only). shell_enabled gives the
+# owner a bash tool that runs a persistent per-task shell directly on this machine
+# ($SHELL, else bash, else zsh) with the full environment; commands run without approval
+# unless they match the blacklist above. workspace_enabled adds Write/Edit (pre-approved);
+# workspace_dir is the shell's starting cwd and the suggested scratch area.
 shell_enabled: true
 workspace_enabled: true
-workspace_dir: /workspace            # scratch volume, mounted rw in both core and sandbox
-sandbox_host: sandbox                # internal compose service name (no host ports)
-sandbox_port: 8765
+workspace_dir: data/workspace        # shell cwd + scratch area (repo-local, gitignored)
 shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 
@@ -102,8 +150,8 @@ shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then
 # reminders, recurring jobs, and self-cron the owner sets up. It needs primary_thread_key
 # (the owner inbox those land in — prefer a real topic over the casual General channel)
 # and primary_platform (which chat stack owns the loop) — both required when enabled.
-# owner_tz (above) frames cron + quiet hours. Bash schedules also need shell_enabled and
-# the sandbox up. Scheduling a shell command is approval-gated at creation time.
+# owner_tz (above) frames cron + quiet hours. Bash schedules also need shell_enabled.
+# Scheduling a shell command is approval-gated at creation time.
 scheduler_enabled: false
 # scheduler_tick_seconds: 30         # how often the tick scans for due schedules
 primary_platform: telegram           # which configured stack the scheduler delivers through

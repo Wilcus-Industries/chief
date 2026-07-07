@@ -44,6 +44,7 @@ from ..adapters.base import (
     should_send_as_file,
 )
 from ..gate.approvals import OPUS_ESCALATION_KIND, ApprovalManager
+from ..gate.blacklist import Blacklist
 from ..gate.gate import (
     BUILTIN_SHELL_TOOLS,
     FILE_OP_TOOLS,
@@ -92,6 +93,7 @@ from ..tools.shell import ShellService
 from . import classify
 from .agent import NO_REPLY
 from .personas import build_system_prompt
+from .screening import Screener, build_screening_hook, prefix_flagged
 from .session import Final, TaskSession, TurnEvent
 
 logger = logging.getLogger("chief.core.tasks")
@@ -122,8 +124,8 @@ MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: DENY).
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
-#: gate's hard DENY) — they run inside core where the Max token lives, so the model can
-#: never reach them; it uses the sandbox shell (``mcp__chief_shell__bash``) instead.
+#: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
+#: (``mcp__chief_shell__bash``), so its blacklist matching can't be bypassed.
 DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
 #: Read-only web + meta tools the owner agent always gets (the gate treats all three as
 #: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
@@ -294,6 +296,7 @@ class TaskManager:
         policy: PolicyStore | None = None,
         approvals: ApprovalManager | None = None,
         audit: AuditLog | None = None,
+        blacklist: Blacklist | None = None,
         front_desk_thread_key: str | None = None,
         memory: MemoryStore | None = None,
         memory_dir: str | None = None,
@@ -319,6 +322,9 @@ class TaskManager:
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
+        screener: Screener | None = None,
+        screening_tools: tuple[str, ...] = (),
+        screening_block: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._io = io
@@ -341,6 +347,7 @@ class TaskManager:
         self._policy = policy
         self._approvals = approvals
         self._audit = audit
+        self._blacklist = blacklist
         self._front_desk_thread_key = front_desk_thread_key
         self._memory = memory
         self._memory_dir = memory_dir
@@ -369,6 +376,12 @@ class TaskManager:
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
+        # Untrusted-content screening (host-native): when a screener is wired, the
+        # named tools' results get a PostToolUse injection screen and the guest relay
+        # annotates flagged messages before they reach the Front Desk.
+        self._screener = screener
+        self._screening_tools = frozenset(screening_tools)
+        self._screening_block = screening_block
         #: Set once the owner is reminded a paused cycle is blocking turns; cleared the
         #: next time the budget reports a non-paused mode, so each pause acks once.
         self._paused_ack_sent = False
@@ -739,7 +752,9 @@ class TaskManager:
             # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
             allowed += list(WORKSPACE_TOOLS)
         for svc in services:
-            # Reads only — writes stay off the allow-list so they reach approval.
+            # Reads only — writes stay off the allow-list, but under owner default-allow
+            # that alone no longer cards them; it's blacklist_tools (config.py seeds
+            # every service's write_tools by default) that routes writes to approval.
             allowed += list(svc.read_tools)
         if admin is not None:
             # Owner-initiated, reversible → pre-approved (no card) to block/mute guests.
@@ -795,8 +810,11 @@ class TaskManager:
             ]
             gate_kwargs["skills"] = list(self._default_skills)
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
-        # writes and the shell tool are absent from allowed_tools, so they reach
-        # can_use_tool → approval; Google deferred ops are blocked. Google reads are
+        # writes and the shell tool are absent from allowed_tools, so every call routes
+        # through can_use_tool → classify(); under owner default-allow that ALLOWs a
+        # Google write too unless it's on blacklist_tools (config.py seeds every
+        # service's write_tools there by default) — being off allowed_tools alone no
+        # longer implies a card. Google deferred ops are blocked. Google reads are
         # pre-approved above + ALLOWed by the gate's extra_read_only.
         mcp_servers: dict[str, Any] = {
             svc.server_name: svc.server_config() for svc in services
@@ -806,7 +824,11 @@ class TaskManager:
             assert shell is not None  # narrowed by shell_on
             # Built per task: the bash closure addresses THIS task's own shell (keyed by
             # thread_key), since an in-process MCP handler gets no caller context. Kept
-            # out of allowed_tools → routes to can_use_tool → ASK.
+            # out of allowed_tools → every call routes through can_use_tool → classify.
+            # Under owner default-allow that ALLOWs the call unless the command string
+            # trips blacklist_shell_patterns (mcp__chief_shell__bash is one of
+            # gate.policy.COMMAND_TOOLS, so its "command" input is checked against the
+            # blacklist) — being off allowed_tools alone no longer implies a card.
             mcp_servers[shell.server_name] = shell.server_config(session_key=thread_key)
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
@@ -824,9 +846,14 @@ class TaskManager:
             mcp_servers[schedule.server_name] = schedule.server_config()
         bash_schedule = self._schedule_bash_service
         if bash_schedule is not None:
-            # Gated: register the server but keep its tool_names OFF the allow-list, so
-            # each mint routes through can_use_tool → ASK (same as the shell tool — the
-            # ungated fire it sets up is the gated act).
+            # Register the server but keep its tool_names OFF the allow-list, so a mint
+            # routes through can_use_tool → classify() rather than running unmediated.
+            # Unlike the shell tool, schedule_bash's tool name isn't a COMMAND_TOOL and
+            # isn't seeded into blacklist_tools by default (config.py only seeds each
+            # Google service's write_tools there) — so today a mint currently ALLOWs
+            # with no card under owner default-allow unless the owner also configures
+            # blacklist_tools to include it. Being off allowed_tools routes the call
+            # through the gate; it does not by itself raise a card.
             mcp_servers[bash_schedule.server_name] = bash_schedule.server_config()
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
@@ -851,7 +878,9 @@ class TaskManager:
         if front_desk is not None:
 
             async def relay(text: str) -> None:
-                await self._io.send(front_desk, text)
+                # Guest text is untrusted: a flagged message is still delivered, but
+                # annotated so it reads as data, not instructions (host-native seam).
+                await self._io.send(front_desk, await self._screen_relay(text))
 
             guest_svc = GuestService(relay=relay, from_label=from_label or "a visitor")
             allowed.append(guest_svc.tool_name)
@@ -879,6 +908,21 @@ class TaskManager:
         gate_kwargs["disallowed_tools"] = gate_kwargs["disallowed_tools"] + GUEST_DENIED
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
+
+    async def _screen_relay(self, text: str) -> str:
+        """Screen a guest-relayed message; prepend the warning when flagged.
+
+        Never drops or blocks the message — the owner should still see it — and never
+        lets a screener error break the relay (fail-safe: deliver unannotated).
+        """
+        if self._screener is None:
+            return text
+        try:
+            flagged = await self._screener(text)
+        except Exception:
+            logger.warning("relay screening failed; delivering as-is", exc_info=True)
+            return text
+        return prefix_flagged(text) if flagged else text
 
     def _build_services_with_account(
         self, active_account_label: str | None
@@ -973,9 +1017,16 @@ class TaskManager:
                 self._guest_admin_service.tool_name
             }
         # The benign schedule tools are owner-initiated and only mint safe actions →
-        # ALLOW with no card. Like guest-admin, reuse the gate's "allow without a card"
-        # lever so the PreToolUse hook doesn't card them despite their allow-list entry.
-        # The gated schedule_bash tools are deliberately absent here → they reach ASK.
+        # ALLOW with no card, so add them here for documentation intent. NOTE:
+        # extra_read_only is genuinely inert for the owner tier — gate.classify()'s
+        # owner branch never reads it (only the guest branch's `is_read_only(...) or
+        # tool_name in extra_read_only` check does); an owner call already ALLOWs by
+        # default unless NEVER-listed or blacklisted, with or without this set. Kept in
+        # case the owner posture ever reverts toward default-ask. The separate gated
+        # schedule_bash tools (self._schedule_bash_service, wired above under
+        # mcp_servers) are deliberately left out of this set, but — for the same
+        # reason — that omission has no effect on the owner tier either; see the
+        # comment where bash_schedule is registered for what actually gates it.
         if tier == "owner" and self._schedule_service is not None:
             extra_read_only = extra_read_only | set(
                 self._schedule_service.tool_names
@@ -994,19 +1045,16 @@ class TaskManager:
         route = self._approval_route(
             tier=tier, thread_key=thread_key, surface=surface
         )
-        # Both file roots are owner-only. A guest has no file tools at all, so its gate
-        # carries neither a memory nor a workspace root — total isolation by
-        # construction (matches the cwd=None treatment in _wire_guest_session).
-        owner = tier == "owner"
-        memory_dir = self._memory_dir if owner else None
-        workspace_dir = self._workspace_dir if owner else None
+        # The approval blacklist drives the owner's default-allow posture; a guest
+        # session carries none and stays on the default-ask path (tier-split in
+        # gate.classify — guests never gain the owner's open posture).
+        blacklist = self._blacklist if tier == "owner" else None
         hook = build_pretool_hook(
             thread_key=thread_key,
             tier=tier,
             policy=self._policy,
             audit=self._audit,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
 
@@ -1026,13 +1074,13 @@ class TaskManager:
             audit=self._audit,
             on_waiting=on_waiting,
             on_running=on_running,
-            memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            blacklist=blacklist,
             extra_read_only=extra_read_only,
         )
         hooks: dict[HookEvent, list[HookMatcher]] = {
             "PreToolUse": [HookMatcher(hooks=[hook])]
         }
+        post_hooks: list[HookMatcher] = []
         # Screenshot delivery: owner sessions with a configured screenshots dir get
         # a PostToolUse hook that reads the saved file and delivers it via send_file.
         # Guest sessions never have browser tools — owner-only by construction.
@@ -1042,7 +1090,19 @@ class TaskManager:
                 io=self._io,
                 screenshots_dir=self._screenshots_dir,
             )
-            hooks["PostToolUse"] = [HookMatcher(hooks=[screenshot_hook])]
+            post_hooks.append(HookMatcher(hooks=[screenshot_hook]))
+        # Untrusted-content screening (host-native): owner web/browser results get an
+        # injection screen; a hit is annotated (or blocked, per config). Guests have no
+        # web tools, so their sessions skip it.
+        if tier == "owner" and self._screener is not None and self._screening_tools:
+            screening_hook = build_screening_hook(
+                tools=self._screening_tools,
+                screener=self._screener,
+                block=self._screening_block,
+            )
+            post_hooks.append(HookMatcher(hooks=[screening_hook]))
+        if post_hooks:
+            hooks["PostToolUse"] = post_hooks
         return can_use_tool, hooks
 
     async def _submit(self, task: _RunningTask, turn: Turn) -> None:
