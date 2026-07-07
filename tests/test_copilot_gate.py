@@ -1,0 +1,412 @@
+"""chief's real gate under the Copilot permission adapters (#77, part of #72).
+
+The central mechanism is a *real* tool call passing through chief's *real* gate driven
+by the Copilot SDK boundary shapes: :func:`build_permission_handler` feeds a real
+``PermissionRequest`` of each relevant kind into the real ``build_can_use_tool`` +
+``ApprovalManager``, and :func:`build_session_hooks` drives the real ``PreToolUse``
+hook. Only the SDK is at the boundary — the gate, the approval card, the policy store,
+and the normalization are all real. Whether the Copilot *runtime* actually raises a
+``custom-tool`` request / fires the pre-tool hook for an in-process ``@define_tool``
+call is a runtime behaviour proven only in ``test_copilot_gate_live.py``; here we prove
+the adapter gates it once it arrives.
+"""
+
+import asyncio
+from types import SimpleNamespace
+from typing import Any
+
+from claude_agent_sdk import HookMatcher
+from claude_agent_sdk.types import HookEvent
+from copilot.generated.rpc import (
+    PermissionDecisionApproveOnce,
+    PermissionDecisionReject,
+)
+from copilot.generated.session_events import (
+    PermissionRequestCustomTool,
+    PermissionRequestMcp,
+    PermissionRequestRead,
+    PermissionRequestShell,
+    PermissionRequestUrl,
+    PermissionRequestWrite,
+)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from chief.core.copilot_gate import (
+    COPILOT_SHELL_TOOL,
+    build_permission_handler,
+    build_session_hooks,
+    normalize_permission_request,
+)
+from chief.gate.approvals import ApprovalAction, ApprovalManager
+from chief.gate.gate import build_can_use_tool, build_pretool_hook
+from chief.gate.policy import PolicyStore
+from test_approvals import FakeIO, RecordingAudit, _settle
+
+MEMORY_DIR = "/home/chief/memory"
+
+
+# ---- request constructors ----------------------------------------------------
+
+
+def _shell(command: str) -> PermissionRequestShell:
+    return PermissionRequestShell(
+        can_offer_session_approval=True,
+        commands=[],
+        full_command_text=command,
+        has_write_file_redirection=False,
+        intention="run a command",
+        possible_paths=[],
+        possible_urls=[],
+    )
+
+
+def _read(path: str) -> PermissionRequestRead:
+    return PermissionRequestRead(intention="read a file", path=path)
+
+
+def _write(file_name: str) -> PermissionRequestWrite:
+    return PermissionRequestWrite(
+        can_offer_session_approval=True,
+        diff="+ hi",
+        file_name=file_name,
+        intention="write a file",
+    )
+
+
+# ---- real-gate harness -------------------------------------------------------
+
+
+async def _adapters(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tier: str = "owner",
+    never: list[tuple[str, str | None]] | None = None,
+    approved: list[tuple[str, str | None]] | None = None,
+    timeout: float = 600.0,
+) -> SimpleNamespace:
+    """Build the Copilot adapters over a real gate (fake SDK boundary only)."""
+    io, audit = FakeIO(), RecordingAudit()
+    policy = PolicyStore(session_factory, audit=audit)
+    await policy.seed(never=never or [], approved=approved or [])
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=io,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=timeout,
+    )
+    memory_dir = MEMORY_DIR if tier == "owner" else None
+    hook = build_pretool_hook(
+        thread_key="-100:5",
+        tier=tier,
+        policy=policy,
+        audit=audit,
+        memory_dir=memory_dir,
+    )
+    can_use = build_can_use_tool(
+        task_id=1,
+        thread_key="-100:5",
+        tier=tier,
+        route="-100:5",
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        memory_dir=memory_dir,
+    )
+    hooks_map: dict[HookEvent, list[HookMatcher]] = {
+        "PreToolUse": [HookMatcher(hooks=[hook])]
+    }
+    return SimpleNamespace(
+        handler=build_permission_handler(can_use),
+        session_hooks=build_session_hooks(hooks_map),
+        can_use=can_use,
+        hooks_map=hooks_map,
+        approvals=approvals,
+        io=io,
+        audit=audit,
+    )
+
+
+def _audit_events(audit: RecordingAudit, name: str) -> list[dict[str, object]]:
+    return [e for e in audit.events if e.get("event") == name]
+
+
+# ---- normalization -----------------------------------------------------------
+
+
+def test_normalize_read_maps_to_read_tool() -> None:
+    assert normalize_permission_request(_read("/x/y.md")) == (
+        "Read",
+        {"file_path": "/x/y.md"},
+    )
+
+
+def test_normalize_write_maps_to_write_tool() -> None:
+    assert normalize_permission_request(_write("/x/y.md")) == (
+        "Write",
+        {"file_path": "/x/y.md"},
+    )
+
+
+def test_normalize_shell_maps_to_command_tool() -> None:
+    assert normalize_permission_request(_shell("git push")) == (
+        COPILOT_SHELL_TOOL,
+        {"command": "git push"},
+    )
+
+
+def test_normalize_custom_tool_passes_name_and_args_through() -> None:
+    req = PermissionRequestCustomTool(
+        tool_description="Fetch issue", tool_name="lookup_issue", args={"id": "42"}
+    )
+    assert normalize_permission_request(req) == ("lookup_issue", {"id": "42"})
+
+
+def test_normalize_mcp_passes_name_and_args_through() -> None:
+    req = PermissionRequestMcp(
+        read_only=False,
+        server_name="chief_shell",
+        tool_name="mcp__chief_shell__bash",
+        tool_title="bash",
+        args={"command": "ls"},
+    )
+    assert normalize_permission_request(req) == (
+        "mcp__chief_shell__bash",
+        {"command": "ls"},
+    )
+
+
+def test_normalize_url_maps_to_url_tool() -> None:
+    assert normalize_permission_request(
+        PermissionRequestUrl(intention="fetch", url="https://x")
+    ) == ("url", {"url": "https://x"})
+
+
+def test_normalize_custom_tool_coerces_non_dict_args() -> None:
+    req = PermissionRequestCustomTool(
+        tool_description="d", tool_name="t", args=None
+    )
+    assert normalize_permission_request(req) == ("t", {})
+
+
+# ---- on_permission_request: allow path (no card) -----------------------------
+
+
+async def test_owner_read_within_scope_approves_once_no_card(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC1: an allowed tool call executes without a card.
+    a = await _adapters(session_factory)
+
+    result = await a.handler(_read(f"{MEMORY_DIR}/notes.md"), {})
+
+    assert isinstance(result, PermissionDecisionApproveOnce)
+    assert a.io.cards == []
+
+
+# ---- on_permission_request: blacklist ASK (card blocks) ----------------------
+
+
+async def test_shell_command_raises_card_and_blocks_then_approves(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC1: a blacklisted (approval-required) shell command raises the card and blocks on
+    # it; the parked handler only resolves once the owner taps a button.
+    a = await _adapters(session_factory)
+
+    parked = asyncio.ensure_future(a.handler(_shell("git push"), {}))
+    await _settle(lambda: bool(a.io.cards))
+    assert not parked.done()  # genuinely blocked on the owner's decision
+
+    approval_id = a.io.cards[0][1].approval_id
+    await a.approvals.resolve(
+        approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+    )
+    result = await parked
+
+    assert isinstance(result, PermissionDecisionApproveOnce)
+
+
+async def test_shell_command_denied_maps_to_reject_with_reason(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Decision-vocabulary mapping: a denied ASK becomes a Reject with chief's reason.
+    a = await _adapters(session_factory)
+
+    parked = asyncio.ensure_future(a.handler(_shell("git push"), {}))
+    await _settle(lambda: bool(a.io.cards))
+    approval_id = a.io.cards[0][1].approval_id
+    await a.approvals.resolve(
+        approval_id, ApprovalAction.DENY_ONCE, decided_by="42"
+    )
+    result = await parked
+
+    assert isinstance(result, PermissionDecisionReject)
+    assert result.feedback  # a human-readable reason is forwarded to the runtime
+
+
+async def test_never_listed_shell_rejects_with_no_card(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    a = await _adapters(
+        session_factory, never=[(COPILOT_SHELL_TOOL, "rm -rf /tmp/x")]
+    )
+
+    result = await a.handler(_shell("rm -rf /tmp/x"), {})
+
+    assert isinstance(result, PermissionDecisionReject)
+    assert a.io.cards == []  # a NEVER rule never parks an approval
+
+
+# ---- on_permission_request: custom @define_tool is gated ---------------------
+
+
+async def test_custom_tool_is_gated_not_bypassed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC2: a custom @define_tool call is gated (raises the card), not silently allowed.
+    a = await _adapters(session_factory)
+    req = PermissionRequestCustomTool(
+        tool_description="Delete a record", tool_name="delete_record", args={"id": "1"}
+    )
+
+    parked = asyncio.ensure_future(a.handler(req, {}))
+    await _settle(lambda: bool(a.io.cards))
+    assert not parked.done()  # gated: blocked on approval, not bypassed
+
+    approval_id = a.io.cards[0][1].approval_id
+    await a.approvals.resolve(
+        approval_id, ApprovalAction.DENY_ONCE, decided_by="42"
+    )
+    result = await parked
+
+    assert isinstance(result, PermissionDecisionReject)
+
+
+# ---- on_permission_request: guest hard-denies file ops -----------------------
+
+
+async def test_guest_read_hard_denied_under_backend(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC2: guest sessions (no file roots) hard-deny file ops with no card.
+    a = await _adapters(session_factory, tier="guest")
+
+    result = await a.handler(_read(f"{MEMORY_DIR}/notes.md"), {})
+
+    assert isinstance(result, PermissionDecisionReject)
+    assert a.io.cards == []
+
+
+async def test_guest_write_hard_denied_under_backend(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    a = await _adapters(session_factory, tier="guest")
+
+    result = await a.handler(_write(f"{MEMORY_DIR}/notes.md"), {})
+
+    assert isinstance(result, PermissionDecisionReject)
+    assert a.io.cards == []
+
+
+# ---- on_pre_tool_use: the fast classify+audit pass ---------------------------
+
+
+async def _run_hook(a: SimpleNamespace, tool_name: str, tool_args: Any) -> str | None:
+    handler = a.session_hooks["on_pre_tool_use"]
+    output = await handler(
+        {
+            "sessionId": "s",
+            "timestamp": None,
+            "workingDirectory": MEMORY_DIR,
+            "toolName": tool_name,
+            "toolArgs": tool_args,
+        },
+        {},
+    )
+    return None if output is None else output["permissionDecision"]
+
+
+async def test_pre_tool_use_allows_read_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    a = await _adapters(session_factory)
+    assert await _run_hook(a, "WebSearch", {"query": "x"}) == "allow"
+
+
+async def test_pre_tool_use_denies_builtin_shell(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The claude-agent-sdk built-in shell name is a hard DENY at the hook — a fast
+    # reject even if the runtime would otherwise route it onward.
+    a = await _adapters(session_factory)
+    assert await _run_hook(a, "Bash", {"command": "ls"}) == "deny"
+
+
+async def test_pre_tool_use_asks_for_effectful_command(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    a = await _adapters(session_factory)
+    assert await _run_hook(a, COPILOT_SHELL_TOOL, {"command": "git push"}) == "ask"
+    # The hook wrote the audit line for the call it classified.
+    assert _audit_events(a.audit, "tool_call")
+
+
+def test_build_session_hooks_none_without_pretool() -> None:
+    assert build_session_hooks({}) is None
+    assert build_session_hooks({"PreToolUse": []}) is None
+
+
+# ---- backend → session wiring + resume re-wiring -----------------------------
+
+
+async def test_backend_wires_permission_handler_and_hooks_on_connect(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The backend adapts chief's gate onto the Copilot boundary: a fresh create_session
+    # receives both the permission handler and the pre-tool hooks (not dropped).
+    from copilot.session_events import SessionIdleData
+
+    from chief.core.backend import CopilotBackend
+    from test_copilot_session import FakeCopilotClient, FakeCopilotSession, _msg
+
+    a = await _adapters(session_factory)
+    session = FakeCopilotSession("sess-1", [_msg("hi"), SessionIdleData()])
+    client = FakeCopilotClient(session)
+    backend = CopilotBackend(client_factory=lambda: client)
+
+    task = backend.create_session(
+        model="auto", can_use_tool=a.can_use, hooks=a.hooks_map
+    )
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["on_permission_request"] is not None
+    assert client.create_kwargs["hooks"] is not None
+
+
+async def test_permission_handler_is_rewired_on_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC3: the (non-persisted) permission handler + hooks survive a resume — the resume
+    # branch re-registers them, exactly like the create branch.
+    from copilot.session_events import SessionIdleData
+
+    from chief.core.backend import CopilotBackend
+    from test_copilot_session import FakeCopilotClient, FakeCopilotSession, _msg
+
+    a = await _adapters(session_factory)
+    session = FakeCopilotSession("sess-9", [_msg("resumed"), SessionIdleData()])
+    client = FakeCopilotClient(session)
+    backend = CopilotBackend(client_factory=lambda: client)
+
+    task = backend.create_session(
+        model="auto", resume="sess-9", can_use_tool=a.can_use, hooks=a.hooks_map
+    )
+    [event async for event in task.run_turn("continue")]
+
+    assert client.create_kwargs is None  # resume path, not create
+    assert client.resume_args is not None
+    _session_id, resume_kwargs = client.resume_args
+    assert resume_kwargs["on_permission_request"] is not None
+    assert resume_kwargs["hooks"] is not None
