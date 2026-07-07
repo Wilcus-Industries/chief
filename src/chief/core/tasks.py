@@ -824,7 +824,11 @@ class TaskManager:
             assert shell is not None  # narrowed by shell_on
             # Built per task: the bash closure addresses THIS task's own shell (keyed by
             # thread_key), since an in-process MCP handler gets no caller context. Kept
-            # out of allowed_tools → routes to can_use_tool → ASK.
+            # out of allowed_tools → every call routes through can_use_tool → classify.
+            # Under owner default-allow that ALLOWs the call unless the command string
+            # trips blacklist_shell_patterns (mcp__chief_shell__bash is one of
+            # gate.policy.COMMAND_TOOLS, so its "command" input is checked against the
+            # blacklist) — being off allowed_tools alone no longer implies a card.
             mcp_servers[shell.server_name] = shell.server_config(session_key=thread_key)
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
@@ -842,9 +846,14 @@ class TaskManager:
             mcp_servers[schedule.server_name] = schedule.server_config()
         bash_schedule = self._schedule_bash_service
         if bash_schedule is not None:
-            # Gated: register the server but keep its tool_names OFF the allow-list, so
-            # each mint routes through can_use_tool → ASK (same as the shell tool — the
-            # ungated fire it sets up is the gated act).
+            # Register the server but keep its tool_names OFF the allow-list, so a mint
+            # routes through can_use_tool → classify() rather than running unmediated.
+            # Unlike the shell tool, schedule_bash's tool name isn't a COMMAND_TOOL and
+            # isn't seeded into blacklist_tools by default (config.py only seeds each
+            # Google service's write_tools there) — so today a mint currently ALLOWs
+            # with no card under owner default-allow unless the owner also configures
+            # blacklist_tools to include it. Being off allowed_tools routes the call
+            # through the gate; it does not by itself raise a card.
             mcp_servers[bash_schedule.server_name] = bash_schedule.server_config()
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
@@ -1008,9 +1017,16 @@ class TaskManager:
                 self._guest_admin_service.tool_name
             }
         # The benign schedule tools are owner-initiated and only mint safe actions →
-        # ALLOW with no card. Like guest-admin, reuse the gate's "allow without a card"
-        # lever so the PreToolUse hook doesn't card them despite their allow-list entry.
-        # The gated schedule_bash tools are deliberately absent here → they reach ASK.
+        # ALLOW with no card, so add them here for documentation intent. NOTE:
+        # extra_read_only is genuinely inert for the owner tier — gate.classify()'s
+        # owner branch never reads it (only the guest branch's `is_read_only(...) or
+        # tool_name in extra_read_only` check does); an owner call already ALLOWs by
+        # default unless NEVER-listed or blacklisted, with or without this set. Kept in
+        # case the owner posture ever reverts toward default-ask. The separate gated
+        # schedule_bash tools (self._schedule_bash_service, wired above under
+        # mcp_servers) are deliberately left out of this set, but — for the same
+        # reason — that omission has no effect on the owner tier either; see the
+        # comment where bash_schedule is registered for what actually gates it.
         if tier == "owner" and self._schedule_service is not None:
             extra_read_only = extra_read_only | set(
                 self._schedule_service.tool_names
