@@ -4,8 +4,12 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.config import Settings
+from chief.gate.blacklist import Blacklist
+from chief.gate.gate import GateDecision, classify
+from chief.gate.policy import PolicyStore
 
 
 def _write_secrets(secrets_dir: Path) -> None:
@@ -567,6 +571,79 @@ def test_skills_rejects_blank_entry(
 
     with pytest.raises(ValidationError, match="non-empty"):
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_default_blacklist_tools_seeds_gmail_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MEDIUM-1: under owner default-allow, being absent from allowed_tools alone no
+    # longer cards a Google write — blacklist_tools must seed it by default.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert "mcp__gmail_chief__gmail_send_message" in settings.blacklist_tools
+    assert "mcp__gmail_chief__gmail_reply_on_message" in settings.blacklist_tools
+    # Sanity check the other Google services' writes are covered too.
+    assert "mcp__calendar__create-event" in settings.blacklist_tools
+    assert "mcp__drive__UploadMarkdownAsPDF" in settings.blacklist_tools
+    assert "mcp__sheets__update_cells" in settings.blacklist_tools
+
+
+async def test_default_blacklist_tools_card_gmail_send_for_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The seeded default actually drives classify() to ASK for the owner tier — not
+    # just present in config, but wired through Blacklist.from_config correctly.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    blacklist = Blacklist.from_config(
+        settings.blacklist_shell_patterns, settings.blacklist_tools
+    )
+    policy = PolicyStore(session_factory)
+    await policy.seed(never=[], approved=[])
+
+    verdict = classify(
+        "mcp__gmail_chief__gmail_send_message",
+        {"to": "someone@example.com", "body": "hi"},
+        policy,
+        tier="owner",
+        blacklist=blacklist,
+    )
+
+    assert verdict.decision is GateDecision.ASK
+
+
+def test_default_screening_tools_covers_gmail_drive_and_browser_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MEDIUM-2: Gmail/Drive reads and playwright's action tools (which return an
+    # updated page snapshot alongside the click/type/etc.) are untrusted channels too,
+    # not just the original fetch/search/navigate/snapshot set.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert "WebFetch" in settings.screening_tools  # pre-existing default retained
+    for tool in (
+        "mcp__gmail_chief__gmail_list_messages",
+        "mcp__gmail_chief__gmail_get_message",
+        "mcp__drive__ReadDriveFile",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+    ):
+        assert tool in settings.screening_tools
 
 
 def test_blank_owner_id_env_is_unset(

@@ -17,6 +17,12 @@ Two consumers:
 
 Screening **fails safe to "clean"**: a screener error must never break a turn, so an
 exception reads as not-flagged (the same fail-direction as the other classifiers).
+
+**Accepted residual gap:** content the owner's shell tool fetches directly (``curl``,
+``wget``, or any other host command hitting the network) never passes through a
+``screening_tools``-gated MCP/built-in tool, so it reaches the model completely
+unscreened. This is a deliberate cost tradeoff, not an oversight — screening every byte
+a general-purpose shell can produce isn't tractable the way a fixed tool catalog is.
 """
 
 import json
@@ -59,7 +65,9 @@ RELAY_WARNING = (
 
 #: Cap on how much of a (possibly huge) page is sent to the screening model. The head
 #: of the content is where an injection aimed at the reader usually sits; the cap
-#: bounds cost.
+#: bounds cost. Accepted tradeoff: content past this cap is never inspected, so an
+#: attacker aware of the limit could pad enough benign filler ahead of a payload to push
+#: it past the head window.
 _MAX_SCREEN_CHARS = 20_000
 
 
@@ -147,6 +155,11 @@ def build_screening_hook(
             "tool": tool_name,
         })
         if block:
+            # Verified against claude-agent-sdk 0.2.88's SyncHookJSONOutput
+            # (claude_agent_sdk/types.py): a PostToolUse hook blocks via the top-level
+            # decision/reason pair, not a hookSpecificOutput field — "decision" only
+            # accepts the Literal["block"] shown here, and "reason" is the message
+            # surfaced to Claude. This shape is correct as written.
             return {"decision": "block", "reason": INJECTION_WARNING}
         return {
             "hookSpecificOutput": {

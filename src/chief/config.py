@@ -22,6 +22,24 @@ from pydantic_settings import (
 )
 
 from .gate.blacklist import DEFAULT_SHELL_PATTERNS
+from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
+from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
+from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
+from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
+
+#: Default ``blacklist_tools`` seed (MEDIUM-1 fix): under the owner's default-allow
+#: gate, being absent from ``allowed_tools`` no longer routes a call to an approval
+#: card by itself — ``classify()`` (chief.gate.gate) ALLOWs anything not APPROVED or
+#: blacklisted. Every Google write tool (Gmail send/reply/draft/label/trash, calendar
+#: create/update, Drive upload, Sheets writes) is seeded here so the "reads ALLOW,
+#: writes ASK" design each service's ``tools/<svc>/mcp.py`` module documents actually
+#: holds under the new posture, instead of running silently uncarded.
+_DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
+    _GMAIL_WRITE_TOOLS
+    + _CALENDAR_WRITE_TOOLS
+    + _DRIVE_WRITE_TOOLS
+    + _SHEETS_WRITE_TOOLS
+)
 
 
 class PolicySeed(BaseModel):
@@ -92,29 +110,56 @@ class Settings(BaseSettings):
     # guest-originated approvals, admission cards, and relayed messages post to (M6).
     # blacklist_shell_patterns are regexes over shell commands (and blacklist_tools
     # whole tool names) that still raise an approval card under the owner's
-    # default-allow posture; guests stay default-ask regardless.
+    # default-allow posture; guests stay default-ask regardless. Being absent from a
+    # session's ``allowed_tools`` is NOT enough on its own to card an owner call
+    # anymore — ``classify()`` (chief.gate.gate) ALLOWs anything not APPROVED or on
+    # one of these two blacklists, so blacklist_tools is what actually restores
+    # "writes ASK" for the Google services (default-seeded — see
+    # ``_DEFAULT_BLACKLIST_TOOLS`` above).
     approval_timeout_seconds: float = 600.0
     never_seed: list[PolicySeed] = []
     approved_seed: list[PolicySeed] = []
     audit_log_path: str = "data/audit.jsonl"
     front_desk_thread_key: str | None = None
     blacklist_shell_patterns: tuple[str, ...] = DEFAULT_SHELL_PATTERNS
-    blacklist_tools: tuple[str, ...] = ()
+    blacklist_tools: tuple[str, ...] = _DEFAULT_BLACKLIST_TOOLS
 
     # Untrusted-content screening (host-native security seam). Material arriving from
     # the internet (screening_tools results) or from guests (the Front Desk relay) is
     # screened by a cheap screening_model call for prompt injection before the owner
     # agent acts on it; a hit is annotated with a warning (screening_block=true blocks
     # the result outright instead). Fail-safe: a screener error passes content through.
+    # screening_block defaults False, i.e. screening is advisory/annotate-only — it
+    # never itself blocks a turn unless flipped on (MEDIUM/LOW finding).
     screening_enabled: bool = True
     screening_model: str = "claude-haiku-4-5"
     screening_block: bool = False
+    # MEDIUM-2 fix: Gmail reads (email bodies are attacker-controlled), the Drive read,
+    # and the playwright browser action tools that return an updated page
+    # snapshot/result alongside the interaction (click/type/hover/drag/drop/
+    # select_option/press_key/fill_form/file_upload/handle_dialog) are untrusted
+    # channels too, not just the original fetch/search/navigate/snapshot set.
     screening_tools: tuple[str, ...] = (
         "WebFetch",
         "WebSearch",
         "mcp__playwright__browser_snapshot",
         "mcp__playwright__browser_navigate",
         "mcp__playwright__browser_navigate_back",
+        "mcp__playwright__browser_click",
+        "mcp__playwright__browser_type",
+        "mcp__playwright__browser_hover",
+        "mcp__playwright__browser_drag",
+        "mcp__playwright__browser_drop",
+        "mcp__playwright__browser_select_option",
+        "mcp__playwright__browser_press_key",
+        "mcp__playwright__browser_fill_form",
+        "mcp__playwright__browser_file_upload",
+        "mcp__playwright__browser_handle_dialog",
+        "mcp__gmail_chief__gmail_list_messages",
+        "mcp__gmail_chief__gmail_get_message",
+        "mcp__gmail_chief__gmail_search_messages",
+        "mcp__gmail_chief__gmail_list_drafts",
+        "mcp__drive__ReadDriveFile",
     )
 
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
