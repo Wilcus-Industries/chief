@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     owner_model_opus: str = "claude-opus-4-8"
     opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
+    # Agent backend seam (#75, part of #72 — the strangler scaffold). Every session the
+    # engine drives is built through an AgentBackend; ``claude`` (the claude-agent-sdk
+    # path) is the sole implementation today. Config-selectable so a later Copilot
+    # backend is a one-line swap — only ``claude`` validates for now.
+    agent_backend: str = "claude"
     db_path: str = "chief.db"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
@@ -253,6 +258,20 @@ class Settings(BaseSettings):
         """
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("agent_backend")
+    @classmethod
+    def _validate_agent_backend(cls, value: str) -> str:
+        """Only ``claude`` is a valid backend for now (#75).
+
+        Fails the boot on an unknown name rather than at first turn; the runtime
+        registry (:func:`chief.core.backend.select_backend`) enforces the same rule.
+        """
+        if value != "claude":
+            raise ValueError(
+                f"agent_backend must be 'claude' (the only backend), got {value!r}"
+            )
         return value
 
     @field_validator("quiet_hours_start", "quiet_hours_end")
