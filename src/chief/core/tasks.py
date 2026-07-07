@@ -752,7 +752,9 @@ class TaskManager:
             # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
             allowed += list(WORKSPACE_TOOLS)
         for svc in services:
-            # Reads only — writes stay off the allow-list so they reach approval.
+            # Reads only — writes stay off the allow-list, but under owner default-allow
+            # that alone no longer cards them; it's blacklist_tools (config.py seeds
+            # every service's write_tools by default) that routes writes to approval.
             allowed += list(svc.read_tools)
         if admin is not None:
             # Owner-initiated, reversible → pre-approved (no card) to block/mute guests.
@@ -808,8 +810,11 @@ class TaskManager:
             ]
             gate_kwargs["skills"] = list(self._default_skills)
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
-        # writes and the shell tool are absent from allowed_tools, so they reach
-        # can_use_tool → approval; Google deferred ops are blocked. Google reads are
+        # writes and the shell tool are absent from allowed_tools, so every call routes
+        # through can_use_tool → classify(); under owner default-allow that ALLOWs a
+        # Google write too unless it's on blacklist_tools (config.py seeds every
+        # service's write_tools there by default) — being off allowed_tools alone no
+        # longer implies a card. Google deferred ops are blocked. Google reads are
         # pre-approved above + ALLOWed by the gate's extra_read_only.
         mcp_servers: dict[str, Any] = {
             svc.server_name: svc.server_config() for svc in services
