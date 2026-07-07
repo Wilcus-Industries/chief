@@ -83,6 +83,9 @@ services:
       - telegram_bot_token
       - discord_bot_token
       - claude_code_oauth_token
+      # OpenRouter BYOK provider target class (#90, part of #72). Optional — an empty
+      # file is fine when no session ever requests the `openrouter` target.
+      - openrouter_api_key
     volumes:
       # Mounted read-only over the image's baked copy (Dockerfile COPYs it as a fallback)
       # so a config.yaml edit takes effect on `up -d` with no rebuild. config.py reads
@@ -439,6 +442,10 @@ secrets:
     file: ./secrets/claude_code_oauth_token
   google_oauth_client.json:
     file: ./secrets/google_oauth_client.json
+  # OpenRouter BYOK provider target class (#90, part of #72) — optional, only needed
+  # when a session is spawned on an `openrouter` target. See secrets/README.md.
+  openrouter_api_key:
+    file: ./secrets/openrouter_api_key
 
 volumes:
   sqlite-data:

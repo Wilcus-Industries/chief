@@ -21,6 +21,7 @@ from claude_agent_sdk import (
     ToolPermissionContext,
 )
 from claude_agent_sdk.types import HookEvent
+from copilot import ProviderConfig
 
 from chief.core.backend import ClaudeBackend, CopilotBackend, select_backend
 from chief.core.session import Final
@@ -110,6 +111,21 @@ async def test_claude_backend_wires_permission_hook_tools_and_resume() -> None:
     assert options.allowed_tools == ["Read"]
     assert options.disallowed_tools == ["Bash"]
     assert options.mcp_servers == mcp_servers
+
+
+async def test_claude_backend_ignores_provider_kwarg() -> None:
+    # #90: `provider` is a Copilot BYOK concept; ClaudeBackend accepts it (to satisfy
+    # AgentBackend) but never forwards it — passing it must not raise (TaskSession has
+    # no `provider` param, so a leaked forward would blow up with TypeError) and the
+    # turn behaves exactly as if `provider` were never passed.
+    provider = ProviderConfig(base_url="https://openrouter.ai/api/v1", api_key="k")
+
+    session = ClaudeBackend(client_factory=FakeClient).create_session(
+        model="m", provider=provider
+    )
+    events = [event async for event in session.run_turn("hi")]
+
+    assert events == [Final(text="hi")]
 
 
 def test_select_backend_claude_returns_claude_backend() -> None:
