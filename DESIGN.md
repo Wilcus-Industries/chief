@@ -325,10 +325,19 @@ default-ask posture survives unchanged on the guest tier).
    "always allow" button) beats the blacklist.
 3. **Approval blacklist** → **ASK** (the approval flow). Configurable in
    `config.yaml`: regexes over shell commands (`blacklist_shell_patterns` — default
-   set: sudo/doas, `rm -rf` on `/`/`$HOME`/`~`, mkfs / `dd of=/dev/`,
-   shutdown/reboot, `kill -9 1`, `curl … | sh`, `git push --force` to main/master,
-   `chmod -R 777`, global package installs) plus whole tool names
-   (`blacklist_tools`).
+   set: sudo/doas, `rm -rf` on `/`/`$HOME`/`~`/critical system dirs, mkfs / `dd
+   of=/dev/`, shutdown/reboot, `kill` on PID 1, `curl … | sh` and other
+   pipe/redirect-to-interpreter shapes, `git push --force`/`+refspec` to
+   main/master, `chmod -R 777`, global package installs) plus whole tool names
+   (`blacklist_tools`). Commands are shlex-canonicalized before matching so
+   quoting/escaping tricks (`su''do`, `rm -rf "/"`) can't split a pattern's expected
+   token apart — but **this is a footgun-catcher, not a security boundary**: it
+   raises the floor against accidental and low-effort trips, not a determined
+   adversary who controls the command string (variable indirection, `base64 -d |
+   sh`, subshells, alternate binaries all remain possible by design; see
+   `chief/gate/blacklist.py`'s module doc). The real defense against
+   attacker-controlled/injected commands is the untrusted-content screening layer
+   below, not this list.
 4. **Everything else** → **allow**. Writes anywhere on the host, sends, bookings —
    the owner chose autonomy; the audit log still records every call.
 
@@ -387,10 +396,12 @@ nothing; the permission gate is a real code callback that runs regardless of wha
 **Threats → mitigations:**
 
 - **Prompt injection** (poisoned email/web/file says "email X / delete Y") →
-  **untrusted-content screening** (host-native): web/browser results and guest
-  messages pass a cheap Haiku screen and a hit is annotated with a warning (or
-  blocked, `screening_block`); the blacklist still cards the destructive shapes; tool
-  content treated as untrusted; every call is audited.
+  **untrusted-content screening** (host-native) is the real control: web/browser
+  results and guest messages pass a cheap Haiku screen and a hit is annotated with a
+  warning (or blocked, `screening_block`); tool content treated as untrusted; every
+  call is audited. The blacklist cards the classically destructive *shapes* as a
+  backstop, but it is not built to withstand a command an attacker (not the owner)
+  constructed — see the blacklist note under Permission gate.
 - **Guest jailbreak to owner tools** → impossible by construction (tools absent), not by
   instruction.
 - **Self-escalation** via editing `Soul.md`/memory → those never grant tools; gate is code.
@@ -403,8 +414,10 @@ nothing; the permission gate is a real code callback that runs regardless of wha
   drains your Max limits) + **block/mute**. The owner can block (ignore entirely) or mute
   (take messages silently). **chief may also self-block, but only for clear abuse**, and
   always notifies the owner when it does (owner can override).
-- **Destructive ops** → approval blacklist (cards the classic destructive shapes) +
-  NEVER list. No sandbox blast-radius bound anymore — blacklist coverage is the line.
+- **Destructive ops** → approval blacklist (cards the classic destructive shapes,
+  footgun-catcher not airtight — see Permission gate) + NEVER list. No sandbox
+  blast-radius bound anymore — blacklist coverage is the line, and that line is
+  deliberately a speed bump, not a wall.
 - **Identity spoofing** → platform user-IDs trusted; owner = exact ID match, no fuzzy.
 
 **Shell (host-native).** Shell/code executes **directly on the owner's machine** as
