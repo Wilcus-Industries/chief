@@ -121,10 +121,13 @@ class CopilotBackend:
     chief's SDK-agnostic gate callbacks, adapted by :mod:`chief.core.copilot_gate` onto
     the Copilot SDK's ``on_permission_request`` handler and ``SessionHooks`` and passed
     into the session (re-registered on every connect, so resume is gated too). The
-    remaining tool/persona kwargs (``allowed_tools`` / ``disallowed_tools``,
-    ``mcp_servers``, ``plugins``, ``skills``, ``system_prompt``, ``fork_session``) are
-    accepted to satisfy the :class:`AgentBackend` contract but not yet forwarded; later
-    #72 slices map them onto the SDK's custom tools and MCP servers.
+    persona is wired too (#78): ``system_prompt`` is mapped onto the Copilot SDK's
+    ``customize``-mode system message (see
+    :func:`~chief.core.copilot_session.build_persona_system_message`). The remaining
+    tool kwargs (``allowed_tools`` / ``disallowed_tools``, ``mcp_servers``,
+    ``plugins``, ``skills``, ``fork_session``) are accepted to satisfy the
+    :class:`AgentBackend` contract but not yet forwarded; later #72 slices map them onto
+    the SDK's custom tools and MCP servers.
     """
 
     def __init__(
@@ -160,6 +163,7 @@ class CopilotBackend:
             cwd=cwd,
             on_permission_request=on_permission_request,
             hooks=copilot_hooks,
+            system_prompt=system_prompt,
             client_factory=self._client_factory,
         )
 
