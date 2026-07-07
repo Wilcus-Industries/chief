@@ -20,7 +20,8 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
 * ``tool.execution_start`` (:class:`ToolExecutionStartData`) → ``Milestone("using …")``,
   the analogue of ``ToolUseBlock`` → ``Milestone``.
 * ``assistant.usage`` (:class:`AssistantUsageData`) → ``last_cost_usd`` (summed across
-  the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost).
+  the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost) and
+  ``last_served_model`` (``data.model`` — the actually-served model, #90).
 * ``session.limits_exhausted`` → ``last_rate_limit_status = "rejected"`` so the budget
   gate can back off — Copilot's quota model has no per-turn allowed/warning status like
   claude-agent-sdk's ``RateLimitEvent``, so ``rejected`` is the only synthesised signal.
@@ -28,10 +29,16 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
   ``assistant.turn_end``, which fires once per inner tool round-trip (#72 spike).
 * ``session.error`` / ``model.call_failure`` → raise, aborting the turn.
 
-This slice wires only what one owner text turn needs (model, resume, cwd). Tools, the
-permission gate, and the persona are accepted at the backend seam but not yet
-forwarded — later #72 slices map them onto the SDK's permission callback, hooks, and
-custom tools.
+This slice wires only what one owner text turn needs (model, resume, cwd, provider).
+Tools, the permission gate, and the persona are accepted at the backend seam but not
+yet forwarded — later #72 slices map them onto the SDK's permission callback, hooks,
+and custom tools.
+
+**Provider target classes (#90, part of #72).** ``provider`` is an optional
+:class:`~copilot.ProviderConfig` BYOK override — ``None`` keeps the session on plain
+Copilot quota (the ``copilot`` target class); :func:`openrouter_provider_config` builds
+one for the ``openrouter`` target class (the SDK's "openai" provider pointed at
+OpenRouter, with a concrete model requested via the existing ``model=`` kwarg).
 """
 
 import asyncio
@@ -39,7 +46,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Protocol
 
-from copilot import CopilotClient
+from copilot import CopilotClient, ProviderConfig
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -52,6 +59,7 @@ from copilot.session_events import (
 )
 
 from ..adapters.base import Attachment
+from ..config import Settings
 from .agent import NO_REPLY
 from .session import Final, Milestone, TurnEvent
 
@@ -90,6 +98,7 @@ class _CopilotClient(Protocol):
         *,
         model: str | None = ...,
         working_directory: str | None = ...,
+        provider: ProviderConfig | None = ...,
     ) -> _CopilotSession: ...
     async def resume_session(
         self,
@@ -97,6 +106,7 @@ class _CopilotClient(Protocol):
         *,
         model: str | None = ...,
         working_directory: str | None = ...,
+        provider: ProviderConfig | None = ...,
     ) -> _CopilotSession: ...
 
 
@@ -105,6 +115,28 @@ CopilotClientFactory = Callable[[], _CopilotClient]
 
 def _default_copilot_client() -> _CopilotClient:
     return CopilotClient()
+
+
+#: The OpenRouter BYOK provider target class (#90, part of #72): the SDK's "openai"
+#: provider pointed at OpenRouter's OpenAI-compatible endpoint. A concrete OpenRouter
+#: model is requested via the session's existing ``model=`` kwarg alongside this.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def openrouter_provider_config(settings: Settings) -> ProviderConfig:
+    """Build the ``openrouter`` BYOK :class:`~copilot.ProviderConfig` (#90, part of
+    #72).
+
+    ``ProviderConfig`` is a ``total=False`` ``TypedDict`` — ``api_key`` is only set when
+    ``settings.openrouter_api_key`` is configured (never hardcoded), so an unconfigured
+    key surfaces as an auth error from OpenRouter itself, not a masked empty string.
+    Pass the result as ``create_session``'s ``provider=`` kwarg alongside a concrete
+    OpenRouter model name in ``model=``.
+    """
+    config: ProviderConfig = {"base_url": OPENROUTER_BASE_URL, "type": "openai"}
+    if settings.openrouter_api_key is not None:
+        config["api_key"] = settings.openrouter_api_key
+    return config
 
 
 def _describe_error(data: SessionErrorData | ModelCallFailureData) -> str:
@@ -130,11 +162,15 @@ class CopilotTaskSession:
         resume: str | None = None,
         cwd: str | None = None,
         client_factory: CopilotClientFactory = _default_copilot_client,
+        provider: ProviderConfig | None = None,
     ) -> None:
         self._model = model
         self._resume = resume
         self._cwd = cwd
         self._client_factory = client_factory
+        #: BYOK provider config (e.g. :func:`openrouter_provider_config`) — ``None``
+        #: keeps the session on plain Copilot quota (#90, part of #72).
+        self._provider = provider
         self._client: _CopilotClient | None = None
         self._session: _CopilotSession | None = None
         self._connected = False
@@ -149,6 +185,10 @@ class CopilotTaskSession:
         #: Latest synthesised rate-limit status — only ``rejected`` (on quota
         #: exhaustion); Copilot exposes no allowed/warning status. Sticky across turns.
         self.last_rate_limit_status: str | None = None
+        #: The actually-served model, captured from the latest usage event's
+        #: ``data.model`` (#90) — Copilot's ``auto`` and BYOK targets like OpenRouter
+        #: both report it here regardless of what was requested. Reset each turn.
+        self.last_served_model: str | None = None
 
     def _on_event(self, event: SessionEvent) -> None:
         """Pump one SDK event onto the current turn's queue (thread-safe).
@@ -168,11 +208,16 @@ class CopilotTaskSession:
         await client.start()
         if self._resume is not None:
             session = await client.resume_session(
-                self._resume, model=self._model, working_directory=self._cwd
+                self._resume,
+                model=self._model,
+                working_directory=self._cwd,
+                provider=self._provider,
             )
         else:
             session = await client.create_session(
-                model=self._model, working_directory=self._cwd
+                model=self._model,
+                working_directory=self._cwd,
+                provider=self._provider,
             )
         session.on(self._on_event)
         self._client = client
@@ -201,6 +246,7 @@ class CopilotTaskSession:
             )
         self._queue = asyncio.Queue()
         self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
+        self.last_served_model = None  # this turn's served model; reset each turn
         text_blocks_seen = 0
         await self._session.send(text)
         while True:
@@ -216,6 +262,7 @@ class CopilotTaskSession:
             elif isinstance(data, AssistantUsageData):
                 if data.cost is not None:
                     self.last_cost_usd += data.cost
+                self.last_served_model = data.model
             elif isinstance(data, SessionLimitsExhaustedRequestedData):
                 self.last_rate_limit_status = "rejected"
             elif isinstance(data, (SessionErrorData, ModelCallFailureData)):
