@@ -99,8 +99,10 @@ class Route(Base):
     The row *set* is the category set: every category with a row maps to a
     ``{target_class, model}`` target — ``copilot`` (Copilot quota, e.g. ``auto``) or
     ``openrouter`` (a BYOK per-model target). Seeded from ``config.yaml`` on boot
-    (mirrors :class:`PolicyEntry`); the self-config slice later makes both editable.
-    ``category`` is unique so a seed / edit upserts one target per category.
+    (mirrors :class:`PolicyEntry`); the self-config tool (#83) makes both columns and
+    the row set itself editable at runtime. ``category`` is unique so a seed / edit
+    upserts one target per category. ``description`` is optional free text the
+    classifier folds into its prompt so a re-described category steers the next spawn.
     """
 
     __tablename__ = "routes"
@@ -110,6 +112,7 @@ class Route(Base):
     category: Mapped[str]
     target_class: Mapped[str]  # "copilot" | "openrouter"
     model: Mapped[str]
+    description: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
