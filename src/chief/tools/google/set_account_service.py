@@ -20,18 +20,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
-    create_sdk_mcp_server,
-    tool,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ...persistence.tasks import (
     get_active_account,
     get_or_create_task,
     set_active_account,
+)
+from ..inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
+    create_sdk_mcp_server,
+    tool,
 )
 from .accounts import EmailResolver, GoogleAccount, discover_accounts
 
@@ -109,7 +109,7 @@ class SetAccountService:
         """SDK-qualified name: ``mcp__chief_set_account__set_account``."""
         return f"mcp__{self.server_name}__set_account"
 
-    def _build_tool(self, thread_key: str) -> SdkMcpTool[Any]:
+    def _build_tool(self, thread_key: str) -> InProcessTool:
         """Build the ``set_account`` tool closed over ``thread_key``.
 
         Each owner session gets its own tool instance so the closure addresses
@@ -164,7 +164,7 @@ class SetAccountService:
 
         return set_account
 
-    def server_config(self, *, thread_key: str) -> McpSdkServerConfig:
+    def server_config(self, *, thread_key: str) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this service.
 
         Unlike :class:`~chief.tools.google.list_accounts_service.ListAccountsService`,

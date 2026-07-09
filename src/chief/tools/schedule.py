@@ -33,12 +33,6 @@ from datetime import UTC, datetime, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
-    create_sdk_mcp_server,
-    tool,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..core.schedule_time import next_fire
@@ -56,6 +50,12 @@ from ..persistence.schedules import (
     disable_schedule,
     get_schedule,
     list_enabled,
+)
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
+    create_sdk_mcp_server,
+    tool,
 )
 
 #: Action types the benign server may create — never ``bash`` (that needs the gate).
@@ -431,7 +431,7 @@ class ScheduleService:
     def _tz(self) -> tzinfo:
         return ZoneInfo(self.owner_tz)
 
-    def _build_once(self) -> SdkMcpTool[Any]:
+    def _build_once(self) -> InProcessTool:
         factory, tz, now_fn = self.session_factory, self._tz(), self.now
 
         @tool("schedule_once", _ONCE_DESCRIPTION, _ONCE_SCHEMA)
@@ -443,7 +443,7 @@ class ScheduleService:
 
         return schedule_once
 
-    def _build_recurring(self) -> SdkMcpTool[Any]:
+    def _build_recurring(self) -> InProcessTool:
         factory, tz, now_fn = self.session_factory, self._tz(), self.now
 
         @tool("schedule_recurring", _RECURRING_DESCRIPTION, _RECURRING_SCHEMA)
@@ -455,7 +455,7 @@ class ScheduleService:
 
         return schedule_recurring
 
-    def _build_monitor(self) -> SdkMcpTool[Any]:
+    def _build_monitor(self) -> InProcessTool:
         factory, tz, now_fn = self.session_factory, self._tz(), self.now
         min_interval = self.monitor_min_interval_seconds
 
@@ -481,7 +481,7 @@ class ScheduleService:
 
         return create_monitor
 
-    def _build_list(self) -> SdkMcpTool[Any]:
+    def _build_list(self) -> InProcessTool:
         factory, tz = self.session_factory, self._tz()
 
         @tool("list_schedules", _LIST_DESCRIPTION, {})
@@ -494,7 +494,7 @@ class ScheduleService:
 
         return list_schedules
 
-    def _build_cancel(self) -> SdkMcpTool[Any]:
+    def _build_cancel(self) -> InProcessTool:
         factory = self.session_factory
 
         @tool("cancel_schedule", _CANCEL_DESCRIPTION, {"schedule_id": int})
@@ -511,7 +511,7 @@ class ScheduleService:
 
         return cancel_schedule
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the benign schedule tools."""
         return create_sdk_mcp_server(
             self.server_name,
@@ -553,7 +553,7 @@ class ScheduleBashService:
     def _tz(self) -> tzinfo:
         return ZoneInfo(self.owner_tz)
 
-    def _build_tool(self) -> SdkMcpTool[Any]:
+    def _build_tool(self) -> InProcessTool:
         factory, tz, now_fn = self.session_factory, self._tz(), self.now
 
         @tool("schedule_bash", _BASH_DESCRIPTION, _BASH_SCHEMA)
@@ -581,7 +581,7 @@ class ScheduleBashService:
 
         return schedule_bash
 
-    def _build_monitor(self) -> SdkMcpTool[Any]:
+    def _build_monitor(self) -> InProcessTool:
         factory, tz, now_fn = self.session_factory, self._tz(), self.now
         min_interval = self.monitor_min_interval_seconds
 
@@ -613,7 +613,7 @@ class ScheduleBashService:
 
         return create_monitor
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the gated bash-schedule tools."""
         return create_sdk_mcp_server(
             self.server_name, tools=[self._build_tool(), self._build_monitor()]

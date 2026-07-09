@@ -33,9 +33,10 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
@@ -357,7 +358,7 @@ class WebService:
         """The SDK-qualified ``mcp__chief_web__search`` name (screening key)."""
         return f"mcp__{self.server_name}__search"
 
-    def _build_fetch_tool(self) -> SdkMcpTool[Any]:
+    def _build_fetch_tool(self) -> InProcessTool:
         fetcher = self.fetcher
 
         @tool("fetch", _FETCH_DESCRIPTION, {"url": str})
@@ -375,7 +376,7 @@ class WebService:
 
         return fetch
 
-    def _build_search_tool(self) -> SdkMcpTool[Any]:
+    def _build_search_tool(self) -> InProcessTool:
         searcher = self.searcher
 
         @tool("search", _SEARCH_DESCRIPTION, {"query": str})
@@ -391,7 +392,7 @@ class WebService:
 
         return search
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the fetch + search tools."""
         return create_sdk_mcp_server(
             self.server_name,

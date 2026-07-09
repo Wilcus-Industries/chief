@@ -25,13 +25,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+from ..inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
-
 from .auth import (
     SCOPES,
     ClientSecretsMissing,
@@ -99,7 +98,7 @@ class AddAccountService:
         """SDK-qualified name: ``mcp__chief_add_account__add_account``."""
         return f"mcp__{self.server_name}__add_account"
 
-    def _build_tool(self) -> SdkMcpTool[Any]:
+    def _build_tool(self) -> InProcessTool:
         secrets_dir = self.secrets_dir
         client_secrets = self.client_secrets
         scopes = self.scopes
@@ -154,6 +153,6 @@ class AddAccountService:
 
         return add_account
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this service."""
         return create_sdk_mcp_server(self.server_name, tools=[self._build_tool()])

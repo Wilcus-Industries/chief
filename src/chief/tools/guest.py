@@ -21,15 +21,15 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
-    create_sdk_mcp_server,
-    tool,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..persistence import contacts as contact_repo
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
+    create_sdk_mcp_server,
+    tool,
+)
 
 #: Relays a formatted guest note to the owner's Front Desk (built per session).
 Relay = Callable[[str], Awaitable[None]]
@@ -70,7 +70,7 @@ class GuestService:
         """The SDK-qualified ``mcp__chief_guest__leave_message`` name (allow-list)."""
         return f"mcp__{self.server_name}__leave_message"
 
-    def _build_tool(self) -> SdkMcpTool[Any]:
+    def _build_tool(self) -> InProcessTool:
         relay, from_label = self.relay, self.from_label
 
         @tool("leave_message", _LEAVE_MESSAGE_DESCRIPTION, {"message": str})
@@ -83,7 +83,7 @@ class GuestService:
 
         return leave_message
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this guest session's relay tool."""
         return create_sdk_mcp_server(self.server_name, tools=[self._build_tool()])
 
@@ -101,7 +101,7 @@ class GuestAdminService:
         """The SDK-qualified ``mcp__chief_guest_admin__manage_guest`` name."""
         return f"mcp__{self.server_name}__manage_guest"
 
-    def _build_tool(self) -> SdkMcpTool[Any]:
+    def _build_tool(self) -> InProcessTool:
         session_factory, platform = self.session_factory, self.platform
 
         @tool(
@@ -142,6 +142,6 @@ class GuestAdminService:
 
         return manage_guest
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the owner's guest-admin tool."""
         return create_sdk_mcp_server(self.server_name, tools=[self._build_tool()])
