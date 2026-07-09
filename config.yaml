@@ -170,6 +170,16 @@ workspace_dir: data/workspace        # shell cwd + scratch area (repo-local, git
 shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 
+# chief-owned web tools (#81, part of #72, owner-only, opt-in). With web_tools_enabled on,
+# owner sessions get a web-fetch + web-search tool that reach both backends (the Copilot
+# SDK has no built-in web tools). web-fetch is SSRF-guarded (private/loopback/link-local
+# targets refused, redirects re-validated) and asks for approval; web-search needs the
+# brave_search_api_key secret (without it, search returns a "not configured" note).
+web_tools_enabled: false
+# web_fetch_timeout_seconds: 15       # per-fetch wall clock
+# web_fetch_max_bytes: 5000000        # cap on bytes read from a single page
+# web_search_count: 5                 # results returned per web-search
+
 # Scheduler (M9a, opt-in). With scheduler_enabled on, a long-running tick fires the
 # reminders, recurring jobs, and self-cron the owner sets up. It needs primary_thread_key
 # (the owner inbox those land in — prefer a real topic over the casual General channel)

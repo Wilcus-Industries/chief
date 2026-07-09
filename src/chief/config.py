@@ -26,6 +26,8 @@ from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
 from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
 from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
 from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
+from .tools.web import FETCH_TOOL_NAME as _WEB_FETCH_TOOL
+from .tools.web import SEARCH_TOOL_NAME as _WEB_SEARCH_TOOL
 
 #: Default ``blacklist_tools`` seed (MEDIUM-1 fix): under the owner's default-allow
 #: gate, being absent from ``allowed_tools`` no longer routes a call to an approval
@@ -34,11 +36,17 @@ from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
 #: create/update, Drive upload, Sheets writes) is seeded here so the "reads ALLOW,
 #: writes ASK" design each service's ``tools/<svc>/mcp.py`` module documents actually
 #: holds under the new posture, instead of running silently uncarded.
+#: The chief-owned ``web-fetch`` tool (#81) is seeded too: core runs host-native, so a
+#: model-supplied URL is a real SSRF surface. Its ``chief.tools.web.validate_target``
+#: guard denies private/loopback targets outright; this blacklist entry additionally
+#: routes every fetch through an approval card (blacklist match ⇒ ASK, never DENY).
+#: ``web-search`` hits a fixed trusted provider, so it is left off — it ALLOWs freely.
 _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     _GMAIL_WRITE_TOOLS
     + _CALENDAR_WRITE_TOOLS
     + _DRIVE_WRITE_TOOLS
     + _SHEETS_WRITE_TOOLS
+    + (_WEB_FETCH_TOOL,)
 )
 
 
@@ -186,9 +194,14 @@ class Settings(BaseSettings):
     # snapshot/result alongside the interaction (click/type/hover/drag/drop/
     # select_option/press_key/fill_form/file_upload/handle_dialog) are untrusted
     # channels too, not just the original fetch/search/navigate/snapshot set.
+    # ``mcp__chief_web__fetch`` / ``__search`` (#81) are chief's own web tools — their
+    # results are internet content, so they must be screened too; the built-in
+    # ``WebFetch`` / ``WebSearch`` names are kept for the claude backend's built-ins.
     screening_tools: tuple[str, ...] = (
         "WebFetch",
         "WebSearch",
+        _WEB_FETCH_TOOL,
+        _WEB_SEARCH_TOOL,
         "mcp__playwright__browser_snapshot",
         "mcp__playwright__browser_navigate",
         "mcp__playwright__browser_navigate_back",
@@ -276,6 +289,21 @@ class Settings(BaseSettings):
     shell_timeout_seconds: float = 120.0
     shell_output_limit: int = 64_000
 
+    # chief-owned web tools (#81, part of #72), owner-only, default off (opt-in).
+    # web_tools_enabled wires the in-process ``chief_web`` MCP server (fetch + search)
+    # into owner sessions — one server reaching both backends (the Copilot SDK lacks
+    # built-in web tools). ``fetch`` is guarded against SSRF (private/loopback/
+    # link-local targets refused, the connection pinned to the validated IP, redirects
+    # re-validated) and seeded into blacklist_tools so it also asks for approval.
+    # ``search`` uses the Brave Search API (brave_search_api_key secret); without the
+    # key it degrades to a "not configured" note, so fetch still works.
+    # web_fetch_timeout_seconds bounds one fetch and web_fetch_max_bytes caps the bytes
+    # read into memory from a single page.
+    web_tools_enabled: bool = False
+    web_fetch_timeout_seconds: float = 15.0
+    web_fetch_max_bytes: int = 5_000_000
+    web_search_count: int = 5
+
     # Scheduler (M9a), default off (mirror the opt-in subsystem pattern). When enabled,
     # the long-running tick fires reminders, recurring jobs, and self-cron the owner set
     # up. primary_thread_key is the owner inbox they land in and primary_platform picks
@@ -359,6 +387,10 @@ class Settings(BaseSettings):
     # is actually spawned on an ``openrouter`` target. Never the Copilot token itself,
     # which is CLI-managed in ``~/.copilot/config.json`` and never touches secrets_dir.
     openrouter_api_key: str | None = None
+    # Brave Search API key for the chief-owned ``web-search`` tool (#81). Optional —
+    # only needed when web_tools_enabled and the owner wants search; ``web-fetch`` needs
+    # no provider key. Never the Copilot token. Get one at https://brave.com/search/api/.
+    brave_search_api_key: str | None = None
 
     @field_validator(
         "owner_telegram_id",

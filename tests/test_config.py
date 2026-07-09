@@ -697,6 +697,54 @@ def test_default_blacklist_tools_seeds_gmail_send(
     assert "mcp__sheets__update_cells" in settings.blacklist_tools
 
 
+def test_web_fetch_tool_defaults_to_blacklist_and_screening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #81: the chief-owned web-fetch tool is an SSRF surface on the host, so it is
+    # seeded into blacklist_tools (so it asks) and both web tools are screened for
+    # injection. The literal names must match what the tools register under
+    # (mcp__chief_web__…), or the screening PostToolUse hook silently misses them.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert "mcp__chief_web__fetch" in settings.blacklist_tools
+    # search hits a fixed trusted provider, so it is NOT blacklisted (allows freely).
+    assert "mcp__chief_web__search" not in settings.blacklist_tools
+    assert "mcp__chief_web__fetch" in settings.screening_tools
+    assert "mcp__chief_web__search" in settings.screening_tools
+
+
+async def test_web_fetch_blacklist_drives_owner_ask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The seeded default actually drives classify() to ASK for the owner tier.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    blacklist = Blacklist.from_config(
+        settings.blacklist_shell_patterns, settings.blacklist_tools
+    )
+    policy = PolicyStore(session_factory)
+    await policy.seed(never=[], approved=[])
+
+    verdict = classify(
+        "mcp__chief_web__fetch",
+        {"url": "https://example.com"},
+        policy,
+        tier="owner",
+        blacklist=blacklist,
+    )
+    assert verdict.decision is GateDecision.ASK
+
+
 async def test_default_blacklist_tools_card_gmail_send_for_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

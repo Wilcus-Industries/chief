@@ -307,6 +307,32 @@ async def test_dispatch_threads_attachments_into_run_turn(
     await mgr.shutdown()
 
 
+async def test_dispatch_pre_extracts_pdf_to_text(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #81: an incoming PDF is read as extracted text at the dispatch seam — the PDF is
+    # folded into the turn text (backend-agnostic) and no PDF attachment reaches the
+    # session, so neither backend has to carry a PDF content block.
+    from test_pdf import make_pdf
+
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+    pdf = Attachment(
+        media_type="application/pdf",
+        data=make_pdf("Board meeting notes"),
+        filename="notes.pdf",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="summarize", attachments=(pdf,))
+    await _until(lambda: bool(sess.queries))
+
+    assert "summarize" in sess.queries[0]
+    assert "Board meeting notes" in sess.queries[0]  # real pypdf extraction
+    assert sess.attachments_seen == [()]  # the PDF was consumed into text
+    await mgr.shutdown()
+
+
 async def test_long_reply_sent_as_file(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

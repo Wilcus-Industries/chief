@@ -92,9 +92,11 @@ from ..tools.guest import GuestAdminService, GuestService
 from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
+from ..tools.web import WebService
 from . import classify
 from .agent import NO_REPLY
 from .backend import ClaudeBackend
+from .pdf import extract_pdf_attachments
 from .personas import build_system_prompt
 from .routing import (
     DEFAULT_CATEGORY,
@@ -306,6 +308,7 @@ class TaskManager:
         google_services: Sequence[GoogleService] = (),
         owner_tz: str = "UTC",
         shell_service: ShellService | None = None,
+        web_service: WebService | None = None,
         workspace_dir: str | None = None,
         guest_model: str | None = None,
         guest_calendar_service: GoogleService | None = None,
@@ -367,6 +370,9 @@ class TaskManager:
         self._google_services = tuple(google_services)
         self._owner_tz = owner_tz
         self._shell_service = shell_service
+        # chief-owned web-fetch/web-search tools (#81), owner-only. Built the shell way
+        # so the single in-process ``chief_web`` MCP server reaches both backends.
+        self._web_service = web_service
         self._workspace_dir = workspace_dir
         self._guest_model = guest_model
         self._guest_calendar_service = guest_calendar_service
@@ -481,7 +487,17 @@ class TaskManager:
         is_general: bool = False,
         surface: Surface = Surface.DM,
     ) -> None:
-        """Route an owner message (+ media) into its task, spawning a topic when due."""
+        """Route an owner message (+ media) into its task, spawning a topic when due.
+
+        Incoming PDFs are pre-extracted to text here (#81) — the one platform- and
+        backend-agnostic seam — and folded into the turn text, so neither backend has to
+        carry a PDF content block (claude-agent-sdk sent a ``document`` block; the
+        Copilot session dropped it). Images pass through untouched. Extraction runs off
+        the event loop (``to_thread``) so a big PDF can't block other tasks' turns.
+        """
+        text, attachments = await asyncio.to_thread(
+            extract_pdf_attachments, text, attachments
+        )
         if surface is Surface.GROUP:
             # An owner-engaged group turn runs flat (a group has no forum to branch
             # into) with the full owner surface; its approval cards DM the owner.
@@ -855,6 +871,14 @@ class TaskManager:
             # gate.policy.COMMAND_TOOLS, so its "command" input is checked against the
             # blacklist) — being off allowed_tools alone no longer implies a card.
             mcp_servers[shell.server_name] = shell.server_config(session_key=thread_key)
+        if self._web_service is not None:
+            # Owner-only web fetch/search (#81). Kept OFF allowed_tools so every call
+            # routes through can_use_tool → classify: search ALLOWs under owner
+            # default-allow, while fetch trips its blacklist_tools entry (config.py)
+            # and raises an approval card. Its SSRF guard is the real boundary; the
+            # card is defense in depth. The one server reaches both backends.
+            web = self._web_service
+            mcp_servers[web.server_name] = web.server_config()
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
         if list_accounts is not None:

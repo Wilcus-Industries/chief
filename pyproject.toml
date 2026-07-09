@@ -15,6 +15,7 @@ dependencies = [
     "croniter>=3",
     "httpx>=0.28",
     "alembic>=1.18.4",
+    "pypdf>=6.14.2",
 ]
 
 [dependency-groups]
