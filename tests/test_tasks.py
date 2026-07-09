@@ -1506,6 +1506,137 @@ async def test_guest_session_never_gets_skills(
     await mgr.shutdown()
 
 
+# ---- category-routed subagents wiring (#87) ----------------------------------
+
+
+async def _subagents_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: FakeIO,
+    *,
+    factory: Factory,
+    subagents_enabled: bool = True,
+    routed: bool = True,
+    skills: bool = False,
+) -> TaskManager:
+    routing = None
+    if routed:
+        routing = RoutingStore(session_factory)
+        await routing.seed(_ROUTES)
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        front_desk_thread_key="-100:1",
+        routing=routing,
+        subagents_enabled=subagents_enabled,
+        skills_enabled=skills,
+        skills_plugin_path="vendor/chief-skills" if skills else None,
+        default_skills=("docx", "claude-api") if skills else (),
+    )
+
+
+async def test_owner_subagents_run_on_their_category_resolved_model(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC1 (central mechanism): each built-in subagent is configured with the model ITS
+    # declared category resolves to via the live routing table — researcher→research
+    # →auto, coder→code→the openrouter model. Distinct models, one table, at spawn.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["researcher"]["model"] == "auto"
+    assert agents["coder"]["model"] == "deepseek/deepseek-v4-flash"
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_use_parent_model_when_routing_off(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Routing disabled: subagents are still wired, but each omits its model so the SDK
+    # runs it on the parent session's model (the decision when routing is off).
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured), routed=False
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["custom_agents"]  # subagents present
+    assert all("model" not in a for a in captured["custom_agents"])
+    await mgr.shutdown()
+
+
+async def test_owner_no_subagents_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "custom_agents" not in captured
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_subagents(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC2: subagents are owner-only. Even with the framework enabled, a guest session
+    # carries no custom_agents — the guest wiring never sets them, and
+    # build_custom_agents would refuse the guest tier anyway.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory, FakeIO(), factory=_capture_factory(captured)
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "custom_agents" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_skills_on_wires_copilot_skill_directories(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #87: the M10 skills port — the curated set also reaches the session as absolute
+    # skill_directories (the Copilot analogue of the claude plugins/skills path, which
+    # stays set alongside it for whichever backend is live).
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert dirs  # non-empty for the curated set
+    assert any(d.endswith("/upstream/skills/docx") for d in dirs)
+    # The claude-shaped path stays set too, so a claude backend still works.
+    assert captured["plugins"] == [{"type": "local", "path": "vendor/chief-skills"}]
+    await mgr.shutdown()
+
+
 async def test_guest_gets_no_calendar_or_web_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
