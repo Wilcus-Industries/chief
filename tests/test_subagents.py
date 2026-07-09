@@ -289,6 +289,21 @@ async def test_load_subagent_specs_skips_malformed_file_with_warning(
     assert any("broken.md" in record.message for record in caplog.records)
 
 
+async def test_load_subagent_specs_skips_unreadable_directory_entry(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # #105 AC5: a *.md path that isn't a regular file (here, a directory) must degrade
+    # to a skipped entry with a logged warning, not raise OSError out of read_text().
+    (tmp_path / "notafile.md").mkdir()
+    _write_md(tmp_path / "ok.md", "category: general\ndescription: fine", "a prompt")
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        specs = load_subagent_specs(tmp_path)
+
+    assert [s.name for s in specs] == ["ok"]
+    assert any("notafile.md" in record.message for record in caplog.records)
+
+
 async def test_load_subagent_specs_missing_category_is_malformed(
     tmp_path: Path,
 ) -> None:
