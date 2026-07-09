@@ -267,6 +267,9 @@ def _load_calendar_server(tmp_token_dir: Path) -> types.ModuleType:
     assert spec is not None and spec.loader is not None
     srv = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = srv
+    # The docker server imports FastMCP (the ``mcp`` stack), a claude-agent-sdk
+    # transitive dropped in #88 and absent from the chief venv — skip if not installed.
+    pytest.importorskip("mcp")
     spec.loader.exec_module(srv)
     return srv
 
@@ -378,6 +381,9 @@ def _load_drive_server(tmp_token_dir: Path) -> types.ModuleType:
     assert spec is not None and spec.loader is not None
     srv = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = srv
+    # The docker server imports FastMCP (the ``mcp`` stack), a claude-agent-sdk
+    # transitive dropped in #88 and absent from the chief venv — skip if not installed.
+    pytest.importorskip("mcp")
     spec.loader.exec_module(srv)
     return srv
 
@@ -478,6 +484,9 @@ def _load_sheets_server(tmp_token_dir: Path) -> types.ModuleType:
     assert spec is not None and spec.loader is not None
     srv = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = srv
+    # The docker server imports FastMCP (the ``mcp`` stack), a claude-agent-sdk
+    # transitive dropped in #88 and absent from the chief venv — skip if not installed.
+    pytest.importorskip("mcp")
     spec.loader.exec_module(srv)
     return srv
 
@@ -590,6 +599,9 @@ def _load_gmail_server(tmp_token_dir: Path) -> types.ModuleType:
     assert spec is not None and spec.loader is not None
     srv = importlib.util.module_from_spec(spec)
     sys.modules[mod_name] = srv
+    # The docker server imports FastMCP (the ``mcp`` stack), a claude-agent-sdk
+    # transitive dropped in #88 and absent from the chief venv — skip if not installed.
+    pytest.importorskip("mcp")
     spec.loader.exec_module(srv)
     return srv
 
