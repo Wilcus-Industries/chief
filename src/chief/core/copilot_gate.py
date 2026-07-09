@@ -88,6 +88,7 @@ from ..gate.types import (
     HookContext,
     HookEvent,
     HookMatcher,
+    PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
 )
@@ -182,6 +183,10 @@ def build_permission_handler(can_use_tool: CanUseTool) -> PermissionHandlerFn:
     the real gate, and maps the result onto Copilot's decision vocabulary
     (:class:`PermissionDecisionApproveOnce` / :class:`PermissionDecisionReject`; see the
     module docstring for why never ``approve-for-session``).
+
+    Only an explicit :class:`PermissionResultAllow` approves — a deny **or any
+    unrecognized result type** rejects (fail closed). A gate that returns something the
+    contract doesn't cover must never coast through as an approval.
     """
 
     async def on_permission_request(
@@ -189,9 +194,17 @@ def build_permission_handler(can_use_tool: CanUseTool) -> PermissionHandlerFn:
     ) -> PermissionRequestResult:
         tool_name, tool_input = normalize_permission_request(request)
         result = await can_use_tool(tool_name, tool_input, ToolPermissionContext())
+        if isinstance(result, PermissionResultAllow):
+            return PermissionDecisionApproveOnce()
         if isinstance(result, PermissionResultDeny):
             return PermissionDecisionReject(feedback=result.message or None)
-        return PermissionDecisionApproveOnce()
+        # Unknown result type — reject rather than let it pass as an approval.
+        logger.warning(
+            "gate returned unrecognized result %r for %s; rejecting",
+            type(result).__name__,
+            tool_name,
+        )
+        return PermissionDecisionReject(feedback="unrecognized gate result")
 
     return on_permission_request
 

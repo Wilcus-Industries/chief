@@ -1,7 +1,7 @@
 [project]
 name = "chief"
 version = "0.0.0"
-description = "Personal AI assistant on Claude Max — foundations (M0/M1)."
+description = "Personal AI assistant on the GitHub Copilot SDK."
 requires-python = ">=3.12"
 dependencies = [
     "github-copilot-sdk>=1",

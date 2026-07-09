@@ -230,6 +230,22 @@ async def test_owner_read_within_scope_approves_once_no_card(
     assert a.io.cards == []
 
 
+async def test_permission_handler_rejects_unrecognized_gate_result() -> None:
+    # #88 hardening: only an explicit PermissionResultAllow approves. A can_use_tool
+    # that returns neither Allow nor Deny (a contract violation) must fail closed —
+    # reject, never coast through as an approval.
+    async def bogus_can_use(
+        tool_name: str, tool_input: dict[str, Any], context: Any
+    ) -> Any:
+        return object()  # neither PermissionResultAllow nor PermissionResultDeny
+
+    handler = build_permission_handler(bogus_can_use)
+    result = await handler(_read(f"{MEMORY_DIR}/notes.md"), {})
+
+    assert isinstance(result, PermissionDecisionReject)
+    assert result.feedback  # a human-readable reason is forwarded to the runtime
+
+
 # ---- on_permission_request: blacklist ASK (card blocks) ----------------------
 
 
@@ -359,7 +375,8 @@ async def test_pre_tool_use_allows_read_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     a = await _adapters(session_factory)
-    assert await _run_hook(a, "WebSearch", {"query": "x"}) == "allow"
+    read = {"file_path": f"{MEMORY_DIR}/notes.md"}
+    assert await _run_hook(a, "Read", read) == "allow"
 
 
 async def test_pre_tool_use_denies_builtin_shell(

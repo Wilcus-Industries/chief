@@ -109,8 +109,8 @@ screening_enabled: true
 screening_model: anthropic/claude-haiku-4.5  # OpenRouter-namespaced id (vendor/model); a bare id fails every screen OPEN
 screening_block: false
 # screening_tools:                 # which tools' results get screened (defaults shown)
-#   - WebFetch
-#   - WebSearch
+#   - mcp__chief_web__fetch
+#   - mcp__chief_web__search
 #   - mcp__playwright__browser_snapshot
 #   - mcp__playwright__browser_navigate
 #   - mcp__playwright__browser_navigate_back
