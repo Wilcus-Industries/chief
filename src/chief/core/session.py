@@ -65,7 +65,7 @@ class SessionProto(Protocol):
 
     session_id: str | None
     #: This turn's SDK cost and latest rate-limit status, captured by the session and
-    #: read by the engine after a clean turn to drive the budget (M9).
+    #: read by the engine after a clean turn to drive the budget (M9 / #84).
     last_cost_usd: float
     last_rate_limit_status: str | None
     #: The actually-served model for this turn (#79/#90). For a routed ``openrouter``
@@ -73,6 +73,10 @@ class SessionProto(Protocol):
     #: session it is what ``auto`` picked — read for observability (``set_model`` is
     #: untrusted on Copilot quota, so the served model is read here, not assumed).
     last_served_model: str | None
+    #: This turn's raw premium-request counts (quota name → cumulative used, #80). The
+    #: engine sums these into the premium-request budget currency for a Copilot-quota
+    #: turn (#84). Empty on a backend with no quota snapshot (e.g. the Claude bridge).
+    last_premium_requests: dict[str, int]
 
     def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()
@@ -188,6 +192,10 @@ class TaskSession:
         #: The actually-served model, captured from each ``AssistantMessage.model`` this
         #: turn (#79/#90); reset each turn. Read for observability by the engine.
         self.last_served_model: str | None = None
+        #: Raw premium-request counts (#80). Always empty on the Claude bridge — it
+        #: draws from the Max subscription, so there is no Copilot quota snapshot to
+        #: report; the engine budgets a bridge turn as an informational count (#84).
+        self.last_premium_requests: dict[str, int] = {}
 
     async def _ensure_connected(self) -> None:
         if not self._connected:

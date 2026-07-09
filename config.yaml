@@ -195,17 +195,20 @@ primary_platform: telegram           # which configured stack the scheduler deli
 # heartbeat_url:                     # dead-man's-switch GET pinged on the interval; unset disables
 # heartbeat_interval_seconds: 300    # seconds between heartbeat pings
 
-# Usage budgeting (M9, opt-in). With budget_enabled on, each turn's SDK cost rolls into a
-# month-to-date total against monthly_credit_usd (the fixed credit ceiling). Crossing a
-# budget_warn_fractions tier warns the owner once; reaching budget_exhaust_fraction pauses
-# the owner's turns and posts a choice card (downgrade / continue full-quality / approve
-# pay-as-you-go overflow). Warnings + the card route to primary_thread_key, so set it (as
-# the scheduler does). budget_cycle_anchor_day (1–28) is the cycle reset day in owner_tz.
+# Usage budgeting (#84, opt-in). With budget_enabled on, each turn is metered in the native
+# currency it spent (no cross-currency conversion): Copilot premium requests vs
+# premium_request_cap, and OpenRouter dollars vs openrouter_dollar_cap. Crossing a
+# budget_warn_fractions tier warns the owner once; reaching budget_exhaust_fraction runs
+# that currency's action — premium requests pause the owner's turns and post a choice card,
+# OpenRouter dollars downgrade the routed openrouter categories onto Copilot
+# budget_downgrade_model (auto). Warnings + the card route to primary_thread_key, so set it
+# (as the scheduler does). budget_cycle_anchor_day (1–28) is the cycle reset day in owner_tz.
 budget_enabled: false
-# monthly_credit_usd: 200.0          # fixed monthly credit ceiling spend draws from
+# premium_request_cap: 200           # Copilot premium-request cap (200/mo, Student plan)
+# openrouter_dollar_cap: 20.0        # OpenRouter BYOK dollar cap
 # budget_warn_fractions: [0.75, 0.9] # warn-once thresholds (each in (0,1], auto-sorted)
-# budget_exhaust_fraction: 1.0       # fraction that triggers the pause+ask card
-# budget_downgrade_model: claude-haiku-4-5-20251001  # model the Downgrade choice switches to
+# budget_exhaust_fraction: 1.0       # fraction of a cap that triggers its action
+# budget_downgrade_model: auto       # Copilot model an openrouter category downgrades onto
 # budget_cycle_anchor_day: 1         # day-of-month the billing cycle resets (1–28)
 
 # Skills framework (M10, opt-in). With skills_enabled on, owner sessions load a curated

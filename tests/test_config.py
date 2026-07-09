@@ -538,10 +538,11 @@ def test_m9_budget_defaults_off(
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
     assert settings.budget_enabled is False
-    assert settings.monthly_credit_usd == 200.0
+    assert settings.premium_request_cap == 200
+    assert settings.openrouter_dollar_cap == 20.0
     assert settings.budget_warn_fractions == (0.75, 0.90)
     assert settings.budget_exhaust_fraction == 1.0
-    assert settings.budget_downgrade_model == "claude-haiku-4-5-20251001"
+    assert settings.budget_downgrade_model == "auto"
     assert settings.budget_cycle_anchor_day == 1
 
 
@@ -603,19 +604,33 @@ def test_budget_rejects_bad_anchor_day(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
-def test_budget_rejects_nonpositive_credit(
+def test_budget_rejects_nonpositive_premium_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The BudgetGate divides spend by the credit, so a zero/negative ceiling is a
-    # config error, not a degenerate "everything is over budget".
+    # The BudgetGate divides usage by each cap, so a zero/negative cap is a config
+    # error, not a degenerate "everything is over budget".
     (tmp_path / "config.yaml").write_text(
-        "owner_telegram_id: 1\nmonthly_credit_usd: 0\n"
+        "owner_telegram_id: 1\npremium_request_cap: 0\n"
     )
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValidationError, match="monthly_credit_usd"):
+    with pytest.raises(ValidationError, match="premium_request_cap"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_budget_rejects_nonpositive_dollar_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nopenrouter_dollar_cap: 0\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="openrouter_dollar_cap"):
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
