@@ -766,6 +766,9 @@ def build_scheduler(
         primary_thread_key=settings.primary_thread_key,
         shell_service=build_shell_service(settings),
         google_services=build_google_services(settings),
+        # #88 HIGH-2: agent monitors get the chief_web read surface (fetch + search),
+        # the same in-process server owner sessions use. None when web tools are off.
+        web_service=build_web_service(settings),
         monitor_model=settings.monitor_model,
         owner_tz=settings.owner_tz,
         quiet_hours_start=settings.quiet_hours_start,
