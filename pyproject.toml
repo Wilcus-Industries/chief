@@ -27,6 +27,10 @@ dev = [
     # Host-only OAuth helper (chief.tools.google.auth). Not a runtime dep — the core
     # container reaches Google through the MCP servers, not this script.
     "google-auth-oauthlib>=1.2",
+    # Test-only (#88): the Google-MCP injection / Sheets row-1 security suites drive the
+    # vendored docker/mcp-* servers in-process, which import ``mcp``. Dev group ONLY —
+    # the core reaches those servers over HTTP, never imports this package at runtime.
+    "mcp>=1",
 ]
 
 [build-system]
@@ -74,11 +78,11 @@ ignore_missing_imports = true
 module = ["croniter.*"]
 ignore_missing_imports = true
 
-# The ``mcp`` stack (mcp + its starlette transitive) came in via the agent SDK removed
-# in #88 and is no longer installed in the chief venv — only the opt-in live tests and
-# the docker MCP-server tests use it (they importorskip it and drive the vendored
-# docker/mcp-* servers, whose deps live in their images). Ignore the missing modules so
-# those guarded imports type-check without the package present.
+# ``mcp`` (+ its starlette transitive) is now a dev-group dependency (#88 relit the
+# Google-MCP injection / Sheets row-1 security suites, which import it to drive the
+# vendored docker/mcp-* servers in-process). Neither ships complete inline types for
+# every submodule those guarded imports touch, so keep ignoring missing imports rather
+# than let a partial-typing gap in a test-only dependency fail the type-check.
 [[tool.mypy.overrides]]
 module = ["mcp", "mcp.*", "starlette", "starlette.*"]
 ignore_missing_imports = true
