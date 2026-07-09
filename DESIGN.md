@@ -109,8 +109,8 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
 | Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (secrets-dir file or env); never set `ANTHROPIC_API_KEY`; regen yearly |
 | Gate mechanism | `PreToolUse` hook (every tool) + `canUseTool` (ask→approval) — verified |
-| Usage budget | Track month-to-date `total_cost_usd` vs monthly Agent SDK credit ($100/$200); warn 75/90%; on cap ask owner. (Post-June-15: separate from interactive limits) |
-| Credit overflow | Hard pause at exhaustion; overflow to paid API rates only if owner approves |
+| Usage budget | Meter each turn in its native currency, no cross-currency conversion (#84): Copilot premium requests (raw count vs a monthly cap), OpenRouter dollars (metered BYOK spend vs a dollar cap), bridge turns (informational, uncapped). Warn at configured thresholds (default 75/90%) |
+| Budget exhaustion | Premium requests: pause + owner choice card (downgrade to Copilot `auto` / continue full-quality / approve overflow past the cap). OpenRouter dollars: silently auto-downgrade routed categories onto Copilot `auto`, no card. Bridge turns: never acts |
 | Guest billing | Owner's subscription credit pays for all (no separate guest key in v1); ToS grey-area noted |
 | Proactivity | Reactive + reminders only; no unsolicited nudges |
 | Scheduler | Reminders + recurring + monitors (predicate→action); chief self-manages; gate still applies |
@@ -543,31 +543,51 @@ test (migrate-before-app + compose validity); the VPS deploy job is gone.
   machine loss.
 - **Error surfacing** — tool/API failures are reported in-thread to the owner, not swallowed.
 
-### Usage budgeting (reworked for the June-15-2026 model)
+### Usage budgeting (native currencies, #84, part of #72)
 
-**Reality after June 15, 2026:** Agent SDK usage draws from a **separate monthly credit**
-(Max 5x $100, Max 20x $200) and **no longer competes with the owner's interactive Claude
-Code limits**. So the old "cap at 50% to leave headroom" premise is gone — the real
-constraint is **not blowing chief's fixed monthly dollar credit too early**.
+**Reality after June 15, 2026:** Agent SDK usage on a Claude subscription draws from a
+**separate monthly credit**, decoupled from the Copilot/OpenRouter routing chief actually
+runs on day to day. So there is no single dollar total to track — chief meters each turn
+in **whichever native currency it actually spent**, with **no cross-currency conversion**:
 
-- **Track spend, not windows.** chief sums its own `total_cost_usd` (client-side estimate)
-  per query into a **month-to-date total**, compared against the configured monthly credit.
-  Persisted (sqlite); resets on the credit's monthly cycle.
-- **Thresholds.** Warn the owner at e.g. 75% and 90% of the monthly credit. Also honor
-  `RateLimitEvent` (allowed_warning / rejected) as a hard backoff signal.
-- **On (near-)exhaustion — ask, don't silently throttle.** chief pauses and offers:
-  **(a) downgrade model** (Sonnet→Haiku) to stretch remaining credit, or **(b) continue at
-  full quality until selected tasks finish**, then stop. **On full exhaustion → ask before
-  overflowing**: chief does *not* spend real API money silently; only overflows to
-  pay-as-you-go API rates if the owner approves (then continues for the cycle).
-- **Caveat:** `total_cost_usd` is an *estimate*; for true spend chief can cross-check the
-  Console/Usage API. Good enough for warn/throttle, not for hard billing decisions.
+- **Copilot premium requests** — a raw cumulative count (summed from the Copilot SDK's
+  per-quota snapshot, #80) against a configured monthly cap (`premium_request_cap`,
+  default 200 — the Student plan pool, spike #74).
+- **OpenRouter dollars** — metered BYOK spend, summed per turn, against a dollar cap
+  (`openrouter_dollar_cap`).
+- **Bridge turns** — an informational per-turn count on the Claude Max bridge; never
+  capped or acted on (Max limits are absorbed by the resilience slice's backoff/queue,
+  not budgeted here).
 
-**Guest billing:** **everything (owner + guests) rides the owner's subscription credit** —
-no separate guest API key for v1. Guest requests are trivial/cheap so the credit impact is
-small. ⚠️ *Awareness:* guest-facing inference on "individual use" subscription auth is a ToS
-grey area; if chief ever becomes a service *for others*, move the guest path to a separate
-API key (the architecture leaves room — guest sessions are already isolated).
+- **Track spend per currency, not a blended total.** Each currency accumulates its own
+  month-to-date row, keyed `(cycle, currency)` (`persistence/usage.py`), persisted
+  (sqlite), resetting on the configured cycle-anchor day in the owner's tz. Premium
+  requests accumulate as a monotonic high-water mark (the Copilot SDK reports a
+  cumulative snapshot, so a stale or repeated reading can't double-count); OpenRouter
+  dollars and bridge turns sum per-turn deltas.
+- **Thresholds.** Warn the owner once per configured fraction of a currency's cap
+  (`budget_warn_fractions`, default 75%/90%). A hard `rejected` rate limit on a currency
+  is also treated like exhaustion.
+- **Exhaustion runs that currency's own action** (`core/budget.py`):
+  - **Premium requests** exhausting **pauses** the cycle — further owner turns are
+    gated until resolved — and posts a choice card: **Downgrade** (resume turns on the
+    cheaper Copilot `auto` model), **Continue** (keep going at full quality despite
+    being over cap), or **Overflow** (approve continued spend past the cap).
+  - **OpenRouter dollars** exhausting **auto-downgrades**, no card: chief silently
+    re-targets every routed openrouter category onto Copilot `auto` for the rest of the
+    cycle (budget downgrade sits above routing in precedence) and switches any live
+    routed sessions across.
+  - **Bridge turns** never act — count only.
+- **Persisted per-currency mode**, restart-proof (the admission-card pattern): each
+  currency's mode (normal/paused/downgraded/continue/overflow) survives a restart, so a
+  pause or a card choice isn't lost.
+
+**Guest billing:** unchanged — everything (owner + guests) rides the owner's existing
+Copilot/subscription access; no separate guest key in v1. Guest requests are
+trivial/cheap so the impact on any currency is small. ⚠️ *Awareness:* guest-facing
+inference on "individual use" auth is a ToS grey area; if chief ever becomes a service
+*for others*, move the guest path to separate credentials (the architecture leaves
+room — guest sessions are already isolated).
 
 ## Proactivity, scheduling & skills (draft)
 
@@ -772,8 +792,10 @@ chief/
   not billing-grade), per-model `model_usage`, per-step `AssistantMessage.usage` (dedupe by
   `message_id`). `RateLimitEvent`/`RateLimitStatus` give **status levels** (allowed /
   allowed_warning / rejected) per bucket (`five_hour`, `seven_day`, …), **not exact %**
-  ([issue #50518](https://github.com/anthropics/claude-code/issues/50518)). chief tracks its
-  own cumulative `total_cost_usd` and reacts to `RateLimitEvent`. [cost-tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
+  ([issue #50518](https://github.com/anthropics/claude-code/issues/50518)). chief meters
+  each turn in its native currency — OpenRouter turns by `total_cost_usd`, Copilot turns
+  by premium-request count (#84) — and reacts to `RateLimitEvent`.
+  [cost-tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking)
 - **Session resume ✅** — `session_id` from `ResultMessage`; pass to `resume`. Matches the
   notify-and-ask restart recovery.
 - **Google MCP choice ✅ (resolved at M5)** — chief builds its **own per-service FastMCP
