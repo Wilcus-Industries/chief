@@ -100,6 +100,7 @@ from .pdf import extract_pdf_attachments
 from .personas import build_system_prompt
 from .routing import (
     DEFAULT_CATEGORY,
+    TARGET_CLASS_COPILOT,
     RoutingStore,
     RoutingTarget,
     provider_for_target,
@@ -665,10 +666,11 @@ class TaskManager:
             active_account_label=active_account_label,
             account_ask_needed=account_ask_needed,
         )
-        # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
-        # swapped for the cheaper budget model while the cycle is downgraded (M9),
-        # reopened on Opus if the thread was escalated (Task.model, M11), or on a routed
-        # category's target model + BYOK provider (#79).
+        # Guests run on the guest model (Sonnet, never Opus, never routed onto a BYOK
+        # class — #82); the owner on theirs — swapped for the cheaper budget model
+        # while the cycle is downgraded (M9), reopened on Opus if the thread was
+        # escalated (Task.model, M11), or on a routed category's target model + BYOK
+        # provider (#79).
         if tier == "owner":
             target = await self._resolve_owner_target(
                 thread_key=thread_key,
@@ -676,9 +678,9 @@ class TaskManager:
                 surface=surface,
                 classify_text=classify_text,
             )
-            model, provider = target.model, target.provider
         else:
-            model, provider = self._guest_model or self._owner_model, None
+            target = self._resolve_guest_target()
+        model, provider = target.model, target.provider
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
@@ -1172,6 +1174,34 @@ class TaskManager:
             await self._run_turn(task, turn)
 
     # ---- model routing (#79) --------------------------------------------
+
+    def _resolve_guest_target(self) -> ResolvedTarget:
+        """The model + BYOK provider a guest session opens on — always Copilot quota.
+
+        Guest isolation invariant (#82, part of #72): a guest turn must never resolve
+        onto an ``openrouter`` or (future) ``bridge`` target, no matter what the
+        routing table currently maps every category to — including after #83's
+        runtime category add/remove/rename edits. This function is the guard: it
+        never reads ``self._routing`` or any category at all, so there is no
+        category-name allow/deny-list here for a rename to slip past. The one fact
+        that matters is **target class** — this always returns the
+        :data:`~chief.core.routing.TARGET_CLASS_COPILOT` class (``provider=None``),
+        and the assertion below fails loudly if a future edit ever wires a BYOK
+        provider in here by mistake, instead of silently leaking a guest onto paid
+        quota.
+
+        This is ``_ensure_task``'s guest branch — the *only* place a guest
+        ``_RunningTask``'s model/provider are ever set. Every later re-target
+        (``/route`` respawn, ``/opus``/``/sonnet``, budget downgrade) is gated on
+        ``tier == "owner"`` or only reachable from an owner-only entry point, so a
+        guest session's target is decided here once and never touched again.
+        """
+        target = ResolvedTarget(self._guest_model or self._owner_model, None)
+        assert target.provider is None, (
+            "guest target must stay on Copilot quota "
+            f"({TARGET_CLASS_COPILOT}) — never openrouter or another BYOK class"
+        )
+        return target
 
     async def _resolve_owner_target(
         self,

@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from copilot import ProviderConfig
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
@@ -29,6 +30,8 @@ from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact
 from chief.memory.versioning import GitVersioner, NullVersioner, Versioner
 from chief.obs.audit import AuditLog
+from chief.persistence.models import Route
+from chief.persistence.routing import add_route
 from chief.persistence.tasks import (
     CANCELLED,
     DONE,
@@ -2698,9 +2701,11 @@ async def _routed_manager(
     openrouter_provider: ProviderConfig | None = _OPENROUTER,
     idle: float = 1000.0,
     compaction: float = 1000.0,
+    routes: list[tuple[str, str, str]] = _ROUTES,
+    guest_model: str | None = None,
 ) -> TaskManager:
     routing = RoutingStore(session_factory)
-    await routing.seed(_ROUTES)
+    await routing.seed(routes)
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -2715,6 +2720,7 @@ async def _routed_manager(
         classify_category=classify_category,
         openrouter_provider=openrouter_provider,
         routing_surface_defaults=surface_defaults or {},
+        guest_model=guest_model,
     )
 
 
@@ -3101,4 +3107,129 @@ async def test_sonnet_after_opus_on_routed_thread_respawns_to_openrouter(
     task = mgr._tasks["-100:5"]
     assert task.model == "deepseek/deepseek-v4-flash"
     assert task.provider is _OPENROUTER
+    await mgr.shutdown()
+
+
+# ---- guest isolation under routing (#82, part of #72) -----------------------
+
+#: Every default category pointed at a paid/BYOK class — including a hypothetical
+#: future "bridge" (Max) class that isn't implemented yet (#72's three-class plan) —
+#: so a test can prove a guest never lands on any of them, regardless of what the
+#: table says. Deliberately built with ``core.routing.RoutingStore.seed`` (a plain
+#: string column, no target-class enum), the same route the self-config slice (#83)
+#: will write through, since ``config.py``'s validator only allows copilot/openrouter
+#: today and would reject seeding "bridge" at boot.
+_ALL_PAID_ROUTES = [
+    ("writing", "openrouter", "expensive/writing-model"),
+    ("code", "openrouter", "expensive/code-model"),
+    ("reasoning", "bridge", "claude-max-bridge"),
+    ("research", "bridge", "claude-max-bridge"),
+    ("general", "openrouter", "expensive/general-model"),
+]
+
+
+async def _unrouted_classify(text: str, **_: Any) -> str:
+    """A classifier a guest turn must never call — guests don't classify (#82)."""
+    raise AssertionError("a guest turn must never resolve a job category")
+
+
+async def test_guest_never_resolves_to_paid_target_when_every_category_is_paid(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC1 (#82): with the routing table pointing every category at openrouter/bridge,
+    a guest task still resolves to the Copilot-quota guest model — the central
+    mechanism a real guest turn is asserted against, not a mocked resolver."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=_unrouted_classify,
+        routes=_ALL_PAID_ROUTES,
+        guest_model="guest-model",
+    )
+
+    await mgr.dispatch_guest(thread_key="555:0", text="help me", from_label="Guest")
+    await _until(lambda: ("555:0", "reply:help me") in io.sends)
+
+    guest = created[-1]
+    assert guest["model"] == "guest-model"
+    assert guest["provider"] is None  # never openrouter/bridge — Copilot quota only
+    await mgr.shutdown()
+
+
+async def test_guest_invariant_holds_after_category_add_remove_rename(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC2 (#82): #83's runtime category add/remove/rename can't weaken the guard —
+    it never keys on a category name, so mutating the category set underneath a live
+    routing table changes nothing for a guest turn."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=_unrouted_classify,
+        routes=_ALL_PAID_ROUTES,
+        guest_model="guest-model",
+    )
+    routing = mgr._routing
+    assert routing is not None
+
+    # #83's gated tool isn't built yet (concurrent slice) — mutate the routes table
+    # directly the same way it eventually will: add a new paid category, rename an
+    # existing one (drop + re-add under a new name), and remove another outright.
+    async with session_factory() as session:
+        await add_route(
+            session, category="shopping", target_class="bridge", model="max-bridge"
+        )
+        await session.execute(delete(Route).where(Route.category == "code"))
+        await add_route(
+            session, category="coding", target_class="openrouter", model="x/y"
+        )
+        await session.execute(delete(Route).where(Route.category == "reasoning"))
+        await session.commit()
+    await routing.load()
+    assert set(routing.categories()) == {
+        "writing",
+        "research",
+        "general",
+        "coding",
+        "shopping",
+    }
+
+    await mgr.dispatch_guest(thread_key="555:1", text="still safe", from_label="G")
+    await _until(lambda: ("555:1", "reply:still safe") in io.sends)
+
+    guest = created[-1]
+    assert guest["model"] == "guest-model"
+    assert guest["provider"] is None
+    await mgr.shutdown()
+
+
+async def test_guest_falls_back_to_owner_model_when_unconfigured_even_when_routed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Guest posture unchanged (#82): with no ``guest_model`` configured, a guest
+    still falls back to the plain owner model (never a routed BYOK target) — the
+    pre-#82 fallback behaviour, preserved."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=_unrouted_classify,
+        routes=_ALL_PAID_ROUTES,
+        guest_model=None,
+    )
+
+    await mgr.dispatch_guest(thread_key="555:2", text="hi there", from_label="G")
+    await _until(lambda: ("555:2", "reply:hi there") in io.sends)
+
+    guest = created[-1]
+    assert guest["model"] == "claude-sonnet-4-6"  # _routed_manager's owner_model
+    assert guest["provider"] is None
     await mgr.shutdown()
