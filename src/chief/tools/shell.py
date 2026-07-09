@@ -34,9 +34,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
@@ -450,7 +450,7 @@ class ShellService:
         if self._host is not None:
             await self._host.aclose()
 
-    def _build_bash_tool(self, session_key: str) -> SdkMcpTool[Any]:
+    def _build_bash_tool(self, session_key: str) -> InProcessTool:
         @tool("bash", _BASH_DESCRIPTION, {"command": str})
         async def bash(args: dict[str, Any]) -> dict[str, Any]:
             command = str(args.get("command", ""))
@@ -467,7 +467,7 @@ class ShellService:
 
         return bash
 
-    def server_config(self, *, session_key: str) -> McpSdkServerConfig:
+    def server_config(self, *, session_key: str) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this task's bash tool."""
         return create_sdk_mcp_server(
             self.server_name, tools=[self._build_bash_tool(session_key)]

@@ -100,3 +100,63 @@ async def test_partition_none_returns_empty() -> None:
     tools, http_servers = await partition_mcp_servers(None)
     assert tools == []
     assert http_servers == {}
+
+
+# ---- the chief-owned in-process seam (#88) ----------------------------------------
+
+
+def test_build_input_schema_converts_simple_type_map() -> None:
+    # A {param: python_type} map → an object schema with every param required.
+    from chief.tools.inprocess import build_input_schema
+
+    schema = build_input_schema({"command": str, "count": int})
+    assert schema == {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "count": {"type": "integer"},
+        },
+        "required": ["command", "count"],
+    }
+
+
+def test_build_input_schema_passes_full_json_schema_through() -> None:
+    # A full JSON Schema object (its own type/properties/required) is returned as-is.
+    from chief.tools.inprocess import build_input_schema
+
+    full = {
+        "type": "object",
+        "properties": {"account": {"type": "string", "description": "x"}},
+        "required": [],
+    }
+    assert build_input_schema(full) is full
+
+
+def test_create_sdk_mcp_server_carries_tools_under_sdk_type() -> None:
+    # The config discriminator is type == "sdk" (what partition_mcp_servers keys off).
+    from chief.tools.inprocess import create_sdk_mcp_server, tool
+
+    @tool("echo", "echo it", {"text": str})
+    async def _echo(args: Any) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": args["text"]}]}
+
+    config = create_sdk_mcp_server("chief_echo", tools=[_echo])
+    assert config["type"] == "sdk"
+    assert config["name"] == "chief_echo"
+    assert [t.name for t in config["tools"]] == ["echo"]
+
+
+async def test_convert_maps_is_error_to_failure_result() -> None:
+    # Pin the convert_mcp_call_tool_result contract (verified vs github-copilot-sdk
+    # 1.0.5): a chief tool's is_error=True → a Copilot failure ToolResult, and the text
+    # content flows through.
+    from chief.tools.inprocess import create_sdk_mcp_server, tool
+
+    @tool("boom", "always errors", {"x": str})
+    async def _boom(args: Any) -> dict[str, Any]:
+        return {"content": [{"type": "text", "text": "nope"}], "is_error": True}
+
+    (t,) = await sdk_server_to_tools(create_sdk_mcp_server("chief_x", tools=[_boom]))
+    result = await _invoke(t, x="y")
+    assert result.result_type == "failure"
+    assert result.text_result_for_llm == "nope"
