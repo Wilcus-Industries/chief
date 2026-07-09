@@ -97,6 +97,7 @@ from ..tools.web import WebService
 from . import classify
 from .agent import NO_REPLY
 from .backend import ClaudeBackend
+from .budget import EFFECT_DOWNGRADE, premium_request_total
 from .pdf import extract_pdf_attachments
 from .personas import build_system_prompt
 from .routing import (
@@ -207,11 +208,15 @@ class TaskIO(Protocol):
 
 
 class BudgetProto(Protocol):
-    """The slice of :class:`~chief.core.budget.BudgetGate` the engine drives (M9)."""
+    """The slice of :class:`~chief.core.budget.BudgetGate` the engine drives (#84).
 
-    async def record(self, cost: float) -> None: ...
-    async def note_rate_limited(self) -> None: ...
-    async def mode(self) -> str: ...
+    ``record`` / ``note_rate_limited`` return ``EFFECT_DOWNGRADE`` when a currency just
+    crossed into ``downgraded`` (the engine then switches live sessions), else ``None``.
+    """
+
+    async def record(self, currency: str, amount: float) -> str | None: ...
+    async def note_rate_limited(self, currency: str) -> str | None: ...
+    async def mode(self, currency: str) -> str: ...
 
 
 SessionFactory = Callable[..., SessionProto]
@@ -324,6 +329,7 @@ class TaskManager:
         budget: BudgetProto | None = None,
         owner_inbox: str | None = None,
         budget_downgrade_model: str | None = None,
+        native_quota_currency: str = usage.PREMIUM_REQUESTS,
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
@@ -391,6 +397,10 @@ class TaskManager:
         self._budget = budget
         self._owner_inbox = owner_inbox
         self._budget_downgrade_model = budget_downgrade_model
+        # The currency a provider-None (non-openrouter) owner turn spends in (#84): the
+        # Copilot backend draws premium requests; the Claude backend rides the Max
+        # bridge (informational-only). app.build_engine sets it from agent_backend.
+        self._native_quota_currency = native_quota_currency
         # Skills (M10), owner-only. When enabled, owner sessions load the plugin
         # manifest at skills_plugin_path and enable exactly default_skills; guests get
         # neither.
@@ -1226,11 +1236,14 @@ class TaskManager:
     ) -> ResolvedTarget:
         """The model + BYOK provider a new owner session opens on (#79).
 
-        Composes with — never clobbers — the M9/M11 precedence:
+        Composes with — never clobbers — the M11/#84 precedence:
 
         1. A persisted Opus escalation (``Task.model``) wins outright: the explicit
            owner choice overrides routing, on plain Copilot quota (no BYOK provider).
-        2. An active budget downgrade: the cheaper model, no provider.
+        2. An active budget downgrade (the OpenRouter dollar budget is exhausted this
+           cycle): re-target onto the cheaper Copilot class — ``budget_downgrade_model``
+           (``auto``), no provider. Sits *above* routing, so it wins over any route,
+           including an openrouter one (#84).
         3. Category routing (when a routing table is wired): the task's category
            (``/route`` override → per-surface default → classify → fallback) → the
            category's ``{target_class, model}`` → ``(model, provider)``.
@@ -1239,7 +1252,8 @@ class TaskManager:
         if persisted == self._owner_model_opus:
             return ResolvedTarget(self._owner_model_opus)
         if self._budget is not None and self._budget_downgrade_model is not None:
-            if await self._budget.mode() == usage.MODE_DOWNGRADED:
+            openrouter_mode = await self._budget.mode(usage.OPENROUTER_DOLLARS)
+            if openrouter_mode == usage.MODE_DOWNGRADED:
                 return ResolvedTarget(self._budget_downgrade_model)
         if self._routing is not None:
             target = await self._resolve_route(thread_key, surface, classify_text)
@@ -1389,11 +1403,15 @@ class TaskManager:
             task.model = target.model
 
     async def _budget_admits(self) -> bool:
-        """False when the cycle is paused at budget — the turn must be skipped without
-        spending. Reminds the owner once per pause episode that turns are blocked."""
+        """False when the quota currency is paused at budget — the turn must be skipped
+        without spending. Reminds the owner once per pause episode that turns are gated.
+
+        Only the premium-request currency pauses (#84); an exhausted OpenRouter dollar
+        budget *downgrades* (turns keep running on Copilot), so it never gates here.
+        """
         if self._budget is None:
             return True
-        if await self._budget.mode() != usage.MODE_PAUSED:
+        if await self._budget.mode(self._native_quota_currency) != usage.MODE_PAUSED:
             self._paused_ack_sent = False
             return True
         if not self._paused_ack_sent and self._owner_inbox is not None:
@@ -1401,9 +1419,24 @@ class TaskManager:
             await self._io.send(self._owner_inbox, PAUSED_BUDGET_ACK)
         return False
 
+    def _turn_currency(self, task: _RunningTask) -> tuple[str, float]:
+        """The native currency + amount this turn spent (#84).
+
+        An openrouter (BYOK provider) turn spends metered dollars; a plain-quota turn
+        spends the backend's native quota — Copilot premium requests (summed from the
+        raw snapshot #80) or, on the Claude bridge, one informational bridge turn.
+        """
+        if task.provider is not None:
+            return usage.OPENROUTER_DOLLARS, task.session.last_cost_usd
+        if self._native_quota_currency == usage.BRIDGE_TURNS:
+            return usage.BRIDGE_TURNS, 1.0
+        return usage.PREMIUM_REQUESTS, premium_request_total(
+            task.session.last_premium_requests
+        )
+
     async def _record_spend(self, task: _RunningTask) -> None:
-        """Roll this turn's SDK cost into the cycle total; a hard rate-limit rejection
-        is treated like exhaustion (pause + ask)."""
+        """Meter this turn in its native currency; a hard rate-limit rejection is
+        treated like exhaustion of that currency (pause the quota, or downgrade)."""
         # The actually-served model is observability only (#79): on Copilot ``auto`` and
         # on OpenRouter alike the real model is read from the turn's event, not assumed
         # from what was requested (set_model is untrusted on Copilot quota, spike #74).
@@ -1415,34 +1448,43 @@ class TaskManager:
             )
         if self._budget is None:
             return
-        await self._budget.record(task.session.last_cost_usd)
+        currency, amount = self._turn_currency(task)
+        await self._apply_budget_effect(await self._budget.record(currency, amount))
         if task.session.last_rate_limit_status == "rejected":
-            await self._budget.note_rate_limited()
+            await self._apply_budget_effect(
+                await self._budget.note_rate_limited(currency)
+            )
+
+    async def _apply_budget_effect(self, effect: str | None) -> None:
+        """Complete a budget action the gate signalled: a downgrade needs the engine to
+        switch live sessions onto the cheaper class (the gate owns no live session)."""
+        if effect == EFFECT_DOWNGRADE:
+            await self.downgrade_live_sessions()
 
     async def downgrade_live_sessions(self) -> None:
-        """Switch every live owner session to the budget downgrade model (M9).
+        """Switch every live owner session onto the cheaper Copilot class (#84).
 
-        Invoked when the owner taps **Downgrade** on the budget card; new sessions
-        already pick the model up via :meth:`_resolve_owner_target`. No-op when no
-        downgrade model is configured (budget disabled).
+        Invoked when the OpenRouter dollar budget exhausts (auto, via the gate's effect)
+        or the owner taps **Downgrade** on the budget card; new sessions already pick it
+        up via :meth:`_resolve_owner_target`. No-op when no downgrade model is
+        configured (budget disabled). The target is ``{budget_downgrade_model, provider
+        None}`` — Copilot ``auto``.
 
-        An Opus-pinned thread is **skipped** (M11): an explicit escalation overrides a
-        budget downgrade — the owner chose to spend faster and was warned — so a
-        Downgrade tap leaves it on Opus (live and persisted stay in agreement, matching
-        the reopen precedence in :meth:`_resolve_owner_target`; ``/sonnet`` drops it).
+        A routed **openrouter** session crosses the provider class to get there, which a
+        live ``set_model`` can't do, so this uses :meth:`_switch_live_session`: a
+        same-class copilot session takes the cheap live ``set_model``, an openrouter one
+        the resume-preserving respawn (#94, carrying the thread's Google account #91).
+        An Opus-pinned thread is **skipped**: an explicit escalation overrides a budget
+        downgrade — the owner chose to spend faster and was warned (matching the reopen
+        precedence in :meth:`_resolve_owner_target`; ``/sonnet`` drops it).
         """
         if self._budget_downgrade_model is None:
             return
+        target = ResolvedTarget(self._budget_downgrade_model)  # Copilot auto
         for task in list(self._tasks.values()):
             if task.tier != "owner" or task.model == self._owner_model_opus:
                 continue
-            # A routed openrouter session can't be downgraded via set_model (that can't
-            # change the BYOK provider, and the downgrade model isn't an OpenRouter
-            # one); leave it — only a /route respawn switches its target (#79).
-            if task.provider is not None:
-                continue
-            await task.session.set_model(self._budget_downgrade_model)
-            task.model = self._budget_downgrade_model
+            await self._switch_live_session(task, target)
 
     # ---- Opus escalation (M11) ------------------------------------------
 
@@ -1475,7 +1517,8 @@ class TaskManager:
         note = ""
         if (
             self._budget is not None
-            and await self._budget.mode() == usage.MODE_DOWNGRADED
+            and await self._budget.mode(usage.OPENROUTER_DOLLARS)
+            == usage.MODE_DOWNGRADED
         ):
             note = f" {OPUS_BUDGET_NOTE}"
         return f"{OPUS_CONFIRM}{note}"

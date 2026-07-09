@@ -735,7 +735,7 @@ async def test_budget_card_tap_flips_mode(
     await adapter._on_callback(update, _CTX)
 
     async with session_factory() as session:
-        row = await usage.get_row(session, "2026-06")
+        row = await usage.get_row(session, "2026-06", usage.OPENROUTER_DOLLARS)
     assert row is not None and row.mode == usage.MODE_DOWNGRADED
     assert engine.downgraded == 1  # the tap flips live owner sessions too
     update.callback_query.edit_message_text.assert_awaited_once()  # type: ignore[union-attr]
@@ -750,7 +750,9 @@ async def test_budget_card_tap_ignored_for_guest(
     await adapter._on_callback(update, _CTX)
 
     async with session_factory() as session:
-        assert await usage.get_row(session, "2026-06") is None
+        assert (
+            await usage.get_row(session, "2026-06", usage.PREMIUM_REQUESTS) is None
+        )
     update.callback_query.answer.assert_awaited_once_with("Not allowed.")  # type: ignore[union-attr]
 
 

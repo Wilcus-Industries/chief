@@ -912,11 +912,15 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 
 **Phase 3 — Proactivity & extensibility**
 - **M9 scheduler — ✅ done.** reminders + recurring + monitors, quiet hours, uptime
-  heartbeat, and **usage budgeting**: each turn's SDK cost rolls into a month-to-date
-  total against a fixed credit (`core/budget.py`, `persistence/usage.py`), warns the owner
-  once per threshold, and on (near-)exhaustion pauses the cycle and posts a choice card
-  (downgrade / continue full-quality / approve overflow) — a persisted mode, restart-proof
-  (the admission-card pattern), enforced by `TaskManager`. Opt-in (`budget_enabled`).
+  heartbeat, and **usage budgeting** (reworked onto native currencies in #84, part of
+  #72): each turn is metered in the currency it actually spent — Copilot premium requests
+  (a raw count vs the 200/mo cap), OpenRouter dollars (metered spend vs a dollar cap), or
+  bridge turns (informational only) — with no cross-currency conversion (`core/budget.py`,
+  `persistence/usage.py`). Each currency warns once per threshold and on exhaustion runs
+  its own action: premium requests pause the cycle + post a choice card, OpenRouter
+  dollars downgrade the routed openrouter categories onto Copilot `auto` (precedence
+  budget-downgrade > routing). Persisted per-currency mode, restart-proof (the
+  admission-card pattern), enforced by `TaskManager`. Opt-in (`budget_enabled`).
 - **M10 skills — ✅ done.** Agent-SDK skills framework: a curated local plugin
   (`vendor/chief-skills` — a hand-picked subset of `anthropics/skills` + the chief-owned
   `setup-morning-brief`, chief-drafts/owner-approves) wired onto **owner sessions only**

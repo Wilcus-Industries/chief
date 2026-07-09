@@ -111,11 +111,14 @@ class BudgetAction(Enum):
     OVERFLOW = "overflow"  # approve pay-as-you-go spend past the credit
 
 
-#: Maps a card choice to the persisted ``MonthlyCost.mode`` it flips the cycle into.
-_BUDGET_MODE = {
-    BudgetAction.DOWNGRADE: usage.MODE_DOWNGRADED,
-    BudgetAction.CONTINUE: usage.MODE_CONTINUE,
-    BudgetAction.OVERFLOW: usage.MODE_OVERFLOW,
+#: Maps a card choice to the ``(currency, mode)`` it flips (#84). The card is posted
+#: when the Copilot **premium-request** currency is exhausted, so Continue/Overflow flip
+#: that currency's mode (keep running past its cap); Downgrade instead re-targets the
+#: **OpenRouter dollar** currency onto the cheaper Copilot class to cut spend.
+_BUDGET_DECISION = {
+    BudgetAction.DOWNGRADE: (usage.OPENROUTER_DOLLARS, usage.MODE_DOWNGRADED),
+    BudgetAction.CONTINUE: (usage.PREMIUM_REQUESTS, usage.MODE_CONTINUE),
+    BudgetAction.OVERFLOW: (usage.PREMIUM_REQUESTS, usage.MODE_OVERFLOW),
 }
 
 #: Button labels for the choice card, shared by both adapters (each builds its own
@@ -172,10 +175,10 @@ async def apply_budget_decision(
     cycle: str,
     action: BudgetAction,
 ) -> str:
-    """Flip ``cycle`` into the mode the owner's choice picks; return that new mode."""
-    mode = _BUDGET_MODE[action]
+    """Flip the currency the owner's choice targets into its mode; return it (#84)."""
+    currency, mode = _BUDGET_DECISION[action]
     async with session_factory() as session:
-        await usage.set_mode(session, cycle=cycle, mode=mode)
+        await usage.set_mode(session, cycle=cycle, currency=currency, mode=mode)
     return mode
 
 

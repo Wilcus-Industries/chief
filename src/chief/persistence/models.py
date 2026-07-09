@@ -131,23 +131,33 @@ class RateLimit(Base):
     count: Mapped[int] = mapped_column(default=0)
 
 
-class MonthlyCost(Base):
-    """Per-billing-cycle SDK spend + budget mode (owned by M9 usage budgeting).
+class UsageMeter(Base):
+    """Per-cycle usage in one native currency + its budget mode (#84, part of #72).
 
-    One row per cycle key (``"2026-06"``-style, anchored in ``owner_tz``). Spend is a
-    read-modify-write accumulator, so the unique constraint stops a racing insert from
-    creating a duplicate row; the repo also serializes get-or-create under a lock. A new
-    cycle has no row, so month-to-date implicitly resets to 0. ``mode`` is the persisted
-    budget state the owner's card decision flips (``usage.MODE_*``); ``warned_fraction``
-    is the high-water mark of the last warned threshold, so each tier warns once.
+    Replaces the single Anthropic-dollar ``monthly_costs`` accumulator: chief now meters
+    each turn in the native currency it actually spent — Copilot **premium requests**
+    (a raw count vs the 200/mo cap), **OpenRouter dollars** (metered spend vs a dollar
+    cap), or **bridge turns** (an informational count, no cap). No cross-conversion.
+
+    One row per ``(cycle, currency)`` — the cycle key (``"2026-06"``-style) is anchored
+    in ``owner_tz``, so a new cycle has no row and the currency resets to 0 implicitly.
+    ``amount`` is a read-modify-write accumulator (additive for dollars/bridge, or
+    monotonic for the premium snapshot), so the unique constraint stops a racing insert
+    duplicating a row; the repo also serializes get-or-create under a lock. ``mode`` is
+    the per-currency budget state a threshold action or the owner's card decision flips
+    (``usage.MODE_*``); ``warned_fraction`` is that currency's last-warned high-water
+    mark, so each tier warns once.
     """
 
-    __tablename__ = "monthly_costs"
-    __table_args__ = (UniqueConstraint("cycle", name="uq_monthly_cost_cycle"),)
+    __tablename__ = "usage_meters"
+    __table_args__ = (
+        UniqueConstraint("cycle", "currency", name="uq_usage_meter_cycle_currency"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle: Mapped[str]  # billing-cycle key, e.g. "2026-06"
-    total_cost_usd: Mapped[float] = mapped_column(default=0.0)
+    currency: Mapped[str]  # usage.PREMIUM_REQUESTS / OPENROUTER_DOLLARS / BRIDGE_TURNS
+    amount: Mapped[float] = mapped_column(default=0.0)  # count or dollars per currency
     mode: Mapped[str] = mapped_column(default="normal")  # usage.MODE_* (string const)
     warned_fraction: Mapped[float] = mapped_column(default=0.0)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
