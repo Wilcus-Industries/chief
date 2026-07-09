@@ -7,14 +7,17 @@ SDK client/session boundary faked, so a real turn drives without spawning the Co
 runtime. This is the twin of ``tests/test_session.py`` (the claude-agent-sdk mapping).
 """
 
+import asyncio
 import logging
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-from copilot import ProviderConfig
+from copilot import CopilotClient, ProviderConfig, RuntimeConnection
 from copilot._jsonrpc import JsonRpcError, ProcessExitedError
 from copilot.generated.rpc import SessionsForkRequest, SessionsForkResult
 from copilot.session_events import (
@@ -41,7 +44,7 @@ from chief.core.copilot_session import (
     read_premium_requests,
 )
 from chief.core.personas import build_system_prompt
-from chief.core.session import Final, Milestone
+from chief.core.session import Final, Milestone, close_wedged_session
 from chief.memory.store import Fact
 from chief.memory.versioning import NullVersioner
 from chief.tools.guest import GuestService
@@ -140,6 +143,7 @@ class FakeCopilotClient:
         self._session = session
         self.started = False
         self.stopped = False
+        self.force_stopped = False
         self.create_kwargs: dict[str, Any] | None = None
         self.resume_args: tuple[str, dict[str, Any]] | None = None
         #: Set by ``rpc.sessions.fork`` to the source id it was asked to fork (#93);
@@ -153,6 +157,9 @@ class FakeCopilotClient:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def force_stop(self) -> None:
+        self.force_stopped = True
 
     @property
     def rpc(self) -> _FakeServerRpc:
@@ -962,12 +969,16 @@ class _DeadResumeClient:
         self.create_kwargs: dict[str, Any] | None = None
         self.resume_args: tuple[str, dict[str, Any]] | None = None
         self.stopped = False
+        self.force_stopped = False
 
     async def start(self) -> None:
         pass
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def force_stop(self) -> None:
+        self.force_stopped = True
 
     @property
     def rpc(self) -> _FakeServerRpc:
@@ -1057,3 +1068,123 @@ async def test_parallel_chats_get_independent_sessions() -> None:
     assert made[0] is not made[1]
     assert task_a.session_id == "sess-1"
     assert task_b.session_id == "sess-2"
+
+
+# --- Bounded escape hatch: force_close (#101) ---------------------------------------
+
+
+async def test_force_close_force_stops_the_client_and_resets_state() -> None:
+    # force_close is the bounded teardown a time-boxed caller falls back to: it calls
+    # the SDK's force_stop (kills the CLI) and resets the session to reconnectable.
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto")
+    assert isinstance(task, CopilotTaskSession)
+    [event async for event in task.run_turn("go")]
+
+    await task.force_close()
+
+    assert client.force_stopped is True
+    # Private access matches this suite's convention (cf. the resume-reset tests).
+    assert task._client is None
+    assert task._session is None
+    assert task._connected is False
+
+
+# --- Orphan reap (#101) -------------------------------------------------------------
+#
+# The determination the issue asks for, settled by reading the pinned SDK: a time-boxed
+# ``aclose`` orphans a live ``copilot`` CLI. ``aclose`` -> ``session.disconnect`` sends
+# ``session.destroy`` with no timeout, so a wedged CLI never answers; a caller that
+# cancels ``aclose`` mid-``disconnect`` never reaches ``client.stop()``, whose tail is
+# the ONLY place the spawned CLI is terminated. The child keeps running — a live orphan.
+# The tests below demonstrate it with a *real* OS child process standing in for the CLI,
+# then prove ``close_wedged_session`` reaps it via the SDK's ``force_stop`` (a kill).
+
+
+def _spawn_sleeper() -> subprocess.Popen[bytes]:
+    """A real OS child that outlives a bare teardown — the CLI stand-in."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+class _WedgedRuntimeClient(FakeCopilotClient):
+    """A client whose ``stop`` wedges forever, mirroring the pinned SDK contract: only
+    ``force_stop`` kills the spawned CLI, and it does so without re-wedging the caller.
+    """
+
+    def __init__(self, session: "FakeCopilotSession") -> None:
+        super().__init__(session)
+        self.proc = _spawn_sleeper()
+
+    async def stop(self) -> None:
+        await asyncio.Event().wait()  # the wedge: never answers
+
+    async def force_stop(self) -> None:
+        self.force_stopped = True
+        self.proc.kill()
+        self.proc.wait(timeout=5)
+
+
+class _WedgedDisconnectSession(FakeCopilotSession):
+    """A session whose ``disconnect`` blocks forever (the ``session.destroy`` wedge)."""
+
+    async def disconnect(self) -> None:
+        await asyncio.Event().wait()
+
+
+def _wedged_task() -> tuple[CopilotTaskSession, _WedgedRuntimeClient]:
+    session = _WedgedDisconnectSession("sess-1", [_msg("hi"), SessionIdleData()])
+    client = _WedgedRuntimeClient(session)
+    task = CopilotTaskSession(model="auto", client_factory=lambda: client)
+    return task, client
+
+
+async def test_time_boxed_aclose_orphans_the_cli_process() -> None:
+    # Criterion 1, made empirical: a bare time-boxed aclose leaves a real OS process
+    # alive. disconnect wedges, the timeout cancels aclose mid-teardown, client.stop's
+    # terminate is never reached — the child survives.
+    task, client = _wedged_task()
+    try:
+        [event async for event in task.run_turn("go")]  # connect + spawn the child
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await task.aclose()
+        assert client.proc.poll() is None  # a real process survived the aclose
+    finally:
+        client.proc.kill()
+        client.proc.wait(timeout=5)  # never leak the child out of the test
+
+
+async def test_close_wedged_session_reaps_the_cli_process() -> None:
+    # Criterion 3: the shared helper time-boxes the same wedged aclose and reaps the
+    # orphan via force_stop — no process survives, and it returns promptly.
+    task, client = _wedged_task()
+    try:
+        [event async for event in task.run_turn("go")]
+        async with asyncio.timeout(5):  # the helper must not itself wedge
+            await close_wedged_session(task, timeout=0.05)
+        assert client.force_stopped is True
+        assert client.proc.poll() is not None  # no process survives the reap
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+            client.proc.wait(timeout=5)
+
+
+async def test_sdk_force_stop_kills_a_spawned_cli_process() -> None:
+    # Seam pin on the pinned github-copilot-sdk<2 (#102 practice): the reap relies on
+    # the real force_stop killing the spawned CLI. Inject a real child into the private
+    # _cli_process (a deliberate seam pin, same spirit as read_premium_requests reading
+    # _quota_snapshots) and prove force_stop kills it. The client is never start()ed, so
+    # the explicit stdio path avoids any runtime download.
+    client = CopilotClient(
+        connection=RuntimeConnection.for_stdio(path=sys.executable)
+    )
+    proc = _spawn_sleeper()
+    client._cli_process = proc
+    try:
+        await client.force_stop()
+        assert proc.wait(timeout=5) is not None  # the real SDK killed the child
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)

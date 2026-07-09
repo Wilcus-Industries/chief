@@ -161,6 +161,7 @@ class _CopilotClient(Protocol):
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
+    async def force_stop(self) -> None: ...
 
     @property
     def rpc(self) -> _CopilotServerRpc: ...
@@ -630,7 +631,14 @@ class CopilotTaskSession:
             await self._session.set_model(model)
 
     async def aclose(self) -> None:
-        """Disconnect the session and stop the client, freeing the runtime."""
+        """Disconnect the session and stop the client, freeing the runtime.
+
+        Unbounded on a wedged runtime: ``disconnect`` sends ``session.destroy`` with no
+        timeout and ``stop`` awaits more RPCs, so a wedged CLI never answers and a
+        time-boxed caller that cancels this mid-teardown skips the subprocess terminate
+        at the tail of ``stop`` — orphaning the Copilot CLI (#101). :meth:`force_close`
+        is the bounded escape hatch for those time-boxed callers.
+        """
         if self._session is not None:
             await self._session.disconnect()
             self._session = None
@@ -638,3 +646,24 @@ class CopilotTaskSession:
             await self._client.stop()
             self._client = None
         self._connected = False
+
+    async def force_close(self) -> None:
+        """Bounded, ungraceful teardown for a wedged session (#101).
+
+        ``aclose`` awaits unbounded RPCs (``disconnect`` sends ``session.destroy`` with
+        no timeout), so a time-boxed caller cancels it mid-teardown — skipping
+        ``client.stop()``'s terminate and leaking the Copilot CLI subprocess. The SDK's
+        ``force_stop`` ``kill()``s the spawned CLI without graceful cleanup and is
+        itself bounded (a non-blocking kill; its only awaits are ~1s jsonrpc thread
+        joins), so it can never re-wedge the caller. It does not ``wait()`` the killed
+        child, so the dead process lingers as a transient zombie (one PID, no CPU) until
+        Python's subprocess machinery reaps it — a deliberate trade to stay on the
+        public ``force_stop`` surface rather than reach into ``client._cli_process`` in
+        prod.
+        """
+        client = self._client
+        self._session = None
+        self._client = None
+        self._connected = False
+        if client is not None:
+            await client.force_stop()
