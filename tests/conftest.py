@@ -1,23 +1,12 @@
-"""Shared fixtures: clean auth env, in-memory db, fake settings."""
+"""Shared fixtures: in-memory db, fake settings."""
 
 from collections.abc import AsyncIterator
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from chief.persistence.models import Base
-
-
-@pytest.fixture(autouse=True)
-def _no_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep ANTHROPIC_API_KEY out of the env for every test by default.
-
-    Its presence is a hard failure in config; tests that exercise that guard set
-    it explicitly. Defaulting it absent keeps the rest of the suite hermetic.
-    """
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
 @pytest_asyncio.fixture

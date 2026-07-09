@@ -28,7 +28,7 @@ from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core import screening
-from .core.backend import select_backend
+from .core.backend import CopilotBackend
 from .core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -72,7 +72,7 @@ from .tools.web import BraveSearcher, WebFetcher, WebService
 logger = logging.getLogger("chief.app")
 
 #: Candidate secrets directories, first existing one wins (host-native). Each holds
-#: one file per secret field (telegram_bot_token, claude_code_oauth_token, …) — the
+#: one file per secret field (telegram_bot_token, openrouter_api_key, …) — the
 #: pydantic-settings ``secrets_dir`` convention the old Docker mount used. The
 #: CHIEF_SECRETS_DIR env var overrides; env vars alone also work (no dir needed).
 SECRETS_DIR_CANDIDATES = (
@@ -103,7 +103,7 @@ def load_settings() -> Settings:
     for candidate in candidates:
         if candidate and os.path.isdir(candidate):
             return Settings(_secrets_dir=candidate)  # type: ignore[call-arg]
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
 
 
 def build_memory(settings: Settings) -> MemoryStore:
@@ -408,10 +408,10 @@ def build_engine(
         if settings.scheduler_enabled
         else None
     )
-    # Route every session through the config-selected AgentBackend (#75). Only
-    # ``claude`` is valid today; ClaudeBackend.create_session is the SessionFactory the
-    # engine builds each owner/guest session with.
-    backend = select_backend(settings.agent_backend)
+    # Every session is built through the Copilot backend (#88, chief's sole harness):
+    # CopilotBackend.create_session is the SessionFactory the engine builds each
+    # owner/guest session with.
+    backend = CopilotBackend()
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -483,13 +483,9 @@ def build_engine(
             settings.budget_downgrade_model if budget is not None else None
         ),
         # A plain-quota owner turn spends the backend's native currency (#84): the
-        # Copilot backend burns premium requests; the Claude backend rides the Max
-        # bridge, counted informationally only (limits absorbed by backoff, unbudgeted).
-        native_quota_currency=(
-            usage.BRIDGE_TURNS
-            if settings.agent_backend == "claude"
-            else usage.PREMIUM_REQUESTS
-        ),
+        # Copilot backend burns premium requests (#88 removed the Max-bridge backend
+        # whose turns were informational-only).
+        native_quota_currency=usage.PREMIUM_REQUESTS,
         # Group chats (M11): cap on the per-group ambient buffer.
         group_context_max_messages=settings.group_context_max_messages,
         # Owner-only packaged skills (M10). The path must be absolute (see
@@ -814,13 +810,8 @@ async def serve(settings: Settings) -> None:
 def main() -> None:
     configure_logging()
     settings = load_settings()
-
-    # The SDK's `claude` subprocess authenticates from CLAUDE_CODE_OAUTH_TOKEN in its
-    # environment. Bridge the value here so it works whether the token arrived via a
-    # Docker secret file or an env var. (config rejects ANTHROPIC_API_KEY, which would
-    # otherwise outrank it and bill the API.)
-    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = settings.claude_code_oauth_token
-
+    # The Copilot CLI authenticates from its own ``~/.copilot/config.json`` (#88), so
+    # there is no SDK auth token to bridge into the environment here.
     asyncio.run(serve(settings))
 
 

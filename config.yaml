@@ -18,10 +18,11 @@ owner_model_opus: claude-opus-4-8
 opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
-# Agent backend seam (#75, part of #72). Every session the engine drives is built through
-# an AgentBackend: "claude" (the claude-agent-sdk path) or "copilot" (the GitHub Copilot
-# SDK, #76). Switch per deployment; "claude" stays the default.
-agent_backend: claude
+# Agent backend (#88): the GitHub Copilot SDK is chief's sole harness. The
+# claude-agent-sdk backend and the ``agent_backend`` selector are gone — do not re-add
+# an ``agent_backend:`` line here (``agent_backend: claude`` now fails the boot with a
+# migration message; ``copilot`` is tolerated but inert). The Copilot CLI manages its
+# own auth in ~/.copilot/config.json.
 
 # Model routing (#79, part of #72), opt-in. When routing_enabled, an owner task's
 # spawning message is auto-classified into one job category (on classifier_model, never a
