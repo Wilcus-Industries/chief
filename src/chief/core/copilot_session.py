@@ -72,6 +72,7 @@ from typing import Any, Protocol
 
 from copilot import CopilotClient, ProviderConfig, SessionHooks, Tool
 from copilot._jsonrpc import JsonRpcError, ProcessExitedError
+from copilot.generated.rpc import SessionsForkRequest, SessionsForkResult
 from copilot.session import (
     MCPServerConfig,
     SectionOverride,
@@ -117,6 +118,29 @@ class _CopilotSession(Protocol):
     async def disconnect(self) -> None: ...
 
 
+class _CopilotSessionsRpc(Protocol):
+    """The slice of the SDK's experimental ``sessions.*`` RPC group used here (#93).
+
+    Only :meth:`fork` is reached — ``sessions.fork`` creates a NEW session from an
+    existing one's persisted history and returns its id, leaving the source untouched.
+    That is how :meth:`chief.core.tasks.TaskManager.branch`'s fork request is honoured
+    on Copilot: the branch resumes the forked copy, so the casual channel keeps its own
+    session. The group is marked *Experimental* by the SDK; isolating it behind this one
+    slot keeps the churn contained if the RPC shifts.
+    """
+
+    async def fork(
+        self, params: SessionsForkRequest, *, timeout: float | None = ...
+    ) -> SessionsForkResult: ...
+
+
+class _CopilotServerRpc(Protocol):
+    """The slice of ``copilot`` ``ServerRpc`` (``client.rpc``) this module reaches."""
+
+    @property
+    def sessions(self) -> _CopilotSessionsRpc: ...
+
+
 class _CopilotClient(Protocol):
     """The slice of ``copilot.CopilotClient`` this module uses (structural).
 
@@ -126,6 +150,10 @@ class _CopilotClient(Protocol):
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
+
+    @property
+    def rpc(self) -> _CopilotServerRpc: ...
+
     async def create_session(
         self,
         *,
@@ -325,9 +353,16 @@ class CopilotTaskSession:
         disallowed_tools: list[str] | None = None,
         client_factory: CopilotClientFactory = _default_copilot_client,
         provider: ProviderConfig | None = None,
+        fork_session: bool = False,
     ) -> None:
         self._model = model
         self._resume = resume
+        #: When resuming, fork the source session first so the branch gets an
+        #: independent copy instead of driving (and mutating) the casual channel's live
+        #: session (#93, part of #72). Set by
+        #: :meth:`chief.core.tasks.TaskManager.branch`; ignored on a plain create or
+        #: resume.
+        self._fork_session = fork_session
         self._cwd = cwd
         #: chief's gate, adapted onto the Copilot boundary by the backend. Non-persisted
         #: SDK callbacks, so re-registered on every connect (create *and* resume) below.
@@ -399,8 +434,17 @@ class CopilotTaskSession:
         # a resumed session is gated identically to a freshly created one (#77). The
         # tool surface is likewise re-supplied on resume — the SDK does not persist it.
         if self._resume is not None:
+            # A branch (fork_session) forks the casual channel's persisted history into
+            # a NEW session and resumes that copy, so the two threads stay independent
+            # (#93, part of #72). A plain resume reopens the id directly.
+            resume_id = self._resume
+            if self._fork_session:
+                forked = await client.rpc.sessions.fork(
+                    SessionsForkRequest(session_id=self._resume)
+                )
+                resume_id = forked.session_id
             session = await client.resume_session(
-                self._resume,
+                resume_id,
                 model=self._model,
                 working_directory=self._cwd,
                 on_permission_request=self._on_permission_request,

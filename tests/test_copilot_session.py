@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 from copilot import ProviderConfig
 from copilot._jsonrpc import JsonRpcError, ProcessExitedError
+from copilot.generated.rpc import SessionsForkRequest, SessionsForkResult
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -110,21 +111,52 @@ class FakeCopilotSession:
         self.disconnected = True
 
 
+class _FakeSessionsRpc:
+    """Fake ``client.rpc.sessions`` — records the fork source, returns a new id."""
+
+    def __init__(self, client: "FakeCopilotClient") -> None:
+        self._client = client
+
+    async def fork(
+        self, params: SessionsForkRequest, *, timeout: float | None = None
+    ) -> SessionsForkResult:
+        self._client.forked_from = params.session_id
+        return SessionsForkResult(session_id=self._client.forked_session_id)
+
+
+class _FakeServerRpc:
+    """Fake ``client.rpc`` — only its ``sessions`` group is reached (issue #93)."""
+
+    def __init__(self, client: "FakeCopilotClient") -> None:
+        self.sessions = _FakeSessionsRpc(client)
+
+
 class FakeCopilotClient:
     """Structural stand-in for ``copilot.CopilotClient``."""
 
-    def __init__(self, session: FakeCopilotSession) -> None:
+    def __init__(
+        self, session: FakeCopilotSession, *, forked_session_id: str = "sess-forked"
+    ) -> None:
         self._session = session
         self.started = False
         self.stopped = False
         self.create_kwargs: dict[str, Any] | None = None
         self.resume_args: tuple[str, dict[str, Any]] | None = None
+        #: Set by ``rpc.sessions.fork`` to the source id it was asked to fork (#93);
+        #: stays ``None`` when no fork happened, so tests can assert fork was skipped.
+        self.forked_from: str | None = None
+        #: The id ``rpc.sessions.fork`` returns for the new, independent session.
+        self.forked_session_id = forked_session_id
 
     async def start(self) -> None:
         self.started = True
 
     async def stop(self) -> None:
         self.stopped = True
+
+    @property
+    def rpc(self) -> _FakeServerRpc:
+        return _FakeServerRpc(self)
 
     async def create_session(self, **kwargs: Any) -> FakeCopilotSession:
         self.create_kwargs = kwargs
@@ -358,6 +390,51 @@ async def test_no_provider_defaults_to_none() -> None:
 
     assert client.create_kwargs is not None
     assert client.create_kwargs["provider"] is None
+
+
+# --- Branch forks the casual session, never shares it (#93) --------------------------
+
+
+async def test_branch_forks_source_session_into_independent_id() -> None:
+    # AC1/AC2 (#93): /branch under CopilotBackend must FORK the casual channel's
+    # session, not merely resume it — so the branched thread gets an independent copy
+    # whose id differs from the casual's, and turns in one never mutate the other's
+    # context. This is exactly TaskManager.branch's request:
+    # create_session(resume=<casual id>, fork_session=True).
+    session = FakeCopilotSession("sess-forked", [_msg("branched"), SessionIdleData()])
+    client = FakeCopilotClient(session, forked_session_id="sess-forked")
+    backend = CopilotBackend(client_factory=lambda: client)
+
+    task = backend.create_session(
+        model="auto", resume="sess-casual", fork_session=True
+    )
+    events = [event async for event in task.run_turn("carry on")]
+
+    assert events == [Final(text="branched")]
+    # The fork sourced from the casual channel's id — the SDK leaves that id untouched.
+    assert client.forked_from == "sess-casual"
+    # The live turn drove the FORKED session, not the casual one: we resumed the new id,
+    # so the branched thread's persisted id is distinct from the casual's.
+    assert client.resume_args is not None
+    assert client.resume_args[0] == "sess-forked"
+    assert task.session_id == "sess-forked"
+    assert task.session_id != "sess-casual"
+
+
+async def test_resume_without_fork_does_not_fork() -> None:
+    # A plain resume (fork_session False) must NOT fork — it resumes the id directly, so
+    # an ordinary reopen keeps its own session as before. #93 scopes the fork strictly
+    # to the branch path.
+    backend, client, _session = _backend_with(
+        [_msg("resumed"), SessionIdleData()], session_id="sess-9"
+    )
+    task = backend.create_session(model="auto", resume="sess-9")
+    [event async for event in task.run_turn("continue")]
+
+    assert client.forked_from is None  # fork was never invoked
+    assert client.resume_args is not None
+    assert client.resume_args[0] == "sess-9"  # resumed the id directly, unforked
+    assert task.session_id == "sess-9"
 
 
 async def test_interrupt_set_model_and_aclose_delegate() -> None:
@@ -783,6 +860,10 @@ class _DeadResumeClient:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    @property
+    def rpc(self) -> _FakeServerRpc:
+        return _FakeServerRpc(cast(FakeCopilotClient, self))
 
     async def create_session(self, **kwargs: Any) -> FakeCopilotSession:
         self.create_kwargs = kwargs
