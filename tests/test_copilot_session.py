@@ -10,11 +10,12 @@ runtime. This is the twin of ``tests/test_session.py`` (the claude-agent-sdk map
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from copilot import ProviderConfig
+from copilot._jsonrpc import JsonRpcError, ProcessExitedError
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -35,11 +36,13 @@ from chief.core.copilot_session import (
     build_persona_system_message,
     find_vendor_identity_leak,
     openrouter_provider_config,
+    read_premium_requests,
 )
 from chief.core.personas import build_system_prompt
 from chief.core.session import Final, Milestone
 from chief.memory.store import Fact
 from chief.memory.versioning import NullVersioner
+from chief.tools.guest import GuestService
 
 
 def _event(data: Any) -> SessionEvent:
@@ -617,3 +620,251 @@ def test_openrouter_provider_config_omits_key_when_unconfigured(
     provider = openrouter_provider_config(settings)
 
     assert "api_key" not in provider
+
+
+# --- Tools + MCP servers forwarded to the SDK (#80) --------------------------------
+
+
+def _guest_service() -> tuple[GuestService, list[str]]:
+    relayed: list[str] = []
+
+    async def relay(text: str) -> None:
+        relayed.append(text)
+
+    return GuestService(relay=relay, from_label="Dana"), relayed
+
+
+async def test_in_process_and_http_servers_reach_create_session() -> None:
+    # AC1: chief's mixed mcp_servers → the SDK's two inputs. The in-process guest server
+    # becomes a flat SDK-qualified custom tool; the Google/browser HTTP config passes
+    # through as an mcp_server; disallowed_tools becomes excluded_tools.
+    service, _relayed = _guest_service()
+    http = {"type": "http", "url": "http://mcp-calendar:8000"}
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(
+        model="auto",
+        mcp_servers={
+            service.server_name: service.server_config(),
+            "chief_calendar": http,
+        },
+        disallowed_tools=["Bash", "BashOutput"],
+    )
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    tool_names = [t.name for t in client.create_kwargs["tools"]]
+    assert tool_names == ["mcp__chief_guest__leave_message"]
+    assert client.create_kwargs["mcp_servers"] == {"chief_calendar": http}
+    assert client.create_kwargs["excluded_tools"] == ["Bash", "BashOutput"]
+
+
+async def test_tools_reach_resume_session_too() -> None:
+    # The tool surface is non-persisted, so a resumed session must be re-supplied it.
+    service, _relayed = _guest_service()
+    backend, client, _session = _backend_with(
+        [_msg("resumed"), SessionIdleData()], session_id="sess-9"
+    )
+    task = backend.create_session(
+        model="auto",
+        resume="sess-9",
+        mcp_servers={service.server_name: service.server_config()},
+    )
+
+    [event async for event in task.run_turn("continue")]
+
+    assert client.resume_args is not None
+    _sid, kwargs = client.resume_args
+    assert [t.name for t in kwargs["tools"]] == ["mcp__chief_guest__leave_message"]
+
+
+async def test_no_tools_forwards_none_not_empty() -> None:
+    # No mcp_servers/disallowed → the SDK sees None (its own defaults), not [] which
+    # (for excluded_tools) would read as an explicit empty filter.
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto")
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["tools"] is None
+    assert client.create_kwargs["mcp_servers"] is None
+    assert client.create_kwargs["excluded_tools"] is None
+
+
+# --- Raw premium-request usage capture (#80, scope-guarded) -------------------------
+
+
+def _usage_with_quota(used: int, *, quota: str = "premium_interactions") -> Any:
+    return AssistantUsageData.from_dict(
+        {
+            "model": "auto",
+            "quotaSnapshots": {
+                quota: {
+                    "entitlementRequests": 300,
+                    "isUnlimitedEntitlement": False,
+                    "overage": 0.0,
+                    "overageAllowedWithExhaustedQuota": False,
+                    "remainingPercentage": 90.0,
+                    "usageAllowedWithExhaustedQuota": True,
+                    "usedRequests": used,
+                }
+            },
+        }
+    )
+
+
+def test_read_premium_requests_extracts_used_counts() -> None:
+    counts = read_premium_requests(_usage_with_quota(42))
+    assert counts == {"premium_interactions": 42}
+
+
+def test_read_premium_requests_fails_safe_without_snapshots() -> None:
+    # Copilot quota often reports no snapshot; the accessor degrades to {}, not a raise.
+    assert read_premium_requests(AssistantUsageData(model="auto")) == {}
+
+
+def test_read_premium_requests_skips_reshaped_snapshot() -> None:
+    # The count lives on an internal, unstable SDK field; a snapshot missing it is
+    # skipped, not fatal — the accessor isolates that instability (scope guard #80).
+    class _Reshaped:
+        pass  # no _used_requests attribute
+
+    usage = AssistantUsageData(model="auto")
+    usage._quota_snapshots = cast(Any, {"premium_interactions": _Reshaped()})
+
+    assert read_premium_requests(usage) == {}
+
+
+async def test_turn_records_raw_premium_requests() -> None:
+    # AC2: raw usage counts are recorded per turn — captured off the usage event onto
+    # the session (recorded only; NOT wired into the dollar budget, per the guard).
+    backend, _client, _session = _backend_with(
+        [_usage_with_quota(7), _msg("hi"), SessionIdleData()]
+    )
+    task = backend.create_session(model="auto")
+    assert isinstance(task, CopilotTaskSession)
+
+    [event async for event in task.run_turn("go")]
+
+    assert task.last_premium_requests == {"premium_interactions": 7}
+
+
+async def test_premium_requests_reset_each_turn() -> None:
+    session = FakeCopilotSession(
+        "sess-1", [_usage_with_quota(3), _msg("hi"), SessionIdleData()]
+    )
+    client = FakeCopilotClient(session)
+    task = CopilotTaskSession(model="auto", client_factory=lambda: client)
+
+    [event async for event in task.run_turn("first")]
+    assert task.last_premium_requests == {"premium_interactions": 3}
+
+    session._script = [_msg("again"), SessionIdleData()]
+    [event async for event in task.run_turn("second")]
+    assert task.last_premium_requests == {}
+
+
+# --- Resume self-heal on a dead pointer (#80, parity with TaskSession) --------------
+
+
+class _DeadResumeClient:
+    """A client whose resume attempt fails once, then a fresh create succeeds."""
+
+    def __init__(self, session: FakeCopilotSession, error: Exception) -> None:
+        self._session = session
+        self._error = error
+        self.create_kwargs: dict[str, Any] | None = None
+        self.resume_args: tuple[str, dict[str, Any]] | None = None
+        self.stopped = False
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def create_session(self, **kwargs: Any) -> FakeCopilotSession:
+        self.create_kwargs = kwargs
+        return self._session
+
+    async def resume_session(
+        self, session_id: str, **kwargs: Any
+    ) -> FakeCopilotSession:
+        self.resume_args = (session_id, kwargs)
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        JsonRpcError(code=-32000, message="unknown session"),
+        ProcessExitedError("runtime exited"),
+    ],
+)
+async def test_dead_resume_self_heals_onto_fresh_session(error: Exception) -> None:
+    # AC2: a dead/expired resume id drops the pointer and retries once on a fresh
+    # session rather than crashing the turn — mirrors TaskSession's self-heal. The same
+    # client resumes (fails) then creates (succeeds); the reconnect asks for it again.
+    fresh = FakeCopilotSession("fresh-id", [_msg("healed"), SessionIdleData()])
+    client = _DeadResumeClient(fresh, error)
+
+    task = CopilotTaskSession(
+        model="auto", resume="stale-id", client_factory=lambda: client
+    )
+
+    events = [event async for event in task.run_turn("continue")]
+
+    assert events == [Final(text="healed")]
+    assert client.resume_args is not None  # the resume was genuinely attempted first
+    assert client.create_kwargs is not None  # then healed onto a fresh create
+    assert task.session_id == "fresh-id"
+
+
+async def test_dead_resume_reraises_when_not_resuming() -> None:
+    # A create-path (no resume) failure has nothing to self-heal to — it surfaces.
+    session = FakeCopilotSession("sess-1", [])
+
+    class _FailingCreateClient(_DeadResumeClient):
+        async def create_session(self, **kwargs: Any) -> FakeCopilotSession:
+            raise self._error
+
+    clients = iter(
+        [_FailingCreateClient(session, ProcessExitedError("boom"))]
+    )
+    task = CopilotTaskSession(model="auto", client_factory=lambda: next(clients))
+
+    with pytest.raises(ProcessExitedError):
+        [event async for event in task.run_turn("go")]
+
+
+# --- Concurrency model: one runtime per session (#80 AC3) --------------------------
+
+
+async def test_parallel_chats_get_independent_sessions() -> None:
+    # AC3: chief runs a session per chat. The backend builds one CopilotTaskSession per
+    # create_session call, each spinning up its own client/runtime (parity with
+    # ClaudeBackend, no shared-client locking) — so two chats run without cross-talk.
+    made: list[FakeCopilotClient] = []
+
+    def factory() -> FakeCopilotClient:
+        n = len(made) + 1
+        client = FakeCopilotClient(
+            FakeCopilotSession(f"sess-{n}", [_msg(f"reply {n}"), SessionIdleData()])
+        )
+        made.append(client)
+        return client
+
+    backend = CopilotBackend(client_factory=factory)
+    task_a = backend.create_session(model="auto")
+    task_b = backend.create_session(model="auto")
+
+    events_a = [event async for event in task_a.run_turn("chat A")]
+    events_b = [event async for event in task_b.run_turn("chat B")]
+
+    assert events_a == [Final(text="reply 1")]
+    assert events_b == [Final(text="reply 2")]
+    assert len(made) == 2  # a distinct runtime per chat, not one shared client
+    assert made[0] is not made[1]
+    assert task_a.session_id == "sess-1"
+    assert task_b.session_id == "sess-2"
