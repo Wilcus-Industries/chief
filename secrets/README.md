@@ -17,6 +17,7 @@ secrets/
 ├── google_oauth_client.json           ← ignored, never commit
 ├── telegram_bot_token                 ← ignored, never commit
 ├── openrouter_api_key                 ← ignored, never commit (optional — #90)
+├── brave_search_api_key               ← ignored, never commit (optional — #81 web-search)
 └── google_tokens/                     ← dedicated Google account tokens subdir
     ├── .gitkeep                       ← tracked (keeps the dir in git)
     ├── google_token.json              ← ignored, never commit (primary account)
@@ -43,7 +44,8 @@ cannot read them:
 ```sh
 chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
            secrets/google_oauth_client.json secrets/telegram_bot_token \
-           secrets/google_tokens/google_token.json secrets/openrouter_api_key
+           secrets/google_tokens/google_token.json secrets/openrouter_api_key \
+           secrets/brave_search_api_key
 ```
 
 | File | Value |
@@ -54,6 +56,7 @@ chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
 | `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 | `openrouter_api_key` | OpenRouter API key (optional — see "OpenRouter BYOK" below) |
+| `brave_search_api_key` | Brave Search API key (optional — see "Web search" below) |
 
 ## Chat platforms (Telegram and/or Discord)
 
@@ -86,6 +89,18 @@ exist: `touch secrets/openrouter_api_key` (mirrors the platform-you-skip pattern
 
 This is a separate credential from the GitHub Copilot token itself — see "Not here: the
 GitHub Copilot token" above.
+
+## Web search (issue #81, part of #72)
+
+`brave_search_api_key` powers the chief-owned `web-search` tool (`web_tools_enabled`).
+chief owns `web-fetch` + `web-search` as custom tools because the Copilot SDK has no
+built-in web tools; `web-fetch` needs **no** key (it fetches URLs directly, behind an
+SSRF guard), so the search key is **optional** — without it, `web-search` returns a
+"not configured" note and `web-fetch` still works.
+
+Get a key at <https://brave.com/search/api/> (the free "Data for Search" tier is enough
+for personal use). If you enable web tools but skip search, `touch
+secrets/brave_search_api_key` so the file exists (mirrors the platform-you-skip pattern).
 
 ## Google OAuth (M5/M8) — Calendar + Drive + Sheets + Gmail
 

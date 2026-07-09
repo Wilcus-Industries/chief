@@ -56,6 +56,7 @@ from .tools.guest import GuestAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
+from .tools.web import BraveSearcher, WebFetcher, WebService
 
 logger = logging.getLogger("chief.app")
 
@@ -134,6 +135,28 @@ def build_shell_service(settings: Settings) -> ShellService | None:
         workspace_dir=settings.workspace_dir,
         timeout_seconds=settings.shell_timeout_seconds,
         output_limit=settings.shell_output_limit,
+    )
+
+
+def build_web_service(settings: Settings) -> WebService | None:
+    """The chief-owned web fetch/search tools (#81), or ``None`` when disabled.
+
+    One in-process ``chief_web`` server reaches both backends. The fetcher is bounded by
+    the configured timeout + byte cap and guards every URL against SSRF; the searcher
+    uses the Brave API key (optional — search degrades to a note without it).
+    """
+    if not settings.web_tools_enabled:
+        return None
+    return WebService(
+        fetcher=WebFetcher(
+            timeout=settings.web_fetch_timeout_seconds,
+            max_bytes=settings.web_fetch_max_bytes,
+        ),
+        searcher=BraveSearcher(
+            api_key=settings.brave_search_api_key,
+            count=settings.web_search_count,
+            timeout=settings.web_fetch_timeout_seconds,
+        ),
     )
 
 
@@ -378,6 +401,9 @@ def build_engine(
         google_services=build_google_services(settings),
         owner_tz=settings.owner_tz,
         shell_service=build_shell_service(settings),
+        # chief-owned web fetch/search (#81) — owner-only, SSRF-guarded, one server for
+        # both backends. None when web_tools_enabled is off.
+        web_service=build_web_service(settings),
         workspace_dir=(
             settings.workspace_dir if settings.workspace_enabled else None
         ),
