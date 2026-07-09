@@ -136,12 +136,12 @@ class UsageMeter(Base):
 
     Replaces the single Anthropic-dollar ``monthly_costs`` accumulator: chief now meters
     each turn in the native currency it actually spent — Copilot **premium requests**
-    (a raw count vs the 200/mo cap), **OpenRouter dollars** (metered spend vs a dollar
-    cap), or **bridge turns** (an informational count, no cap). No cross-conversion.
+    (a raw count vs the 200/mo cap) or **OpenRouter dollars** (metered spend vs a dollar
+    cap). No cross-conversion.
 
     One row per ``(cycle, currency)`` — the cycle key (``"2026-06"``-style) is anchored
     in ``owner_tz``, so a new cycle has no row and the currency resets to 0 implicitly.
-    ``amount`` is a read-modify-write accumulator (additive for dollars/bridge, or
+    ``amount`` is a read-modify-write accumulator (additive for dollars, or
     monotonic for the premium snapshot), so the unique constraint stops a racing insert
     duplicating a row; the repo also serializes get-or-create under a lock. ``mode`` is
     the per-currency budget state a threshold action or the owner's card decision flips
@@ -156,7 +156,7 @@ class UsageMeter(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle: Mapped[str]  # billing-cycle key, e.g. "2026-06"
-    currency: Mapped[str]  # usage.PREMIUM_REQUESTS / OPENROUTER_DOLLARS / BRIDGE_TURNS
+    currency: Mapped[str]  # usage.PREMIUM_REQUESTS / usage.OPENROUTER_DOLLARS
     amount: Mapped[float] = mapped_column(default=0.0)  # count or dollars per currency
     mode: Mapped[str] = mapped_column(default="normal")  # usage.MODE_* (string const)
     warned_fraction: Mapped[float] = mapped_column(default=0.0)

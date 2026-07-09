@@ -327,7 +327,6 @@ class TaskManager:
         budget: BudgetProto | None = None,
         owner_inbox: str | None = None,
         budget_downgrade_model: str | None = None,
-        native_quota_currency: str = usage.PREMIUM_REQUESTS,
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
@@ -401,10 +400,6 @@ class TaskManager:
         self._budget = budget
         self._owner_inbox = owner_inbox
         self._budget_downgrade_model = budget_downgrade_model
-        # The currency a provider-None (non-openrouter) owner turn spends in (#84): the
-        # Copilot backend draws premium requests; the Claude backend rides the Max
-        # bridge (informational-only). app.build_engine sets it from agent_backend.
-        self._native_quota_currency = native_quota_currency
         # Skills (M10), owner-only. When enabled, owner sessions load the plugin
         # manifest at skills_plugin_path and enable exactly default_skills; guests get
         # neither.
@@ -1232,8 +1227,8 @@ class TaskManager:
         """The model + BYOK provider a guest session opens on — always Copilot quota.
 
         Guest isolation invariant (#82, part of #72): a guest turn must never resolve
-        onto an ``openrouter`` or (future) ``bridge`` target, no matter what the
-        routing table currently maps every category to — including after #83's
+        onto an ``openrouter`` target — nor onto any paid class added later — no matter
+        what the routing table currently maps every category to, including after #83's
         runtime category add/remove/rename edits. This function is the guard: it
         never reads ``self._routing`` or any category at all, so there is no
         category-name allow/deny-list here for a rename to slip past. The one fact
@@ -1441,7 +1436,7 @@ class TaskManager:
         """
         if self._budget is None:
             return True
-        if await self._budget.mode(self._native_quota_currency) != usage.MODE_PAUSED:
+        if await self._budget.mode(usage.PREMIUM_REQUESTS) != usage.MODE_PAUSED:
             self._paused_ack_sent = False
             return True
         if not self._paused_ack_sent and self._owner_inbox is not None:
@@ -1460,32 +1455,27 @@ class TaskManager:
         * the **OpenRouter dollar** budget exhausting on its own (auto, via the gate's
           ``ACTION_DOWNGRADE`` effect, #84); or
         * the owner tapping **Downgrade** on the premium-exhaustion card, which flips
-          the **native quota currency** (Copilot premium requests) out of ``paused``
-          into ``downgraded`` — so :meth:`_budget_admits` stops gating and turns resume
-          on the cheaper model (#97). Continue/Overflow move it to their own modes.
+          the **premium-request currency** out of ``paused`` into ``downgraded`` — so
+          :meth:`_budget_admits` stops gating and turns resume on the cheaper model
+          (#97). Continue/Overflow move it to their own modes.
 
-        Reads only the persisted per-currency mode (no side effects); the native quota
-        currency is ``bridge_turns`` on the Claude backend, which never downgrades, so
-        that branch is inert there.
+        Reads only the persisted per-currency mode (no side effects).
         """
         if self._budget is None:
             return False
         if await self._budget.mode(usage.OPENROUTER_DOLLARS) == usage.MODE_DOWNGRADED:
             return True
-        quota_mode = await self._budget.mode(self._native_quota_currency)
+        quota_mode = await self._budget.mode(usage.PREMIUM_REQUESTS)
         return quota_mode == usage.MODE_DOWNGRADED
 
     def _turn_currency(self, task: _RunningTask) -> tuple[str, float]:
         """The native currency + amount this turn spent (#84).
 
         An openrouter (BYOK provider) turn spends metered dollars; a plain-quota turn
-        spends the backend's native quota — Copilot premium requests (summed from the
-        raw snapshot #80) or, on the Claude bridge, one informational bridge turn.
+        spends Copilot premium requests (summed from the raw snapshot #80).
         """
         if task.provider is not None:
             return usage.OPENROUTER_DOLLARS, task.session.last_cost_usd
-        if self._native_quota_currency == usage.BRIDGE_TURNS:
-            return usage.BRIDGE_TURNS, 1.0
         return usage.PREMIUM_REQUESTS, premium_request_total(
             task.session.last_premium_requests
         )
