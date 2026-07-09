@@ -17,6 +17,7 @@ from chief.memory.versioning import GitVersioner, NullVersioner
 from chief.obs.audit import AuditLog
 from chief.persistence import approvals as appr_repo
 from chief.persistence import policy as policy_repo
+from chief.persistence import usage
 
 
 def test_load_settings_uses_env_when_no_secrets_dir(
@@ -305,7 +306,8 @@ def test_build_engine_wires_budget_when_enabled(
     settings = _settings(
         budget_enabled=True,
         primary_thread_key="-100:1",
-        monthly_credit_usd=50.0,
+        premium_request_cap=150,
+        openrouter_dollar_cap=50.0,
     )
     policy, audit, memory = _shared(settings, session_factory)
 
@@ -318,11 +320,13 @@ def test_build_engine_wires_budget_when_enabled(
     )
 
     # The gate is built against this platform's IO, routes to the owner inbox, and
-    # carries the configured credit; the downgrade model + inbox thread into the engine.
+    # carries a per-currency policy for each configured cap; the downgrade model + inbox
+    # thread into the engine (#84).
     assert isinstance(manager._budget, BudgetGate)
     assert isinstance(manager._budget._io, TelegramTaskIO)  # this platform's IO
     assert manager._budget._owner_inbox == "-100:1"
-    assert manager._budget._credit == 50.0
+    assert manager._budget._policies[usage.PREMIUM_REQUESTS].cap == 150.0
+    assert manager._budget._policies[usage.OPENROUTER_DOLLARS].cap == 50.0
     assert manager._owner_inbox == "-100:1"
     assert manager._budget_downgrade_model == settings.budget_downgrade_model
 

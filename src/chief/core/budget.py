@@ -1,20 +1,33 @@
-"""Usage-budget coordinator (M9) — record spend, warn, and gate on exhaustion.
+"""Per-currency usage-budget coordinator (#84) — meter, warn, pause/downgrade.
 
-After the June-15 billing change chief draws from a fixed monthly credit, so the risk
-is silently blowing it early. :class:`BudgetGate` rolls each turn's SDK cost into the
-billing cycle's month-to-date total (:mod:`chief.persistence.usage`), warns the owner
-once per configured threshold, and on (near-)exhaustion flips the cycle into the
-``paused`` mode and posts a **choice card** to the owner inbox (downgrade / continue /
-overflow). The turn that trips exhaustion has already spent; *subsequent* turns are what
-the persisted mode gates — restart-proof, no parked future (the admission-card pattern).
+chief's spend rides three native currencies with no cross-currency conversion (part of
+#72): Copilot **premium requests** (a raw count vs the 200/mo cap), **OpenRouter
+dollars** (metered spend vs a dollar cap), and **bridge turns** (informational only —
+Max limits are absorbed by the resilience slice's backoff/queue, not budgeted).
+:class:`BudgetGate` rolls each turn's usage into its currency's month-to-date row
+(:mod:`chief.persistence.usage`), warns the owner once per configured threshold, and on
+(near-)exhaustion runs that currency's configured action:
 
-Mostly pure + a thin IO seam, so it is testable without the SDK: :func:`cycle_key` is
-pure, and everything else flows through ``session_factory`` + a small :class:`BudgetIO`.
+* :data:`ACTION_PAUSE` (premium requests) — flip the currency to ``paused`` and post the
+  owner a choice card; the paused mode gates *subsequent* turns (the admission-card
+  pattern, restart-proof — the turn that tripped exhaustion has already spent).
+* :data:`ACTION_DOWNGRADE` (OpenRouter dollars) — flip the currency to ``downgraded``
+  and return :data:`EFFECT_DOWNGRADE`, so the engine re-targets the openrouter routes
+  onto the cheaper Copilot ``auto`` class (an overlay the resolver reads — no routing
+  rows mutated) and switches live openrouter sessions across.
+* :data:`ACTION_NONE` (bridge turns) — count only.
+
+Mostly pure + a thin IO seam, so it is testable without an SDK: :func:`cycle_key` is
+pure and everything else flows through ``session_factory`` + a small :class:`BudgetIO`.
+The engine, not the gate, owns the live sessions, so an exhaustion needing a live switch
+is *returned* as an effect rather than called back — keeping the wiring one-directional
+(engine → gate) with no back-reference.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -25,6 +38,55 @@ from ..adapters.base import BudgetCard
 from ..persistence import usage
 
 logger = logging.getLogger("chief.core.budget")
+
+#: How a currency folds each reading into its month-to-date total.
+ACCUM_ADD = "add"  # per-turn deltas sum (OpenRouter dollars, bridge turns)
+ACCUM_MAX = "max"  # a cumulative snapshot; keep the high-water mark (premium requests)
+
+#: What a currency does when it crosses its exhaustion threshold.
+ACTION_PAUSE = "pause"  # flip to paused + post the owner choice card
+ACTION_DOWNGRADE = "downgrade"  # flip to downgraded + tell the engine to re-target
+ACTION_NONE = "none"  # informational currency (bridge turns) — never acts
+
+#: Returned by :meth:`BudgetGate.record` / :meth:`BudgetGate.note_rate_limited` when a
+#: currency just crossed into ``downgraded`` — the engine completes it by switching live
+#: sessions onto the cheaper class (:meth:`TaskManager.downgrade_live_sessions`).
+EFFECT_DOWNGRADE = "downgrade"
+
+#: Owner-facing currency labels + amount formatters for warn/card/downgrade text.
+_CURRENCY_LABEL = {
+    usage.PREMIUM_REQUESTS: "premium requests",
+    usage.OPENROUTER_DOLLARS: "OpenRouter spend",
+    usage.BRIDGE_TURNS: "bridge turns",
+}
+
+
+def _fmt_amount(currency: str, amount: float) -> str:
+    """Format ``amount`` in ``currency``'s natural unit (dollars vs a plain count)."""
+    if currency == usage.OPENROUTER_DOLLARS:
+        return f"${amount:.2f}"
+    return f"{amount:.0f}"
+
+
+def premium_request_total(counts: dict[str, int]) -> float:
+    """Sum a turn's raw per-quota premium-request snapshot into one cumulative count.
+
+    ``counts`` is :attr:`CopilotTaskSession.last_premium_requests` (#80) — quota name →
+    cumulative used-requests this cycle. The Student plan exposes a single premium pool,
+    so the sum is that pool's running count; an empty dict (no snapshot) is ``0.0``.
+    """
+    return float(sum(counts.values()))
+
+
+@dataclass(frozen=True)
+class CurrencyPolicy:
+    """One native currency's cap, warn/exhaust thresholds, accumulation, and action."""
+
+    cap: float
+    warn_fractions: tuple[float, ...]
+    exhaust_fraction: float
+    accumulation: str  # ACCUM_ADD | ACCUM_MAX
+    action: str  # ACTION_PAUSE | ACTION_DOWNGRADE | ACTION_NONE
 
 
 class BudgetIO(Protocol):
@@ -44,7 +106,7 @@ def cycle_key(now: datetime, tz: ZoneInfo, anchor_day: int) -> str:
     Anchored in the owner's ``tz``: the cycle resets on ``anchor_day`` each month, so a
     local date *before* ``anchor_day`` belongs to the cycle that started the prior month
     (``anchor_day == 1`` collapses to the plain calendar month). The key names the
-    cycle's start year-month, so a new cycle simply has no row → spend resets to 0.
+    cycle's start year-month, so a new cycle simply has no row → usage resets to 0.
     """
     local = now.astimezone(tz)
     year, month = local.year, local.month
@@ -56,7 +118,7 @@ def cycle_key(now: datetime, tz: ZoneInfo, anchor_day: int) -> str:
 
 
 class BudgetGate:
-    """Records per-turn spend; warns and pauses the cycle as the credit runs down."""
+    """Meters each turn per currency; warns and runs its exhaustion action (#84)."""
 
     def __init__(
         self,
@@ -64,9 +126,7 @@ class BudgetGate:
         session_factory: async_sessionmaker[AsyncSession],
         io: BudgetIO,
         owner_inbox: str,
-        monthly_credit_usd: float,
-        warn_fractions: tuple[float, ...] = (0.75, 0.90),
-        exhaust_fraction: float = 1.0,
+        policies: dict[str, CurrencyPolicy],
         owner_tz: str = "UTC",
         anchor_day: int = 1,
         now: Callable[[], datetime] = _utcnow,
@@ -74,101 +134,182 @@ class BudgetGate:
         self._session_factory = session_factory
         self._io = io
         self._owner_inbox = owner_inbox
-        self._credit = monthly_credit_usd
-        self._warn_fractions = tuple(sorted(warn_fractions))
-        self._exhaust_fraction = exhaust_fraction
+        self._policies = policies
         self._tz = ZoneInfo(owner_tz)
         self._anchor_day = anchor_day
         self._now = now
         #: Serializes the whole read-decide-write of record/note_rate_limited across the
         #: one event loop. The usage repo's per-op lock only guards each get-or-create;
-        #: the warn-once / pause-once decision spans several ops, so without this two
+        #: the warn-once / act-once decision spans several ops, so without this two
         #: concurrent turns crossing a threshold could both read mode==normal and both
-        #: card. (Distinct from usage._lock — acquired before it, never re-entered.)
+        #: act. (Distinct from usage._lock — acquired before it, never re-entered.)
         self._lock = asyncio.Lock()
 
     def _cycle(self) -> str:
         return cycle_key(self._now(), self._tz, self._anchor_day)
 
-    async def record(self, cost: float) -> None:
-        """Roll ``cost`` into the cycle total, then warn or pause+card as it crosses."""
+    async def record(self, currency: str, amount: float) -> str | None:
+        """Roll ``amount`` into ``currency``'s cycle total, then warn or run its action.
+
+        Returns :data:`EFFECT_DOWNGRADE` when the currency just crossed into
+        ``downgraded`` (the engine completes it), else ``None``. Unknown currency: skip.
+        """
+        policy = self._policies.get(currency)
+        if policy is None:
+            return None
         async with self._lock:
             cycle = self._cycle()
             async with self._session_factory() as session:
-                total = await usage.add_cost(session, cycle=cycle, amount=cost)
-                row = await usage.get_row(session, cycle)
-                assert row is not None  # add_cost just created/updated it
-                fraction = total / self._credit
-                if fraction >= self._exhaust_fraction:
-                    await self._exhaust(session, cycle, row.mode, total)
-                else:
-                    await self._warn(
-                        session, cycle, row.warned_fraction, total, fraction
+                total = await self._accumulate(session, cycle, currency, policy, amount)
+                if policy.action == ACTION_NONE or policy.cap <= 0:
+                    return None  # informational currency — never warns or acts
+                row = await usage.get_row(session, cycle, currency)
+                assert row is not None  # _accumulate just created/updated it
+                fraction = total / policy.cap
+                if fraction >= policy.exhaust_fraction:
+                    return await self._exhaust(
+                        session, cycle, currency, policy, row.mode, total
                     )
+                await self._warn(
+                    session,
+                    cycle,
+                    currency,
+                    policy,
+                    row.warned_fraction,
+                    total,
+                    fraction,
+                )
+                return None
 
-    async def note_rate_limited(self) -> None:
-        """A hard ``rejected`` rate limit — treat like exhaustion: pause + ask."""
+    async def note_rate_limited(self, currency: str) -> str | None:
+        """A hard ``rejected`` rate limit on ``currency`` — treat like exhaustion.
+
+        Runs the currency's exhaustion action (pause+card, or downgrade); returns
+        :data:`EFFECT_DOWNGRADE` when it downgraded, else ``None``. An informational or
+        unknown currency is a no-op (its Max limits are absorbed elsewhere).
+        """
+        policy = self._policies.get(currency)
+        if policy is None or policy.action == ACTION_NONE:
+            return None
         async with self._lock:
             cycle = self._cycle()
             async with self._session_factory() as session:
-                row = await usage.get_row(session, cycle)
+                row = await usage.get_row(session, cycle, currency)
                 mode = row.mode if row is not None else usage.MODE_NORMAL
-                total = row.total_cost_usd if row is not None else 0.0
-                await self._exhaust(session, cycle, mode, total, rate_limited=True)
+                total = row.amount if row is not None else 0.0
+                return await self._exhaust(
+                    session, cycle, currency, policy, mode, total, rate_limited=True
+                )
 
-    async def mode(self) -> str:
-        """The cycle's persisted budget mode (``MODE_NORMAL`` when no row yet)."""
+    async def mode(self, currency: str) -> str:
+        """``currency``'s persisted mode this cycle (``MODE_NORMAL`` when no row)."""
         async with self._session_factory() as session:
-            row = await usage.get_row(session, self._cycle())
+            row = await usage.get_row(session, self._cycle(), currency)
             return row.mode if row is not None else usage.MODE_NORMAL
+
+    async def _accumulate(
+        self,
+        session: AsyncSession,
+        cycle: str,
+        currency: str,
+        policy: CurrencyPolicy,
+        amount: float,
+    ) -> float:
+        if policy.accumulation == ACCUM_MAX:
+            return await usage.raise_amount(
+                session, cycle=cycle, currency=currency, amount=amount
+            )
+        return await usage.add_amount(
+            session, cycle=cycle, currency=currency, amount=amount
+        )
 
     async def _warn(
         self,
         session: AsyncSession,
         cycle: str,
+        currency: str,
+        policy: CurrencyPolicy,
         warned_fraction: float,
         total: float,
         fraction: float,
     ) -> None:
         """Warn once for the highest tier newly crossed past the high-water mark."""
-        crossed = [f for f in self._warn_fractions if warned_fraction < f <= fraction]
+        tiers = sorted(policy.warn_fractions)
+        crossed = [f for f in tiers if warned_fraction < f <= fraction]
         if not crossed:
             return
-        await usage.mark_warned(session, cycle=cycle, fraction=crossed[-1])
-        await self._io.send(self._owner_inbox, self._warn_text(total, fraction))
+        await usage.mark_warned(
+            session, cycle=cycle, currency=currency, fraction=crossed[-1]
+        )
+        await self._io.send(
+            self._owner_inbox, self._warn_text(currency, policy, total, fraction)
+        )
 
     async def _exhaust(
         self,
         session: AsyncSession,
         cycle: str,
+        currency: str,
+        policy: CurrencyPolicy,
         mode: str,
         total: float,
         *,
         rate_limited: bool = False,
-    ) -> None:
-        """Flip a still-``normal`` cycle to ``paused`` and post the choice card once.
+    ) -> str | None:
+        """Run ``currency``'s exhaustion action once, only while it is still ``normal``.
 
-        Only ``normal`` is acted on: once the owner has chosen (continue/overflow/
-        downgraded) or it is already paused, further over-budget turns must not re-pause
-        or re-card.
+        Once a threshold action has fired (or the owner has chosen), further over-budget
+        turns in the same cycle must not re-pause, re-card, or re-downgrade.
         """
         if mode != usage.MODE_NORMAL:
-            return
-        await usage.set_mode(session, cycle=cycle, mode=usage.MODE_PAUSED)
-        # Mark every tier as warned so no stale threshold warning fires after the card.
-        await usage.mark_warned(session, cycle=cycle, fraction=1.0)
-        card = BudgetCard(cycle=cycle, text=self._card_text(total, rate_limited))
+            return None
+        # Mark every tier warned so no stale threshold warning fires after the action.
+        await usage.mark_warned(session, cycle=cycle, currency=currency, fraction=1.0)
+        if policy.action == ACTION_DOWNGRADE:
+            await usage.set_mode(
+                session, cycle=cycle, currency=currency, mode=usage.MODE_DOWNGRADED
+            )
+            await self._io.send(
+                self._owner_inbox, self._downgrade_text(currency, policy, total)
+            )
+            return EFFECT_DOWNGRADE
+        await usage.set_mode(
+            session, cycle=cycle, currency=currency, mode=usage.MODE_PAUSED
+        )
+        card = BudgetCard(
+            cycle=cycle, text=self._card_text(currency, policy, total, rate_limited)
+        )
         await self._io.send_budget_card(self._owner_inbox, card)
+        return None
 
-    def _warn_text(self, total: float, fraction: float) -> str:
+    def _warn_text(
+        self, currency: str, policy: CurrencyPolicy, total: float, fraction: float
+    ) -> str:
+        label = _CURRENCY_LABEL[currency]
         return (
-            f"⚠️ Budget: ${total:.2f} of ${self._credit:.2f} used "
-            f"({fraction:.0%} of the monthly credit)."
+            f"⚠️ Budget: {_fmt_amount(currency, total)} of "
+            f"{_fmt_amount(currency, policy.cap)} {label} used ({fraction:.0%})."
         )
 
-    def _card_text(self, total: float, rate_limited: bool) -> str:
+    def _downgrade_text(
+        self, currency: str, policy: CurrencyPolicy, total: float
+    ) -> str:
+        label = _CURRENCY_LABEL[currency]
+        return (
+            f"⚡ Budget reached: {_fmt_amount(currency, total)} of "
+            f"{_fmt_amount(currency, policy.cap)} {label}. "
+            "Downgrading routed categories to Copilot for this cycle."
+        )
+
+    def _card_text(
+        self, currency: str, policy: CurrencyPolicy, total: float, rate_limited: bool
+    ) -> str:
+        label = _CURRENCY_LABEL[currency]
         if rate_limited:
-            head = "🛑 Rate limited by the API — pausing to avoid burning credit."
+            head = "🛑 Rate limited by the API — pausing to avoid burning quota."
         else:
-            head = f"🛑 Budget reached: ${total:.2f} of ${self._credit:.2f} used."
+            head = (
+                f"🛑 Budget reached: {_fmt_amount(currency, total)} of "
+                f"{_fmt_amount(currency, policy.cap)} {label} used."
+            )
         return f"{head} Pick how to continue:"

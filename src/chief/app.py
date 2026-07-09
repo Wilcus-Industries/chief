@@ -29,7 +29,16 @@ from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core import screening
 from .core.backend import select_backend
-from .core.budget import BudgetGate, BudgetIO
+from .core.budget import (
+    ACCUM_ADD,
+    ACCUM_MAX,
+    ACTION_DOWNGRADE,
+    ACTION_NONE,
+    ACTION_PAUSE,
+    BudgetGate,
+    BudgetIO,
+    CurrencyPolicy,
+)
 from .core.copilot_session import openrouter_provider_config
 from .core.routing import RoutingStore
 from .core.scheduler import Scheduler
@@ -42,6 +51,7 @@ from .memory.store import MemoryStore
 from .memory.versioning import GitVersioner, NullVersioner, Versioner
 from .obs.audit import AuditLog
 from .obs.logging import configure_logging
+from .persistence import usage
 from .persistence.db import create_engine, init_db, session_factory
 from .tools.browser import mcp as browser_mcp
 from .tools.calendar import mcp as calendar_mcp
@@ -298,11 +308,13 @@ def build_budget(
     io: BudgetIO,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> BudgetGate | None:
-    """The usage-budget gate (M9), or ``None`` when budgeting is disabled.
+    """The per-currency usage-budget gate (#84), or ``None`` when budgeting is disabled.
 
-    Like the scheduler, the budget routes every warning and the choice card to the
-    owner inbox (``primary_thread_key``), so enabling it requires that key be set —
-    asserted here (there is no config validator, since the gate is inert when off).
+    Builds one :class:`CurrencyPolicy` per native currency (#84): Copilot premium
+    requests (a cumulative count vs ``premium_request_cap`` → pause), OpenRouter dollars
+    (additive spend vs ``openrouter_dollar_cap`` → downgrade), and bridge turns
+    (informational, no cap). Like the scheduler, every warning and the choice card route
+    to the owner inbox (``primary_thread_key``), so enabling it needs that key set.
     """
     if not settings.budget_enabled:
         return None
@@ -310,13 +322,36 @@ def build_budget(
         "budget_enabled requires primary_thread_key — budget warnings and the "
         "choice card have nowhere to land without it"
     )
+    warn = settings.budget_warn_fractions
+    exhaust = settings.budget_exhaust_fraction
+    policies = {
+        usage.PREMIUM_REQUESTS: CurrencyPolicy(
+            cap=float(settings.premium_request_cap),
+            warn_fractions=warn,
+            exhaust_fraction=exhaust,
+            accumulation=ACCUM_MAX,
+            action=ACTION_PAUSE,
+        ),
+        usage.OPENROUTER_DOLLARS: CurrencyPolicy(
+            cap=settings.openrouter_dollar_cap,
+            warn_fractions=warn,
+            exhaust_fraction=exhaust,
+            accumulation=ACCUM_ADD,
+            action=ACTION_DOWNGRADE,
+        ),
+        usage.BRIDGE_TURNS: CurrencyPolicy(
+            cap=float("inf"),
+            warn_fractions=(),
+            exhaust_fraction=1.0,
+            accumulation=ACCUM_ADD,
+            action=ACTION_NONE,
+        ),
+    }
     return BudgetGate(
         session_factory=session_factory,
         io=io,
         owner_inbox=settings.primary_thread_key,
-        monthly_credit_usd=settings.monthly_credit_usd,
-        warn_fractions=settings.budget_warn_fractions,
-        exhaust_fraction=settings.budget_exhaust_fraction,
+        policies=policies,
         owner_tz=settings.owner_tz,
         anchor_day=settings.budget_cycle_anchor_day,
     )
@@ -446,6 +481,14 @@ def build_engine(
         ),
         budget_downgrade_model=(
             settings.budget_downgrade_model if budget is not None else None
+        ),
+        # A plain-quota owner turn spends the backend's native currency (#84): the
+        # Copilot backend burns premium requests; the Claude backend rides the Max
+        # bridge, counted informationally only (limits absorbed by backoff, unbudgeted).
+        native_quota_currency=(
+            usage.BRIDGE_TURNS
+            if settings.agent_backend == "claude"
+            else usage.PREMIUM_REQUESTS
         ),
         # Group chats (M11): cap on the per-group ambient buffer.
         group_context_max_messages=settings.group_context_max_messages,
