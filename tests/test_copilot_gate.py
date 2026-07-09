@@ -166,17 +166,36 @@ def test_normalize_custom_tool_passes_name_and_args_through() -> None:
     assert normalize_permission_request(req) == ("lookup_issue", {"id": "42"})
 
 
-def test_normalize_mcp_passes_name_and_args_through() -> None:
+def test_normalize_mcp_qualifies_bare_tool_name_with_server() -> None:
+    # #80 gate agreement: an MCP call arrives split as (server_name, bare tool_name);
+    # the two are re-joined into the mcp__<server>__<tool> name chief's allowlists /
+    # blacklist key off. A bare name here (the real wire shape) would silently un-gate.
     req = PermissionRequestMcp(
         read_only=False,
-        server_name="chief_shell",
-        tool_name="mcp__chief_shell__bash",
-        tool_title="bash",
-        args={"command": "ls"},
+        server_name="chief_calendar",
+        tool_name="list_events",
+        tool_title="List events",
+        args={"start": "today"},
     )
     assert normalize_permission_request(req) == (
-        "mcp__chief_shell__bash",
-        {"command": "ls"},
+        "mcp__chief_calendar__list_events",
+        {"start": "today"},
+    )
+
+
+def test_normalize_mcp_does_not_double_qualify_prefixed_name() -> None:
+    # Defensive: a tool_name already carrying the mcp__ prefix passes through unchanged,
+    # so the mapping holds whether the runtime sends the bare or pre-qualified form.
+    req = PermissionRequestMcp(
+        read_only=False,
+        server_name="chief_calendar",
+        tool_name="mcp__chief_calendar__list_events",
+        tool_title="List events",
+        args={"start": "today"},
+    )
+    assert normalize_permission_request(req) == (
+        "mcp__chief_calendar__list_events",
+        {"start": "today"},
     )
 
 
