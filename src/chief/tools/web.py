@@ -1,11 +1,11 @@
 """chief-owned ``web-fetch`` + ``web-search`` custom tools (#81, part of #72).
 
-The Copilot SDK has no built-in web tools (unlike claude-agent-sdk's ``WebFetch`` /
-``WebSearch``), so chief owns them. Built the :mod:`chief.tools.shell` way (``@tool`` +
-:func:`create_sdk_mcp_server`), one in-process MCP server named ``chief_web`` reaches
-**both** backends automatically: claude-agent-sdk takes the ``mcp_servers`` entry
-directly, and :func:`chief.core.copilot_tools.partition_mcp_servers` converts it to a
-flat Copilot tool. So the tools are written once, not per backend.
+The Copilot SDK has no built-in web tools (the retired claude-agent-sdk backend had
+``WebFetch`` / ``WebSearch``), so chief owns them. Built the :mod:`chief.tools.shell`
+way (``@tool`` + :func:`create_sdk_mcp_server` from :mod:`chief.tools.inprocess`), one
+in-process server named ``chief_web`` is threaded into every owner session's
+``mcp_servers`` and :func:`chief.core.copilot_tools.partition_mcp_servers` converts it
+to a flat Copilot tool.
 
 **SSRF guard (security).** Core runs host-native (no sandbox container), so a bare
 ``httpx.get(url)`` on a model-supplied URL is a real server-side-request-forgery surface

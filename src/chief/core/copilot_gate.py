@@ -3,9 +3,9 @@
 chief's gate (:mod:`chief.gate.gate`) is SDK-agnostic: :func:`~chief.gate.gate.classify`
 rules on a ``(tool_name, tool_input)`` pair, :func:`~chief.gate.gate.build_can_use_tool`
 owns the ASK → approval-card round-trip, and :func:`~chief.gate.gate.build_pretool_hook`
-is the fast classify+audit pass. The claude-agent-sdk backend feeds those two callbacks
-straight to the SDK. The Copilot SDK exposes the *same two seams* under different names
-and shapes, so this module is the thin boundary adapter between them.
+is the fast classify+audit pass. Those callbacks are spelled in chief's own SDK-neutral
+vocabulary (:mod:`chief.gate.types`); the Copilot SDK exposes the *same two seams* under
+different names and shapes, so this module is the thin boundary adapter between them.
 
 **The two seams.**
 
@@ -94,12 +94,12 @@ from ..gate.types import (
 
 logger = logging.getLogger("chief.core.copilot_gate")
 
-#: chief's sandbox-shell command-tool name. Copilot's native ``shell`` permission kind
+#: chief's host-shell command-tool name. Copilot's native ``shell`` permission kind
 #: normalizes to it so the command string flows through the same ``COMMAND_TOOLS``
-#: safe-match (and "Run: …" approval preview) as the claude-agent-sdk path, and so an
-#: un-approved shell command falls through :func:`classify` to ASK — never a hard DENY
-#: (the built-in ``Bash`` hard-DENY is specific to the claude-agent-sdk in-core shell,
-#: which reaches the Max OAuth token; Copilot's shell runs in the separate runtime).
+#: safe-match (and "Run: …" approval preview) as chief's own ``bash`` tool, and so an
+#: un-approved shell command falls through :func:`classify` to ASK — never a hard DENY.
+#: (The built-in ``Bash`` hard-DENY names a separate SDK built-in chief keeps disabled
+#: so it can't run as a second, un-blacklisted shell beside the per-task host shell.)
 COPILOT_SHELL_TOOL = "mcp__chief_shell__bash"
 
 #: The ``on_permission_request`` callback shape: a kind-tagged request plus the SDK's

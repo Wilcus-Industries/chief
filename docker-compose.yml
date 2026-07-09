@@ -33,9 +33,9 @@ services:
   #     ./secrets/google_tokens/google_token.json          → primary (default) account
   #     ./secrets/google_tokens/google_token_work.json     → account labeled "work@corp.com"
   #   Only the dedicated ./secrets/google_tokens/ subdirectory is mounted at /token so
-  #   unrelated secrets (claude_code_oauth_token, discord_bot_token,
-  #   google_oauth_client.json, telegram_bot_token) are never visible inside this
-  #   container (issue #57).  The whole ./secrets dir is intentionally NOT mounted here.
+  #   unrelated secrets (discord_bot_token, google_oauth_client.json,
+  #   telegram_bot_token) are never visible inside this container (issue #57).  The
+  #   whole ./secrets dir is intentionally NOT mounted here.
   mcp-calendar:
     profiles: ["google"]
     build:

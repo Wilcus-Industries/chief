@@ -552,8 +552,8 @@ def test_mcp_calendar_token_mount_uses_dedicated_subdir() -> None:
     """mcp-calendar /token must be mounted from ./secrets/google_tokens, not ./secrets.
 
     Mounting the whole ./secrets directory exposes unrelated secrets
-    (claude_code_oauth_token, discord_bot_token, google_oauth_client.json,
-    telegram_bot_token) inside the calendar container.  A compromise of the
+    (discord_bot_token, google_oauth_client.json, telegram_bot_token) inside the
+    calendar container.  A compromise of the
     calendar container or its supply chain would leak those secrets.  Only the
     dedicated google_tokens subdirectory — containing solely google_token*.json
     files — may be mounted at /token (issue #57).
@@ -567,8 +567,8 @@ def test_mcp_calendar_token_mount_uses_dedicated_subdir() -> None:
     host_source = entry.split(":")[0]
     assert host_source != _SECRETS_DIR, (
         f"mcp-calendar mounts the entire secrets directory ({_SECRETS_DIR!r}) at "
-        f"{_CALENDAR_TOKEN_DIR!r}.  This exposes claude_code_oauth_token, "
-        "discord_bot_token, google_oauth_client.json and telegram_bot_token inside "
+        f"{_CALENDAR_TOKEN_DIR!r}.  This exposes discord_bot_token, "
+        "google_oauth_client.json and telegram_bot_token inside "
         "the container.  Change the host source to the dedicated tokens subdir: "
         f"'- {_CALENDAR_TOKEN_HOST_SOURCE}:{_CALENDAR_TOKEN_DIR}:ro' (issue #57)."
     )
