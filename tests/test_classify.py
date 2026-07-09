@@ -220,12 +220,14 @@ class _FakeCondSession:
         *,
         raise_on_turn: bool = False,
         hang: bool = False,
+        hang_close: bool = False,
         **kwargs: Any,
     ) -> None:
         self.kwargs = kwargs
         self._reply = reply
         self._raise = raise_on_turn
         self._hang = hang
+        self._hang_close = hang_close
         self.closed = False
         self.session_id: str | None = None
         self.last_cost_usd = 0.0
@@ -243,6 +245,8 @@ class _FakeCondSession:
     async def interrupt(self) -> None: ...
     async def set_model(self, model: str) -> None: ...
     async def aclose(self) -> None:
+        if self._hang_close:  # a wedged teardown that never terminates
+            await asyncio.Event().wait()
         self.closed = True
 
 
@@ -251,11 +255,16 @@ def _cond_factory(
     *,
     raise_on_turn: bool = False,
     hang: bool = False,
+    hang_close: bool = False,
     captured: dict[str, Any] | None = None,
 ) -> Any:
     def factory(**kwargs: Any) -> _FakeCondSession:
         session = _FakeCondSession(
-            reply, raise_on_turn=raise_on_turn, hang=hang, **kwargs
+            reply,
+            raise_on_turn=raise_on_turn,
+            hang=hang,
+            hang_close=hang_close,
+            **kwargs,
         )
         if captured is not None:
             captured["session"] = session
@@ -268,7 +277,7 @@ async def test_ask_condition_allow_lists_exactly_its_read_tools() -> None:
     # AC: the ephemeral session is built with the read tools allow-listed, and its
     # can_use_tool ALLOWs exactly those and DENYs anything else (read-only monitor).
     captured: dict[str, Any] = {}
-    reads = ["WebSearch", "mcp__gmail_chief__gmail_get_message"]
+    reads = ["mcp__chief_web__search", "mcp__gmail_chief__gmail_get_message"]
     result = await classify.ask_condition(
         "is there new mail?",
         model="m",
@@ -282,7 +291,7 @@ async def test_ask_condition_allow_lists_exactly_its_read_tools() -> None:
     can_use = session.kwargs["can_use_tool"]
     from chief.gate.types import PermissionResultAllow, PermissionResultDeny
 
-    allowed = await can_use("WebSearch", {}, None)
+    allowed = await can_use("mcp__chief_web__search", {}, None)
     denied = await can_use("Write", {"file_path": "/etc/x"}, None)
     assert isinstance(allowed, PermissionResultAllow)
     assert isinstance(denied, PermissionResultDeny)
@@ -291,7 +300,7 @@ async def test_ask_condition_allow_lists_exactly_its_read_tools() -> None:
 
 async def test_ask_condition_fails_safe_to_no_on_error() -> None:
     session = classify.ask_condition(
-        "?", model="m", allowed_tools=["WebSearch"],
+        "?", model="m", allowed_tools=["mcp__chief_web__search"],
         session_factory=_cond_factory("YES", raise_on_turn=True),
     )
     assert await session is False
@@ -299,7 +308,7 @@ async def test_ask_condition_fails_safe_to_no_on_error() -> None:
 
 async def test_ask_condition_parses_no() -> None:
     result = await classify.ask_condition(
-        "?", model="m", allowed_tools=["WebSearch"],
+        "?", model="m", allowed_tools=["mcp__chief_web__search"],
         session_factory=_cond_factory("NO"),
     )
     assert result is False
@@ -313,9 +322,31 @@ async def test_ask_condition_times_out_and_closes_session() -> None:
     result = await classify.ask_condition(
         "?",
         model="m",
-        allowed_tools=["WebSearch"],
+        allowed_tools=["mcp__chief_web__search"],
         session_factory=_cond_factory("YES", hang=True, captured=captured),
         timeout=0.05,
     )
     assert result is False
     assert captured["session"].closed is True
+
+
+async def test_ask_condition_time_boxes_a_wedged_teardown(
+    monkeypatch: Any,
+) -> None:
+    # MEDIUM-1 (round 2): on the timeout path the session is wedged by definition, so
+    # its aclose() — an unbounded disconnect/stop — can itself hang and re-freeze the
+    # scheduler tick loop the turn timeout just rescued. The finally must time-box the
+    # teardown too. Here the turn hangs (→ turn timeout) AND aclose hangs; the call
+    # must still fail safe to False and return promptly, not block on the wedged close.
+    monkeypatch.setattr(classify, "_CLOSE_TIMEOUT", 0.05)
+    # Outer guard: before the fix the unbounded aclose hangs forever, so this timeout
+    # fires and the test FAILS; after it, the bounded teardown returns well within it.
+    async with asyncio.timeout(5):
+        result = await classify.ask_condition(
+            "?",
+            model="m",
+            allowed_tools=["mcp__chief_web__search"],
+            session_factory=_cond_factory("YES", hang=True, hang_close=True),
+            timeout=0.05,
+        )
+    assert result is False

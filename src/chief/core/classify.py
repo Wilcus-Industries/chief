@@ -56,6 +56,13 @@ _MAX_TOKENS = 16
 #: timeout is the bound. Timeout → fail-safe ``False``.
 _CONDITION_TIMEOUT = 120.0
 
+#: Wall-clock bound (seconds) on the teardown that follows a monitor turn. On the
+#: timeout path the session is wedged by definition, and ``CopilotSession.aclose``
+#: awaits an unbounded ``disconnect``/``stop``; a hang there would re-block the same
+#: tick loop the turn timeout just rescued. Mirrors
+#: :data:`chief.core.tasks._RESET_TIMEOUT`.
+_CLOSE_TIMEOUT = 10.0
+
 #: The session-factory seam for :func:`ask_condition` (defaults to a real ephemeral
 #: :class:`~chief.core.backend.CopilotBackend` session; tests inject a fake).
 CondSessionFactory = Callable[..., SessionProto]
@@ -317,10 +324,12 @@ async def ask_condition(
     Google HTTP servers) — with a ``can_use_tool`` gate (:func:`_read_only_gate`) that
     allow-lists exactly those tools and denies everything else. The answer is the last
     non-empty final text, ``YES``/``NO``; anything else, or any exception, returns
-    ``False`` (a monitor never flips wrong). The turn is bounded by ``timeout`` seconds
-    (default :data:`_CONDITION_TIMEOUT`); a wedged turn times out to ``False`` and the
-    session is still closed, so it can never block the scheduler tick loop.
-    ``session_factory`` defaults to a real
+    ``False`` (a monitor never flips wrong). The whole call is awaited inline in the
+    scheduler tick loop, so both phases are time-boxed: the turn by ``timeout`` seconds
+    (default :data:`_CONDITION_TIMEOUT`, 120s) and the teardown that follows it by
+    :data:`_CLOSE_TIMEOUT` (10s) — a wedged turn times out to ``False`` and its
+    now-wedged session close is bounded too, so the worst-case inline block is their
+    sum, never unbounded. ``session_factory`` defaults to a real
     :class:`~chief.core.backend.CopilotBackend` session; tests inject a fake.
     """
     factory = (
@@ -350,7 +359,12 @@ async def ask_condition(
         return False
     finally:
         try:
-            await session.aclose()
+            # On the timeout path the session is wedged by definition, and aclose's
+            # disconnect/stop is itself unbounded — time-box it (mirrors tasks.py's
+            # _RESET_TIMEOUT) so a hung teardown can't re-freeze the tick loop. A
+            # TimeoutError here is an Exception, so it is swallowed by this except.
+            async with asyncio.timeout(_CLOSE_TIMEOUT):
+                await session.aclose()
         except Exception:
             logger.debug("ask_condition session close failed", exc_info=True)
     return answer.lower().startswith("yes")
