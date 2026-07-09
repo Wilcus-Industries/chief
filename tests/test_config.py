@@ -722,6 +722,10 @@ def test_web_fetch_tool_defaults_to_blacklist_and_screening(
     assert "mcp__chief_web__search" not in settings.blacklist_tools
     assert "mcp__chief_web__fetch" in settings.screening_tools
     assert "mcp__chief_web__search" in settings.screening_tools
+    # #88: the claude-agent-sdk built-in web tool names are gone (they no longer exist
+    # under the Copilot backend); chief's own two web tools carry the invariant.
+    assert "WebFetch" not in settings.screening_tools
+    assert "WebSearch" not in settings.screening_tools
 
 
 async def test_web_fetch_blacklist_drives_owner_ask(
@@ -793,7 +797,9 @@ def test_default_screening_tools_covers_gmail_drive_and_browser_actions(
 
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
-    assert "WebFetch" in settings.screening_tools  # pre-existing default retained
+    # #88: chief's own web tool carries the web channel now (the claude built-in
+    # ``WebFetch`` name was dropped — it no longer exists under the Copilot backend).
+    assert "mcp__chief_web__fetch" in settings.screening_tools
     for tool in (
         "mcp__gmail_chief__gmail_list_messages",
         "mcp__gmail_chief__gmail_get_message",

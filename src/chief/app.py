@@ -106,6 +106,25 @@ def load_settings() -> Settings:
     return Settings()
 
 
+def warn_if_classifier_keyless(settings: Settings) -> None:
+    """Warn once at boot when the OpenRouter key is missing (#88).
+
+    The cheap text classifiers (stop-intent steering, warrants-a-task auto-spawn, the
+    complexity/routing judgments) and injection screening all run as direct OpenRouter
+    one-shots now. Keyless, they make **no** HTTP call and fail safe — and screening
+    fails *open* (untrusted content passes UNSCREENED). That degradation is deliberate
+    (owner decision), so surface it loudly once rather than let it be silent.
+    """
+    if settings.openrouter_api_key is None:
+        logger.warning(
+            "openrouter_api_key is not set — the cheap classifiers (stop-intent "
+            "steering, warrants-a-task, complexity, routing) make no HTTP call and "
+            "fail safe (no interrupt, no spawn, no escalation), and injection "
+            "screening fails OPEN: untrusted web/browser/guest content reaches the "
+            "agent UNSCREENED. Set openrouter_api_key to enable them."
+        )
+
+
 def build_memory(settings: Settings) -> MemoryStore:
     """Construct the markdown memory store + its versioner from settings."""
     versioner: Versioner = (
@@ -431,6 +450,10 @@ def build_engine(
         ),
         routing_surface_defaults=settings.routing_surface_defaults,
         classifier_model=settings.classifier_model,
+        # The cheap text classifiers (steering, warrants-task, complexity, routing) run
+        # as direct OpenRouter one-shots (#88); this key authenticates them. None ⇒ they
+        # make no call and fail safe.
+        classifier_api_key=settings.openrouter_api_key,
         concurrency=settings.concurrency,
         turn_timeout=settings.turn_timeout_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
@@ -511,10 +534,14 @@ def build_engine(
             else None
         ),
         # Untrusted-content screening (host-native): web/browser tool results and the
-        # guest relay get a cheap Haiku injection screen; inert (None) when disabled.
+        # guest relay get a cheap OpenRouter injection screen; inert (None) when
+        # disabled. The OpenRouter key authenticates the screen call — keyless, it fails
+        # open (content passes unscreened); the boot warns once (#88).
         screener=(
             functools.partial(
-                screening.screen_text, model=settings.screening_model
+                screening.screen_text,
+                model=settings.screening_model,
+                api_key=settings.openrouter_api_key,
             )
             if settings.screening_enabled
             else None
@@ -735,6 +762,7 @@ async def serve(settings: Settings) -> None:
     needs no live connection (policy seed, memory scaffold/purge) runs once up front;
     per-platform recovery + approval re-arm fire in each stack's ``on_ready``.
     """
+    warn_if_classifier_keyless(settings)
     engine: AsyncEngine = create_engine(settings.db_path)
     await init_db(engine)
     factory = session_factory(engine)

@@ -301,6 +301,7 @@ class TaskManager:
         opus_auto_detect: bool = False,
         routing: RoutingStore | None = None,
         classify_category: CategoryClassifier = classify.classify_category,
+        classifier_api_key: str | None = None,
         openrouter_provider: ProviderConfig | None = None,
         routing_surface_defaults: dict[str, str] | None = None,
         default_category: str = DEFAULT_CATEGORY,
@@ -366,6 +367,11 @@ class TaskManager:
         # routing_surface_defaults pins a category per Surface. Inert (None) when off.
         self._routing = routing
         self._classify_category = classify_category
+        # The OpenRouter key the cheap text classifiers (stop-intent / warrants-task /
+        # complexity / category) authenticate their direct HTTP one-shots with (#88).
+        # None ⇒ they make no HTTP call and fail safe (no interrupt, no spawn, no
+        # escalation, routing falls back to the default category); the boot warns once.
+        self._classifier_api_key = classifier_api_key
         self._openrouter_provider = openrouter_provider
         self._routing_surface_defaults = routing_surface_defaults or {}
         self._default_category = default_category
@@ -530,7 +536,7 @@ class TaskManager:
             return
         is_casual = is_general
         if is_general and await self._warrants_task(
-            text, model=self._classifier_model
+            text, model=self._classifier_model, api_key=self._classifier_api_key
         ):
             new_key = await self._io.create_thread(
                 like_thread_key=thread_key, title=_title(text)
@@ -1204,7 +1210,11 @@ class TaskManager:
         self._cancel_idle(task)
         if task.generating:
             if (
-                await self._stop_intent(turn.text, model=self._classifier_model)
+                await self._stop_intent(
+                    turn.text,
+                    model=self._classifier_model,
+                    api_key=self._classifier_api_key,
+                )
                 and task.generating
             ):
                 await task.session.interrupt()
@@ -1315,6 +1325,7 @@ class TaskManager:
                 categories=self._routing.categories(),
                 default=self._default_category,
                 descriptions=self._routing.descriptions(),
+                api_key=self._classifier_api_key,
             )
         return self._default_category
 
@@ -1611,7 +1622,9 @@ class TaskManager:
             or self._approvals is None
         ):
             return
-        if not await self._is_complex(text, model=self._classifier_model):
+        if not await self._is_complex(
+            text, model=self._classifier_model, api_key=self._classifier_api_key
+        ):
             return
         route = self._approval_route(
             tier="owner", thread_key=task.thread_key, surface=task.surface
