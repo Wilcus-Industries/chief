@@ -109,8 +109,8 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
 | Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (secrets-dir file or env); never set `ANTHROPIC_API_KEY`; regen yearly |
 | Gate mechanism | `PreToolUse` hook (every tool) + `canUseTool` (ask→approval) — verified |
-| Usage budget | Meter each turn in its native currency, no cross-currency conversion (#84): Copilot premium requests (raw count vs a monthly cap), OpenRouter dollars (metered BYOK spend vs a dollar cap), bridge turns (informational, uncapped). Warn at configured thresholds (default 75/90%) |
-| Budget exhaustion | Premium requests: pause + owner choice card (downgrade to Copilot `auto` / continue full-quality / approve overflow past the cap). OpenRouter dollars: silently auto-downgrade routed categories onto Copilot `auto`, no card. Bridge turns: never acts |
+| Usage budget | Meter each turn in its native currency, no cross-currency conversion (#84): Copilot premium requests (raw count vs a monthly cap), OpenRouter dollars (metered BYOK spend vs a dollar cap). Warn at configured thresholds (default 75/90%). A third currency, bridge turns, is retired and inert (#100) |
+| Budget exhaustion | Premium requests: pause + owner choice card (downgrade to Copilot `auto` / continue full-quality / approve overflow past the cap). OpenRouter dollars: silently auto-downgrade routed categories onto Copilot `auto`, no card |
 | Guest billing | Owner's subscription credit pays for all (no separate guest key in v1); ToS grey-area noted |
 | Proactivity | Reactive + reminders only; no unsolicited nudges |
 | Scheduler | Reminders + recurring + monitors (predicate→action); chief self-manages; gate still applies |
@@ -555,16 +555,21 @@ in **whichever native currency it actually spent**, with **no cross-currency con
   default 200 — the Student plan pool, spike #74).
 - **OpenRouter dollars** — metered BYOK spend, summed per turn, against a dollar cap
   (`openrouter_dollar_cap`).
-- **Bridge turns** — an informational per-turn count on the Claude Max bridge; never
-  capped or acted on (Max limits are absorbed by the resilience slice's backoff/queue,
-  not budgeted here).
+- **Bridge turns** — *retired, inert.* An informational per-turn count that was to meter
+  a Claude Max bridge; never capped or acted on. The bridge was dropped (#85/#86 closed
+  won't-do, 2026-07-09: proxying a consumer Max subscription as a programmatic backend is
+  a terms-of-service risk on a personal account, and the proxy handles long-lived OAuth
+  credentials). **No `bridge` target class exists** — the routing classes are `copilot`
+  and `openrouter`, and nothing can increment this counter. The currency remains in the
+  schema; retiring it is tracked in #100. Effectively the budget model is **two**
+  currencies.
 
 - **Track spend per currency, not a blended total.** Each currency accumulates its own
   month-to-date row, keyed `(cycle, currency)` (`persistence/usage.py`), persisted
   (sqlite), resetting on the configured cycle-anchor day in the owner's tz. Premium
   requests accumulate as a monotonic high-water mark (the Copilot SDK reports a
   cumulative snapshot, so a stale or repeated reading can't double-count); OpenRouter
-  dollars and bridge turns sum per-turn deltas.
+  dollars sum per-turn deltas (as would bridge turns, were the currency live).
 - **Thresholds.** Warn the owner once per configured fraction of a currency's cap
   (`budget_warn_fractions`, default 75%/90%). A hard `rejected` rate limit on a currency
   is also treated like exhaustion.
@@ -577,7 +582,7 @@ in **whichever native currency it actually spent**, with **no cross-currency con
     re-targets every routed openrouter category onto Copilot `auto` for the rest of the
     cycle (budget downgrade sits above routing in precedence) and switches any live
     routed sessions across.
-  - **Bridge turns** never act — count only.
+  - **Bridge turns** never act — count only (and never increment; see above).
 - **Persisted per-currency mode**, restart-proof (the admission-card pattern): each
   currency's mode (normal/paused/downgraded/continue/overflow) survives a restart, so a
   pause or a card choice isn't lost.
@@ -936,8 +941,8 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
 - **M9 scheduler — ✅ done.** reminders + recurring + monitors, quiet hours, uptime
   heartbeat, and **usage budgeting** (reworked onto native currencies in #84, part of
   #72): each turn is metered in the currency it actually spent — Copilot premium requests
-  (a raw count vs the 200/mo cap), OpenRouter dollars (metered spend vs a dollar cap), or
-  bridge turns (informational only) — with no cross-currency conversion (`core/budget.py`,
+  (a raw count vs the 200/mo cap) or OpenRouter dollars (metered spend vs a dollar cap);
+  a third, bridge turns, is retired and inert (#100) — with no cross-currency conversion (`core/budget.py`,
   `persistence/usage.py`). Each currency warns once per threshold and on exhaustion runs
   its own action: premium requests pause the cycle + post a choice card, OpenRouter
   dollars downgrade the routed openrouter categories onto Copilot `auto` (precedence
