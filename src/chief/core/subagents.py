@@ -171,18 +171,21 @@ def skill_directories_for(plugin_path: str, curated: Sequence[str]) -> list[str]
     ``curated`` — the copilot analogue of claude-agent-sdk's ``skills=`` name filter,
     which chief uses to scope exactly the enable-list.
 
-    PORTING GAPS (the RISK #87 flags — the mapping is not 1:1):
+    PORTING GAPS (the mapping is not 1:1):
 
-    * **Directory semantics.** Each returned entry is a single skill's own directory
-      (the one holding its SKILL.md). If the Copilot runtime instead treats
-      ``skill_directories`` as *parent* roots to scan, it may not discover a skill dir
-      handed to it directly — the interpretation is not verifiable from the Python SDK
-      surface (the runtime is a separate process). This precise per-skill form is the
-      deliberate choice because it preserves the curated scoping; a parent-root form
-      would re-expose the whole upstream set and need ``disabled_skills`` to trim.
     * **No name-filter equivalent.** Copilot has no ``skills=`` allow-filter; scoping is
       done by *which directories* are handed in (here) plus ``enable_skills`` /
       ``disabled_skills``. chief relies on the former.
+
+    **Directory semantics — verified against the live Copilot runtime 1.0.67 (#98).**
+    The runtime scans each ``skill_directories`` entry *recursively* for SKILL.md,
+    and also discovers a directory whose SKILL.md sits directly inside it. Both hold
+    at once, so the per-skill form returned here resolves to exactly the curated set,
+    while a parent root (e.g. ``vendor/chief-skills/upstream/``) would resolve to all
+    18 upstream skills. Every entry must therefore stay a *leaf* — one SKILL.md in
+    its subtree, its own. A dir with a nested SKILL.md below it would silently
+    re-expose an uncurated skill;
+    ``test_skill_directories_are_leaf_dirs_never_parent_roots`` guards that.
     """
     manifest_path = Path(plugin_path) / ".claude-plugin" / "plugin.json"
     manifest: dict[str, list[str]] = json.loads(manifest_path.read_text())
