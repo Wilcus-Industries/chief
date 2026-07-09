@@ -350,6 +350,9 @@ class TestTaskManagerAccountInjection:
         *,
         sessions: list[CaptureSession],
         sdk_factory: Any,
+        routing: Any = None,
+        openrouter_provider: Any = None,
+        routing_surface_defaults: dict[str, str] | None = None,
     ) -> TaskManager:
         from chief.tools.google import GoogleService
         from chief.tools.google.accounts import GoogleAccount
@@ -382,6 +385,9 @@ class TestTaskManagerAccountInjection:
             set_account_service=set_account_svc,
             memory=memory,
             memory_dir=str(tmp_path / "memory"),
+            routing=routing,
+            openrouter_provider=openrouter_provider,
+            routing_surface_defaults=routing_surface_defaults or {},
         )
 
     @pytest.mark.asyncio
@@ -502,6 +508,81 @@ class TestTaskManagerAccountInjection:
             f"Thread B expected personal@example.com, got {label_b!r}"
         )
         assert label_a != label_b, "Cross-talk: both threads got the same account label"
+
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_route_respawn_carries_active_account(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """``/route`` respawns a live session onto a new target (issue #79); the
+        rebuilt session must keep the thread's pinned account (issue #91) — same
+        ``X-Account-Label`` on the calendar MCP config as before the respawn."""
+        from copilot import ProviderConfig
+
+        from chief.core.routing import RoutingStore
+
+        openrouter = ProviderConfig(
+            base_url="https://openrouter.ai/api/v1", api_key="k"
+        )
+        routing = RoutingStore(session_factory)
+        await routing.seed(
+            [
+                ("general", "copilot", "auto"),
+                ("code", "openrouter", "deepseek/deepseek-v4-flash"),
+            ]
+        )
+
+        sessions, factory = _make_session_capturer()
+        mgr = self._make_manager(
+            session_factory,
+            tmp_path,
+            sessions=sessions,
+            sdk_factory=factory,
+            routing=routing,
+            openrouter_provider=openrouter,
+            # Pin the DM surface to "general" so spawn never needs the real
+            # classifier — deterministic without stubbing classify_category.
+            routing_surface_defaults={"dm": "general"},
+        )
+
+        async with session_factory() as session:
+            task = await get_or_create_task(
+                session,
+                platform="telegram",
+                thread_key="thread:route-acct",
+                tier="owner",
+            )
+            await set_active_account(session, task, "work@corp.com")
+
+        await mgr.dispatch(thread_key="thread:route-acct", text="hello")
+        assert sessions, "Expected initial session to be created"
+        initial_headers = (
+            sessions[0]
+            .kwargs.get("mcp_servers", {})
+            .get("calendar", {})
+            .get("headers", {})
+        )
+        assert initial_headers.get("X-Account-Label") == "work@corp.com"
+
+        await mgr.route("thread:route-acct", "code")
+
+        assert len(sessions) == 2, (
+            f"Expected the /route respawn to open a second session, got "
+            f"{len(sessions)}"
+        )
+        respawned_headers = (
+            sessions[-1]
+            .kwargs.get("mcp_servers", {})
+            .get("calendar", {})
+            .get("headers", {})
+        )
+        assert respawned_headers.get("X-Account-Label") == "work@corp.com", (
+            "The /route respawn dropped the thread's pinned Google account — "
+            f"got {respawned_headers!r}"
+        )
 
         await mgr.shutdown()
 
