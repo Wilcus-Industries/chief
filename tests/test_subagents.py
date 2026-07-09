@@ -176,3 +176,26 @@ def test_skill_directories_excludes_non_curated() -> None:
 
 def test_skill_directories_empty_when_nothing_curated() -> None:
     assert skill_directories_for(_PLUGIN, ()) == []
+
+
+def test_skill_directories_are_leaf_dirs_never_parent_roots() -> None:
+    # Verified against the live Copilot runtime 1.0.67 (#98): it resolves each
+    # skill_directories entry by scanning it *recursively* for SKILL.md. Handing it
+    # vendor/chief-skills/upstream/ yields all 18 upstream skills; handing it a dir
+    # whose SKILL.md sits directly inside yields exactly that one. Curation rests on
+    # every entry being a leaf — one SKILL.md in its whole subtree, its own. A dir
+    # with a nested SKILL.md below it would silently re-expose an uncurated skill.
+    from chief.config import Settings
+
+    curated = Settings.model_fields["default_skills"].default
+    dirs = skill_directories_for(_PLUGIN, curated)
+
+    assert len(dirs) == len(curated)
+    for path in dirs:
+        found = list(Path(path).rglob("SKILL.md"))
+        assert found == [Path(path) / "SKILL.md"], f"{path} is a parent root"
+
+    # Positive control for the scan semantics the guard defends against: the upstream
+    # root really does hold many SKILL.md, so passing it would leak the uncurated set.
+    upstream_root = Path(_PLUGIN) / "upstream"
+    assert len(list(upstream_root.rglob("SKILL.md"))) > len(curated)
