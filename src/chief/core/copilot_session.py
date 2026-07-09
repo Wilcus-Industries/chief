@@ -23,7 +23,7 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
   the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost),
   ``last_served_model`` (``data.model`` — the actually-served model, #90), and
   ``last_premium_requests`` (raw per-quota used-request counts, #80 — see
-  :func:`read_premium_requests`; recorded only, not wired into the dollar budget).
+  :func:`read_premium_requests`; summed into the premium-request budget currency, #84).
 * ``session.limits_exhausted`` → ``last_rate_limit_status = "rejected"`` so the budget
   gate can back off — Copilot's quota model has no per-turn allowed/warning status like
   claude-agent-sdk's ``RateLimitEvent``, so ``rejected`` is the only synthesised signal.
@@ -309,9 +309,10 @@ def read_premium_requests(data: AssistantUsageData) -> dict[str, int]:
     reshaped field yields ``{}`` (no count), never a crash, since the field is not part
     of the SDK's public surface.
 
-    SCOPE (#80, part of #72): this captures the **raw counts only**. It is deliberately
-    *not* wired into the dollar-based budget (:class:`~chief.core.budget.BudgetGate` /
-    ``MonthlyCost`` cap/warn/pause/downgrade) — that is rebuilt in the budget slice.
+    SCOPE (#80, part of #72): this captures the **raw counts only**. The budget slice
+    (#84) sums them (:func:`chief.core.budget.premium_request_total`) into the
+    premium-request currency, metered against the monthly cap by
+    :class:`~chief.core.budget.BudgetGate`.
     """
     snapshots = getattr(data, "_quota_snapshots", None)
     if not snapshots:
@@ -405,8 +406,8 @@ class CopilotTaskSession:
         #: both report it here regardless of what was requested. Reset each turn.
         self.last_served_model: str | None = None
         #: This turn's raw premium-request counts (quota name → used-requests), captured
-        #: from usage events via :func:`read_premium_requests` (#80). Reset each turn.
-        #: SCOPE: recorded only — not wired into the dollar budget (budget slice).
+        #: from usage events via :func:`read_premium_requests` (#80). Reset each turn;
+        #: the engine sums them into the premium-request currency (#84).
         self.last_premium_requests: dict[str, int] = {}
 
     def _on_event(self, event: SessionEvent) -> None:

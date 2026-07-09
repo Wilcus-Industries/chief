@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
 from chief.core.agent import NO_REPLY
+from chief.core.budget import EFFECT_DOWNGRADE
 from chief.core.routing import RoutingStore
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
@@ -29,6 +30,7 @@ from chief.gate.policy import PolicyStore
 from chief.memory.store import Fact
 from chief.memory.versioning import GitVersioner, NullVersioner, Versioner
 from chief.obs.audit import AuditLog
+from chief.persistence import usage
 from chief.persistence.tasks import (
     CANCELLED,
     DONE,
@@ -95,6 +97,7 @@ class FakeSession:
         after_gate: list[Milestone] | None = None,
         cost: float = 0.0,
         rate_limit: str | None = None,
+        premium: dict[str, int] | None = None,
     ) -> None:
         self.model = model
         self.resume = resume
@@ -105,6 +108,9 @@ class FakeSession:
         self.closed = False
         self.last_cost_usd = 0.0
         self.last_rate_limit_status: str | None = None
+        #: Raw premium-request snapshot the engine sums into the premium currency (#84).
+        self._premium = premium or {}
+        self.last_premium_requests: dict[str, int] = {}
         #: Simulated served model (#79): defaults to the model the session was spawned
         #: on, so a routed session reports the target it actually ran (set in run_turn).
         self.last_served_model: str | None = None
@@ -130,6 +136,7 @@ class FakeSession:
         self.session_id = f"sess-{text}"
         self.last_cost_usd = self._cost
         self.last_rate_limit_status = self._rate_limit
+        self.last_premium_requests = dict(self._premium)  # this turn's quota snapshot
         self.last_served_model = self.model  # the target this session actually ran on
         for milestone in self._after_gate:  # yielded post-gate (after a cancel flips)
             yield milestone
@@ -148,20 +155,30 @@ class FakeSession:
 
 
 class FakeBudget:
-    """Structural BudgetGate: records spend, serves a fixed mode (M9 enforcement)."""
+    """Structural BudgetGate (#84): records per-currency usage, serves a fixed mode.
 
-    def __init__(self, *, mode_value: str = "normal") -> None:
+    ``mode_value`` is returned for every currency (enough for the precedence/pause
+    tests, which each exercise one currency); ``effect`` lets ``record`` simulate a
+    downgrade signal so the engine's live-switch reaction can be driven.
+    """
+
+    def __init__(
+        self, *, mode_value: str = "normal", effect: str | None = None
+    ) -> None:
         self._mode = mode_value
-        self.recorded: list[float] = []
-        self.rate_limited = 0
+        self._effect = effect
+        self.recorded: list[tuple[str, float]] = []
+        self.rate_limited: list[str] = []
 
-    async def record(self, cost: float) -> None:
-        self.recorded.append(cost)
+    async def record(self, currency: str, amount: float) -> str | None:
+        self.recorded.append((currency, amount))
+        return self._effect
 
-    async def note_rate_limited(self) -> None:
-        self.rate_limited += 1
+    async def note_rate_limited(self, currency: str) -> str | None:
+        self.rate_limited.append(currency)
+        return None
 
-    async def mode(self) -> str:
+    async def mode(self, currency: str) -> str:
         return self._mode
 
 
@@ -1852,20 +1869,21 @@ def test_io_and_platform_properties_expose_wiring(
 # ---- budget enforcement (M9) ---------------------------------------------
 
 
-async def test_clean_turn_records_spend(
+async def test_clean_copilot_turn_records_premium_requests(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     io = FakeIO()
-    sess = FakeSession(model="m", cost=4.25)
+    # A plain-quota (no BYOK provider) owner turn meters premium requests, not dollars —
+    # the raw snapshot is summed into the premium currency (#84).
+    sess = FakeSession(model="m", cost=4.25, premium={"premium": 3})
     budget = FakeBudget()
     mgr = _manager(session_factory, io, factory=_one(sess), budget=budget)
 
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: ("-100:5", "reply:hi") in io.sends)
 
-    # The turn's SDK cost rolls into the monthly total; no rate-limit note.
-    assert budget.recorded == [4.25]
-    assert budget.rate_limited == 0
+    assert budget.recorded == [(usage.PREMIUM_REQUESTS, 3.0)]
+    assert budget.rate_limited == []
     await mgr.shutdown()
 
 
@@ -1873,16 +1891,16 @@ async def test_rate_limit_rejection_notes_budget(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     io = FakeIO()
-    sess = FakeSession(model="m", cost=1.0, rate_limit="rejected")
+    sess = FakeSession(model="m", premium={"premium": 5}, rate_limit="rejected")
     budget = FakeBudget()
     mgr = _manager(session_factory, io, factory=_one(sess), budget=budget)
 
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: ("-100:5", "reply:hi") in io.sends)
 
-    # A hard rejection is treated like exhaustion — pause + ask.
-    assert budget.recorded == [1.0]
-    assert budget.rate_limited == 1
+    # A hard rejection is treated like exhaustion of that turn's currency — pause + ask.
+    assert budget.recorded == [(usage.PREMIUM_REQUESTS, 5.0)]
+    assert budget.rate_limited == [usage.PREMIUM_REQUESTS]
     await mgr.shutdown()
 
 
@@ -1992,6 +2010,107 @@ async def test_downgrade_live_sessions_spares_guest_sessions(
     # Only owner sessions follow the budget downgrade; a live guest keeps its model.
     assert owner_sess.model == "budget-model"
     assert guest_sess.model == "guest-model"
+    await mgr.shutdown()
+
+
+# ---- per-currency budget: openrouter dollars → downgrade (#84) ----------------
+
+
+async def test_openrouter_turn_records_dollars(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC1: a routed openrouter (BYOK) turn meters its cost in the dollar currency."""
+    io = FakeIO()
+
+    def factory(
+        *, model: str, provider: ProviderConfig | None = None, **_: Any
+    ) -> SessionProto:
+        return FakeSession(model=model, cost=2.5)  # this openrouter turn cost $2.50
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code"  # the openrouter DeepSeek target
+
+    budget = FakeBudget()
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=factory,
+        classify_category=fake_classify,
+        budget=budget,
+        downgrade_model="auto",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="fix this bug")
+    await _until(lambda: ("-100:5", "reply:fix this bug") in io.sends)
+
+    # Dollars, not premium: the BYOK provider marks the turn as openrouter (#84).
+    assert budget.recorded == [(usage.OPENROUTER_DOLLARS, 2.5)]
+    await mgr.shutdown()
+
+
+async def test_openrouter_exhaustion_downgrades_live_session_to_copilot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC2 (headline): when the gate signals a dollar-budget downgrade, the engine
+    re-targets the live openrouter session onto Copilot ``auto`` — a respawn across the
+    provider class via the #94 seam (a set_model can't drop the BYOK provider)."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code"  # openrouter DeepSeek
+
+    budget = FakeBudget(effect=EFFECT_DOWNGRADE)  # the turn trips the dollar cap
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+        budget=budget,
+        downgrade_model="auto",
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="fix this bug")
+    await _until(lambda: len(created) == 2)  # the record effect respawned the session
+
+    # The respawn crossed to plain Copilot auto (no BYOK provider), context preserved.
+    respawned = created[-1]
+    assert respawned["model"] == "auto"
+    assert respawned["provider"] is None
+    assert respawned["resume"] == "sess-fix this bug"
+    task = mgr._tasks["-100:5"]
+    assert task.model == "auto" and task.provider is None
+    await mgr.shutdown()
+
+
+async def test_downgraded_openrouter_category_resolves_to_copilot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC2: with the dollar budget downgraded, a new task in an openrouter category
+    resolves onto the cheaper Copilot class — the downgrade wins over the route,
+    precedence budget-downgrade > routing (#84)."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code"  # would route to openrouter DeepSeek at full budget
+
+    budget = FakeBudget(mode_value=usage.MODE_DOWNGRADED)
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+        budget=budget,
+        downgrade_model="auto",
+    )
+
+    await mgr.dispatch(thread_key="-100:9", text="fix this bug")
+    await _until(lambda: ("-100:9", "reply:fix this bug") in io.sends)
+
+    spawned = created[-1]
+    assert spawned["model"] == "auto"  # re-targeted off openrouter onto Copilot
+    assert spawned["provider"] is None
     await mgr.shutdown()
 
 
@@ -2698,6 +2817,8 @@ async def _routed_manager(
     openrouter_provider: ProviderConfig | None = _OPENROUTER,
     idle: float = 1000.0,
     compaction: float = 1000.0,
+    budget: Any = None,
+    downgrade_model: str | None = None,
 ) -> TaskManager:
     routing = RoutingStore(session_factory)
     await routing.seed(_ROUTES)
@@ -2715,6 +2836,8 @@ async def _routed_manager(
         classify_category=classify_category,
         openrouter_provider=openrouter_provider,
         routing_surface_defaults=surface_defaults or {},
+        budget=budget,
+        budget_downgrade_model=downgrade_model,
     )
 
 

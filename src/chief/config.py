@@ -325,20 +325,23 @@ class Settings(BaseSettings):
     # enforced at create time so an agent monitor can't poll every tick (Haiku budget).
     monitor_min_interval_seconds: int = 300
 
-    # Usage budgeting (M9), default off. After the June-15 billing change chief draws
-    # from a fixed monthly credit, so the risk is silently blowing it early. When
-    # enabled, per-turn SDK cost rolls into a month-to-date total; crossing a
-    # budget_warn_fractions tier warns the owner once, and reaching
-    # budget_exhaust_fraction pauses the owner's turns and posts a choice card
-    # (downgrade to budget_downgrade_model / continue full-quality / approve overflow).
-    # All warnings + the card route to primary_thread_key, so budget_enabled wants it
-    # set (shared with the scheduler). budget_cycle_anchor_day (1–28) picks the billing
-    # cycle's reset day in owner_tz. Inert when disabled — no model-validator needed.
+    # Usage budgeting (#84, part of #72), default off. chief meters each turn in the
+    # native currency it actually spent — no cross-currency conversion. Two currencies
+    # carry caps: Copilot premium_request_cap (raw count, 200/mo on the Student plan —
+    # spike #74) and openrouter_dollar_cap (metered BYOK spend). Each accumulates vs its
+    # cap; crossing a budget_warn_fractions tier warns the owner once, and reaching
+    # budget_exhaust_fraction runs that currency's action — premium requests pause the
+    # owner's turns + post a choice card, OpenRouter dollars downgrade the openrouter
+    # categories onto Copilot budget_downgrade_model (``auto``). Bridge turns are
+    # informational only (no cap). Warnings + the card route to primary_thread_key, so
+    # budget_enabled wants it set (as the scheduler does). budget_cycle_anchor_day
+    # (1–28) is the cycle reset day in owner_tz. Inert when disabled.
     budget_enabled: bool = False
-    monthly_credit_usd: float = 200.0
+    premium_request_cap: int = 200
+    openrouter_dollar_cap: float = 20.0
     budget_warn_fractions: tuple[float, ...] = (0.75, 0.90)
     budget_exhaust_fraction: float = 1.0
-    budget_downgrade_model: str = "claude-haiku-4-5-20251001"
+    budget_downgrade_model: str = "auto"
     budget_cycle_anchor_day: int = 1
 
     # Skills framework (M10), default off (mirror the opt-in subsystem pattern). The
@@ -527,12 +530,20 @@ class Settings(BaseSettings):
                 )
         return tuple(sorted(value))
 
-    @field_validator("monthly_credit_usd")
+    @field_validator("premium_request_cap")
     @classmethod
-    def _validate_credit(cls, value: float) -> float:
-        """The credit ceiling must be positive — :class:`BudgetGate` divides by it."""
+    def _validate_premium_cap(cls, value: int) -> int:
+        """The premium-request cap must be positive — the gate divides by it."""
         if value <= 0:
-            raise ValueError(f"monthly_credit_usd must be > 0, got {value!r}")
+            raise ValueError(f"premium_request_cap must be > 0, got {value!r}")
+        return value
+
+    @field_validator("openrouter_dollar_cap")
+    @classmethod
+    def _validate_openrouter_cap(cls, value: float) -> float:
+        """The OpenRouter dollar cap must be positive — the gate divides by it."""
+        if value <= 0:
+            raise ValueError(f"openrouter_dollar_cap must be > 0, got {value!r}")
         return value
 
     @field_validator("budget_exhaust_fraction")
