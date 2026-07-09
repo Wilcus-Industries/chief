@@ -2696,6 +2696,8 @@ async def _routed_manager(
     classify_category: Callable[..., Any],
     surface_defaults: dict[str, str] | None = None,
     openrouter_provider: ProviderConfig | None = _OPENROUTER,
+    idle: float = 1000.0,
+    compaction: float = 1000.0,
 ) -> TaskManager:
     routing = RoutingStore(session_factory)
     await routing.seed(_ROUTES)
@@ -2704,7 +2706,8 @@ async def _routed_manager(
         io=io,
         owner_model="claude-sonnet-4-6",
         classifier_model="claude-haiku-4-5",
-        idle_archive_seconds=1000.0,
+        idle_archive_seconds=idle,
+        compaction_idle_seconds=compaction,
         session_factory_sdk=factory,
         stop_intent=_no,
         warrants_task=_no,
@@ -2872,4 +2875,111 @@ async def test_classifier_runs_on_fixed_cheap_model_never_a_target(
         "code",
         "reasoning",
     }
+    await mgr.shutdown()
+
+
+# ---- reseed / branch bypass routing (#92, part of #72) ------------------------
+
+
+async def test_casual_reseed_rebuilds_on_the_routed_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#92 AC1: a reseed of a routed casual task rebuilds on the category's
+    {model, provider} — not the owner model / plain Copilot quota."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code" if "bug" in text else "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+        compaction=0.02,
+    )
+
+    await mgr.dispatch(thread_key="-100:0", text="fix this bug", is_general=True)
+    await _until(lambda: ("-100:0", "reply:fix this bug") in io.sends)
+    routed = created[-1]
+    assert routed["model"] == "deepseek/deepseek-v4-flash"
+    assert routed["provider"] is _OPENROUTER
+
+    # Casual idle fires _idle_then_compact → _summarize_and_reseed: the fresh reseeded
+    # session must land on the same routed target, not the owner model / Copilot quota.
+    await _until(lambda: len(created) >= 2 and created[0]["session"].closed)
+    reseeded = created[-1]
+    assert reseeded["model"] == "deepseek/deepseek-v4-flash"
+    assert reseeded["provider"] is _OPENROUTER
+    await mgr.shutdown()
+
+
+async def test_branch_of_routed_casual_produces_task_on_routed_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#92 AC2: branch of a routed casual context produces a task on the category's
+    {model, provider} — not the owner model / plain Copilot quota. The casual thread
+    was only auto-classified (no explicit /route), so this also proves branch carries
+    forward the live resolved target rather than an unpersisted route_category."""
+    io = FakeIO(next_thread="-100:88")
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code" if "bug" in text else "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:0", text="fix this bug", is_general=True)
+    await _until(lambda: ("-100:0", "reply:fix this bug") in io.sends)
+    assert created[-1]["model"] == "deepseek/deepseek-v4-flash"  # sanity: routed
+
+    new_key = await mgr.branch("-100:0", "Promoted bug thread")
+
+    assert new_key == "-100:88"
+    branched = created[-1]
+    assert branched["model"] == "deepseek/deepseek-v4-flash"
+    assert branched["provider"] is _OPENROUTER
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:88")
+    assert db is not None and db.route_category is None  # no persisted override used
+    await mgr.shutdown()
+
+
+async def test_branch_of_escalated_casual_keeps_opus_over_routing(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#92: the precedence is Opus escalation > budget downgrade > routing > owner
+    model, and neither reseed nor branch may reorder it. An escalated casual thread
+    branches onto Opus even though its category routes to openrouter."""
+    io = FakeIO(next_thread="-100:88")
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code"  # would route to the openrouter DeepSeek target
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:0", text="fix this bug", is_general=True)
+    await _until(lambda: ("-100:0", "reply:fix this bug") in io.sends)
+    assert created[-1]["model"] == "deepseek/deepseek-v4-flash"  # sanity: routed
+
+    await mgr.escalate("-100:0")  # explicit /opus wins outright (M11)
+
+    new_key = await mgr.branch("-100:0", "Escalated thread")
+
+    assert new_key == "-100:88"
+    branched = created[-1]
+    assert branched["model"] == "claude-opus-4-8"  # Opus wins over routing
+    assert branched["provider"] is None  # plain Copilot quota, not BYOK
     await mgr.shutdown()
