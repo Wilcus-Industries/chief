@@ -130,3 +130,30 @@ async def test_classify_category_runs_on_fixed_cheap_model_empty_toolset(
     )
     assert captured["options"].model == "claude-haiku-4-5"  # the fixed cheap target
     assert captured["options"].tools == []  # empty base set (can only answer)
+
+
+async def test_classify_category_folds_descriptions_into_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#83: a re-described category steers the classifier — its blurb rides the prompt,
+    so a self-config edit takes effect at the very next spawn. The reply still matches
+    on the bare category name."""
+    captured: dict[str, Any] = {}
+
+    def _capture(*args: Any, **kwargs: Any) -> Any:
+        captured["options"] = kwargs["options"]
+        return _stream("code")(*args, **kwargs)
+
+    monkeypatch.setattr(classify, "query", _capture)
+    got = await classify.classify_category(
+        "fix a null deref",
+        model="m",
+        categories=_CATEGORIES,
+        default="general",
+        descriptions={"code": "writing or fixing source code"},
+    )
+    assert got == "code"
+    system = captured["options"].system_prompt
+    assert "code (writing or fixing source code)" in system
+    # An un-described category appears by bare name (no empty parens).
+    assert "writing," in system or system.endswith("writing")
