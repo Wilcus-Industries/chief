@@ -852,6 +852,7 @@ class TaskManager:
             owner_tz=self._owner_tz,
             workspace_enabled=workspace_on,
             shell_enabled=shell_on,
+            web_enabled=self._web_service is not None,
             guest_admin_enabled=admin is not None,
             skills=self._default_skills if skills_on else (),
             platform=self._platform,
