@@ -16,11 +16,17 @@ secrets/
 ├── discord_bot_token                  ← ignored, never commit
 ├── google_oauth_client.json           ← ignored, never commit
 ├── telegram_bot_token                 ← ignored, never commit
+├── openrouter_api_key                 ← ignored, never commit (optional — #90)
 └── google_tokens/                     ← dedicated Google account tokens subdir
     ├── .gitkeep                       ← tracked (keeps the dir in git)
     ├── google_token.json              ← ignored, never commit (primary account)
     └── google_token_<label>.json      ← ignored, never commit (additional accounts)
 ```
+
+**Not here: the GitHub Copilot token.** `agent_backend: copilot` (#76/#90, part of #72)
+authenticates via the `copilot` CLI's own login, which is CLI-managed at
+`~/.copilot/config.json` and auto-refreshes on its own. Never copy that token into this
+directory — it isn't a Docker secret and doesn't follow this file's pattern.
 
 Google account tokens live exclusively in `google_tokens/` — **not** directly under
 `secrets/`.  The host-native core scans it directly, and the four Google MCP
@@ -37,7 +43,7 @@ cannot read them:
 ```sh
 chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
            secrets/google_oauth_client.json secrets/telegram_bot_token \
-           secrets/google_tokens/google_token.json
+           secrets/google_tokens/google_token.json secrets/openrouter_api_key
 ```
 
 | File | Value |
@@ -47,6 +53,7 @@ chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
 | `claude_code_oauth_token` | Output of `claude setup-token` (1-year Max OAuth token) |
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
 | `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
+| `openrouter_api_key` | OpenRouter API key (optional — see "OpenRouter BYOK" below) |
 
 ## Chat platforms (Telegram and/or Discord)
 
@@ -64,6 +71,21 @@ Intents in the Developer Portal, or Discord delivers empty message content.
 
 Do **not** create an `ANTHROPIC_API_KEY` — it outranks the OAuth token and would bill the
 API instead of the Max subscription. The app refuses to start if it is set.
+
+## OpenRouter BYOK (issue #90, part of #72)
+
+`openrouter_api_key` is the key for the `openrouter` provider target class: a session
+spawned on it runs through `CopilotBackend` (the GitHub Copilot SDK) against a concrete
+OpenRouter model, BYOK, at OpenRouter's own metered per-token rate — separate from the
+included Copilot subscription quota. Get a key from
+<https://openrouter.ai/settings/keys>.
+
+It is **optional** — only required when a session actually requests the `openrouter`
+target. If you don't use it yet, Docker still requires the referenced secret file to
+exist: `touch secrets/openrouter_api_key` (mirrors the platform-you-skip pattern above).
+
+This is a separate credential from the GitHub Copilot token itself — see "Not here: the
+GitHub Copilot token" above.
 
 ## Google OAuth (M5/M8) — Calendar + Drive + Sheets + Gmail
 

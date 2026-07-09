@@ -28,6 +28,7 @@ from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core import screening
+from .core.backend import select_backend
 from .core.budget import BudgetGate, BudgetIO
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
@@ -331,10 +332,15 @@ def build_engine(
         if settings.scheduler_enabled
         else None
     )
+    # Route every session through the config-selected AgentBackend (#75). Only
+    # ``claude`` is valid today; ClaudeBackend.create_session is the SessionFactory the
+    # engine builds each owner/guest session with.
+    backend = select_backend(settings.agent_backend)
     return TaskManager(
         session_factory=session_factory,
         io=io,
         platform=platform,
+        session_factory_sdk=backend.create_session,
         owner_model=settings.owner_model_default,
         # Owner Opus escalation (M11): /opus pins a thread to owner_model_opus; with
         # opus_auto_detect on, a complex owner turn also asks before escalating.

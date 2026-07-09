@@ -18,6 +18,11 @@ owner_model_opus: claude-opus-4-8
 opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
+# Agent backend seam (#75, part of #72). Every session the engine drives is built through
+# an AgentBackend: "claude" (the claude-agent-sdk path) or "copilot" (the GitHub Copilot
+# SDK, #76). Switch per deployment; "claude" stays the default.
+agent_backend: claude
+
 # sqlite file path (repo-local data/ dir, gitignored; ~ expands).
 db_path: data/chief.db
 

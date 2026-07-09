@@ -93,6 +93,51 @@ def test_m2_defaults_and_env_override(
     assert settings.classifier_model == "claude-haiku-4-5"
 
 
+def test_agent_backend_defaults_to_claude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The engine routes through the AgentBackend seam (#75); only "claude" is valid.
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.agent_backend == "claude"
+
+
+def test_agent_backend_accepts_copilot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # copilot (the GitHub Copilot SDK backend, #76) is now a valid selection.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nagent_backend: copilot\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.agent_backend == "copilot"
+
+
+def test_agent_backend_rejects_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # claude and copilot are the only valid backends; anything else is a config error.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nagent_backend: gemini\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="agent_backend"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
 def test_m11_opus_escalation_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
