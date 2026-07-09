@@ -34,7 +34,14 @@ and shapes, so this module is the thin boundary adapter between them.
   :func:`_adapt_post_output` bridges chief's block / ``additionalContext`` output onto
   the SDK's ``PostToolUseHookOutput`` (which has no ``block`` field — a block becomes a
   ``modifiedResult`` that replaces the flagged content). Dropping this (the pre-#95 bug)
-  makes host-native screening a silent no-op on the Copilot backend.
+  makes host-native screening a silent no-op on the Copilot backend. The SDK routes a
+  result it classifies as a *failure* (``isError`` true) to a **separate**
+  ``on_post_tool_use_failure`` hook, not this one, so :func:`build_session_hooks`
+  forwards the same screening pass there as well (:func:`_build_post_failure_handler`) —
+  otherwise a flagged *failed* result (e.g. an external browser tool returning
+  attacker-controlled page text inside an error) would skip screening entirely (#96).
+  That output carries only ``additionalContext`` (no ``modifiedResult`` / block
+  channel), so the failure path can annotate but not replace.
 
 **Decision-vocabulary mapping.** chief owns its own persisted allowlist
 (:class:`~chief.gate.policy.PolicyStore`) and audit trail, so it must stay the single
@@ -254,39 +261,87 @@ def _build_pre_handler(pretool: list[_LooseHook]) -> _SessionHookFn:
     return on_pre_tool_use
 
 
-def _adapt_post_output(chief_output: dict[str, Any]) -> dict[str, Any]:
-    """Map a chief ``PostToolUse`` hook's output onto ``PostToolUseHookOutput``.
+def _post_annotation(chief_output: dict[str, Any]) -> tuple[str | None, bool]:
+    """Extract ``(warning_text, is_block)`` from a chief ``PostToolUse`` hook's output.
 
-    chief's screening hook returns a **block** decision, an ``additionalContext``
-    **annotation**, or ``{}`` when the result passes clean; the screenshot-delivery hook
-    returns only the empty ``hookSpecificOutput`` envelope (its work is a ``send_file``
-    side effect). The Copilot post-hook output has **no** ``block`` field, so a block is
-    expressed as a ``modifiedResult`` that REPLACES the flagged result — the model never
-    reads the injection content — carrying the warning, with the same warning also as
-    ``additionalContext`` so the block reason is explicit. An annotation maps to
-    ``additionalContext`` (the result is still delivered, warning appended). A clean or
-    empty result maps to ``{}`` (no change).
+    chief's screening hook returns a **block** decision (``{"decision": "block",
+    "reason": …}``), an ``additionalContext`` **annotation**
+    (``{"hookSpecificOutput": {"additionalContext": …}}``), or ``{}`` when the result
+    passes clean; the screenshot-delivery hook returns only the empty envelope (its work
+    is a ``send_file`` side effect). This is the shared read of that output both the
+    success- and failure-path adapters key off, so the two can't drift on how a flag is
+    recognised. A clean/empty output yields ``(None, False)``.
     """
     if not chief_output:
-        return {}
+        return None, False
     if chief_output.get("decision") == "block":
-        reason = chief_output.get("reason", "")
-        return {"modifiedResult": reason, "additionalContext": reason}
+        return chief_output.get("reason", ""), True
     spec = chief_output.get("hookSpecificOutput", {})
     context = spec.get("additionalContext")
     if context:
-        return {"additionalContext": context}
-    return {}
+        return context, False
+    return None, False
+
+
+def _adapt_post_output(chief_output: dict[str, Any]) -> dict[str, Any]:
+    """Map a chief ``PostToolUse`` hook's output onto ``PostToolUseHookOutput``.
+
+    The Copilot post-hook output has **no** ``block`` field, so a block is expressed as
+    a ``modifiedResult`` that REPLACES the flagged result — the model never reads the
+    injection content — with the same warning also as ``additionalContext`` so the block
+    reason is explicit. An annotation maps to ``additionalContext`` (the result is still
+    delivered, warning appended). A clean or empty result maps to ``{}`` (no change).
+    """
+    text, is_block = _post_annotation(chief_output)
+    if text is None:
+        return {}
+    if is_block:
+        return {"modifiedResult": text, "additionalContext": text}
+    return {"additionalContext": text}
+
+
+def _adapt_post_failure_output(chief_output: dict[str, Any]) -> dict[str, Any]:
+    """Map a chief ``PostToolUse`` hook's output onto ``PostToolUseFailureHookOutput``.
+
+    The failure output (verified against the installed SDK) carries **only**
+    ``additionalContext`` — no ``modifiedResult`` and no block/decision channel — so a
+    flag can only ANNOTATE the failed result, matching the ``screening_block=False``
+    default. Even a ``block`` decision degrades to an annotation here: its reason is
+    surfaced as ``additionalContext`` so the model is still warned, though the content
+    can't be replaced. A clean or empty result maps to ``{}`` (no change).
+    """
+    text, _is_block = _post_annotation(chief_output)
+    if text is None:
+        return {}
+    return {"additionalContext": text}
+
+
+async def _run_post_hooks(
+    posttool: list[_LooseHook],
+    chief_input: dict[str, Any],
+    adapt: Callable[[dict[str, Any]], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Run chief's ``PostToolUse`` hook(s) on one remapped input, merging each one's
+    ``adapt``-ed output into a single Copilot output.
+
+    Returns ``None`` when nothing was annotated or blocked, so the SDK leaves the result
+    untouched. Shared by the success- and failure-path handlers so their fan-out/merge
+    logic can't drift.
+    """
+    output: dict[str, Any] = {}
+    for hook in posttool:
+        result = await hook(chief_input, None, HookContext(signal=None))
+        output.update(adapt(result))
+    return output or None
 
 
 def _build_post_handler(posttool: list[_LooseHook]) -> _SessionHookFn:
-    """The ``on_post_tool_use`` callback: run chief's ``PostToolUse`` hook(s) on a tool
-    result, merging each one's :func:`_adapt_post_output` into one Copilot output.
+    """The ``on_post_tool_use`` callback: run chief's ``PostToolUse`` hook(s) on a
+    successful tool result.
 
     chief's ``PostToolUse`` input shape is ``(tool_name, tool_response)`` — the Copilot
     ``toolName`` / ``toolResult`` fields are remapped onto it, just as the pre adapter
-    remaps ``toolName`` / ``toolArgs``. Returns ``None`` when nothing was annotated or
-    blocked, so the SDK leaves the result untouched.
+    remaps ``toolName`` / ``toolArgs``.
     """
 
     async def on_post_tool_use(
@@ -296,13 +351,39 @@ def _build_post_handler(posttool: list[_LooseHook]) -> _SessionHookFn:
             "tool_name": hook_input.get("toolName", ""),
             "tool_response": hook_input.get("toolResult"),
         }
-        output: dict[str, Any] = {}
-        for hook in posttool:
-            result = await hook(chief_input, None, HookContext(signal=None))
-            output.update(_adapt_post_output(result))
-        return output or None
+        return await _run_post_hooks(posttool, chief_input, _adapt_post_output)
 
     return on_post_tool_use
+
+
+def _build_post_failure_handler(posttool: list[_LooseHook]) -> _SessionHookFn:
+    """The ``on_post_tool_use_failure`` callback: run chief's ``PostToolUse`` screening
+    hook(s) on a tool result the SDK classified as a **failure** (``isError`` true).
+
+    The Copilot runtime routes a failed tool result to ``postToolUseFailure`` — *not*
+    ``postToolUse`` — passing only the extracted ``error`` string (``copilot/tools.py``
+    sets ``result_type="failure"`` on ``isError``). Without this seam, chief's injection
+    screening skips every failed result, so attacker-controlled page text returned in an
+    external browser tool's error would reach the model unscreened (#96). chief's
+    screening hook reads ``(tool_name, tool_response)``; the failure input's
+    ``toolName`` / ``error`` fields are remapped onto it. ``toolName`` is fully
+    qualified — the same field the success hook receives, and the failure input carries
+    no ``serverName`` — so the exact-name keying in
+    :func:`chief.core.screening.build_screening_hook` matches with no requalification.
+    """
+
+    async def on_post_tool_use_failure(
+        hook_input: dict[str, Any], invocation: dict[str, str]
+    ) -> dict[str, Any] | None:
+        chief_input = {
+            "tool_name": hook_input.get("toolName", ""),
+            "tool_response": hook_input.get("error"),
+        }
+        return await _run_post_hooks(
+            posttool, chief_input, _adapt_post_failure_output
+        )
+
+    return on_post_tool_use_failure
 
 
 def build_session_hooks(
@@ -321,6 +402,11 @@ def build_session_hooks(
       result-screening (:func:`chief.core.screening.build_screening_hook`) and
       screenshot-delivery hooks on the tool result — the host-native injection boundary,
       which is a no-op on this backend if the post hooks are dropped at the adapter.
+    * ``on_post_tool_use_failure`` (wired alongside ``on_post_tool_use``, from the same
+      ``PostToolUse`` hook) runs that screening on a result the SDK classifies as a
+      *failure* (``isError`` true), which the runtime routes to the failure hook and
+      *not* ``on_post_tool_use`` — so a flagged failed result is screened too, rather
+      than reaching the model unscreened (#96).
     """
     pretool = _pretool_hooks(hooks)
     posttool = _posttool_hooks(hooks)
@@ -331,4 +417,7 @@ def build_session_hooks(
         session_hooks["on_pre_tool_use"] = cast(Any, _build_pre_handler(pretool))
     if posttool:
         session_hooks["on_post_tool_use"] = cast(Any, _build_post_handler(posttool))
+        session_hooks["on_post_tool_use_failure"] = cast(
+            Any, _build_post_failure_handler(posttool)
+        )
     return session_hooks
