@@ -22,8 +22,12 @@ entry, keyed by server name:
 ``ShellService.run``) in-process — no ``mcp.Server`` round-trip (#88 dropped that, and
 with it the ``mcp`` transitive dependency). Its ``{"content": …, "is_error": …}`` result
 is mapped onto a Copilot :class:`~copilot.ToolResult` by the SDK's own
-:func:`~copilot.convert_mcp_call_tool_result` (verified against github-copilot-sdk
-1.0.5: it reads ``call_result["content"]`` and ``call_result.get("isError")``).
+:func:`~copilot.convert_mcp_call_tool_result`. That dict shape is **undocumented** —
+source-verified against github-copilot-sdk 1.0.5, which subscripts
+``call_result["content"]`` and reads a camelCase ``call_result.get("isError")``. The
+dependency is pinned ``>=1,<2`` and ``tests/test_copilot_tools.py`` asserts the shape
+against the installed SDK, because since #88 this is the *sole* path by which every
+in-process chief tool reaches the model (#102).
 
 **Tool naming is the gate contract.** chief qualifies an in-process tool as
 ``mcp__<server>__<tool>``, and chief's gate (:mod:`chief.gate`) keys every allowlist,
