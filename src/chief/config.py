@@ -25,6 +25,7 @@ from .gate.blacklist import DEFAULT_SHELL_PATTERNS
 from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
 from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
 from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
+from .tools.routing_admin import MUTATING_TOOL_NAMES as _ROUTING_ADMIN_TOOLS
 from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
 from .tools.web import FETCH_TOOL_NAME as _WEB_FETCH_TOOL
 from .tools.web import SEARCH_TOOL_NAME as _WEB_SEARCH_TOOL
@@ -41,12 +42,17 @@ from .tools.web import SEARCH_TOOL_NAME as _WEB_SEARCH_TOOL
 #: guard denies private/loopback targets outright; this blacklist entry additionally
 #: routes every fetch through an approval card (blacklist match ⇒ ASK, never DENY).
 #: ``web-search`` hits a fixed trusted provider, so it is left off — it ALLOWs freely.
+#: The self-config routing tool's mutating verbs (#83) are seeded too: it edits chief's
+#: own routing table, so under the owner default-allow gate a bare registration would
+#: run un-carded — each mutating edit must ASK. Its read-only ``list_routing`` is left
+#: off (it ALLOWs freely). The gate is this tool's security boundary.
 _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     _GMAIL_WRITE_TOOLS
     + _CALENDAR_WRITE_TOOLS
     + _DRIVE_WRITE_TOOLS
     + _SHEETS_WRITE_TOOLS
     + (_WEB_FETCH_TOOL,)
+    + _ROUTING_ADMIN_TOOLS
 )
 
 

@@ -30,6 +30,11 @@ agent_backend: claude
 # "openrouter" (BYOK per-model; needs openrouter_api_key in the secrets dir). /route
 # <category> overrides a thread; routing_surface_defaults (keys: home/dm/group) pin a
 # category per surface without classifying. The category set IS the seeded routes.
+# When routing is on, chief also gets a gated self-config tool (#83): on request it can
+# amend its own routing table — a category's {target_class, model}, and the category set
+# itself (add/remove/rename/re-describe) — through the permission gate (each edit asks).
+# Edits persist and drive the next classify/route; guest/budget guardrails stay out of
+# reach (the tool is owner-only and only ever sets copilot/openrouter).
 routing_enabled: false
 # routing_seed defaults to: writing/research/general → copilot auto; code/reasoning →
 # openrouter deepseek/deepseek-v4-flash. Override to re-target (the bridge slice later

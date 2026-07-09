@@ -53,6 +53,7 @@ from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
 from .tools.google.set_account_service import SetAccountService
 from .tools.guest import GuestAdminService
+from .tools.routing_admin import RoutingAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
@@ -158,6 +159,20 @@ def build_web_service(settings: Settings) -> WebService | None:
             timeout=settings.web_fetch_timeout_seconds,
         ),
     )
+
+
+def build_routing_admin_service(
+    routing: RoutingStore | None,
+) -> RoutingAdminService | None:
+    """The self-config routing tool (#83), or ``None`` when routing is off.
+
+    Shares the one live :class:`RoutingStore` the engine resolves against, so an edit is
+    effective at the next spawn. Owner-only; its mutating verbs are gated through
+    ``blacklist_tools`` (:mod:`chief.config`). Inert (``None``) unless routing is wired.
+    """
+    if routing is None:
+        return None
+    return RoutingAdminService(routing=routing)
 
 
 def build_guest_calendar_service(settings: Settings) -> GoogleService | None:
@@ -404,6 +419,9 @@ def build_engine(
         # chief-owned web fetch/search (#81) — owner-only, SSRF-guarded, one server for
         # both backends. None when web_tools_enabled is off.
         web_service=build_web_service(settings),
+        # Self-config routing tool (#83) — owner-only, shares the live routing table;
+        # its edits are gated via blacklist_tools. None when routing is off.
+        routing_admin_service=build_routing_admin_service(routing),
         workspace_dir=(
             settings.workspace_dir if settings.workspace_enabled else None
         ),
