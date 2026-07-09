@@ -23,7 +23,6 @@ from chief.adapters.base import Attachment
 from chief.core.session import Final, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
-    WEB_META_TOOLS,
     SessionProto,
     TaskManager,
 )
@@ -185,9 +184,8 @@ async def test_owner_browser_session_wires_mcp_and_read_tools_in_allowed(
     assert "mcp__playwright__browser_console_messages" in allowed
     assert "mcp__playwright__browser_wait_for" in allowed
     assert "mcp__playwright__browser_tabs" in allowed
-    # Memory + web tools are retained alongside browser tools.
+    # Memory tools are retained alongside browser tools.
     assert "Read" in allowed
-    assert "WebSearch" in allowed
     await mgr.shutdown()
 
 
@@ -284,8 +282,8 @@ async def test_browser_disabled_owner_keeps_memory_and_web_tools(
 
     # No playwright MCP server when disabled.
     assert "mcp_servers" not in captured
-    # Owner still gets memory + web tools.
-    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
+    # Owner base surface is memory tools (no web service wired here).
+    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS)
     await mgr.shutdown()
 
 

@@ -149,13 +149,10 @@ WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
 #: (``mcp__chief_shell__bash``), so its blacklist matching can't be bypassed.
 DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
-#: Read-only web + meta tools the owner agent always gets (the gate treats all three as
-#: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
-WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
 #: The owner-only built-ins a guest must never reach. The gate classifies these as
 #: read-only (ALLOW), so absence from a guest's allowed_tools is not enough — they are
 #: refused at the SDK layer (disallowed_tools), the same hard-deny used for the shell.
-GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS) | set(WEB_META_TOOLS))
+GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS))
 #: System-prompt note appended to an owner session running on a GROUP surface (M11).
 #: Same owner toolset, but a reminder that replies are public to the whole group and
 #: that tool-approval prompts are DM'd privately — so the model neither leaks
@@ -816,7 +813,7 @@ class TaskManager:
         # the plugin + enable-list ride only the owner's options. Both guard on a
         # configured plugin path so an enabled-but-unwired flag stays inert (no error).
         skills_on = self._skills_enabled and self._skills_plugin_path is not None
-        allowed = list(MEMORY_TOOLS) + list(WEB_META_TOOLS)
+        allowed = list(MEMORY_TOOLS)
         if workspace_on:
             # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
             allowed += list(WORKSPACE_TOOLS)

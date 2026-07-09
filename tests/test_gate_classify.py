@@ -53,11 +53,11 @@ async def test_never_denies_on_both_tiers(
 async def test_never_wins_over_read_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A NEVER rule on a normally allowed tool still hard-denies, on both tiers.
-    store = await _store(session_factory, never=[("WebSearch", None)])
+    # A NEVER rule on a genuinely read-only tool (Read) still hard-denies, both tiers.
+    store = await _store(session_factory, never=[("Read", None)])
 
     for tier in ("owner", "guest"):
-        verdict = classify("WebSearch", {"query": "x"}, store, tier=tier)
+        verdict = classify("Read", {"file_path": "/tmp/x"}, store, tier=tier)
         assert verdict.decision is GateDecision.DENY, tier
 
 
@@ -248,14 +248,16 @@ async def test_guest_file_ops_deny(
         assert verdict.decision is GateDecision.DENY, tool
 
 
-async def test_guest_read_only_allows(
+async def test_guest_unknown_tool_asks(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    # #88: WebSearch is no longer a known read-only built-in, so a guest call to it is
+    # an unknown tool ⇒ the safe default ASK (not ALLOW).
     store = await _store(session_factory)
 
     verdict = classify("WebSearch", {"query": "x"}, store, tier="guest")
 
-    assert verdict.decision is GateDecision.ALLOW
+    assert verdict.decision is GateDecision.ASK
 
 
 async def test_guest_extra_read_only_tool_allows(
