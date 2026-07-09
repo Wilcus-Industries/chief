@@ -91,7 +91,12 @@ def test_m2_defaults_and_env_override(
 
     assert settings.concurrency == 5  # env override
     assert settings.idle_archive_seconds == 3600
-    assert settings.classifier_model == "claude-haiku-4-5"
+    # #88: the OpenRouter classifiers get namespaced ids (sent verbatim as the
+    # OpenRouter ``model`` field); the Copilot agent-monitor id is a different one.
+    assert settings.classifier_model == "anthropic/claude-haiku-4.5"
+    assert "/" in settings.classifier_model
+    assert "/" in settings.screening_model
+    assert settings.monitor_model == "auto"
 
 
 def test_agent_backend_claude_fails_with_migration_message(
