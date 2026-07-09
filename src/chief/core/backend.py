@@ -124,6 +124,15 @@ class CopilotBackend:
     third-party boundary): production spawns the real runtime, tests inject a fake so a
     real turn can be dispatched through the backend without a subprocess.
 
+    **Concurrency model (#80).** One Copilot runtime per chat: every
+    ``create_session`` builds its own :class:`CopilotTaskSession`, and each connects via
+    its own ``client_factory()`` → its own CLI-server subprocess. This is the same
+    one-subprocess-per-session shape as :class:`ClaudeBackend` / :class:`TaskSession`,
+    so chief's per-chat sessions stay isolated with no shared-client locking — the SDK's
+    ability to multiplex N sessions on one client is deliberately unused, keeping
+    ``aclose`` a per-session teardown. ``TaskManager``'s ``Semaphore`` (which bounds
+    concurrently *generating* turns) is orthogonal and fits this model unchanged.
+
     The permission gate is wired (#77, part of #72): ``can_use_tool`` and ``hooks`` are
     chief's SDK-agnostic gate callbacks, adapted by :mod:`chief.core.copilot_gate` onto
     the Copilot SDK's ``on_permission_request`` handler and ``SessionHooks`` and passed
@@ -134,10 +143,27 @@ class CopilotBackend:
     (#90, part of #72) is an optional BYOK provider-target override (``None`` stays on
     plain Copilot quota) —
     :func:`~chief.core.copilot_session.openrouter_provider_config` builds one for the
-    ``openrouter`` target class. The remaining tool kwargs (``allowed_tools`` /
-    ``disallowed_tools``, ``mcp_servers``, ``plugins``, ``skills``, ``fork_session``)
-    are accepted to satisfy the :class:`AgentBackend` contract but not yet forwarded;
-    later #72 slices map them onto the SDK's custom tools and MCP servers.
+    ``openrouter`` target class.
+
+    Tools + MCP servers are wired (#80, part of #72): chief's mixed ``mcp_servers``
+    mapping is threaded into the session and split at connect by
+    :func:`~chief.core.copilot_tools.partition_mcp_servers` into the SDK's flat custom
+    ``tools`` (the in-process shell/scheduler/guest servers) and HTTP ``mcp_servers``
+    (the Google/browser containers). ``disallowed_tools`` becomes the SDK's
+    ``excluded_tools``.
+
+    Three contract kwargs stay accepted-but-unforwarded, by design:
+
+    * ``allowed_tools`` — chief's pre-approval list, enforced by the gate
+      (approve-once), not a visibility allowlist. The SDK's ``available_tools`` is a
+      *hard* allowlist that would hide the shell/schedule tools chief deliberately keeps
+      off ``allowed_tools`` so they route through the gate, so it stays unset.
+    * ``plugins`` / ``skills`` — chief's ``[{"type":"local","path":…}]`` + ``list[str]``
+      shape has no direct SDK analogue (the SDK takes ``skill_directories`` /
+      ``plugin_directories`` paths); packaged skills stay a later #72 slice.
+    * ``fork_session`` — the SDK's ``resume_session`` has no fork concept, so the casual
+      reseed's fork request (:meth:`chief.core.tasks.TaskManager.branch`) is inert here:
+      the session still resumes, it just is not forked.
     """
 
     def __init__(
@@ -175,6 +201,8 @@ class CopilotBackend:
             on_permission_request=on_permission_request,
             hooks=copilot_hooks,
             system_prompt=system_prompt,
+            mcp_servers=mcp_servers,
+            disallowed_tools=disallowed_tools,
             client_factory=self._client_factory,
             provider=provider,
         )
