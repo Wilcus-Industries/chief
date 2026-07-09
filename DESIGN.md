@@ -38,6 +38,30 @@ sandbox-isolated design to a host-native, highly-autonomous one. What changed:
 Sections below marked *(superseded — host-native)* keep the original design for the
 record; the rest of this section is the current truth.
 
+## Self-management reversal (2026-07)
+
+A second owner-approved reversal, in the same spirit as the host-native one: the
+original `never self-deployed` rule for chief-authored skills is **reversed**. chief now
+manages its own harness (issue #103).
+
+- **Skills and subagents self-deploy.** chief writes them as plain files under
+  `data/skills/` and `data/subagents/`, git-versioned by the existing `GitVersioner`.
+  They are picked up at the next session build — **no approval card, no restart**.
+  Subagents route by **category, never a pinned model id**, which preserves the
+  guest/budget guardrail (it keys off the target class).
+- **Config self-edits are lazy and fenced.** A `self_config.yaml` overlay merges above
+  the YAML settings source at boot, default-allow **except a hard denylist**
+  (`blacklist_*`, `never_seed`/`approved_seed`, `screening_*`, every `*_enabled` flag,
+  owner ids, secrets/tokens, `db_path`, MCP urls, thread keys). A guard test forces every
+  new `Settings` field to be denied or explicitly tagged merge-safe. Applies at next
+  restart; no card.
+- **Source self-edits ship via an owner-approved restart card** (follow-on work), gated
+  on the project done-check with a known-good tag and auto-revert.
+
+The security boundary here is **activation, not file access**: owner `Write`/`Edit`/`bash`
+are already unconfined, so an on-disk fence around these files would be theater. See the
+residual risks under Security model.
+
 ## Goals
 
 - Reach the agent by DM from **Telegram** and **Discord** (Telegram first).
@@ -131,7 +155,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Away status | A time-sensitive memory fact ("on vacation til Mon"), not a mode |
 | Guest times | Always owner TZ, timezone stated explicitly |
 | Opus escalation | Always owner-approved: command pre-approves, auto-detect asks |
-| Skill authoring | chief drafts, owner approves via review/merge; never self-deployed |
+| Skill authoring | chief self-deploys skills/subagents as files (no card); source edits ship via an owner-approved restart card *(reversal — see Self-management)* |
 | Acting-as identity | Transparent — assistant signature on outgoing email/messages |
 | Encryption at rest | Secrets = `0600` files in the secrets dir; transcripts/memory via host perms + backups |
 | Memory mgmt | `/memory`, `/forget` + direct file edit; auto-notify on save |
@@ -416,6 +440,16 @@ nothing; the permission gate is a real code callback that runs regardless of wha
   shell runs as the owner's user with the full environment, OAuth token included —
   the owner explicitly traded this isolation away for autonomy. The blacklist +
   screening + audit log are the remaining controls.
+- **Persistent self-authored harness** via an injected owner turn → **accepted risk
+  (self-management)**: an injection that reaches an owner turn can author a skill or
+  subagent file that then persists into every later session. No on-disk fence would help
+  (owner `Write`/`Edit`/`bash` are unconfined); the controls are screening on untrusted
+  content, the git history of `data/skills` / `data/subagents`, and the audit log.
+- **Screening fails open when keyless** → **accepted risk** (#88): `screen_text` returns
+  "clean" on *any* error — missing key, non-2xx, unreachable provider — so content passes
+  and the injection seam is unguarded in that configuration. `warn_if_classifier_keyless`
+  warns once at boot, making this a pinned tradeoff (availability over strictness) rather
+  than an accidental hole.
 - **Guest abuse / cost** (spam, burning Max limits) → notify-on-first-contact admission +
   **per-guest rate limit AND a global guest budget** (so neither one guest nor a crowd
   drains your Max limits) + **block/mute**. The owner can block (ignore entirely) or mute
@@ -625,8 +659,10 @@ platform** (e.g. Telegram), so there's one predictable inbox for them.
 Claude Code — how features are added without touching core. First example:
 **`setup-morning-brief`** — a skill that *interviews* the owner (what to include, what
 time), then registers a recurring schedule for the digest. Briefing isn't hardcoded; it's
-a skill + a schedule. **Authoring: chief drafts, owner approves** — chief can propose new
-skills, but they go live only after owner review/merge (via the CI/PR path), never self-deployed.
+a skill + a schedule. **Authoring: chief self-deploys** — it writes skills (and subagents)
+as files under `data/skills/` / `data/subagents/`, git-versioned, live at the next session
+build with no card and no restart. *(Owner-approved reversal of the original "chief drafts,
+owner approves via review/merge, never self-deployed" rule — see Self-management reversal.)*
 
 **Quiet hours** (configurable): during the window, non-urgent pings and trigger-fires are
 **deferred to morning**; only urgent / owner-waiting items break through.
