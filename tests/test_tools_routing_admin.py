@@ -157,15 +157,15 @@ async def test_edit_refuses_a_class_outside_the_allowed_set(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     # The tool may only ever set copilot/openrouter. A fabricated class (a guest-
-    # elevating or "bridge" one) is refused and the table is left unchanged, so the
-    # guest-isolation / budget guardrails (which key off the class) stay covered.
+    # elevating or a paid one added later) is refused and the table is left unchanged,
+    # so the guest-isolation / budget guardrails (which key off the class) stay covered.
     store = await _seeded_store(session_factory)
     tools = await _tools(store)
 
     result = await _invoke(
         tools[SET_TARGET_TOOL],
         category="writing",
-        target_class="bridge",
+        target_class="future-paid",
         model="x/y",
     )
     assert result.result_type == "failure"

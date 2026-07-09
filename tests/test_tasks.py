@@ -25,7 +25,6 @@ from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
     ACTION_DOWNGRADE,
-    ACTION_NONE,
     ACTION_PAUSE,
     EFFECT_DOWNGRADE,
     BudgetGate,
@@ -2194,13 +2193,6 @@ def _real_budget(
             accumulation=ACCUM_ADD,
             action=ACTION_DOWNGRADE,
         ),
-        usage.BRIDGE_TURNS: CurrencyPolicy(
-            cap=float("inf"),
-            warn_fractions=(),
-            exhaust_fraction=1.0,
-            accumulation=ACCUM_ADD,
-            action=ACTION_NONE,
-        ),
     }
     return BudgetGate(
         session_factory=session_factory,
@@ -3609,18 +3601,19 @@ async def test_sonnet_after_opus_on_routed_thread_respawns_to_openrouter(
 
 # ---- guest isolation under routing (#82, part of #72) -----------------------
 
-#: Every default category pointed at a paid/BYOK class — including a hypothetical
-#: future "bridge" (Max) class that isn't implemented yet (#72's three-class plan) —
-#: so a test can prove a guest never lands on any of them, regardless of what the
-#: table says. Deliberately built with ``core.routing.RoutingStore.seed`` (a plain
-#: string column, no target-class enum), the same route the self-config slice (#83)
-#: will write through, since ``config.py``'s validator only allows copilot/openrouter
-#: today and would reject seeding "bridge" at boot.
+#: Every default category pointed at a paid/BYOK class — including ``"future-paid"``, a
+#: class that does not exist, so a test can prove a guest never lands on any paid class
+#: regardless of what the table says. (It stood for the Max bridge until that was
+#: dropped in #85/#86; the coverage outlives it — the guard must hold for a paid class
+#: added later without anyone re-checking the guest path.) Deliberately built with
+#: ``core.routing.RoutingStore.seed`` (a plain string column, no target-class enum), the
+#: same route the self-config slice (#83) will write through, since ``config.py``'s
+#: validator only allows copilot/openrouter and would reject seeding it at boot.
 _ALL_PAID_ROUTES = [
     ("writing", "openrouter", "expensive/writing-model"),
     ("code", "openrouter", "expensive/code-model"),
-    ("reasoning", "bridge", "claude-max-bridge"),
-    ("research", "bridge", "claude-max-bridge"),
+    ("reasoning", "future-paid", "expensive/reasoning-model"),
+    ("research", "future-paid", "expensive/research-model"),
     ("general", "openrouter", "expensive/general-model"),
 ]
 
@@ -3633,8 +3626,8 @@ async def _unrouted_classify(text: str, **_: Any) -> str:
 async def test_guest_never_resolves_to_paid_target_when_every_category_is_paid(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """AC1 (#82): with the routing table pointing every category at openrouter/bridge,
-    a guest task still resolves to the Copilot-quota guest model — the central
+    """AC1 (#82): with the routing table pointing every category at a paid class, a
+    guest task still resolves to the Copilot-quota guest model — the central
     mechanism a real guest turn is asserted against, not a mocked resolver."""
     io = FakeIO()
     created: list[dict[str, Any]] = []
@@ -3652,7 +3645,7 @@ async def test_guest_never_resolves_to_paid_target_when_every_category_is_paid(
 
     guest = created[-1]
     assert guest["model"] == "guest-model"
-    assert guest["provider"] is None  # never openrouter/bridge — Copilot quota only
+    assert guest["provider"] is None  # never a paid class — Copilot quota only
     await mgr.shutdown()
 
 
@@ -3680,7 +3673,10 @@ async def test_guest_invariant_holds_after_category_add_remove_rename(
     # existing one (drop + re-add under a new name), and remove another outright.
     async with session_factory() as session:
         await add_route(
-            session, category="shopping", target_class="bridge", model="max-bridge"
+            session,
+            category="shopping",
+            target_class="future-paid",
+            model="expensive/shopping-model",
         )
         await session.execute(delete(Route).where(Route.category == "code"))
         await add_route(

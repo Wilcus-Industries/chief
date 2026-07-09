@@ -22,7 +22,7 @@ read-only ``list_routing`` is left off the blacklist — it ALLOWs freely.
 **Guardrails stay unreachable.** Guest isolation (#82) and budget caps (#84) key off a
 target's **class**. This tool only edits the ``routes`` table (a category → class /
 model / description) and has no knob for guest-class allowlists or budget config, so it
-cannot grant a guest an ``openrouter``/``bridge`` target or raise/remove a cap. It is
+cannot grant a guest an ``openrouter`` target or raise/remove a cap. It is
 wired only into *owner* sessions (never guests — tier isolation by construction), and
 the store refuses any ``target_class`` outside
 :data:`~chief.core.routing.TARGET_CLASSES`, so it can never invent a class the

@@ -33,7 +33,6 @@ from .core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
     ACTION_DOWNGRADE,
-    ACTION_NONE,
     ACTION_PAUSE,
     BudgetGate,
     BudgetIO,
@@ -354,10 +353,10 @@ def build_budget(
     """The per-currency usage-budget gate (#84), or ``None`` when budgeting is disabled.
 
     Builds one :class:`CurrencyPolicy` per native currency (#84): Copilot premium
-    requests (a cumulative count vs ``premium_request_cap`` → pause), OpenRouter dollars
-    (additive spend vs ``openrouter_dollar_cap`` → downgrade), and bridge turns
-    (informational, no cap). Like the scheduler, every warning and the choice card route
-    to the owner inbox (``primary_thread_key``), so enabling it needs that key set.
+    requests (a cumulative count vs ``premium_request_cap`` → pause) and OpenRouter
+    dollars (additive spend vs ``openrouter_dollar_cap`` → downgrade). Like the
+    scheduler, every warning and the choice card route to the owner inbox
+    (``primary_thread_key``), so enabling it needs that key set.
     """
     if not settings.budget_enabled:
         return None
@@ -381,13 +380,6 @@ def build_budget(
             exhaust_fraction=exhaust,
             accumulation=ACCUM_ADD,
             action=ACTION_DOWNGRADE,
-        ),
-        usage.BRIDGE_TURNS: CurrencyPolicy(
-            cap=float("inf"),
-            warn_fractions=(),
-            exhaust_fraction=1.0,
-            accumulation=ACCUM_ADD,
-            action=ACTION_NONE,
         ),
     }
     return BudgetGate(
@@ -532,7 +524,6 @@ def build_engine(
         # A plain-quota owner turn spends the backend's native currency (#84): the
         # Copilot backend burns premium requests (#88 removed the Max-bridge backend
         # whose turns were informational-only).
-        native_quota_currency=usage.PREMIUM_REQUESTS,
         # Group chats (M11): cap on the per-group ambient buffer.
         group_context_max_messages=settings.group_context_max_messages,
         # Owner-only packaged skills (M10). The path must be absolute (see
