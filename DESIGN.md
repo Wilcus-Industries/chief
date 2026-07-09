@@ -5,8 +5,10 @@ Discord and it does things for you — and for other people, like a real assista
 screens for its boss. Runs on the GitHub Copilot SDK (#88 retired the original Claude
 Agent SDK / Max-subscription harness — see the host-native rework and PRD #72 below).
 
-Status: **design complete (v1)**, built through M13 — and **reworked host-native
-(2026-07)**, see the next section.
+Status: **v1 built and shipped** — every milestone (S0 → M13) is done and running
+host-native, then **reworked host-native (2026-07)**, see the next section. What follows
+is the design of record for the working system, not a forward plan; the old phased
+build order is kept at the end purely as a historical ledger.
 
 ## Host-native rework (2026-07)
 
@@ -44,7 +46,8 @@ record; the rest of this section is the current truth.
 - Agent acts via MCP servers: **Google Drive, Gmail, Google Calendar** (owner only).
 - Plus **web search/fetch**, a **file workspace**, and a real **shell** on the owner's
   machine (blacklist-gated).
-- Use the **Claude Agent SDK** (Python) so it runs on **Claude Max**, not API billing.
+- Run on the **GitHub Copilot SDK** (Python) as the sole agent harness (#88 retired the
+  original Claude Agent SDK / Claude-Max path); the copilot CLI owns its own auth.
 - Ship as a **local install**: native core + a small docker compose stack of MCP
   sidecars.
 
@@ -214,7 +217,7 @@ bounded parallelism, milestone progress, live steering.
 
 ## Agent core internals (draft)
 
-Wraps the Claude Agent SDK. One **session per task**, kept open in streaming-input mode
+Wraps the GitHub Copilot SDK. One **session per task**, kept open in streaming-input mode
 (see task engine). Key design choices:
 
 - **Tier isolation by construction, not instruction.** Owner and guest sessions are built
@@ -228,9 +231,10 @@ Wraps the Claude Agent SDK. One **session per task**, kept open in streaming-inp
   - **Shell** → chief's in-process `mcp__chief_shell__bash` tool (the SDK built-in
     Bash stays refused: one shell surface), running persistent per-task shells on the
     host, blacklist-gated. Owner-only.
-  - **File workspace** → SDK built-in Read/Write/Edit; host-native: unconfined for the
+  - **File workspace** → built-in Read/Write/Edit; host-native: unconfined for the
     owner, with `data/workspace` as the suggested scratch dir + shell cwd. Owner-only.
-  - **Web search/fetch** → SDK built-in (or a web MCP). Owner-only.
+  - **Web search/fetch** → chief's own in-process `mcp__chief_web__{fetch,search}` server
+    (#88 dropped the Claude web built-ins): SSRF-guarded fetch + Brave search. Owner-only.
   - **Google (Calendar/Gmail/Drive)** → MCP server(s). Owner-only.
   - **Guest tools** → small custom MCP/in-process tools, the only ones in a guest session.
 - **System prompt** = `Soul.md` (chief's identity/voice, see below) + tier framing (owner:
@@ -377,7 +381,8 @@ respond.
 
 ## Security model (draft)
 
-chief holds your email, calendar, files, and a shell on your VPS, and talks to strangers.
+chief holds your email, calendar, files, and a real shell on your own machine, and talks
+to strangers.
 Security is the spine, not a feature. Guiding principle from the research: **enforce in
 code, never in prompt** — `Soul.md`, memory, and personas *shape* behavior but guarantee
 nothing; the permission gate is a real code callback that runs regardless of what the model
@@ -440,7 +445,7 @@ full encrypted volume).
 
 ```
   Telegram ─┐
-  Discord  ─┤── Chat Adapter ──▶ Agent Core (Claude Agent SDK) ──▶ MCP servers
+  Discord  ─┤── Chat Adapter ──▶ Agent Core (GitHub Copilot SDK) ──▶ MCP servers
   (Email?) ─┘        ▲               │        │                      ├─ Google Drive
                      │               │   Command policy              ├─ Gmail
               approve/deny ◀─────────┘   + approval flow             └─ Google Calendar
@@ -450,7 +455,7 @@ full encrypted volume).
 
 - **Chat adapters** — one per platform behind a shared interface. Normalize inbound DMs,
   tag owner vs guest, carry a thread/session key, stream replies back.
-- **Agent core** — wraps the Claude Agent SDK. Owns system prompt(s) (owner vs guest
+- **Agent core** — wraps the GitHub Copilot SDK. Owns system prompt(s) (owner vs guest
   persona), MCP connections, sessions, and the command-policy gate.
 - **Session store** — conversation continuity + persisted auth tokens.
 - **MCP servers** — Google Workspace tools (owner-scoped).
@@ -671,8 +676,9 @@ card:
   with a server-side **row-1 (header) write guard**; first-party FastMCP server
   (`docker/mcp-sheets/server.py`), multi-account per-request credential selection,
   atomic per-account token write-back. *Live (M8).*
-- **Web** — search + fetch (read-only GET is un-gated; POST/forms are effectful → gated).
-  SDK built-ins (WebSearch/WebFetch). *Live (M7).*
+- **Web** — search + fetch via chief's own in-process `mcp__chief_web` server
+  (SSRF-guarded fetch, Brave search); fetch is approval-gated, search runs freely. #88
+  dropped the Claude web built-ins. Opt-in (`web_tools_enabled`).
 - **Shell/code** — persistent per-task shells on the host, blacklist-gated (host-native
   rework; was the M7 sandbox container). Opt-in (`shell_enabled`).
 - **File workspace** — scratch dir (Read/Write/Edit) at `data/workspace`; host-native:
@@ -713,7 +719,7 @@ assistant"). Honest about being an assistant; sets recipient expectations.
 ## Tech / toolchain
 
 - Python, `uv + ruff + mypy + pytest` (already scaffolded).
-- Claude Agent SDK (Python).
+- GitHub Copilot SDK (`github-copilot-sdk`, Python) — the sole agent harness.
 - `python-telegram-bot`, `discord.py` (both in use — Telegram long-poll + Discord gateway).
 - docker compose.
 
@@ -738,8 +744,9 @@ chief/
       telegram.py            # long-poll; supergroup topics + DM + group-mention; TaskIO impl
       discord.py             # gateway; channel threads = tasks; TaskIO + ApprovalIO impl
     core/
-      agent.py               # one-shot Agent SDK query helper (NO_REPLY sentinel)
-      session.py             # persistent ClaudeSDKClient session per task (resume/stream)
+      session.py             # session Protocol + TaskSession (NO_REPLY sentinel)
+      copilot_session.py     # persistent Copilot SDK session per task (resume/stream)
+      backend.py             # CopilotBackend: the SessionFactory each session spawns through
       classify.py            # cheap Haiku judgments (stop-intent / warrants-task)
       tasks.py               # lifecycle, semaphore, live steering, auto-archive, recovery
       personas.py            # owner/guest system-prompt assembly (Soul.md/User.md)
@@ -786,6 +793,14 @@ chief/
 
 ## Verified (technical) — researched 2026-06-03
 
+> **Historical (pre-#88).** These findings are from the original Claude Agent SDK /
+> Claude-Max design and are kept as a research record. #88 moved chief onto the GitHub
+> Copilot SDK, so the Max-auth specifics below (`CLAUDE_CODE_OAUTH_TOKEN`,
+> `ANTHROPIC_API_KEY` rejection, subscription credit) no longer describe how chief runs —
+> the copilot CLI now owns its own auth. The gate/session-resume/Google-MCP findings still
+> hold. The budget design they seeded lives in "Usage budgeting" above (two native
+> currencies).
+
 - **Max auth in docker ✅** — `claude setup-token` mints a **1-year** OAuth token; set it as
   `CLAUDE_CODE_OAUTH_TOKEN` (Docker secret). The SDK reads it (auth precedence #5) and runs
   on the subscription, headless. **Must NOT set `ANTHROPIC_API_KEY`** (precedence #3 — it
@@ -829,11 +844,17 @@ See reworked "Usage budgeting" — and the guest-billing fork it raises.
   need a separate search API key?
 - **Voice STT** (deferred) — local Whisper vs API, if/when voice is added.
 
-## Build plan (phased milestones)
+## Build ledger (historical — every milestone below is DONE)
 
-Approval gate + memory are built early because everything reuses them. Order respects the
-"verify Max auth first" rule — and pulls that proof ahead of the real skeleton as a
-throwaway slice (S0), so the one existential unknown is retired on day 1.
+**All of S0 → M13 shipped and run in production host-native.** This section is not a
+forward plan; it is the record of what each milestone delivered, kept for provenance.
+Milestones later reworked by the host-native pass (2026-07) or otherwise superseded are
+marked inline — read those as "was built this way, now works differently," not as pending
+work. Nothing in this section is outstanding.
+
+Original ordering rationale, for the record: the approval gate + memory came first because
+everything reuses them, and agent auth was proven as a throwaway slice (S0) before the real
+skeleton so the one existential unknown was retired on day 1.
 
 **S0 — Walking skeleton (throwaway) — ✅ done; superseded by M0/M1, `s0/` deleted.**
 Telegram DM (owner) → core → Agent SDK one-shot → reply, running in a real container. No
@@ -950,18 +971,23 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   dollars downgrade the routed openrouter categories onto Copilot `auto` (precedence
   budget-downgrade > routing). Persisted per-currency mode, restart-proof (the
   admission-card pattern), enforced by `TaskManager`. Opt-in (`budget_enabled`).
-- **M10 skills — ✅ done.** Agent-SDK skills framework: a curated local plugin
-  (`vendor/chief-skills` — a hand-picked subset of `anthropics/skills` + the chief-owned
-  `setup-morning-brief`, chief-drafts/owner-approves) wired onto **owner sessions only**
-  via the per-session `skills=` filter (`_wire_owner_session`), the plugin path resolved
-  absolute in `build_engine` so the owner session's `cwd=memory_dir` can't mis-resolve
-  it. Opt-in (`skills_enabled`). The four **office-doc skills** (docx/pdf/pptx/xlsx) shell
-  out to a Python + Node (docx-js/pptxgenjs) + pandoc + LibreOffice + poppler toolchain
-  baked into the **M7 sandbox image** (`docker/sandbox/Dockerfile`), alongside the vendored
-  skill tree at the same `/app/vendor/...` path core hands the model. So they are functional
-  **only when `shell_enabled` + the `sandbox` profile are on** (they have no bash otherwise);
-  the image grows ~600 MB but its security posture (secret-free, read-only, capped) is
-  unchanged. `HOME=/tmp` in that image so LibreOffice has a writable profile.
+- **M10 skills — ✅ done (skill loading reworked for Copilot; office toolchain now a
+  host-native gap).** A curated local plugin (`vendor/chief-skills` — a hand-picked subset
+  of `anthropics/skills` + the chief-owned `setup-morning-brief`, chief-drafts/owner-
+  approves) wired onto **owner sessions only**. The original claude-agent-sdk `skills=`
+  name-filter is gone; #87/#98 ported loading to the Copilot SDK's **`skill_directories`**:
+  `subagents.skill_directories_for` reads the plugin manifest and resolves each curated
+  skill name to its **absolute leaf directory** (a parent root would over-expose all 18
+  upstream skills — `test_skill_directories_are_leaf_dirs_never_parent_roots` guards the
+  leaf invariant). `enable_skills` turns on exactly when dirs are supplied; they are
+  non-persisted, so re-supplied on every connect. Owner-only by construction (guests never
+  reach the skills wiring); opt-in (`skills_enabled`). **⚠️ The four office-doc skills
+  (docx/pdf/pptx/xlsx) are currently non-functional host-native.** They shell out to a
+  pandoc + LibreOffice + poppler + Node (docx-js/pptxgenjs) toolchain that was baked into
+  the **M7 sandbox image** — which the 2026-07 host-native rework **deleted**. `install.sh`
+  does not provision that toolchain, so on a stock host the four skills fail at the shell/
+  import step. Accepted gap until the toolchain is added to `install.sh` (e.g. an opt-in
+  `--skills` flag).
 - **M11 group chats — ✅ done.** A third **surface** (`Surface` enum: `HOME | DM |
   GROUP`, orthogonal to `Tier`) beyond the owner's home forum/server and 1:1 DMs. In a
   GROUP (any non-home group/supergroup or guild chief is invited to, opt-in via
