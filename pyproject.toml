@@ -4,7 +4,6 @@ version = "0.0.0"
 description = "Personal AI assistant on Claude Max — foundations (M0/M1)."
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.2",
     "github-copilot-sdk>=1",
     "python-telegram-bot>=21",
     "sqlalchemy>=2",
@@ -73,6 +72,15 @@ ignore_missing_imports = true
 # croniter ships no py.typed; used by chief.core.schedule_time for cron next-fire.
 [[tool.mypy.overrides]]
 module = ["croniter.*"]
+ignore_missing_imports = true
+
+# The ``mcp`` stack (mcp + its starlette transitive) was a claude-agent-sdk transitive,
+# dropped in #88. It is not installed in the chief venv — only the opt-in live tests and
+# the docker MCP-server tests use it (they importorskip it and drive the vendored
+# docker/mcp-* servers, whose deps live in their images). Ignore the missing modules so
+# those guarded imports type-check without the package present.
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "starlette", "starlette.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

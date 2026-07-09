@@ -30,8 +30,12 @@ content.
 import os
 
 import pytest
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+
+# ``mcp`` was a claude-agent-sdk transitive, dropped in #88; this opt-in live
+# test uses it as the MCP client — skip collection when it is not installed.
+pytest.importorskip("mcp")
+from mcp import ClientSession  # noqa: E402
+from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
 
 import chief.tools.browser.mcp as browser_mcp
 from chief.tools.browser.screenshot import extract_screenshot_filename

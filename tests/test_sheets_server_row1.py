@@ -22,7 +22,12 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from starlette.testclient import TestClient
+
+# The docker MCP server under test needs FastMCP + starlette (the ``mcp`` stack),
+# which was a claude-agent-sdk transitive dropped in #88 and is not installed in
+# the chief venv (the docker images carry their own deps). Skip when it is absent.
+pytest.importorskip("mcp")
+from starlette.testclient import TestClient  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Paths
