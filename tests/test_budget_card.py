@@ -32,10 +32,11 @@ def test_parse_budget_rejects_foreign_or_malformed() -> None:
 async def test_apply_budget_decision_flips_the_targeted_currency(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # The card is posted on premium exhaustion (#84): Continue/Overflow flip the
-    # premium-request currency; Downgrade re-targets the OpenRouter dollar currency.
+    # The card is posted on premium exhaustion (#84): every choice flips the
+    # premium-request currency out of ``paused`` so owner turns resume (#97) — Downgrade
+    # onto the cheaper model, Continue at full quality, Overflow past the cap.
     cases = {
-        BudgetAction.DOWNGRADE: (usage.OPENROUTER_DOLLARS, usage.MODE_DOWNGRADED),
+        BudgetAction.DOWNGRADE: (usage.PREMIUM_REQUESTS, usage.MODE_DOWNGRADED),
         BudgetAction.CONTINUE: (usage.PREMIUM_REQUESTS, usage.MODE_CONTINUE),
         BudgetAction.OVERFLOW: (usage.PREMIUM_REQUESTS, usage.MODE_OVERFLOW),
     }

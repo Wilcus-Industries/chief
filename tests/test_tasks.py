@@ -3,8 +3,10 @@
 import asyncio
 import shutil
 from collections.abc import AsyncIterator, Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
@@ -12,9 +14,26 @@ from copilot import ProviderConfig
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
+from chief.adapters.base import (
+    FILE_REPLY_NOTE,
+    Attachment,
+    BudgetAction,
+    BudgetCard,
+    Surface,
+    apply_budget_decision,
+)
 from chief.core.agent import NO_REPLY
-from chief.core.budget import EFFECT_DOWNGRADE
+from chief.core.budget import (
+    ACCUM_ADD,
+    ACCUM_MAX,
+    ACTION_DOWNGRADE,
+    ACTION_NONE,
+    ACTION_PAUSE,
+    EFFECT_DOWNGRADE,
+    BudgetGate,
+    CurrencyPolicy,
+    cycle_key,
+)
 from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
 from chief.core.session import Final, Milestone, TurnEvent
@@ -2150,6 +2169,116 @@ async def test_downgrade_live_sessions_spares_guest_sessions(
     # Only owner sessions follow the budget downgrade; a live guest keeps its model.
     assert owner_sess.model == "budget-model"
     assert guest_sess.model == "guest-model"
+    await mgr.shutdown()
+
+
+class _GateIO:
+    """A no-op BudgetIO (send + send_budget_card) for wiring a real gate in tests."""
+
+    async def send(self, thread_key: str, text: str) -> None:
+        return None
+
+    async def send_budget_card(self, route: str, card: BudgetCard) -> None:
+        return None
+
+
+def _real_budget(
+    session_factory: async_sessionmaker[AsyncSession], *, now: datetime
+) -> BudgetGate:
+    """A real BudgetGate over the usage table — the central mechanism, not a mock.
+
+    Lets a driven test flip a currency's persisted mode through the button's
+    ``apply_budget_decision`` and have ``_budget_admits`` / ``_resolve_owner_target``
+    read that same mode back, exactly as production does — so a bare mode flip can't
+    make the test pass, a turn has to actually run.
+    """
+    policies = {
+        usage.PREMIUM_REQUESTS: CurrencyPolicy(
+            cap=200.0,
+            warn_fractions=(0.75, 0.90),
+            exhaust_fraction=1.0,
+            accumulation=ACCUM_MAX,
+            action=ACTION_PAUSE,
+        ),
+        usage.OPENROUTER_DOLLARS: CurrencyPolicy(
+            cap=100.0,
+            warn_fractions=(0.75, 0.90),
+            exhaust_fraction=1.0,
+            accumulation=ACCUM_ADD,
+            action=ACTION_DOWNGRADE,
+        ),
+        usage.BRIDGE_TURNS: CurrencyPolicy(
+            cap=float("inf"),
+            warn_fractions=(),
+            exhaust_fraction=1.0,
+            accumulation=ACCUM_ADD,
+            action=ACTION_NONE,
+        ),
+    }
+    return BudgetGate(
+        session_factory=session_factory,
+        io=_GateIO(),
+        owner_inbox="owner:0",
+        policies=policies,
+        owner_tz="UTC",
+        anchor_day=1,
+        now=lambda: now,
+    )
+
+
+async def test_premium_downgrade_resumes_turns_on_budget_model(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#97: after a premium-exhaustion card, tapping Downgrade must resume owner turns
+    on the cheaper budget model — not leave the owner paused for the rest of the cycle.
+
+    Driven end to end through the real BudgetGate + usage table: the mode the button's
+    ``apply_budget_decision`` writes is the same mode ``_budget_admits`` and
+    ``_resolve_owner_target`` read back, so a mode flip in isolation can't make this
+    pass — a subsequent owner turn has to *actually run* (the trap #84's tests missed).
+    """
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    now = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
+    cycle = cycle_key(now, ZoneInfo("UTC"), 1)
+    mgr = _manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        budget=_real_budget(session_factory, now=now),
+        owner_inbox="owner:0",
+        downgrade_model="auto",
+    )
+
+    # Premium requests hit the cap → the currency is paused (BudgetGate._exhaust does
+    # this in production; set directly so the card-posting path isn't under test here).
+    async with session_factory() as session:
+        await usage.set_mode(
+            session,
+            cycle=cycle,
+            currency=usage.PREMIUM_REQUESTS,
+            mode=usage.MODE_PAUSED,
+        )
+
+    # While paused, an owner turn is gated: it never runs, never spends, acks once.
+    await mgr.dispatch(thread_key="-100:5", text="before")
+    await _until(lambda: ("owner:0", PAUSED_BUDGET_ACK) in io.sends)
+    assert all("reply:before" not in text for _, text in io.sends)
+    live = created[0]["session"]  # the paused thread's live session (built on Sonnet)
+
+    # The owner taps Downgrade — the exact wire path both adapters run on a tap.
+    await apply_budget_decision(
+        session_factory, cycle=cycle, action=BudgetAction.DOWNGRADE
+    )
+    await mgr.downgrade_live_sessions()
+
+    # A subsequent owner turn now ACTUALLY RUNS (proof the pause lifted, not just a mode
+    # read), and the live + newly-spawned sessions both sit on auto — no disagreement.
+    await mgr.dispatch(thread_key="-100:7", text="after")
+    await _until(lambda: ("-100:7", "reply:after") in io.sends)
+    spawned = created[-1]
+    assert spawned["model"] == "auto" and spawned["provider"] is None
+    assert live.model == "auto"
     await mgr.shutdown()
 
 

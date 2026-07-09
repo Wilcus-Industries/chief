@@ -111,12 +111,16 @@ class BudgetAction(Enum):
     OVERFLOW = "overflow"  # approve pay-as-you-go spend past the credit
 
 
-#: Maps a card choice to the ``(currency, mode)`` it flips (#84). The card is posted
-#: when the Copilot **premium-request** currency is exhausted, so Continue/Overflow flip
-#: that currency's mode (keep running past its cap); Downgrade instead re-targets the
-#: **OpenRouter dollar** currency onto the cheaper Copilot class to cut spend.
+#: Maps a card choice to the ``(currency, mode)`` it flips (#84, #97). The card is only
+#: ever posted when the Copilot **premium-request** currency is exhausted
+#: (``ACTION_PAUSE`` → paused), and ``TaskManager._budget_admits`` gates owner on *that*
+#: currency — so every choice must move it out of ``paused`` or the owner stays gated
+#: for the rest of the cycle. Downgrade flips it to ``downgraded`` (turns resume on the
+#: cheaper Copilot ``auto`` class — ~0.25× premium per turn, spike #74); Continue keeps
+#: full quality; Overflow approves spend past the cap. (Pre-#97, Downgrade flipped the
+#: unrelated OpenRouter dollar currency and left premium ``paused`` — owner stuck.)
 _BUDGET_DECISION = {
-    BudgetAction.DOWNGRADE: (usage.OPENROUTER_DOLLARS, usage.MODE_DOWNGRADED),
+    BudgetAction.DOWNGRADE: (usage.PREMIUM_REQUESTS, usage.MODE_DOWNGRADED),
     BudgetAction.CONTINUE: (usage.PREMIUM_REQUESTS, usage.MODE_CONTINUE),
     BudgetAction.OVERFLOW: (usage.PREMIUM_REQUESTS, usage.MODE_OVERFLOW),
 }
@@ -131,7 +135,7 @@ BUDGET_BUTTON_LABELS = {
 
 #: Card-edit text confirming an applied choice (replaces the buttons after a tap).
 _BUDGET_OUTCOME = {
-    BudgetAction.DOWNGRADE: "⚡ Switched to the budget model for this cycle.",
+    BudgetAction.DOWNGRADE: "⚡ Resumed on the budget model for this cycle.",
     BudgetAction.CONTINUE: "▶️ Continuing at full quality despite the budget.",
     BudgetAction.OVERFLOW: "💳 Approved pay-as-you-go overflow for this cycle.",
 }

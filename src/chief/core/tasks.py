@@ -1262,10 +1262,11 @@ class TaskManager:
 
         1. A persisted Opus escalation (``Task.model``) wins outright: the explicit
            owner choice overrides routing, on plain Copilot quota (no BYOK provider).
-        2. An active budget downgrade (the OpenRouter dollar budget is exhausted this
-           cycle): re-target onto the cheaper Copilot class — ``budget_downgrade_model``
-           (``auto``), no provider. Sits *above* routing, so it wins over any route,
-           including an openrouter one (#84).
+        2. An active budget downgrade (:meth:`_budget_downgraded` — the OpenRouter
+           dollar budget exhausted on its own, or the owner tapped Downgrade on the
+           premium-exhaustion card): re-target onto the cheaper Copilot class —
+           ``budget_downgrade_model`` (``auto``), no provider. Sits *above* routing, so
+           it wins over any route, including an openrouter one (#84, #97).
         3. Category routing (when a routing table is wired): the task's category
            (``/route`` override → per-surface default → classify → fallback) → the
            category's ``{target_class, model}`` → ``(model, provider)``.
@@ -1273,10 +1274,8 @@ class TaskManager:
         """
         if persisted == self._owner_model_opus:
             return ResolvedTarget(self._owner_model_opus)
-        if self._budget is not None and self._budget_downgrade_model is not None:
-            openrouter_mode = await self._budget.mode(usage.OPENROUTER_DOLLARS)
-            if openrouter_mode == usage.MODE_DOWNGRADED:
-                return ResolvedTarget(self._budget_downgrade_model)
+        if self._budget_downgrade_model is not None and await self._budget_downgraded():
+            return ResolvedTarget(self._budget_downgrade_model)
         if self._routing is not None:
             target = await self._resolve_route(thread_key, surface, classify_text)
             if target is not None:
@@ -1441,6 +1440,32 @@ class TaskManager:
             await self._io.send(self._owner_inbox, PAUSED_BUDGET_ACK)
         return False
 
+    async def _budget_downgraded(self) -> bool:
+        """True when a budgeted currency is ``downgraded`` this cycle (#84, #97).
+
+        Owner resolution (:meth:`_resolve_owner_target`) and live sessions
+        (:meth:`downgrade_live_sessions`) both re-target onto the cheaper Copilot
+        ``auto`` class when either downgrade trigger is active, so new and live owner
+        sessions always agree on the target:
+
+        * the **OpenRouter dollar** budget exhausting on its own (auto, via the gate's
+          ``ACTION_DOWNGRADE`` effect, #84); or
+        * the owner tapping **Downgrade** on the premium-exhaustion card, which flips
+          the **native quota currency** (Copilot premium requests) out of ``paused``
+          into ``downgraded`` — so :meth:`_budget_admits` stops gating and turns resume
+          on the cheaper model (#97). Continue/Overflow move it to their own modes.
+
+        Reads only the persisted per-currency mode (no side effects); the native quota
+        currency is ``bridge_turns`` on the Claude backend, which never downgrades, so
+        that branch is inert there.
+        """
+        if self._budget is None:
+            return False
+        if await self._budget.mode(usage.OPENROUTER_DOLLARS) == usage.MODE_DOWNGRADED:
+            return True
+        quota_mode = await self._budget.mode(self._native_quota_currency)
+        return quota_mode == usage.MODE_DOWNGRADED
+
     def _turn_currency(self, task: _RunningTask) -> tuple[str, float]:
         """The native currency + amount this turn spent (#84).
 
@@ -1536,13 +1561,7 @@ class TaskManager:
             opus = ResolvedTarget(self._owner_model_opus)  # opus, plain Copilot quota
             await self._switch_live_session(task, opus)
             task.auto_escalate_suppressed = False
-        note = ""
-        if (
-            self._budget is not None
-            and await self._budget.mode(usage.OPENROUTER_DOLLARS)
-            == usage.MODE_DOWNGRADED
-        ):
-            note = f" {OPUS_BUDGET_NOTE}"
+        note = f" {OPUS_BUDGET_NOTE}" if await self._budget_downgraded() else ""
         return f"{OPUS_CONFIRM}{note}"
 
     async def revert(self, thread_key: str) -> str:
