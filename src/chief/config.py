@@ -372,6 +372,13 @@ class Settings(BaseSettings):
         "mcp-builder",
     )
 
+    # Category-routed subagents (#87, part of #72), default off (opt-in pattern). When
+    # on, owner sessions under CopilotBackend carry chief's built-in subagents, each
+    # declaring a job *category* whose model is resolved through the routing table
+    # (routing off ⇒ the subagent runs on the parent model). Owner-only — no guest gets
+    # subagents.
+    subagents_enabled: bool = False
+
     # Group chats (M11), default off (mirror the opt-in subsystem pattern). A GROUP is
     # any multi-party chat chief is invited to that ISN'T the owner's own HOME surface —
     # owner_home_chat_id (Telegram) / owner_home_guild_id (Discord) name HOME so the

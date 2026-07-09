@@ -25,6 +25,7 @@ from copilot.session_events import (
     SessionEventType,
     SessionIdleData,
     SessionLimitsExhaustedRequestedData,
+    SubagentStartedData,
     ToolExecutionStartData,
 )
 
@@ -479,6 +480,114 @@ async def test_attachments_are_dropped_with_warning_this_slice(
     assert events == [Final(text="ok")]
     assert session.sent == ["what is this?"]
     assert any("attachment" in r.message.lower() for r in caplog.records)
+
+
+# --- Category-routed subagents + skill directories (#87) ---------------------------
+
+
+def _subagent_started(
+    agent_name: str, *, model: str | None = None, display: str = ""
+) -> SubagentStartedData:
+    return SubagentStartedData(
+        agent_description="",
+        agent_display_name=display,
+        agent_name=agent_name,
+        tool_call_id="tc-1",
+        model=model,
+    )
+
+
+async def test_subagent_started_maps_to_delegation_milestone() -> None:
+    # AC1: a subagent turn surfaces to the owner as a milestone that names the subagent
+    # AND the model it runs on — the visible proof it ran on its category's model.
+    backend, _client, _session = _backend_with(
+        [
+            _subagent_started("coder", model="deepseek/deepseek-v4-flash"),
+            _msg("done"),
+            SessionIdleData(),
+        ]
+    )
+    task = backend.create_session(model="auto")
+
+    events = [event async for event in task.run_turn("delegate")]
+
+    assert events == [
+        Milestone(text="delegating to coder (deepseek/deepseek-v4-flash)"),
+        Final(text="done"),
+    ]
+
+
+async def test_subagent_started_without_model_still_surfaces() -> None:
+    # The event's model is optional; the milestone drops the parenthetical rather than
+    # printing "None", and prefers the display name when the runtime supplies one.
+    backend, _client, _session = _backend_with(
+        [_subagent_started("researcher", display="Researcher"), SessionIdleData()]
+    )
+    task = backend.create_session(model="auto")
+
+    events = [event async for event in task.run_turn("go")]
+
+    assert events == [
+        Milestone(text="delegating to Researcher"),
+        Final(text="(no reply)"),
+    ]
+
+
+async def test_custom_agents_and_skill_dirs_forwarded_to_create_session() -> None:
+    # #87: owner-built subagents + ported skill dirs reach the SDK's create_session, and
+    # handing skill dirs turns enable_skills on (an empty-mode session defaults it off).
+    agents: list[Any] = [
+        {"name": "coder", "prompt": "code", "model": "deepseek/deepseek-v4-flash"}
+    ]
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(
+        model="auto",
+        custom_agents=agents,
+        skill_directories=["/abs/skills/docx"],
+    )
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["custom_agents"] == agents
+    assert client.create_kwargs["skill_directories"] == ["/abs/skills/docx"]
+    assert client.create_kwargs["enable_skills"] is True
+
+
+async def test_custom_agents_and_skill_dirs_forwarded_to_resume_session() -> None:
+    # Non-persisted SDK inputs, so a resumed session must be re-supplied them too.
+    agents: list[Any] = [{"name": "coder", "prompt": "code"}]
+    backend, client, _session = _backend_with(
+        [_msg("resumed"), SessionIdleData()], session_id="sess-9"
+    )
+    task = backend.create_session(
+        model="auto",
+        resume="sess-9",
+        custom_agents=agents,
+        skill_directories=["/abs/skills/docx"],
+    )
+
+    [event async for event in task.run_turn("continue")]
+
+    assert client.resume_args is not None
+    _sid, kwargs = client.resume_args
+    assert kwargs["custom_agents"] == agents
+    assert kwargs["skill_directories"] == ["/abs/skills/docx"]
+    assert kwargs["enable_skills"] is True
+
+
+async def test_no_subagents_or_skills_forwards_none() -> None:
+    # No subagents / skill dirs → the SDK sees None (its own defaults), and
+    # enable_skills stays None rather than being force-set.
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto")
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["custom_agents"] is None
+    assert client.create_kwargs["skill_directories"] is None
+    assert client.create_kwargs["enable_skills"] is None
 
 
 # --- Persona via section-customization (#78) --------------------------------------

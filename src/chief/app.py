@@ -500,6 +500,9 @@ def build_engine(
             os.path.abspath(SKILLS_PLUGIN_DIR) if settings.skills_enabled else None
         ),
         default_skills=settings.default_skills,
+        # Owner-only category-routed subagents (#87). Inert unless the flag is on; the
+        # model each subagent runs on is resolved through the routing table at spawn.
+        subagents_enabled=settings.subagents_enabled,
         # Share the exact versioner the memory store uses so auto-commit and memory
         # mutations go through the same git instance. The versioner self-serializes
         # all callers via its internal asyncio.Lock (#22 / #29).
