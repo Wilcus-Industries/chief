@@ -74,8 +74,8 @@ ignore_missing_imports = true
 module = ["croniter.*"]
 ignore_missing_imports = true
 
-# The ``mcp`` stack (mcp + its starlette transitive) was a claude-agent-sdk transitive,
-# dropped in #88. It is not installed in the chief venv — only the opt-in live tests and
+# The ``mcp`` stack (mcp + its starlette transitive) came in via the agent SDK removed
+# in #88 and is no longer installed in the chief venv — only the opt-in live tests and
 # the docker MCP-server tests use it (they importorskip it and drive the vendored
 # docker/mcp-* servers, whose deps live in their images). Ignore the missing modules so
 # those guarded imports type-check without the package present.
