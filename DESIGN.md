@@ -90,6 +90,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Approval routing | In task topic for owner work; **Front Desk** topic for guest-originated |
 | Approval buttons | Approve/Deny once + Always-allow/deny (self-curating allowlist) |
 | Models | Owner: Sonnet default, Opus on demand. Guests: Sonnet, never Opus |
+| Model routing (#79) | Opt-in per-category routing (#72): a task's message is auto-classified into a job category (writing/code/reasoning/research/general) on the cheap classifier — never through the table — and the category's persisted `{target_class, model}` target (`copilot` quota `auto` / `openrouter` BYOK) picks the session's model + provider. `/route <category>` overrides a thread (respawns, since a provider can't change live); config `routing_surface_defaults` pin a category per surface |
 | Personality | `Soul.md` — chief-editable, git-tracked, loaded into every prompt |
 | Long-term memory | Markdown + `[[wikilinks]]` (graph-lite), namespaced facts files; `facts/` listing auto-generated at prompt-build time; chief writes in-session via Write tool; auto-save+notify; no embeddings; mem0 swap deferred behind an interface |
 | Memory mechanics | Overwrite stale facts; TTL-flag time-sensitive; provenance per fact; keep full transcripts; every write git-versioned |

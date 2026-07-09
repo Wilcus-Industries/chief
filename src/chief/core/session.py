@@ -68,6 +68,11 @@ class SessionProto(Protocol):
     #: read by the engine after a clean turn to drive the budget (M9).
     last_cost_usd: float
     last_rate_limit_status: str | None
+    #: The actually-served model for this turn (#79/#90). For a routed ``openrouter``
+    #: session it is the model the provider actually served; for a Copilot ``auto``
+    #: session it is what ``auto`` picked — read for observability (``set_model`` is
+    #: untrusted on Copilot quota, so the served model is read here, not assumed).
+    last_served_model: str | None
 
     def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()
@@ -180,6 +185,9 @@ class TaskSession:
         #: ``rejected``); ``rejected`` lets the budget gate back off (M9). Sticky across
         #: turns — the CLI only re-emits on a transition.
         self.last_rate_limit_status: str | None = None
+        #: The actually-served model, captured from each ``AssistantMessage.model`` this
+        #: turn (#79/#90); reset each turn. Read for observability by the engine.
+        self.last_served_model: str | None = None
 
     async def _ensure_connected(self) -> None:
         if not self._connected:
@@ -233,12 +241,14 @@ class TaskSession:
         await self._ensure_connected()
         await self._client.query(self._prompt(text, attachments))
         self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
+        self.last_served_model = None  # this turn's served model; reset each turn
         text_blocks_seen = 0
         async for message in self._client.receive_response():
             session_id = getattr(message, "session_id", None)
             if session_id:
                 self.session_id = session_id
             if isinstance(message, AssistantMessage):
+                self.last_served_model = message.model
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         text_blocks_seen += 1

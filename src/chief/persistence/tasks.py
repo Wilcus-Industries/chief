@@ -81,6 +81,14 @@ async def set_task_model(
     await session.commit()
 
 
+async def set_route_category(
+    session: AsyncSession, task: Task, category: str | None
+) -> None:
+    """Persist (or clear) the per-task ``/route`` category override (#79)."""
+    task.route_category = category
+    await session.commit()
+
+
 async def get_active_account(session: AsyncSession, task: Task) -> str | None:
     """Return the active Google account label for ``task``, or ``None`` if unset."""
     return task.active_account

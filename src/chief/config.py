@@ -53,6 +53,21 @@ class PolicySeed(BaseModel):
         return self.tool, self.arg_pattern
 
 
+class RouteSeed(BaseModel):
+    """One boot-seeded routing row: a job category → ``{target_class, model}`` target
+    (#79). ``target_class`` is ``copilot`` (Copilot quota, e.g. model ``auto``) or
+    ``openrouter`` (a BYOK per-model target)."""
+
+    category: str
+    target_class: str
+    model: str
+
+    def as_tuple(self) -> tuple[str, str, str]:
+        """The ``(category, target_class, model)`` tuple :meth:`RoutingStore.seed`
+        expects."""
+        return self.category, self.target_class, self.model
+
+
 class Settings(BaseSettings):
     """Validated configuration for the chief core process."""
 
@@ -84,6 +99,33 @@ class Settings(BaseSettings):
     owner_model_default: str = "claude-sonnet-4-6"
     owner_model_opus: str = "claude-opus-4-8"
     opus_auto_detect: bool = False
+    # Model routing (#79, part of #72), default off (mirror the opt-in subsystem
+    # pattern). When routing_enabled, an owner task's spawning message is
+    # auto-classified into one job category (routing_seed) on the cheap classifier_model
+    # — never a routing target — and the category's target picks the owner session's
+    # model + BYOK provider: a ``copilot`` target runs on Copilot quota (model ``auto``,
+    # since the Student plan exposes no model choice — spike #74), an ``openrouter``
+    # target is a BYOK per-model call (needs openrouter_api_key). /route overrides a
+    # task; routing_surface_defaults (keyed by Surface value home/dm/group) pins a
+    # category per surface without classifying. The category set is persisted as data —
+    # exactly the seeded routes. Inert when disabled.
+    routing_enabled: bool = False
+    routing_seed: list[RouteSeed] = [
+        RouteSeed(category="writing", target_class="copilot", model="auto"),
+        RouteSeed(category="research", target_class="copilot", model="auto"),
+        RouteSeed(category="general", target_class="copilot", model="auto"),
+        RouteSeed(
+            category="code",
+            target_class="openrouter",
+            model="deepseek/deepseek-v4-flash",
+        ),
+        RouteSeed(
+            category="reasoning",
+            target_class="openrouter",
+            model="deepseek/deepseek-v4-flash",
+        ),
+    ]
+    routing_surface_defaults: dict[str, str] = {}
     guest_model: str = "claude-sonnet-4-6"
     # Agent backend seam (#75, part of #72 — the strangler scaffold). Every session the
     # engine drives is built through an AgentBackend; ``claude`` (claude-agent-sdk) is
@@ -383,6 +425,40 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"agent_backend must be one of {valid}, got {value!r}"
             )
+        return value
+
+    @field_validator("routing_seed")
+    @classmethod
+    def _validate_routing_seed(cls, value: list[RouteSeed]) -> list[RouteSeed]:
+        """Each routing row needs a non-empty category/model and a known target class.
+
+        Validated at load time so a typo (a stray target class, or a blank category the
+        classifier can never emit) fails the boot rather than the first routed task.
+        """
+        valid = ("copilot", "openrouter")
+        for seed in value:
+            if seed.target_class not in valid:
+                raise ValueError(
+                    f"routing_seed target_class must be one of {valid}, got "
+                    f"{seed.target_class!r}"
+                )
+            if not seed.category.strip() or not seed.model.strip():
+                raise ValueError(
+                    "routing_seed entries need a non-empty category and model"
+                )
+        return value
+
+    @field_validator("routing_surface_defaults")
+    @classmethod
+    def _validate_surface_defaults(cls, value: dict[str, str]) -> dict[str, str]:
+        """Each per-surface default keys off a real Surface value (home/dm/group)."""
+        valid = {"home", "dm", "group"}
+        for surface in value:
+            if surface not in valid:
+                raise ValueError(
+                    f"routing_surface_defaults keys must be Surface values {valid}, "
+                    f"got {surface!r}"
+                )
         return value
 
     @field_validator("quiet_hours_start", "quiet_hours_end")

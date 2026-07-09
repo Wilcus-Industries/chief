@@ -310,6 +310,7 @@ class TelegramAdapter(Adapter):
         self._app.add_handler(CommandHandler("branch", self._on_branch))
         self._app.add_handler(CommandHandler("opus", self._on_opus))
         self._app.add_handler(CommandHandler("sonnet", self._on_sonnet))
+        self._app.add_handler(CommandHandler("route", self._on_route))
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=CALLBACK_QUERY_PATTERN)
         )
@@ -657,6 +658,24 @@ class TelegramAdapter(Adapter):
         await update.effective_message.reply_text(
             await self._engine.revert(thread_key)
         )
+
+    async def _on_route(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Override this thread's routing category (owner only, #79).
+
+        ``/route <category>`` pins the job category (and respawns the session on that
+        category's target); a bare ``/route`` prints usage.
+        """
+        thread_key = self._owner_thread(update)
+        message = update.effective_message
+        if thread_key is None or message is None:
+            return
+        category = (message.text or "").partition(" ")[2].strip()
+        if not category:
+            await message.reply_text("Usage: /route <category>")
+            return
+        await message.reply_text(await self._engine.route(thread_key, category))
 
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

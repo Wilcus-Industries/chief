@@ -138,6 +138,65 @@ def test_agent_backend_rejects_unknown(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+# ---- model routing config (#79) ---------------------------------------------
+
+
+def _routing_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, yaml: str
+) -> Settings:
+    (tmp_path / "config.yaml").write_text(yaml)
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+    return Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_routing_defaults_off_with_the_five_seeded_categories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Routing is opt-in; the seed ships the initial 5-category table (#79).
+    settings = _routing_settings(tmp_path, monkeypatch, "owner_telegram_id: 1\n")
+
+    assert settings.routing_enabled is False
+    by_category = {s.category: s for s in settings.routing_seed}
+    assert set(by_category) == {
+        "writing",
+        "research",
+        "general",
+        "code",
+        "reasoning",
+    }
+    # writing/research/general → copilot auto; code/reasoning → openrouter DeepSeek.
+    assert by_category["writing"].target_class == "copilot"
+    assert by_category["writing"].model == "auto"
+    assert by_category["code"].target_class == "openrouter"
+    assert by_category["code"].model == "deepseek/deepseek-v4-flash"
+
+
+def test_routing_seed_rejects_unknown_target_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = (
+        "owner_telegram_id: 1\n"
+        "routing_seed:\n"
+        "  - {category: code, target_class: bedrock, model: x}\n"
+    )
+    with pytest.raises(ValidationError, match="target_class"):
+        _routing_settings(tmp_path, monkeypatch, yaml)
+
+
+def test_routing_surface_defaults_reject_unknown_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml = (
+        "owner_telegram_id: 1\n"
+        "routing_surface_defaults:\n"
+        "  lobby: general\n"
+    )
+    with pytest.raises(ValidationError, match="Surface"):
+        _routing_settings(tmp_path, monkeypatch, yaml)
+
+
 def test_m11_opus_escalation_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

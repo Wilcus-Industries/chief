@@ -23,6 +23,25 @@ guest_model: claude-sonnet-4-6
 # SDK, #76). Switch per deployment; "claude" stays the default.
 agent_backend: claude
 
+# Model routing (#79, part of #72), opt-in. When routing_enabled, an owner task's
+# spawning message is auto-classified into one job category (on classifier_model, never a
+# routing target) and the category's target picks the session's model + provider. Target
+# classes: "copilot" (Copilot quota — model "auto", no per-model choice, spike #74) and
+# "openrouter" (BYOK per-model; needs openrouter_api_key in the secrets dir). /route
+# <category> overrides a thread; routing_surface_defaults (keys: home/dm/group) pin a
+# category per surface without classifying. The category set IS the seeded routes.
+routing_enabled: false
+# routing_seed defaults to: writing/research/general → copilot auto; code/reasoning →
+# openrouter deepseek/deepseek-v4-flash. Override to re-target (the bridge slice later
+# points code/reasoning at Max):
+# routing_seed:
+#   - {category: writing,   target_class: copilot,    model: auto}
+#   - {category: research,  target_class: copilot,    model: auto}
+#   - {category: general,   target_class: copilot,    model: auto}
+#   - {category: code,      target_class: openrouter, model: deepseek/deepseek-v4-flash}
+#   - {category: reasoning, target_class: openrouter, model: deepseek/deepseek-v4-flash}
+# routing_surface_defaults: {}   # e.g. {group: general}
+
 # sqlite file path (repo-local data/ dir, gitignored; ~ expands).
 db_path: data/chief.db
 

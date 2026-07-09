@@ -308,6 +308,7 @@ class CaptureSession:
         self.session_id: str | None = None
         self.last_cost_usd: float = 0.0
         self.last_rate_limit_status: str | None = None
+        self.last_served_model: str | None = None
 
     async def run_turn(
         self, text: str, attachments: Sequence[Attachment] = ()

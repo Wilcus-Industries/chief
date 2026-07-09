@@ -557,6 +557,16 @@ class DiscordAdapter(Adapter):
             case "sonnet":
                 # Revert this thread to the default model (M11).
                 await channel.send(await self._engine.revert(message.thread_key))
+            case "route":
+                # Override this thread's routing category (#79); respawns the session on
+                # the category's target. A bare /route prints usage.
+                category = arg.strip()
+                if not category:
+                    await channel.send("Usage: /route <category>")
+                    return
+                await channel.send(
+                    await self._engine.route(message.thread_key, category)
+                )
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Resolve an approval, admission, or budget card button tap (owner only)."""

@@ -69,3 +69,64 @@ async def test_classifier_failure_defaults_safe(
     assert await classify.stop_intent("x", model="m") is False
     assert await classify.warrants_task("x", model="m") is False
     assert await classify.is_complex("x", model="m") is False
+
+
+# ---- category classifier (#79) ----------------------------------------------
+
+_CATEGORIES = ("writing", "code", "reasoning", "research", "general")
+
+
+async def test_classify_category_returns_named_category(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(classify, "query", _stream("code"))
+    got = await classify.classify_category(
+        "fix this stack trace", model="m", categories=_CATEGORIES, default="general"
+    )
+    assert got == "code"
+
+
+async def test_classify_category_unknown_reply_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A reply naming no known category never wedges a spawn — it defaults safe.
+    monkeypatch.setattr(classify, "query", _stream("banana"))
+    got = await classify.classify_category(
+        "??", model="m", categories=_CATEGORIES, default="general"
+    )
+    assert got == "general"
+
+
+async def test_classify_category_failure_defaults_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("sdk down")
+
+    monkeypatch.setattr(classify, "query", _boom)
+    got = await classify.classify_category(
+        "x", model="m", categories=_CATEGORIES, default="general"
+    )
+    assert got == "general"
+
+
+async def test_classify_category_runs_on_fixed_cheap_model_empty_toolset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3: the classifier runs on the fixed cheap model with an empty base tool set —
+    never a routing target — so it can't recurse through the table it feeds."""
+    captured: dict[str, Any] = {}
+
+    def _capture(*args: Any, **kwargs: Any) -> Any:
+        captured["options"] = kwargs["options"]
+        return _stream("research")(*args, **kwargs)
+
+    monkeypatch.setattr(classify, "query", _capture)
+    await classify.classify_category(
+        "summarize the literature",
+        model="claude-haiku-4-5",
+        categories=_CATEGORIES,
+        default="general",
+    )
+    assert captured["options"].model == "claude-haiku-4-5"  # the fixed cheap target
+    assert captured["options"].tools == []  # empty base set (can only answer)

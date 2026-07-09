@@ -34,6 +34,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
+from copilot import ProviderConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..adapters.base import (
@@ -70,6 +71,7 @@ from ..persistence.tasks import (
     get_task,
     list_active,
     set_active_account,
+    set_route_category,
     set_session_id,
     set_status,
     set_task_model,
@@ -94,6 +96,12 @@ from . import classify
 from .agent import NO_REPLY
 from .backend import ClaudeBackend
 from .personas import build_system_prompt
+from .routing import (
+    DEFAULT_CATEGORY,
+    RoutingStore,
+    RoutingTarget,
+    provider_for_target,
+)
 from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
@@ -122,6 +130,11 @@ PAUSED_BUDGET_ACK = "⏸ Paused at budget — pick how to continue on the card."
 OPUS_CONFIRM = "⚡ Switched to Opus 4.8 for this thread — /sonnet to switch back."
 OPUS_BUDGET_NOTE = "Heads up: Opus burns the monthly budget faster."
 SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
+#: Owner-facing replies for the #79 ``/route`` command. ROUTE_CONFIRM echoes the target
+#: the thread now runs on; the others are the disabled / unknown-category guards.
+ROUTE_CONFIRM = "🧭 Routing this thread as “{category}” → {target_class}:{model}."
+ROUTING_DISABLED = "Model routing isn't enabled."
+UNKNOWN_CATEGORY = "Unknown category “{category}”. Known: {known}."
 #: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
@@ -199,6 +212,22 @@ class BudgetProto(Protocol):
 
 SessionFactory = Callable[..., SessionProto]
 Classifier = Callable[..., Awaitable[bool]]
+#: The category classifier seam (#79): ``(text, *, model, categories, default) -> str``.
+#: Injected for testability, defaulting to
+#: :func:`chief.core.classify.classify_category`.
+CategoryClassifier = Callable[..., Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class ResolvedTarget:
+    """The model + BYOK provider a new owner session opens on (#79).
+
+    ``provider`` is ``None`` for a plain Copilot-quota (or non-routed) session and the
+    OpenRouter :class:`~copilot.ProviderConfig` for an ``openrouter`` target.
+    """
+
+    model: str
+    provider: ProviderConfig | None = None
 
 #: The engine builds sessions through an AgentBackend (#75). ClaudeBackend is the sole
 #: implementation today; ``app.build_engine`` selects it by config (only ``claude`` is
@@ -229,6 +258,11 @@ class _RunningTask:
     #: The model this live session is running on (M11). Mirrors the SDK session's model
     #: so the "already on Opus" guard and the auto-escalate skip are O(1) (no DB read).
     model: str = ""
+    #: The BYOK provider this live session was spawned on (#79). Non-None ⇒ an
+    #: ``openrouter`` target; a budget ``set_model`` can't switch it, so such a session
+    #: is skipped by :meth:`downgrade_live_sessions` (only a ``/route`` respawn changes
+    #: the provider).
+    provider: ProviderConfig | None = None
     #: Set when an auto-detect escalation card was denied, so a later complex turn in
     #: the same task doesn't re-ask. Cleared by an explicit /opus or /sonnet.
     auto_escalate_suppressed: bool = False
@@ -256,6 +290,11 @@ class TaskManager:
         is_complex: Classifier = classify.is_complex,
         owner_model_opus: str = "claude-opus-4-8",
         opus_auto_detect: bool = False,
+        routing: RoutingStore | None = None,
+        classify_category: CategoryClassifier = classify.classify_category,
+        openrouter_provider: ProviderConfig | None = None,
+        routing_surface_defaults: dict[str, str] | None = None,
+        default_category: str = DEFAULT_CATEGORY,
         policy: PolicyStore | None = None,
         approvals: ApprovalManager | None = None,
         audit: AuditLog | None = None,
@@ -307,6 +346,16 @@ class TaskManager:
         self._is_complex = is_complex
         self._owner_model_opus = owner_model_opus
         self._opus_auto_detect = opus_auto_detect
+        # Model routing (#79, part of #72): when a RoutingStore is wired, an owner
+        # task's spawning message is auto-classified into a job category (on
+        # classifier_model, never a routing target) and the category's target picks the
+        # session's model + BYOK provider. /route overrides per task;
+        # routing_surface_defaults pins a category per Surface. Inert (None) when off.
+        self._routing = routing
+        self._classify_category = classify_category
+        self._openrouter_provider = openrouter_provider
+        self._routing_surface_defaults = routing_surface_defaults or {}
+        self._default_category = default_category
         self._policy = policy
         self._approvals = approvals
         self._audit = audit
@@ -387,7 +436,7 @@ class TaskManager:
         # (whose casual flag needs the adapter's is_forum, unavailable here). A cold
         # wake onto General (":0") just runs as a normal task; its idle-archive no-ops
         # there (archive_thread guards thread_id==0), so nothing is wrongly closed.
-        task = await self._ensure_task(thread_key)
+        task = await self._ensure_task(thread_key, classify_text=text)
         await self._submit(task, Turn(text=text))
 
     # ---- inbound routing -------------------------------------------------
@@ -437,7 +486,9 @@ class TaskManager:
             # An owner-engaged group turn runs flat (a group has no forum to branch
             # into) with the full owner surface; its approval cards DM the owner.
             text = self._with_group_context(thread_key, text)
-            task = await self._ensure_task(thread_key, surface=Surface.GROUP)
+            task = await self._ensure_task(
+                thread_key, surface=Surface.GROUP, classify_text=text
+            )
             await self._submit(task, Turn(text=text, attachments=attachments))
             return
         is_casual = is_general
@@ -450,7 +501,9 @@ class TaskManager:
             await self._io.send(thread_key, "→ Tracking that in a new topic.")
             thread_key = new_key
             is_casual = False  # a spawned topic is a real, full-memory task
-        task = await self._ensure_task(thread_key, is_casual=is_casual)
+        task = await self._ensure_task(
+            thread_key, is_casual=is_casual, classify_text=text
+        )
         await self._submit(task, Turn(text=text, attachments=attachments))
 
     async def dispatch_guest(
@@ -535,6 +588,7 @@ class TaskManager:
         is_casual: bool = False,
         from_label: str | None = None,
         surface: Surface = Surface.DM,
+        classify_text: str | None = None,
     ) -> _RunningTask:
         existing = self._tasks.get(thread_key)
         if existing is not None:
@@ -596,23 +650,31 @@ class TaskManager:
             account_ask_needed=account_ask_needed,
         )
         # Guests run on the guest model (Sonnet, never Opus); the owner on theirs —
-        # swapped for the cheaper budget model while the cycle is downgraded (M9), or
-        # reopened on Opus if the thread was escalated (Task.model, M11).
+        # swapped for the cheaper budget model while the cycle is downgraded (M9),
+        # reopened on Opus if the thread was escalated (Task.model, M11), or on a routed
+        # category's target model + BYOK provider (#79).
         if tier == "owner":
-            model = await self._owner_session_model(persisted=persisted_model)
+            target = await self._resolve_owner_target(
+                thread_key=thread_key,
+                persisted=persisted_model,
+                surface=surface,
+                classify_text=classify_text,
+            )
+            model, provider = target.model, target.provider
         else:
-            model = self._guest_model or self._owner_model
+            model, provider = self._guest_model or self._owner_model, None
         rt = _RunningTask(
             thread_key=thread_key,
             db_id=db_id,
             session=self._session_factory_sdk(
-                model=model, resume=resume, **gate_kwargs
+                model=model, resume=resume, provider=provider, **gate_kwargs
             ),
             queue=asyncio.Queue(),
             tier=tier,
             is_casual=is_casual,
             surface=surface,
             model=model,
+            provider=provider,
         )
         self._tasks[thread_key] = rt
         return rt
@@ -1102,6 +1164,144 @@ class TaskManager:
                 return self._budget_downgrade_model
         return self._owner_model
 
+    # ---- model routing (#79) --------------------------------------------
+
+    async def _resolve_owner_target(
+        self,
+        *,
+        thread_key: str,
+        persisted: str | None,
+        surface: Surface,
+        classify_text: str | None,
+    ) -> ResolvedTarget:
+        """The model + BYOK provider a new owner session opens on (#79).
+
+        Composes with — never clobbers — the M9/M11 precedence:
+
+        1. A persisted Opus escalation (``Task.model``) wins outright: the explicit
+           owner choice overrides routing, on plain Copilot quota (no BYOK provider).
+        2. An active budget downgrade: the cheaper model, no provider.
+        3. Category routing (when a routing table is wired): the task's category
+           (``/route`` override → per-surface default → classify → fallback) → the
+           category's ``{target_class, model}`` → ``(model, provider)``.
+        4. Otherwise the configured owner model (routing off), no provider.
+        """
+        if persisted == self._owner_model_opus:
+            return ResolvedTarget(self._owner_model_opus)
+        if self._budget is not None and self._budget_downgrade_model is not None:
+            if await self._budget.mode() == usage.MODE_DOWNGRADED:
+                return ResolvedTarget(self._budget_downgrade_model)
+        if self._routing is not None:
+            target = await self._resolve_route(thread_key, surface, classify_text)
+            if target is not None:
+                provider = provider_for_target(
+                    target, openrouter_provider=self._openrouter_provider
+                )
+                return ResolvedTarget(target.model, provider)
+        return ResolvedTarget(self._owner_model)
+
+    async def _resolve_route(
+        self, thread_key: str, surface: Surface, classify_text: str | None
+    ) -> RoutingTarget | None:
+        """The routing target for this task, or ``None`` if the table has no target."""
+        assert self._routing is not None  # guarded by the caller
+        category = await self._task_category(thread_key, surface, classify_text)
+        return self._routing.resolve(category)
+
+    async def _task_category(
+        self, thread_key: str, surface: Surface, classify_text: str | None
+    ) -> str:
+        """Pick this task's job category at spawn (#79).
+
+        Precedence: a persisted ``/route`` override wins; else a configured per-surface
+        default pins the category *without* classifying; else the spawning message is
+        auto-classified on the fixed cheap classifier model; else the general fallback.
+        """
+        assert self._routing is not None  # guarded by the caller
+        override = await self._route_category_override(thread_key)
+        if override is not None:
+            return override
+        surface_default = self._routing_surface_defaults.get(surface.value)
+        if surface_default is not None:
+            return surface_default
+        if classify_text is not None:
+            return await self._classify_category(
+                classify_text,
+                model=self._classifier_model,
+                categories=self._routing.categories(),
+                default=self._default_category,
+            )
+        return self._default_category
+
+    async def _route_category_override(self, thread_key: str) -> str | None:
+        """This thread's persisted ``/route`` category, or ``None``."""
+        async with self._session_factory() as session:
+            db = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            return db.route_category if db is not None else None
+
+    async def route(self, thread_key: str, category: str) -> str:
+        """Override this owner thread's routing category (``/route <category>``, #79).
+
+        Persists the per-task category (survives restart) and, when a session is live,
+        **respawns** it onto the category's target — :meth:`SessionProto.set_model`
+        cannot change a session's provider, so a target-class switch (e.g. copilot →
+        openrouter) has to rebuild the session (resume-preserving) rather than re-point
+        a live one. Rejects a category with no row (the table is the source of truth).
+        """
+        if self._routing is None:
+            return ROUTING_DISABLED
+        if not self._routing.has(category):
+            known = ", ".join(self._routing.categories()) or "(none)"
+            return UNKNOWN_CATEGORY.format(category=category, known=known)
+        async with self._session_factory() as session:
+            db = await get_or_create_task(
+                session, platform=self._platform, thread_key=thread_key, tier="owner"
+            )
+            await set_route_category(session, db, category)
+        task = self._tasks.get(thread_key)
+        if task is not None:
+            await self._respawn_for_route(task, category)
+        target = self._routing.resolve(category)
+        assert target is not None  # has(category) guaranteed a row above
+        return ROUTE_CONFIRM.format(
+            category=category,
+            target_class=target.target_class,
+            model=target.model,
+        )
+
+    async def _respawn_for_route(
+        self, task: _RunningTask, category: str
+    ) -> None:
+        """Rebuild a live session on the routed category's target (resume-preserving).
+
+        A ``/route`` may switch target class, and a provider can't change on a live
+        session, so the honest move is to tear the session down and reconnect on the new
+        model + provider — carrying the resume id so the conversation's context follows.
+        """
+        assert self._routing is not None
+        target = self._routing.resolve(category)
+        assert target is not None
+        provider = provider_for_target(
+            target, openrouter_provider=self._openrouter_provider
+        )
+        resume = task.session.session_id
+        if task.generating:
+            await task.session.interrupt()
+        await task.session.aclose()
+        gate_kwargs = self._session_kwargs(
+            thread_key=task.thread_key,
+            tier=task.tier,
+            db_id=task.db_id,
+            surface=task.surface,
+        )
+        task.session = self._session_factory_sdk(
+            model=target.model, resume=resume, provider=provider, **gate_kwargs
+        )
+        task.model = target.model
+        task.provider = provider
+
     async def _budget_admits(self) -> bool:
         """False when the cycle is paused at budget — the turn must be skipped without
         spending. Reminds the owner once per pause episode that turns are blocked."""
@@ -1118,6 +1318,15 @@ class TaskManager:
     async def _record_spend(self, task: _RunningTask) -> None:
         """Roll this turn's SDK cost into the cycle total; a hard rate-limit rejection
         is treated like exhaustion (pause + ask)."""
+        # The actually-served model is observability only (#79): on Copilot ``auto`` and
+        # on OpenRouter alike the real model is read from the turn's event, not assumed
+        # from what was requested (set_model is untrusted on Copilot quota, spike #74).
+        served = task.session.last_served_model
+        if served is not None:
+            logger.info(
+                "turn served model",
+                extra={"thread_key": task.thread_key, "served_model": served},
+            )
         if self._budget is None:
             return
         await self._budget.record(task.session.last_cost_usd)
@@ -1140,6 +1349,11 @@ class TaskManager:
             return
         for task in list(self._tasks.values()):
             if task.tier != "owner" or task.model == self._owner_model_opus:
+                continue
+            # A routed openrouter session can't be downgraded via set_model (that can't
+            # change the BYOK provider, and the downgrade model isn't an OpenRouter
+            # one); leave it — only a /route respawn switches its target (#79).
+            if task.provider is not None:
                 continue
             await task.session.set_model(self._budget_downgrade_model)
             task.model = self._budget_downgrade_model
