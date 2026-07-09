@@ -2983,3 +2983,122 @@ async def test_branch_of_escalated_casual_keeps_opus_over_routing(
     assert branched["model"] == "claude-opus-4-8"  # Opus wins over routing
     assert branched["provider"] is None  # plain Copilot quota, not BYOK
     await mgr.shutdown()
+
+
+# ---- /opus & /sonnet respawn across the provider class (#94, part of #72) -----
+
+
+async def test_opus_on_routed_thread_respawns_to_plain_copilot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#94 AC2: /opus on a live openrouter-routed thread respawns the live session
+    onto {opus, provider=None} (plain Copilot quota) — not opus-through-OpenRouter,
+    which a bare set_model would leave it on (a provider can't change on a live
+    session), stranding the escalated turn on a provider that doesn't serve opus."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code" if "bug" in text else "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="fix this bug")
+    await _until(lambda: ("-100:5", "reply:fix this bug") in io.sends)
+    assert created[-1]["provider"] is _OPENROUTER  # sanity: live on openrouter target
+
+    reply = await mgr.escalate("-100:5")
+
+    assert "Opus" in reply
+    escalated = created[-1]
+    assert escalated["model"] == "claude-opus-4-8"
+    assert escalated["provider"] is None  # plain Copilot, not opus-through-openrouter
+    assert escalated["resume"] == "sess-fix this bug"  # context carried via resume
+    task = mgr._tasks["-100:5"]
+    assert task.model == "claude-opus-4-8" and task.provider is None
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+        assert db is not None and db.model == "claude-opus-4-8"  # persisted
+    await mgr.shutdown()
+
+
+async def test_sonnet_on_routed_thread_restores_routed_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#94 AC1: /sonnet on an openrouter-routed thread with no active Opus escalation
+    restores the thread's routed {model, provider} on the live session — not the owner
+    model on plain Copilot quota (the old routing-blind /sonnet)."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "writing"  # would auto-route to copilot auto
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hello")
+    await _until(lambda: ("-100:5", "reply:hello") in io.sends)
+    await mgr.route("-100:5", "code")  # persist route → respawn onto openrouter
+    assert created[-1]["model"] == "deepseek/deepseek-v4-flash"
+    assert created[-1]["provider"] is _OPENROUTER
+
+    respawns_before = len(created)
+    reply = await mgr.revert("-100:5")  # /sonnet, no Opus escalation active
+
+    assert "Sonnet" in reply
+    task = mgr._tasks["-100:5"]
+    assert task.model == "deepseek/deepseek-v4-flash"  # routed, not owner model
+    assert task.provider is _OPENROUTER
+    # same provider class → a set_model on the live session, not a respawn
+    assert len(created) == respawns_before
+    assert created[-1]["session"].model == "deepseek/deepseek-v4-flash"
+    await mgr.shutdown()
+
+
+async def test_sonnet_after_opus_on_routed_thread_respawns_to_openrouter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#94: clearing an Opus escalation on an openrouter-routed thread respawns the
+    live session back to the routed {model, provider}. Escalation moved it to plain
+    Copilot quota, and a provider can't change on a live session, so a bare set_model
+    couldn't restore openrouter — /sonnet must respawn (precedence after the escalation
+    clears is budget downgrade > routing > owner model)."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hello")
+    await _until(lambda: ("-100:5", "reply:hello") in io.sends)
+    await mgr.route("-100:5", "code")  # → openrouter deepseek
+    await mgr.escalate("-100:5")  # → opus on plain Copilot (respawn, crosses class)
+    assert created[-1]["model"] == "claude-opus-4-8"
+    assert created[-1]["provider"] is None
+
+    await mgr.revert("-100:5")  # → back to openrouter deepseek (respawn, crosses class)
+
+    reverted = created[-1]
+    assert reverted["model"] == "deepseek/deepseek-v4-flash"
+    assert reverted["provider"] is _OPENROUTER
+    task = mgr._tasks["-100:5"]
+    assert task.model == "deepseek/deepseek-v4-flash"
+    assert task.provider is _OPENROUTER
+    await mgr.shutdown()
