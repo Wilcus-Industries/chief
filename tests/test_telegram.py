@@ -735,7 +735,8 @@ async def test_budget_card_tap_flips_mode(
     await adapter._on_callback(update, _CTX)
 
     async with session_factory() as session:
-        row = await usage.get_row(session, "2026-06", usage.OPENROUTER_DOLLARS)
+        row = await usage.get_row(session, "2026-06", usage.PREMIUM_REQUESTS)
+    # Downgrade moves the premium-request currency out of paused → turns resume (#97).
     assert row is not None and row.mode == usage.MODE_DOWNGRADED
     assert engine.downgraded == 1  # the tap flips live owner sessions too
     update.callback_query.edit_message_text.assert_awaited_once()  # type: ignore[union-attr]
