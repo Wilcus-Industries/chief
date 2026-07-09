@@ -9,11 +9,15 @@ than beside any one SDK's session) is what let the claude-agent-sdk harness be r
 (#88) without touching the engine.
 """
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
 from ..adapters.base import Attachment
+
+logger = logging.getLogger("chief.core.session")
 
 #: The reply text surfaced when a turn produced no assistant text at all.
 NO_REPLY = "(no reply)"
@@ -66,3 +70,36 @@ class SessionProto(Protocol):
     async def interrupt(self) -> None: ...
     async def set_model(self, model: str) -> None: ...
     async def aclose(self) -> None: ...
+
+
+async def close_wedged_session(session: SessionProto, *, timeout: float) -> None:
+    """Time-boxed ``aclose`` that reaps the CLI subprocess a cancelled close leaks.
+
+    Both wedged-teardown sites (the watchdog's ``_reset_session`` and
+    ``ask_condition``'s finally) deliberately bound ``aclose`` — blocking the consumer
+    or the scheduler tick loop indefinitely is strictly worse than an abandoned close.
+    But cancelling ``aclose`` mid-``disconnect``/``stop`` skips the SDK's own subprocess
+    terminate, orphaning the Copilot CLI (#101). On expiry (or failure) this falls back
+    to the session's ``force_close`` — a bounded kill — so orphans never accumulate.
+    Never raises (best-effort); external cancellation still propagates. The bound is the
+    point: do not remove it.
+
+    ``force_close`` is discovered by ``getattr`` rather than declared on
+    :class:`SessionProto` — it is a Copilot-specific escape hatch, and keeping it off
+    the contract keeps every non-Copilot test fake valid (they have no reaping to do).
+    """
+    try:
+        async with asyncio.timeout(timeout):
+            await session.aclose()
+        return
+    except Exception:
+        logger.warning(
+            "session aclose timed out/failed; force-closing", exc_info=True
+        )
+    force = getattr(session, "force_close", None)
+    if force is None:
+        return  # non-Copilot fakes: nothing to reap
+    try:
+        await force()
+    except Exception:
+        logger.debug("force_close failed", exc_info=True)

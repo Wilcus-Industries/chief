@@ -21,6 +21,7 @@ from chief.adapters.base import (
     Surface,
     apply_budget_decision,
 )
+from chief.core import tasks
 from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -131,6 +132,7 @@ class FakeSession:
         self.attachments_seen: list[tuple[Attachment, ...]] = []
         self.interrupted = False
         self.closed = False
+        self.force_closed = False
         self.last_cost_usd = 0.0
         self.last_rate_limit_status: str | None = None
         #: Raw premium-request snapshot the engine sums into the premium currency (#84).
@@ -176,6 +178,12 @@ class FakeSession:
         self.model = model
 
     async def aclose(self) -> None:
+        self.closed = True
+
+    async def force_close(self) -> None:
+        # The reap's real effect: the CLI is killed and the session reconnects fresh
+        # next turn — same post-state as a clean aclose (#101).
+        self.force_closed = True
         self.closed = True
 
 
@@ -1087,6 +1095,53 @@ async def test_watchdog_times_out_wedged_turn_and_recovers(
     # The semaphore slot was released: a fresh task can also generate and reply.
     await mgr.dispatch(thread_key="-100:2", text="go")
     await _until(lambda: ("-100:2", "reply:go") in io.sends)
+    await mgr.shutdown()
+
+
+class _WedgedCloseSession(HangSession):
+    """A wedged session whose ``aclose`` also hangs — only ``force_close`` frees it.
+
+    Models the #101 leak: a time-boxed ``aclose`` cancelled mid-teardown never reaps the
+    Copilot CLI, so ``_reset_session`` must fall back to the bounded ``force_close``.
+    """
+
+    async def aclose(self) -> None:
+        if not self.force_closed:  # unbounded until the reap kills the CLI
+            await asyncio.Event().wait()
+        self.closed = True
+
+
+async def test_watchdog_reaps_a_wedged_session_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    # #101: the watchdog reset time-boxes aclose; a cancelled aclose leaks the CLI, so
+    # the reset falls back to force_close to reap the orphan and free the consumer.
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+    monkeypatch.setattr(tasks, "_RESET_TIMEOUT", 0.05)
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        sess: FakeSession = (
+            _WedgedCloseSession(model=model)
+            if not sessions
+            else FakeSession(model=model)
+        )
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(
+        session_factory, io, factory=factory, concurrency=1, turn_timeout=0.05
+    )
+
+    await mgr.dispatch(thread_key="-100:1", text="hang")
+    await _until(lambda: ("-100:1", TURN_TIMEOUT_NOTE) in io.sends)
+
+    # The wedged aclose was time-boxed and the orphan reaped via force_close (which runs
+    # just after the note); the consumer slot is then freed (generating reset) rather
+    # than re-frozen on the hung close.
+    await _until(lambda: bool(sessions) and sessions[0].force_closed)
+    await _until(lambda: mgr._tasks["-100:1"].generating is False)
     await mgr.shutdown()
 
 

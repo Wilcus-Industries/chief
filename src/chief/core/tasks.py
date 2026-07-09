@@ -109,7 +109,7 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
 # the engine's callers keep importing it from the TaskManager module.
-from .session import NO_REPLY, Final
+from .session import NO_REPLY, Final, close_wedged_session
 from .session import SessionProto as SessionProto
 from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
 
@@ -120,8 +120,10 @@ logger = logging.getLogger("chief.core.tasks")
 #: so the engine tears the session down rather than freezing the task forever.
 TURN_TIMEOUT_NOTE = "⚠️ that turn timed out — try again."
 #: Bound on the watchdog's own teardown of a wedged session: ``interrupt`` may hang on
-#: the same wedged control stream, so it is time-boxed before ``aclose`` forces a fresh
-#: subprocess on the next turn. Keeps a hung teardown from re-freezing the consumer.
+#: the same wedged control stream, so it is time-boxed before the session is closed. A
+#: time-boxed ``aclose`` cancelled mid-teardown *leaks* the Copilot CLI subprocess
+#: (#101), so the close goes through :func:`close_wedged_session`, which reaps the
+#: orphan on expiry. Keeps a hung teardown from re-freezing the consumer.
 _RESET_TIMEOUT = 10.0
 #: Owner reminder when a turn is skipped because the cycle is paused at budget (M9).
 #: The choice card was already posted when the cycle paused; this nudges once per
@@ -1717,21 +1719,19 @@ class TaskManager:
         """Best-effort teardown of a wedged session so the next turn reconnects fresh.
 
         The watchdog fired because the turn never terminated, so ``interrupt`` may also
-        hang on the wedged control stream; ``aclose`` (subprocess disconnect) then gets
-        a fresh CLI next turn. Both are time-boxed and guarded — this teardown runs on
-        the consumer loop, so a hung step here would re-freeze the task we just rescued.
+        hang on the wedged control stream; it is time-boxed and guarded. The close then
+        gets a fresh CLI next turn — but a time-boxed ``aclose`` cancelled mid-teardown
+        *leaks* the Copilot CLI subprocess (#101), so it goes through the shared
+        :func:`close_wedged_session`, which reaps the orphan on expiry. This teardown
+        runs on the consumer loop, so a hung step here would re-freeze the task we just
+        rescued — hence the bounds.
         """
-        for label, teardown in (
-            ("interrupt", task.session.interrupt),
-            ("aclose", task.session.aclose),
-        ):
-            try:
-                async with asyncio.timeout(_RESET_TIMEOUT):
-                    await teardown()
-            except Exception:
-                logger.debug(
-                    "%s during turn-timeout reset failed", label, exc_info=True
-                )
+        try:
+            async with asyncio.timeout(_RESET_TIMEOUT):
+                await task.session.interrupt()
+        except Exception:
+            logger.debug("interrupt during turn-timeout reset failed", exc_info=True)
+        await close_wedged_session(task.session, timeout=_RESET_TIMEOUT)
 
     async def _emit_final(self, task: _RunningTask, text: str) -> None:
         """Deliver the final reply: a Markdown file when long, else split messages (M8).

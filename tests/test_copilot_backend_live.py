@@ -26,9 +26,12 @@ Run it:
 ``CHIEF_COPILOT_MODEL`` (default ``auto``) overrides the requested model.
 """
 
+import asyncio
 import os
+import subprocess
 
 import pytest
+from copilot import CopilotClient
 
 from chief.core.backend import CopilotBackend
 from chief.core.copilot_session import find_vendor_identity_leak
@@ -93,3 +96,36 @@ async def test_live_persona_turn_has_no_vendor_identity_leak() -> None:
     assert all(leak is None for _text, leak in leaks), (
         f"vendor identity leaked through the persona customization: {leaks!r}"
     )
+
+
+@pytest.mark.timeout(120)
+async def test_live_time_boxed_disconnect_orphans_cli_then_force_stop_reaps() -> None:
+    """#101's exact experiment, made repeatable against the real runtime.
+
+    A time-boxed ``disconnect`` (the RPC ``aclose`` awaits with no timeout) leaves the
+    spawned ``copilot`` CLI running — a live orphan — and ``force_stop`` reaps it.
+    Opt-in (needs a Copilot login); the deterministic tests in
+    ``test_copilot_session.py`` carry the done-check gate.
+    """
+    client = CopilotClient()
+    await client.start()
+    try:
+        session = await client.create_session(
+            model=os.environ.get("CHIEF_COPILOT_MODEL", "auto")
+        )
+        proc = client._cli_process  # the real spawned CLI child
+        assert isinstance(proc, subprocess.Popen), "expected a spawned CLI process"
+        assert proc.poll() is None  # it is live before teardown
+
+        # A zero-budget disconnect cancels the destroy RPC mid-flight — the runtime
+        # orphan the issue asks to observe.
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0):
+                await session.disconnect()
+        assert proc.poll() is None  # the CLI survived the cancelled teardown
+
+        await client.force_stop()
+        assert proc.wait(timeout=10) is not None  # force_stop killed the orphan
+    finally:
+        if client._cli_process is not None:
+            client._cli_process.kill()
