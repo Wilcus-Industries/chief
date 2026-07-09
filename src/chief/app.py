@@ -28,7 +28,7 @@ from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .config import Settings
 from .core import screening
-from .core.backend import select_backend
+from .core.backend import CopilotBackend
 from .core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -72,7 +72,7 @@ from .tools.web import BraveSearcher, WebFetcher, WebService
 logger = logging.getLogger("chief.app")
 
 #: Candidate secrets directories, first existing one wins (host-native). Each holds
-#: one file per secret field (telegram_bot_token, claude_code_oauth_token, …) — the
+#: one file per secret field (telegram_bot_token, openrouter_api_key, …) — the
 #: pydantic-settings ``secrets_dir`` convention the old Docker mount used. The
 #: CHIEF_SECRETS_DIR env var overrides; env vars alone also work (no dir needed).
 SECRETS_DIR_CANDIDATES = (
@@ -103,7 +103,50 @@ def load_settings() -> Settings:
     for candidate in candidates:
         if candidate and os.path.isdir(candidate):
             return Settings(_secrets_dir=candidate)  # type: ignore[call-arg]
-    return Settings()  # type: ignore[call-arg]
+    return Settings()
+
+
+def warn_if_classifier_degraded(settings: Settings) -> None:
+    """Warn once at boot when the OpenRouter classifier path cannot work (#88).
+
+    The cheap text classifiers (stop-intent steering, warrants-a-task auto-spawn, the
+    complexity/routing judgments) and injection screening all run as direct OpenRouter
+    one-shots now. Two ways they silently degrade — both fail safe, screening fails
+    *open* (untrusted content passes UNSCREENED), and both are deliberate (owner
+    decision D2: warn, never refuse to boot), so surface each loudly once:
+
+    - **Keyless.** No ``openrouter_api_key`` ⇒ no HTTP call at all.
+    - **Keyed but mis-namespaced.** ``classifier_model``/``screening_model`` are sent
+      verbatim as OpenRouter's ``model`` field, which is namespaced (``vendor/model``).
+      A bare id (e.g. ``claude-haiku-4-5``) makes OpenRouter reject *every* call, so the
+      classifiers/screening fail exactly as if keyless — but with a key set there is no
+      other signal. Name each offending field.
+    """
+    if settings.openrouter_api_key is None:
+        logger.warning(
+            "openrouter_api_key is not set — the cheap classifiers (stop-intent "
+            "steering, warrants-a-task, complexity, routing) make no HTTP call and "
+            "fail safe (no interrupt, no spawn, no escalation), and injection "
+            "screening fails OPEN: untrusted web/browser/guest content reaches the "
+            "agent UNSCREENED. Set openrouter_api_key to enable them."
+        )
+        return
+    mis_namespaced = [
+        name
+        for name in ("classifier_model", "screening_model")
+        if "/" not in getattr(settings, name)
+    ]
+    if mis_namespaced:
+        logger.warning(
+            "openrouter_api_key is set but %s lack(s) an OpenRouter namespace "
+            "(expected 'vendor/model', e.g. 'anthropic/claude-haiku-4.5'). OpenRouter "
+            "will reject every classifier call, so stop-intent steering, "
+            "warrants-a-task, complexity, and routing fail safe and injection "
+            "screening fails OPEN: untrusted content reaches the agent UNSCREENED. "
+            "Fix the id(s): %s.",
+            " and ".join(mis_namespaced),
+            ", ".join(f"{n}={getattr(settings, n)!r}" for n in mis_namespaced),
+        )
 
 
 def build_memory(settings: Settings) -> MemoryStore:
@@ -408,10 +451,10 @@ def build_engine(
         if settings.scheduler_enabled
         else None
     )
-    # Route every session through the config-selected AgentBackend (#75). Only
-    # ``claude`` is valid today; ClaudeBackend.create_session is the SessionFactory the
-    # engine builds each owner/guest session with.
-    backend = select_backend(settings.agent_backend)
+    # Every session is built through the Copilot backend (#88, chief's sole harness):
+    # CopilotBackend.create_session is the SessionFactory the engine builds each
+    # owner/guest session with.
+    backend = CopilotBackend()
     return TaskManager(
         session_factory=session_factory,
         io=io,
@@ -431,6 +474,10 @@ def build_engine(
         ),
         routing_surface_defaults=settings.routing_surface_defaults,
         classifier_model=settings.classifier_model,
+        # The cheap text classifiers (steering, warrants-task, complexity, routing) run
+        # as direct OpenRouter one-shots (#88); this key authenticates them. None ⇒ they
+        # make no call and fail safe.
+        classifier_api_key=settings.openrouter_api_key,
         concurrency=settings.concurrency,
         turn_timeout=settings.turn_timeout_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
@@ -483,13 +530,9 @@ def build_engine(
             settings.budget_downgrade_model if budget is not None else None
         ),
         # A plain-quota owner turn spends the backend's native currency (#84): the
-        # Copilot backend burns premium requests; the Claude backend rides the Max
-        # bridge, counted informationally only (limits absorbed by backoff, unbudgeted).
-        native_quota_currency=(
-            usage.BRIDGE_TURNS
-            if settings.agent_backend == "claude"
-            else usage.PREMIUM_REQUESTS
-        ),
+        # Copilot backend burns premium requests (#88 removed the Max-bridge backend
+        # whose turns were informational-only).
+        native_quota_currency=usage.PREMIUM_REQUESTS,
         # Group chats (M11): cap on the per-group ambient buffer.
         group_context_max_messages=settings.group_context_max_messages,
         # Owner-only packaged skills (M10). The path must be absolute (see
@@ -515,10 +558,14 @@ def build_engine(
             else None
         ),
         # Untrusted-content screening (host-native): web/browser tool results and the
-        # guest relay get a cheap Haiku injection screen; inert (None) when disabled.
+        # guest relay get a cheap OpenRouter injection screen; inert (None) when
+        # disabled. The OpenRouter key authenticates the screen call — keyless, it fails
+        # open (content passes unscreened); the boot warns once (#88).
         screener=(
             functools.partial(
-                screening.screen_text, model=settings.screening_model
+                screening.screen_text,
+                model=settings.screening_model,
+                api_key=settings.openrouter_api_key,
             )
             if settings.screening_enabled
             else None
@@ -719,7 +766,10 @@ def build_scheduler(
         primary_thread_key=settings.primary_thread_key,
         shell_service=build_shell_service(settings),
         google_services=build_google_services(settings),
-        classifier_model=settings.classifier_model,
+        # #88 HIGH-2: agent monitors get the chief_web read surface (fetch + search),
+        # the same in-process server owner sessions use. None when web tools are off.
+        web_service=build_web_service(settings),
+        monitor_model=settings.monitor_model,
         owner_tz=settings.owner_tz,
         quiet_hours_start=settings.quiet_hours_start,
         quiet_hours_end=settings.quiet_hours_end,
@@ -739,6 +789,7 @@ async def serve(settings: Settings) -> None:
     needs no live connection (policy seed, memory scaffold/purge) runs once up front;
     per-platform recovery + approval re-arm fire in each stack's ``on_ready``.
     """
+    warn_if_classifier_degraded(settings)
     engine: AsyncEngine = create_engine(settings.db_path)
     await init_db(engine)
     factory = session_factory(engine)
@@ -814,13 +865,8 @@ async def serve(settings: Settings) -> None:
 def main() -> None:
     configure_logging()
     settings = load_settings()
-
-    # The SDK's `claude` subprocess authenticates from CLAUDE_CODE_OAUTH_TOKEN in its
-    # environment. Bridge the value here so it works whether the token arrived via a
-    # Docker secret file or an env var. (config rejects ANTHROPIC_API_KEY, which would
-    # otherwise outrank it and bill the API.)
-    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = settings.claude_code_oauth_token
-
+    # The Copilot CLI authenticates from its own ``~/.copilot/config.json`` (#88), so
+    # there is no SDK auth token to bridge into the environment here.
     asyncio.run(serve(settings))
 
 

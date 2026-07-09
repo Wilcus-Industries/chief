@@ -1,14 +1,14 @@
-"""Forward chief's tool surface onto the Copilot SDK's tools/MCP shape (#80, part #72).
+"""Forward chief's in-process tools onto the Copilot SDK's tools/MCP shape (#80, #88).
 
 chief builds every session's tool surface as a single ``mcp_servers`` mapping (see
 :meth:`chief.core.tasks.TaskManager._wire_owner_session`) that mixes **two kinds** of
 entry, keyed by server name:
 
-* **In-process SDK servers** — the shell, scheduler, and guest tools, built with
-  claude-agent-sdk's ``create_sdk_mcp_server`` into an
-  :class:`~claude_agent_sdk.McpSdkServerConfig` (``{"type": "sdk", ...}``) that carries
-  a live in-process MCP ``Server`` instance. The Copilot SDK has no in-process-MCP
-  concept; its analogue is a flat list of :class:`~copilot.Tool` objects registered via
+* **In-process servers** — the shell, scheduler, guest, web, routing-admin, and
+  Google-account tools, built with :func:`chief.tools.inprocess.create_sdk_mcp_server`
+  into an :class:`~chief.tools.inprocess.InProcessServerConfig` (``{"type": "sdk", …}``)
+  carrying the list of :class:`~chief.tools.inprocess.InProcessTool` records. The
+  Copilot SDK's analogue is a flat list of :class:`~copilot.Tool` objects registered via
   ``create_session(tools=…)``.
 * **External HTTP servers** — the Google (calendar / gmail / drive / sheets) and browser
   MCP containers, built by :meth:`chief.tools.google.GoogleService.server_config` into a
@@ -17,13 +17,15 @@ entry, keyed by server name:
   ``create_session(mcp_servers=…)``.
 
 :func:`partition_mcp_servers` splits the mixed mapping into those two Copilot inputs.
-:func:`sdk_server_to_tools` does the real conversion for the in-process kind: it drives
-the built MCP ``Server``'s own ``list_tools`` / ``call_tool`` handlers in-process, so an
-invoked Copilot tool runs chief's *actual* tool logic (e.g. ``ShellService.run``) — not
-a reimplementation. No tool service is touched; the adapter works off the built configs
-the backend already receives.
+:func:`sdk_server_to_tools` does the conversion for the in-process kind: each
+:class:`InProcessTool`'s handler runs chief's *actual* tool logic (e.g.
+``ShellService.run``) in-process — no ``mcp.Server`` round-trip (#88 dropped that, and
+with it the ``mcp`` transitive dependency). Its ``{"content": …, "is_error": …}`` result
+is mapped onto a Copilot :class:`~copilot.ToolResult` by the SDK's own
+:func:`~copilot.convert_mcp_call_tool_result` (verified against github-copilot-sdk
+1.0.5: it reads ``call_result["content"]`` and ``call_result.get("isError")``).
 
-**Tool naming is the gate contract.** claude-agent-sdk qualifies an MCP tool as
+**Tool naming is the gate contract.** chief qualifies an in-process tool as
 ``mcp__<server>__<tool>``, and chief's gate (:mod:`chief.gate`) keys every allowlist,
 ``COMMAND_TOOLS`` entry, and blacklist rule off those exact strings. So each converted
 Copilot tool is named ``mcp__<server_name>__<tool_name>`` too — the custom-tool name the
@@ -35,10 +37,10 @@ with no requalification. (The HTTP-server tools arrive split as ``server_name`` 
 
 from typing import Any, cast
 
-from claude_agent_sdk import McpSdkServerConfig
 from copilot import Tool, ToolInvocation, ToolResult, convert_mcp_call_tool_result
 from copilot.session import MCPServerConfig
-from mcp import types as mcp_types
+
+from ..tools.inprocess import InProcessServerConfig, InProcessTool, build_input_schema
 
 
 def qualified_tool_name(server_name: str, tool_name: str) -> str:
@@ -46,52 +48,38 @@ def qualified_tool_name(server_name: str, tool_name: str) -> str:
     return f"mcp__{server_name}__{tool_name}"
 
 
-async def _list_sdk_tools(config: McpSdkServerConfig) -> list[mcp_types.Tool]:
-    """Enumerate an in-process MCP server's tools via its own ``list_tools`` handler."""
-    handler = config["instance"].request_handlers[mcp_types.ListToolsRequest]
-    result = await handler(mcp_types.ListToolsRequest(method="tools/list"))
-    return cast(mcp_types.ListToolsResult, result.root).tools
+def _build_copilot_tool(server_name: str, tool_def: InProcessTool) -> Tool:
+    """Wrap one :class:`InProcessTool` as a :class:`copilot.Tool`.
 
-
-def _build_copilot_tool(
-    config: McpSdkServerConfig, tool_def: mcp_types.Tool
-) -> Tool:
-    """Wrap one in-process MCP tool as a :class:`copilot.Tool`.
-
-    The handler dispatches back through the MCP server's ``call_tool`` handler, so the
-    original chief tool logic runs in-process; its ``CallToolResult`` is converted to a
-    Copilot :class:`~copilot.ToolResult` with the SDK's own
-    :func:`~copilot.convert_mcp_call_tool_result`. Built as a :class:`~copilot.Tool`
-    directly (the object ``@define_tool`` also produces) so chief's existing JSON-schema
-    tool definitions carry over verbatim, without fabricating a Pydantic model per tool.
+    The handler runs the original chief tool logic in-process and maps its
+    ``{"content": …, "is_error": …}`` dict onto a Copilot :class:`~copilot.ToolResult`
+    via the SDK's :func:`~copilot.convert_mcp_call_tool_result` (which reads a
+    camelCase ``isError``), so a chief tool error surfaces as a Copilot failure result.
     """
-    call_handler = config["instance"].request_handlers[mcp_types.CallToolRequest]
-    bare_name = tool_def.name
+    handler_fn = tool_def.handler
 
     async def handler(invocation: ToolInvocation) -> ToolResult:
         arguments = invocation.arguments or {}
-        request = mcp_types.CallToolRequest(
-            method="tools/call",
-            params=mcp_types.CallToolRequestParams(
-                name=bare_name, arguments=arguments
-            ),
+        result = await handler_fn(arguments)
+        return convert_mcp_call_tool_result(
+            {
+                "content": result.get("content") or [],
+                "isError": bool(result.get("is_error", False)),
+            }
         )
-        result = await call_handler(request)
-        call_result = cast(mcp_types.CallToolResult, result.root)
-        return convert_mcp_call_tool_result(call_result.model_dump(by_alias=True))
 
     return Tool(
-        name=qualified_tool_name(config["name"], bare_name),
-        description=tool_def.description or "",
-        parameters=tool_def.inputSchema,
+        name=qualified_tool_name(server_name, tool_def.name),
+        description=tool_def.description,
+        parameters=build_input_schema(tool_def.input_schema),
         handler=handler,
     )
 
 
-async def sdk_server_to_tools(config: McpSdkServerConfig) -> list[Tool]:
-    """Convert one in-process ``McpSdkServerConfig`` into a list of Copilot tools."""
-    tool_defs = await _list_sdk_tools(config)
-    return [_build_copilot_tool(config, td) for td in tool_defs]
+async def sdk_server_to_tools(config: InProcessServerConfig) -> list[Tool]:
+    """Convert one in-process ``InProcessServerConfig`` into a list of Copilot tools."""
+    name = config["name"]
+    return [_build_copilot_tool(name, td) for td in config["tools"]]
 
 
 async def partition_mcp_servers(
@@ -108,7 +96,9 @@ async def partition_mcp_servers(
     http_servers: dict[str, MCPServerConfig] = {}
     for name, config in (mcp_servers or {}).items():
         if isinstance(config, dict) and config.get("type") == "sdk":
-            tools.extend(await sdk_server_to_tools(cast(McpSdkServerConfig, config)))
+            tools.extend(
+                await sdk_server_to_tools(cast(InProcessServerConfig, config))
+            )
         else:
             http_servers[name] = cast(MCPServerConfig, config)
     return tools, http_servers

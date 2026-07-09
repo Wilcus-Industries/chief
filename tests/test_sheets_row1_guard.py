@@ -12,6 +12,11 @@ from pathlib import Path
 
 import pytest
 
+# ``row1_guard`` (loaded by path below) imports ``mcp.types`` — the ``mcp`` stack was a
+# claude-agent-sdk transitive dropped in #88 and is not installed in the chief venv (the
+# docker image carries its own deps). Skip the whole module when it is absent.
+pytest.importorskip("mcp")
+
 _GUARD_PATH = (
     Path(__file__).resolve().parents[1] / "docker" / "mcp-sheets" / "row1_guard.py"
 )

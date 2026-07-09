@@ -69,7 +69,6 @@ def _settings(**overrides: object) -> Settings:
     base: dict[str, object] = dict(
         owner_telegram_id=42,
         telegram_bot_token="tg-secret",
-        claude_code_oauth_token="oauth-secret",
     )
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]

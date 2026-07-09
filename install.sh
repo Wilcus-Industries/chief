@@ -62,11 +62,17 @@ ok "secrets/ (one file per secret — gitignored)"
 # turn a clear boot error into a confusing API failure.
 say "checking secrets (files under ./secrets/, or env vars of the same name)"
 SECRETS_OK=1
-if [ -s secrets/claude_code_oauth_token ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  ok "claude_code_oauth_token"
+# Agent auth (#88): the GitHub Copilot SDK authenticates via the Copilot CLI's own
+# login (~/.copilot/config.json), not a chief secret — there is no Claude OAuth token
+# to scaffold. Log in once with the Copilot CLI before the first run.
+say "Copilot auth: log in with the Copilot CLI once (writes ~/.copilot/config.json)"
+# openrouter_api_key (optional) powers the cheap classifiers + injection screening
+# (#88). Keyless, they make no HTTP call and fail safe — and screening fails OPEN
+# (untrusted content passes unscreened) — so this is recommended, not required.
+if [ -s secrets/openrouter_api_key ] || [ -n "${OPENROUTER_API_KEY:-}" ]; then
+  ok "openrouter_api_key"
 else
-  SECRETS_OK=0
-  miss "claude_code_oauth_token — run 'claude setup-token' and save the token to secrets/claude_code_oauth_token"
+  miss "openrouter_api_key (optional) — without it the classifiers + injection screening fail safe/open (see secrets/README.md)"
 fi
 if [ -s secrets/telegram_bot_token ] || [ -n "${TELEGRAM_BOT_TOKEN:-}" ] \
   || [ -s secrets/discord_bot_token ] || [ -n "${DISCORD_BOT_TOKEN:-}" ]; then

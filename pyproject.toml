@@ -1,10 +1,9 @@
 [project]
 name = "chief"
 version = "0.0.0"
-description = "Personal AI assistant on Claude Max — foundations (M0/M1)."
+description = "Personal AI assistant on the GitHub Copilot SDK."
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.2",
     "github-copilot-sdk>=1",
     "python-telegram-bot>=21",
     "sqlalchemy>=2",
@@ -28,6 +27,10 @@ dev = [
     # Host-only OAuth helper (chief.tools.google.auth). Not a runtime dep — the core
     # container reaches Google through the MCP servers, not this script.
     "google-auth-oauthlib>=1.2",
+    # Test-only (#88): the Google-MCP injection / Sheets row-1 security suites drive the
+    # vendored docker/mcp-* servers in-process, which import ``mcp``. Dev group ONLY —
+    # the core reaches those servers over HTTP, never imports this package at runtime.
+    "mcp>=1",
 ]
 
 [build-system]
@@ -73,6 +76,15 @@ ignore_missing_imports = true
 # croniter ships no py.typed; used by chief.core.schedule_time for cron next-fire.
 [[tool.mypy.overrides]]
 module = ["croniter.*"]
+ignore_missing_imports = true
+
+# ``mcp`` (+ its starlette transitive) is now a dev-group dependency (#88 relit the
+# Google-MCP injection / Sheets row-1 security suites, which import it to drive the
+# vendored docker/mcp-* servers in-process). Neither ships complete inline types for
+# every submodule those guarded imports touch, so keep ignoring missing imports rather
+# than let a partial-typing gap in a test-only dependency fail the type-check.
+[[tool.mypy.overrides]]
+module = ["mcp", "mcp.*", "starlette", "starlette.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

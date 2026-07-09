@@ -17,17 +17,12 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, cast
 
 import pytest
-from claude_agent_sdk import (
-    PermissionResultAllow,
-    ToolPermissionContext,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import Attachment
 from chief.core.session import Final, TurnEvent
 from chief.core.tasks import (
     MEMORY_TOOLS,
-    WEB_META_TOOLS,
     SessionProto,
     TaskManager,
 )
@@ -35,6 +30,7 @@ from chief.gate.approvals import ApprovalAction, ApprovalManager
 from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
 from chief.memory.store import Fact
 from chief.memory.versioning import NullVersioner, Versioner
 from chief.tools.browser import mcp as browser_mcp
@@ -188,9 +184,8 @@ async def test_owner_browser_session_wires_mcp_and_read_tools_in_allowed(
     assert "mcp__playwright__browser_console_messages" in allowed
     assert "mcp__playwright__browser_wait_for" in allowed
     assert "mcp__playwright__browser_tabs" in allowed
-    # Memory + web tools are retained alongside browser tools.
+    # Memory tools are retained alongside browser tools.
     assert "Read" in allowed
-    assert "WebSearch" in allowed
     await mgr.shutdown()
 
 
@@ -287,8 +282,8 @@ async def test_browser_disabled_owner_keeps_memory_and_web_tools(
 
     # No playwright MCP server when disabled.
     assert "mcp_servers" not in captured
-    # Owner still gets memory + web tools.
-    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
+    # Owner base surface is memory tools (no web service wired here).
+    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS)
     await mgr.shutdown()
 
 

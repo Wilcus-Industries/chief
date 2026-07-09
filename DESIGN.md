@@ -2,7 +2,8 @@
 
 A personal AI agent, running natively on your own machine. DM it from Telegram or
 Discord and it does things for you — and for other people, like a real assistant
-screens for its boss. Backed by your Claude Max subscription via the Claude Agent SDK.
+screens for its boss. Runs on the GitHub Copilot SDK (#88 retired the original Claude
+Agent SDK / Max-subscription harness — see the host-native rework and PRD #72 below).
 
 Status: **design complete (v1)**, built through M13 — and **reworked host-native
 (2026-07)**, see the next section.
@@ -107,7 +108,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Deploy | Local install (host-native): `install.sh` + `chief` launcher; CI keeps done-check + smoke test, no VPS deploy |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
-| Auth | `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (secrets-dir file or env); never set `ANTHROPIC_API_KEY`; regen yearly |
+| Auth | GitHub Copilot SDK via the `copilot` CLI's own login (`~/.copilot/config.json`, auto-refreshing); `openrouter_api_key` (optional) powers the cheap classifiers + screening and BYOK routing. #88 dropped the Claude `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` path |
 | Gate mechanism | `PreToolUse` hook (every tool) + `canUseTool` (ask→approval) — verified |
 | Usage budget | Meter each turn in its native currency, no cross-currency conversion (#84): Copilot premium requests (raw count vs a monthly cap), OpenRouter dollars (metered BYOK spend vs a dollar cap). Warn at configured thresholds (default 75/90%). A third currency, bridge turns, is retired and inert (#100) |
 | Budget exhaustion | Premium requests: pause + owner choice card (downgrade to Copilot `auto` / continue full-quality / approve overflow past the cap). OpenRouter dollars: silently auto-downgrade routed categories onto Copilot `auto`, no card |
@@ -494,8 +495,9 @@ on agent-reachable paths).
 **Secrets → a secrets dir** (one file per secret; host-native): the first existing of
 `$CHIEF_SECRETS_DIR`, `~/.config/chief/secrets`, or the repo-local `./secrets`, read by
 pydantic-settings; env vars of the same name always work. Holds `telegram_bot_token`,
-`discord_bot_token`, `claude_code_oauth_token` (from `claude setup-token`), the Google
-OAuth client + tokens (`secrets/google_tokens/`). Files are `0600`. Note the shell now
+`discord_bot_token`, the optional `openrouter_api_key`, the Google OAuth client + tokens
+(`secrets/google_tokens/`). The agent auth is **not** here — the Copilot CLI owns its own
+login (#88 dropped the Claude OAuth token). Files are `0600`. Note the shell now
 runs on the host, so secrets in the process env are visible to shell children — an
 accepted trade (see Security model).
 

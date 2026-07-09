@@ -29,16 +29,16 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from claude_agent_sdk import (
+from ..persistence.policy import NEVER
+from .blacklist import Blacklist
+from .policy import PolicyStore
+from .types import (
+    HookCallback,
+    HookContext,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
 )
-from claude_agent_sdk.types import HookCallback, HookContext
-
-from ..persistence.policy import NEVER
-from .blacklist import Blacklist
-from .policy import PolicyStore
 
 
 class GateDecision(Enum):
@@ -63,17 +63,13 @@ def _always(_: dict[str, Any]) -> bool:
 
 #: Read-only tool → predicate over its input. Drives the guest tier's read-only ALLOW
 #: (the owner tier allows by default anyway). Unknown tool ⇒ guest ASK (safe default).
+#: The claude built-ins WebSearch/WebFetch/ToolSearch were dropped with the claude
+#: backend (#88): chief's own web reads are the ``mcp__chief_web__*`` tools, which the
+#: monitor/owner surfaces allow-list explicitly rather than by read-only membership.
 READ_ONLY: dict[str, Callable[[dict[str, Any]], bool]] = {
     "Read": _always,
     "Glob": _always,
     "Grep": _always,
-    "WebSearch": _always,
-    # WebFetch is the GET-only built-in, so any input is read-only. A web tool that can
-    # POST must NOT reuse this name with ``_always`` — gate it with a method predicate.
-    "WebFetch": _always,
-    # ToolSearch only fetches deferred MCP tool *schemas* — it invokes nothing, so it is
-    # safe to ALLOW with no card (it sits in allowed_tools too, see core.tasks).
-    "ToolSearch": _always,
 }
 
 

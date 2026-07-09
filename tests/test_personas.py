@@ -142,12 +142,28 @@ def test_guest_never_gets_gmail_guidance() -> None:
     assert "## Gmail" not in prompt
 
 
-def test_owner_always_gets_web_guidance() -> None:
-    # Web tools are always wired for the owner, so the web block is always present.
-    prompt = build_system_prompt(tier="owner", memory=FakeMemory(), owner_name="Will")
+def test_owner_web_guidance_only_when_web_enabled() -> None:
+    # #88 MEDIUM-2: web tools default OFF (web_tools_enabled), so the ## Web block is
+    # conditional. When wired it names the chief_web tools and flags that fetch may need
+    # approval; it must never name the removed claude built-ins.
+    enabled = build_system_prompt(
+        tier="owner", memory=FakeMemory(), owner_name="Will", web_enabled=True
+    )
+    assert "## Web" in enabled
+    assert "chief_web" in enabled
+    assert "approval" in enabled.lower()  # fetch may ask for approval
+    assert "WebSearch" not in enabled
+    assert "WebFetch" not in enabled
 
-    assert "## Web" in prompt
-    assert "WebSearch" in prompt
+    # Off (explicit and by default) → the block is absent entirely.
+    disabled = build_system_prompt(
+        tier="owner", memory=FakeMemory(), owner_name="Will", web_enabled=False
+    )
+    assert "## Web" not in disabled
+    default = build_system_prompt(
+        tier="owner", memory=FakeMemory(), owner_name="Will"
+    )
+    assert "## Web" not in default
 
 
 def test_owner_shell_and_workspace_guidance_when_enabled() -> None:
@@ -212,6 +228,7 @@ def test_guest_never_gets_shell_workspace_or_web() -> None:
         owner_name="Will",
         workspace_enabled=True,
         shell_enabled=True,
+        web_enabled=True,  # even wired, a guest never sees the web block
     )
 
     assert "## Web" not in prompt

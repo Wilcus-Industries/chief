@@ -1,144 +1,119 @@
-"""AgentBackend seam (issue #75): ClaudeBackend wraps claude-agent-sdk; config selects.
+"""The agent backend seam (#88): CopilotBackend adapts chief's gate onto the SDK.
 
-The central mechanism is a *real* claude-agent-sdk turn dispatched through the backend:
-the SDK options are built for real and a real :class:`TaskSession` drives the turn —
-only the SDK subprocess client (the third-party boundary) is faked. Behaviour is
-unchanged from driving ``TaskSession`` directly; the seam is where a later Copilot
-backend (#72) will implement the same contract against a different SDK.
+The claude-agent-sdk backend and the ``select_backend`` registry are gone — the Copilot
+SDK is chief's sole harness. The central mechanism here is a *real* backend turn: a fake
+Copilot client/session boundary (the third-party subprocess) records the kwargs
+``create_session`` forwards, so the backend's job — turning chief's SDK-agnostic
+``can_use_tool`` into the Copilot SDK's ``on_permission_request`` — is exercised for
+real. The event-mapping half is covered by ``tests/test_copilot_session.py`` and the
+hook adaptation by ``tests/test_copilot_gate.py``.
 """
 
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any, cast
+from uuid import uuid4
 
-import pytest
-from claude_agent_sdk import (
-    AssistantMessage,
-    CanUseTool,
-    ClaudeAgentOptions,
-    HookMatcher,
-    PermissionResultAllow,
-    TextBlock,
-    ToolPermissionContext,
-)
-from claude_agent_sdk.types import HookEvent
-from copilot import ProviderConfig
+from copilot.session_events import SessionEvent, SessionEventType, SessionIdleData
 
-from chief.core.backend import ClaudeBackend, CopilotBackend, select_backend
+from chief.core.backend import CopilotBackend
+from chief.core.copilot_session import CopilotClientFactory
 from chief.core.session import Final
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
+
+
+class FakeSession:
+    """Structural stand-in for a Copilot session — replays a single idle event."""
+
+    session_id = "sess-1"
+
+    def __init__(self) -> None:
+        self._handler: Callable[[SessionEvent], None] | None = None
+
+    def on(self, handler: Callable[[SessionEvent], None]) -> Callable[[], None]:
+        self._handler = handler
+        return lambda: None
+
+    async def send(self, prompt: str, *, attachments: Any = None) -> str:
+        assert self._handler is not None
+        self._handler(
+            SessionEvent(
+                data=SessionIdleData(),
+                id=uuid4(),
+                timestamp=datetime.now(UTC),
+                type=SessionEventType.SESSION_INFO,
+            )
+        )
+        return "msg-1"
+
+    async def set_model(self, model: str) -> None: ...
+    async def abort(self) -> None: ...
+    async def disconnect(self) -> None: ...
 
 
 class FakeClient:
-    """Structural stand-in for ClaudeSDKClient — the faked SDK boundary."""
+    """Records the kwargs ``create_session`` is called with (the faked boundary)."""
 
-    def __init__(self, options: ClaudeAgentOptions) -> None:
-        self.options = options
-        self.connected = False
-        self.queries: list[Any] = []
+    def __init__(self) -> None:
+        self.create_kwargs: dict[str, Any] | None = None
+        self._session = FakeSession()
 
-    async def connect(self) -> None:
-        self.connected = True
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
 
-    async def query(self, prompt: Any, session_id: str = "default") -> None:
-        self.queries.append(prompt)
-
-    async def receive_response(self) -> AsyncIterator[Any]:
-        yield AssistantMessage(
-            content=[TextBlock(text="hi")], model="m", session_id="sess-1"
-        )
-
-    async def interrupt(self) -> None: ...
-
-    async def set_model(self, model: str | None = None) -> None: ...
-
-    async def disconnect(self) -> None:
-        self.connected = False
+    async def create_session(self, **kwargs: Any) -> FakeSession:
+        self.create_kwargs = kwargs
+        return self._session
 
 
-async def test_claude_backend_runs_real_sdk_turn_through_seam() -> None:
-    # A real claude-agent-sdk turn flows through the backend: create_session builds a
-    # TaskSession whose run_turn streams the SDK messages as Final events. Only the
-    # subprocess client is faked.
-    captured: dict[str, FakeClient] = {}
-
-    def factory(options: ClaudeAgentOptions) -> FakeClient:
-        client = FakeClient(options)
-        captured["client"] = client
-        return client
-
-    backend = ClaudeBackend(client_factory=factory)
-    session = backend.create_session(model="claude-sonnet-4-6")
-
-    events = [event async for event in session.run_turn("do it")]
-
-    assert events == [Final(text="hi")]
-    assert captured["client"].connected is True
-    assert captured["client"].queries == ["do it"]
-    assert session.session_id == "sess-1"
+def _factory(client: FakeClient) -> CopilotClientFactory:
+    return cast(CopilotClientFactory, lambda: client)
 
 
-async def test_claude_backend_wires_permission_hook_tools_and_resume() -> None:
-    # The seam forwards the permission callback + pre-tool hook, the in-process tools
-    # and MCP servers, and the resume pointer into the SDK options verbatim.
-    captured: dict[str, ClaudeAgentOptions] = {}
+async def _allow(
+    tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
+) -> PermissionResultAllow:
+    return PermissionResultAllow()
 
-    def factory(options: ClaudeAgentOptions) -> FakeClient:
-        captured["options"] = options
-        return FakeClient(options)
 
-    async def _allow(
-        tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
-    ) -> PermissionResultAllow:
-        return PermissionResultAllow()
-
-    can_use: CanUseTool = _allow
-    hooks: dict[HookEvent, list[HookMatcher]] = {"PreToolUse": []}
-    mcp_servers: dict[str, Any] = {"chief_shell": {"type": "sse", "url": "http://x"}}
-
-    ClaudeBackend(client_factory=factory).create_session(
-        model="m",
-        resume="sess-9",
-        can_use_tool=can_use,
-        hooks=hooks,
-        allowed_tools=["Read"],
-        disallowed_tools=["Bash"],
-        mcp_servers=mcp_servers,
+async def test_backend_runs_a_real_turn_through_the_copilot_session() -> None:
+    # create_session builds a CopilotTaskSession whose run_turn streams the SDK events
+    # as chief Final events; only the client/session subprocess is faked.
+    client = FakeClient()
+    session = CopilotBackend(client_factory=_factory(client)).create_session(
+        model="auto"
     )
 
-    options = captured["options"]
-    assert options.resume == "sess-9"
-    assert options.can_use_tool is can_use
-    assert options.hooks == hooks
-    assert options.allowed_tools == ["Read"]
-    assert options.disallowed_tools == ["Bash"]
-    assert options.mcp_servers == mcp_servers
-
-
-async def test_claude_backend_ignores_provider_kwarg() -> None:
-    # #90: `provider` is a Copilot BYOK concept; ClaudeBackend accepts it (to satisfy
-    # AgentBackend) but never forwards it — passing it must not raise (TaskSession has
-    # no `provider` param, so a leaked forward would blow up with TypeError) and the
-    # turn behaves exactly as if `provider` were never passed.
-    provider = ProviderConfig(base_url="https://openrouter.ai/api/v1", api_key="k")
-
-    session = ClaudeBackend(client_factory=FakeClient).create_session(
-        model="m", provider=provider
-    )
     events = [event async for event in session.run_turn("hi")]
 
-    assert events == [Final(text="hi")]
+    assert events == [Final(text="(no reply)")]
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["model"] == "auto"
 
 
-def test_select_backend_claude_returns_claude_backend() -> None:
-    assert isinstance(select_backend("claude"), ClaudeBackend)
+async def test_backend_adapts_can_use_tool_onto_the_copilot_handler() -> None:
+    # The backend's job: chief's SDK-agnostic can_use_tool becomes the Copilot SDK's
+    # on_permission_request handler, threaded into create_session.
+    client = FakeClient()
+    session = CopilotBackend(client_factory=_factory(client)).create_session(
+        model="auto", can_use_tool=_allow
+    )
+
+    [event async for event in session.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["on_permission_request"] is not None
 
 
-def test_select_backend_copilot_returns_copilot_backend() -> None:
-    # The Copilot backend (#76) is now registered alongside claude.
-    assert isinstance(select_backend("copilot"), CopilotBackend)
+async def test_backend_forwards_no_gate_when_unwired() -> None:
+    # No can_use_tool / hooks → the SDK gets None for both, not an empty handler.
+    client = FakeClient()
+    session = CopilotBackend(client_factory=_factory(client)).create_session(
+        model="auto"
+    )
 
+    [event async for event in session.run_turn("go")]
 
-def test_select_backend_rejects_unknown() -> None:
-    # "claude" and "copilot" are valid; an unknown name is a config error, not a
-    # silent fallback.
-    with pytest.raises(ValueError, match="unknown agent_backend"):
-        select_backend("gemini")
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["on_permission_request"] is None
+    assert client.create_kwargs["hooks"] is None

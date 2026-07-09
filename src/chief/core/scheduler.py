@@ -73,6 +73,7 @@ from ..persistence.schedules import (
 )
 from ..tools.google import GoogleService
 from ..tools.shell import ShellService, format_result
+from ..tools.web import WebService
 from . import classify
 from .schedule_time import defer_target, in_quiet_hours, next_fire
 
@@ -81,14 +82,12 @@ logger = logging.getLogger("chief.core.scheduler")
 #: Per-ping request budget for the dead-man's-switch GET (short; a slow ping is a fail).
 _HEARTBEAT_TIMEOUT = 10.0
 
-#: Read-only web tools an agent monitor always gets (plus the owner's Google reads).
-_WEB_READ_TOOLS = ("WebFetch", "WebSearch")
-
 #: Runs one shell command on a session's persistent shell — the
 #: :meth:`ShellService.run` seam, injectable so tests skip real subprocesses.
 RunCommand = Callable[[str, str], Awaitable[dict[str, Any]]]
 #: An agent monitor's predicate: judge whether ``question`` holds now (injectable so
-#: tests skip the live model; the default builds a read-only Haiku call in __init__).
+#: tests skip the live model; the default builds a read-only Copilot monitor call on
+#: ``monitor_model`` in __init__).
 AgentPredicate = Callable[[str], Awaitable[bool]]
 
 
@@ -134,7 +133,8 @@ class Scheduler:
         shell_service: ShellService | None = None,
         run_command: RunCommand | None = None,
         google_services: Sequence[GoogleService] = (),
-        classifier_model: str = "claude-haiku-4-5",
+        web_service: WebService | None = None,
+        monitor_model: str = "auto",
         agent_predicate: AgentPredicate | None = None,
         owner_tz: str = "UTC",
         quiet_hours_start: str | None = None,
@@ -153,7 +153,8 @@ class Scheduler:
         self._shell_service = shell_service
         self._run_command = run_command
         self._google_services = tuple(google_services)
-        self._classifier_model = classifier_model
+        self._web_service = web_service
+        self._monitor_model = monitor_model
         self._agent_predicate = agent_predicate
         self._tz = ZoneInfo(owner_tz)
         self._quiet_start = quiet_hours_start
@@ -268,17 +269,33 @@ class Scheduler:
         return int(result.get("exit_code", 0)) == 0
 
     async def _evaluate_agent_predicate(self, question: str) -> bool:
-        """A read-only Haiku yes/no over the owner's web + Google read surface."""
+        """A read-only Copilot monitor yes/no over the owner's web + Google reads.
+
+        Runs on ``monitor_model`` (Copilot namespace), not the OpenRouter classifier.
+        """
         if self._agent_predicate is not None:  # injected (tests) — skip the live model
             return await self._agent_predicate(question)
-        allowed = list(_WEB_READ_TOOLS)
+        allowed: list[str] = []
         mcp_servers: dict[str, Any] = {}
+        if self._web_service is not None:
+            web = self._web_service
+            # #88 HIGH-2 (decision D3): hand the monitor BOTH chief_web tools — search
+            # AND fetch. The fetch grant is deliberate: the monitor surface is strictly
+            # narrower than the owner's (_read_only_gate ALLOWs exactly these handed
+            # tools, DENYs all else), the monitor's question is owner-authored at
+            # schedule creation (itself gated), and WebFetcher's SSRF guard
+            # (tools/web.py) still bounds every fetch. Pre-#88 gate.READ_ONLY listed the
+            # built-in WebFetch as always-allow, so unattended monitors already had
+            # fetch — this restores parity, it does not widen the surface. Search-only
+            # would blind the primary monitor use case ("has this page changed").
+            allowed += [web.search_tool_name, web.fetch_tool_name]
+            mcp_servers[web.server_name] = web.server_config()
         for svc in self._google_services:
             allowed += list(svc.read_tools)  # reads only (this turn bypasses the gate)
             mcp_servers[svc.server_name] = svc.server_config()
         return await classify.ask_condition(
             question,
-            model=self._classifier_model,
+            model=self._monitor_model,
             allowed_tools=allowed,
             mcp_servers=mcp_servers,
         )

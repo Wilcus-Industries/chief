@@ -9,7 +9,6 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from copilot import ProviderConfig
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,7 +21,6 @@ from chief.adapters.base import (
     Surface,
     apply_budget_decision,
 )
-from chief.core.agent import NO_REPLY
 from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -36,18 +34,18 @@ from chief.core.budget import (
 )
 from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
-from chief.core.session import Final, Milestone, TurnEvent
+from chief.core.session import NO_REPLY, Final, Milestone, TurnEvent
 from chief.core.tasks import (
     GROUP_MODE_NOTE,
     MEMORY_TOOLS,
     PAUSED_BUDGET_ACK,
     TURN_TIMEOUT_NOTE,
-    WEB_META_TOOLS,
     SessionProto,
     TaskManager,
 )
 from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.gate.policy import PolicyStore
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
 from chief.memory.store import Fact
 from chief.memory.versioning import GitVersioner, NullVersioner, Versioner
 from chief.obs.audit import AuditLog
@@ -1401,8 +1399,6 @@ async def test_owner_calendar_session_wires_mcp_and_partitions_tools(
     assert "mcp__calendar__list-events" in allowed  # reads pre-approved
     assert "mcp__calendar__create-event" not in allowed  # writes reach approval
     assert "Read" in allowed  # memory tools retained
-    assert "WebSearch" in allowed  # web/meta tools added for the owner
-    assert "ToolSearch" in allowed
     # deferred (delete) hard-blocked; reads/writes never land in disallowed
     assert "mcp__calendar__delete-event" in captured["disallowed_tools"]
     await mgr.shutdown()
@@ -1724,17 +1720,8 @@ async def test_guest_session_isolated_and_wires_only_guest_tools(
     await mgr.dispatch_guest(thread_key="555:0", text="hi", from_label="Alice")
 
     allowed = captured["allowed_tools"]
-    # Leak fix: zero owner-memory/web tools, no memory cwd.
-    for forbidden in (
-        "Read",
-        "Glob",
-        "Grep",
-        "Write",
-        "Edit",
-        "WebSearch",
-        "WebFetch",
-        "ToolSearch",
-    ):
+    # Leak fix: zero owner-memory tools, no memory cwd.
+    for forbidden in ("Read", "Glob", "Grep", "Write", "Edit"):
         assert forbidden not in allowed
     assert captured.get("cwd") is None
     # Only the guest surface: relay + calendar free/busy (read), booking absent.
@@ -1744,10 +1731,10 @@ async def test_guest_session_isolated_and_wires_only_guest_tools(
     assert set(captured["mcp_servers"]) == {"chief_guest", "calendar"}
     assert "chief_guest_admin" not in captured["mcp_servers"]  # owner-only, never guest
     assert "chief_shell" not in captured["mcp_servers"]
-    # The owner's built-in file/web/write tools are hard-denied at the SDK layer (not
-    # merely absent from allowed_tools — the gate would otherwise classify them ALLOW).
+    # The owner's built-in file/write tools are hard-denied at the SDK layer (not merely
+    # absent from allowed_tools — the gate would otherwise classify them ALLOW).
     denied = captured["disallowed_tools"]
-    for forbidden in ("Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch"):
+    for forbidden in ("Read", "Glob", "Grep", "Write", "Edit"):
         assert forbidden in denied
     assert "Bash" in denied  # the built-in shell stays denied too
     # Guest = guest model, never the owner's.
@@ -1815,8 +1802,8 @@ async def test_calendar_disabled_owner_has_no_mcp_but_keeps_web_tools(
     await mgr._ensure_task("-100:5", tier="owner")
 
     assert "mcp_servers" not in captured
-    # No Google tools, but the owner still gets memory + web/meta tools.
-    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS) | set(WEB_META_TOOLS)
+    # No Google tools and no web service, so the owner's base surface is memory tools.
+    assert set(captured["allowed_tools"]) == set(MEMORY_TOOLS)
     # The built-in shell stays disallowed even with no services wired.
     assert "Bash" in captured["disallowed_tools"]
     await mgr.shutdown()

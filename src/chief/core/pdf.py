@@ -1,12 +1,11 @@
 """PDF pre-extraction on intake (#81, part of #72).
 
-Both backends stop seeing PDF *content blocks*: claude-agent-sdk used to send an
-incoming PDF as a native ``document`` block (``session._build_user_message``) and the
-Copilot session dropped attachments entirely. Neither is portable, so
-:meth:`chief.core.tasks.TaskManager.dispatch` — the one platform- and backend-agnostic
-seam — extracts each incoming PDF to text here and folds it into the turn text, leaving
-images to pass through untouched. The model then reads the PDF as plain text on either
-backend.
+The Copilot session doesn't take PDF *content blocks*: it drops attachments entirely
+(the retired claude-agent-sdk backend used to send an incoming PDF as a native
+``document`` block, which wasn't portable either). So
+:meth:`chief.core.tasks.TaskManager.dispatch` — the one platform-agnostic seam —
+extracts each incoming PDF to text here and folds it into the turn text, leaving images
+to pass through untouched. The model then reads the PDF as plain text.
 
 Extraction is pure-Python (``pypdf``), so it needs no system libraries or sidecar; a PDF
 with no extractable text (e.g. a pure scan — DESIGN M8 says no OCR) yields an empty body

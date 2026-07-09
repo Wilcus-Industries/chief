@@ -2,8 +2,8 @@
 
 Host-native rework: the shell is a real subprocess of the core process — no sandbox
 container, no RPC. The owner explicitly accepts that shell children inherit the full
-process environment (including ``CLAUDE_CODE_OAUTH_TOKEN``); the approval blacklist
-(:mod:`chief.gate.blacklist`) is what still gates the destructive shapes.
+process environment; the approval blacklist (:mod:`chief.gate.blacklist`) is what still
+gates the destructive shapes.
 
 **Per-session shell.** Each session key gets a long-lived shell (``$SHELL`` if set,
 else ``bash``, else ``zsh`` — macOS and Linux both covered) with ``cwd`` at the
@@ -34,9 +34,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
@@ -45,7 +45,8 @@ logger = logging.getLogger("chief.tools.shell")
 
 #: Encoding for everything crossing the shell's pipes.
 ENCODING = "utf-8"
-#: The SDK names an in-process MCP tool ``mcp__<server>__<tool>``.
+#: chief qualifies an in-process tool as ``mcp__<server>__<tool>`` (see
+#: :mod:`chief.tools.inprocess`); the gate keys off that exact name.
 SERVER_NAME = "chief_shell"
 TOOL_NAME = f"mcp__{SERVER_NAME}__bash"
 
@@ -238,7 +239,7 @@ class _Shell:
     async def _ensure(self) -> asyncio.subprocess.Process:
         if self._proc is None or self._proc.returncode is not None:
             # Full env inheritance is deliberate (host-native): the owner accepts that
-            # shell children see the process env, OAuth token included.
+            # shell children see the full process environment.
             self._proc = await asyncio.create_subprocess_exec(
                 *self._argv,
                 cwd=self._workdir,
@@ -450,7 +451,7 @@ class ShellService:
         if self._host is not None:
             await self._host.aclose()
 
-    def _build_bash_tool(self, session_key: str) -> SdkMcpTool[Any]:
+    def _build_bash_tool(self, session_key: str) -> InProcessTool:
         @tool("bash", _BASH_DESCRIPTION, {"command": str})
         async def bash(args: dict[str, Any]) -> dict[str, Any]:
             command = str(args.get("command", ""))
@@ -467,7 +468,7 @@ class ShellService:
 
         return bash
 
-    def server_config(self, *, session_key: str) -> McpSdkServerConfig:
+    def server_config(self, *, session_key: str) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this task's bash tool."""
         return create_sdk_mcp_server(
             self.server_name, tools=[self._build_bash_tool(session_key)]
