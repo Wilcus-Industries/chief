@@ -8,7 +8,9 @@ routing-off / removed-category fallbacks, and the manifest→``skill_directories
 are each covered.
 """
 
+import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,6 +19,7 @@ from chief.core.subagents import (
     DEFAULT_SUBAGENTS,
     SubagentSpec,
     build_custom_agents,
+    load_subagent_specs,
     resolve_subagent_model,
     skill_directories_for,
 )
@@ -199,3 +202,106 @@ def test_skill_directories_are_leaf_dirs_never_parent_roots() -> None:
     # root really does hold many SKILL.md, so passing it would leak the uncurated set.
     upstream_root = Path(_PLUGIN) / "upstream"
     assert len(list(upstream_root.rglob("SKILL.md"))) > len(curated)
+
+
+# --- on-disk subagent loading (#105, part of #103) ----------------------------------
+
+
+def _write_md(path: Path, frontmatter: str, body: str) -> None:
+    path.write_text(f"---\n{frontmatter}\n---\n{body}")
+
+
+async def test_load_subagent_specs_reads_category_and_resolves_model(
+    tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    # AC1: a chief-authored .md becomes a SubagentSpec, and that spec's category rides
+    # through build_custom_agents to the model the LIVE routing table resolves it to.
+    _write_md(
+        tmp_path / "researcher.md",
+        "category: research\ndescription: Focused background research.",
+        "You are chief's research subagent. Investigate thoroughly.",
+    )
+
+    specs = load_subagent_specs(tmp_path)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.name == "researcher"
+    assert spec.category == "research"
+    assert spec.description == "Focused background research."
+    assert spec.prompt == "You are chief's research subagent. Investigate thoroughly."
+
+    routing = await _seeded(session_factory)
+    agents = build_custom_agents(specs, routing=routing, tier="owner")
+    assert agents[0]["model"] == routing.resolve("research").model  # type: ignore[union-attr]
+
+
+async def test_load_subagent_specs_skills_ride_through(tmp_path: Path) -> None:
+    # AC6: an optional skills: YAML list reaches SubagentSpec.skills and, via
+    # build_custom_agents, the built CustomAgentConfig["skills"].
+    _write_md(
+        tmp_path / "doc.md",
+        "category: general\ndescription: doc helper\nskills:\n  - docx\n  - pdf",
+        "Help with documents.",
+    )
+
+    specs = load_subagent_specs(tmp_path)
+
+    assert specs[0].skills == ("docx", "pdf")
+    agents = build_custom_agents(specs, routing=None, tier="owner")
+    assert agents[0]["skills"] == ["docx", "pdf"]
+
+
+async def test_load_subagent_specs_ignores_model_in_frontmatter(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # AC4: a file that pins model: must not influence CustomAgentConfig["model"] — the
+    # category resolution is the only model source. With routing off, model is absent
+    # entirely even though the file declared one.
+    _write_md(
+        tmp_path / "pinned.md",
+        "category: research\ndescription: d\nmodel: claude-opus-4-8",
+        "prompt body",
+    )
+
+    specs = load_subagent_specs(tmp_path)
+
+    assert specs[0].category == "research"  # only the category rides through
+    agents = build_custom_agents(specs, routing=None, tier="owner")
+    assert "model" not in agents[0]
+
+
+async def test_load_subagent_specs_skips_malformed_file_with_warning(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # AC5: a malformed file (no frontmatter fences) is skipped with a logged warning;
+    # the valid sibling file still loads.
+    (tmp_path / "broken.md").write_text("not frontmatter at all\njust text")
+    _write_md(
+        tmp_path / "ok.md", "category: general\ndescription: fine", "a prompt"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        specs = load_subagent_specs(tmp_path)
+
+    assert [s.name for s in specs] == ["ok"]
+    assert any("broken.md" in record.message for record in caplog.records)
+
+
+async def test_load_subagent_specs_missing_category_is_malformed(
+    tmp_path: Path,
+) -> None:
+    _write_md(tmp_path / "nocat.md", "description: only description", "prompt")
+
+    assert load_subagent_specs(tmp_path) == ()
+
+
+def test_load_subagent_specs_absent_dir_returns_empty(tmp_path: Path) -> None:
+    # AC8 (loader half): a directory that doesn't exist yields () so the caller keeps
+    # DEFAULT_SUBAGENTS.
+    assert load_subagent_specs(tmp_path / "does-not-exist") == ()
+
+
+def test_load_subagent_specs_empty_dir_returns_empty(tmp_path: Path) -> None:
+    assert load_subagent_specs(tmp_path) == ()

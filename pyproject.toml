@@ -81,6 +81,13 @@ ignore_missing_imports = true
 module = ["croniter.*"]
 ignore_missing_imports = true
 
+# pyyaml ships no inline stubs for the bare `import yaml` module name (only for
+# `yaml.*` submodules); used by chief.core.subagents to parse on-disk subagent
+# frontmatter (#105).
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
 # ``mcp`` (+ its starlette transitive) is now a dev-group dependency (#88 relit the
 # Google-MCP injection / Sheets row-1 security suites, which import it to drive the
 # vendored docker/mcp-* servers in-process). Neither ships complete inline types for
