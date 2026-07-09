@@ -9,17 +9,17 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from claude_agent_sdk import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.gate.approvals import ApprovalAction, ApprovalManager
 from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
+from chief.gate.types import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
 from test_approvals import FakeIO, RecordingAudit, _settle
 
 

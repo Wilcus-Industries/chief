@@ -32,8 +32,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from claude_agent_sdk import CanUseTool, HookMatcher
-from claude_agent_sdk.types import HookEvent
 from copilot import ProviderConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,6 +52,7 @@ from ..gate.gate import (
     build_pretool_hook,
 )
 from ..gate.policy import PolicyStore
+from ..gate.types import CanUseTool, HookEvent, HookMatcher
 from ..memory.store import MemoryStore
 from ..memory.versioning import NullVersioner, Versioner
 from ..obs.audit import AuditLog

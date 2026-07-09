@@ -14,12 +14,12 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import uuid4
 
-from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from copilot.session_events import SessionEvent, SessionEventType, SessionIdleData
 
 from chief.core.backend import CopilotBackend
 from chief.core.copilot_session import CopilotClientFactory
 from chief.core.session import Final
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
 
 
 class FakeSession:

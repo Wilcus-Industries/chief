@@ -61,13 +61,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from claude_agent_sdk import (
-    CanUseTool,
-    HookMatcher,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
-from claude_agent_sdk.types import HookContext, HookEvent
 from copilot import (
     PermissionRequest,
     PermissionRequestResult,
@@ -88,6 +81,15 @@ from copilot.generated.session_events import (
     PermissionRequestShell,
     PermissionRequestUrl,
     PermissionRequestWrite,
+)
+
+from ..gate.types import (
+    CanUseTool,
+    HookContext,
+    HookEvent,
+    HookMatcher,
+    PermissionResultDeny,
+    ToolPermissionContext,
 )
 
 logger = logging.getLogger("chief.core.copilot_gate")

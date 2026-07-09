@@ -9,7 +9,6 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from copilot import ProviderConfig
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,6 +46,7 @@ from chief.core.tasks import (
 )
 from chief.gate.approvals import OPUS_ESCALATION_KIND
 from chief.gate.policy import PolicyStore
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
 from chief.memory.store import Fact
 from chief.memory.versioning import GitVersioner, NullVersioner, Versioner
 from chief.obs.audit import AuditLog

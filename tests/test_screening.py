@@ -3,7 +3,6 @@
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from claude_agent_sdk.types import HookCallback
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.core.screening import (
@@ -16,6 +15,7 @@ from chief.core.screening import (
 from chief.core.tasks import TaskManager
 from chief.gate.approvals import ApprovalManager
 from chief.gate.policy import PolicyStore
+from chief.gate.types import HookCallback
 from test_approvals import FakeIO, RecordingAudit
 
 TOOLS = frozenset({"WebFetch", "WebSearch"})

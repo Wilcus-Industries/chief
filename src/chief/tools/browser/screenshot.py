@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
-from claude_agent_sdk.types import HookCallback, HookContext
+from ...gate.types import HookCallback, HookContext
 
 logger = logging.getLogger("chief.tools.browser.screenshot")
 
