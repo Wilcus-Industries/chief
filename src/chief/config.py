@@ -391,6 +391,12 @@ class Settings(BaseSettings):
     # (routing off ⇒ the subagent runs on the parent model). Owner-only — no guest gets
     # subagents.
     subagents_enabled: bool = False
+    # On-disk subagent overrides (#105, part of #103): one ``.md`` per subagent,
+    # filename stem = name, YAML frontmatter (``category``, ``description``, optional
+    # ``skills``), body = prompt. Resolved through the live routing table at spawn — no
+    # restart, no approval card. Absent or empty ⇒ falls back to the built-in
+    # ``DEFAULT_SUBAGENTS``.
+    subagents_dir: str = "data/harness/subagents"
 
     # Group chats (M11), default off (mirror the opt-in subsystem pattern). A GROUP is
     # any multi-party chat chief is invited to that ISN'T the owner's own HOME surface —
@@ -446,6 +452,7 @@ class Settings(BaseSettings):
         "memory_dir",
         "workspace_dir",
         "playwright_screenshots_dir",
+        "subagents_dir",
     )
     @classmethod
     def _expand_user_paths(cls, value: str) -> str:

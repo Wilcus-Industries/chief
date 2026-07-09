@@ -111,7 +111,12 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 # the engine's callers keep importing it from the TaskManager module.
 from .session import NO_REPLY, Final, close_wedged_session
 from .session import SessionProto as SessionProto
-from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
+from .subagents import (
+    DEFAULT_SUBAGENTS,
+    build_custom_agents,
+    load_subagent_specs,
+    skill_directories_for,
+)
 
 logger = logging.getLogger("chief.core.tasks")
 
@@ -337,6 +342,7 @@ class TaskManager:
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
         subagents_enabled: bool = False,
+        subagents_dir: str | None = None,
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
@@ -415,7 +421,11 @@ class TaskManager:
         # Category-routed subagents (#87), owner-only. When on, owner sessions carry
         # chief's DEFAULT_SUBAGENTS with each subagent's model resolved through the live
         # routing table; guests never do (the gate lives in build_custom_agents).
+        # subagents_dir (#105, part of #103) overrides the built-ins on disk: a
+        # directory holding ≥1 loadable spec wins, resolved through the routing table
+        # at each spawn (no restart) — absent/empty keeps DEFAULT_SUBAGENTS.
         self._subagents_enabled = subagents_enabled
+        self._subagents_dir = subagents_dir
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
@@ -893,8 +903,16 @@ class TaskManager:
             # still resolves (RoutingStore.resolve falls back). Routing off ⇒ model
             # omitted, the subagent runs on the parent model. Guests never reach this
             # branch, and build_custom_agents refuses a non-owner tier regardless.
+            # subagents_dir (#105): on-disk specs win when the dir holds ≥1 loadable
+            # spec, resolved fresh at every spawn (no restart, no approval card);
+            # an absent/empty dir keeps DEFAULT_SUBAGENTS.
+            specs = DEFAULT_SUBAGENTS
+            if self._subagents_dir is not None:
+                loaded = load_subagent_specs(self._subagents_dir)
+                if loaded:
+                    specs = loaded
             gate_kwargs["custom_agents"] = build_custom_agents(
-                DEFAULT_SUBAGENTS, routing=self._routing, tier="owner"
+                specs, routing=self._routing, tier="owner"
             )
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
         # writes and the shell tool are absent from allowed_tools, so every call routes
