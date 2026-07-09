@@ -1367,6 +1367,12 @@ class TaskManager:
         a session is live — switches it mid-thread so the next turn (including the one
         that triggered an auto-detect card) runs on Opus. Explicit escalation overrides
         an active budget downgrade; the reply warns that Opus burns the credit faster.
+
+        Clears ``task.provider`` (#92): escalation wins outright onto plain Copilot
+        quota (no BYOK provider) per the resolution order in
+        :meth:`_resolve_owner_target`, so a previously-routed task's tracked provider
+        doesn't linger stale for a later reseed/branch (or the downgrade skip-check) to
+        misread as still-openrouter.
         """
         async with self._session_factory() as session:
             db = await get_or_create_task(
@@ -1377,6 +1383,7 @@ class TaskManager:
         if task is not None:
             await task.session.set_model(self._owner_model_opus)
             task.model = self._owner_model_opus
+            task.provider = None
             task.auto_escalate_suppressed = False
         note = ""
         if (
@@ -1632,6 +1639,12 @@ class TaskManager:
         summarize the full live transcript, seed a brand-new session with the brief, and
         point the task's persisted ``sdk_session_id`` at that small reseeded session.
         Returns the brief. The old session is torn down by the caller.
+
+        The reseeded session opens on ``task.model``/``task.provider`` (#92) — the live
+        task's fields already carry the precedence-resolved target (Opus escalation >
+        budget downgrade > routing > owner model), so the priming turn (and the
+        reseeded ``sdk_session_id`` it mints) lands on the same target the task was
+        actually running on, not a hardcoded owner-model/Copilot-quota fallback.
         """
         summary = await self._run_silent_turn(task.session, COMPACT_PROMPT)
         # Carry the active account forward into the reseeded session so calendar
@@ -1650,7 +1663,7 @@ class TaskManager:
             active_account_label=active_account_label,
         )
         fresh = self._session_factory_sdk(
-            model=self._owner_model, resume=None, **gate_kwargs
+            model=task.model, resume=None, provider=task.provider, **gate_kwargs
         )
         try:
             await self._run_silent_turn(fresh, PRIME_TEMPLATE.format(summary=summary))
@@ -1683,8 +1696,12 @@ class TaskManager:
         casual channel's full context while the casual channel compacts independently.
         The forked session's new id is captured + persisted on the new thread's first
         turn (like any session). Returns the new ``thread_key``.
+
+        The promoted task opens on the casual channel's resolved target (#92), not a
+        hardcoded owner model — see :meth:`_resolve_branch_target`.
         """
         casual_resume = await self._casual_session_id(thread_key)
+        target = await self._resolve_branch_target(thread_key)
         new_key = await self._io.create_thread(
             like_thread_key=thread_key, title=title
         )
@@ -1714,19 +1731,51 @@ class TaskManager:
             thread_key=new_key,
             db_id=db_id,
             session=self._session_factory_sdk(
-                model=self._owner_model,
+                model=target.model,
                 resume=casual_resume,
                 # Fork only when there's a session to fork; an empty casual (no turn
                 # yet) has no context to carry, so the new thread just starts fresh.
                 fork_session=casual_resume is not None,
+                provider=target.provider,
                 **gate_kwargs,
             ),
             queue=asyncio.Queue(),
             tier="owner",
-            model=self._owner_model,
+            model=target.model,
+            provider=target.provider,
         )
         self._tasks[new_key] = rt
         return new_key
+
+    async def _resolve_branch_target(self, thread_key: str) -> ResolvedTarget:
+        """The model + provider a branched-off task opens on (#92).
+
+        A live casual task's ``.model``/``.provider`` are already precedence-resolved
+        (Opus escalation > budget downgrade > routing > owner model) as of its last
+        (re)spawn, so branching reuses them directly rather than re-deriving — that's
+        also the only way to carry forward an auto-classified category, since only an
+        explicit ``/route`` persists ``route_category``; a fresh classify has no turn
+        text to classify (``branch`` takes just a title).
+
+        Falls back to :meth:`_resolve_owner_target` — keyed on the casual
+        ``thread_key`` so its own persisted state (an Opus escalation, an explicit
+        ``/route`` override) is consulted — when the casual task isn't live (e.g. it
+        was already compacted away, or never ran).
+        """
+        live = self._tasks.get(thread_key)
+        if live is not None:
+            return ResolvedTarget(live.model, live.provider)
+        async with self._session_factory() as session:
+            db = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            persisted = db.model if db is not None else None
+        return await self._resolve_owner_target(
+            thread_key=thread_key,
+            persisted=persisted,
+            surface=Surface.DM,
+            classify_text=None,
+        )
 
     async def _casual_session_id(self, thread_key: str) -> str | None:
         """The casual channel's freshest resumable id: live session over the DB row.
