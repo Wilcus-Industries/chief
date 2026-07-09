@@ -1,8 +1,10 @@
 """Per-currency BudgetGate (#84): meter, warn, pause premium / downgrade dollars."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest_asyncio
@@ -13,7 +15,6 @@ from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
     ACTION_DOWNGRADE,
-    ACTION_NONE,
     ACTION_PAUSE,
     EFFECT_DOWNGRADE,
     BudgetGate,
@@ -22,6 +23,9 @@ from chief.core.budget import (
     premium_request_total,
 )
 from chief.persistence import usage
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+_BRIDGE_CURRENCY = re.compile(r"\b(BRIDGE_TURNS|bridge_turns)\b")
 
 
 class FakeBudgetIO:
@@ -67,13 +71,6 @@ def _gate(
             exhaust_fraction=exhaust_fraction,
             accumulation=ACCUM_ADD,
             action=ACTION_DOWNGRADE,
-        ),
-        usage.BRIDGE_TURNS: CurrencyPolicy(
-            cap=float("inf"),
-            warn_fractions=(),
-            exhaust_fraction=1.0,
-            accumulation=ACCUM_ADD,
-            action=ACTION_NONE,
         ),
     }
     return BudgetGate(
@@ -217,21 +214,40 @@ async def test_dollars_downgrade_signals_only_once(
     assert len(io.sends) == 1
 
 
-# ---- bridge turns: informational only -----------------------------------
+# ---- the retired bridge currency (#100) ----------------------------------
 
 
-async def test_bridge_turns_count_without_warning_or_action(
+def test_no_source_references_the_retired_bridge_currency() -> None:
+    """The Max bridge was dropped (#85/#86 won't-do), so nothing can ever spend a
+    bridge turn. The currency was removed end-to-end in #100; this fails the moment
+    any ``src/`` file reintroduces it. Scans source text, no import side effects."""
+    offenders = [
+        str(path.relative_to(_SRC))
+        for path in _SRC.rglob("*.py")
+        if _BRIDGE_CURRENCY.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], (
+        "bridge_turns was retired in #100 — these src files reference it again: "
+        + ", ".join(offenders)
+    )
+
+
+async def test_uncapped_currency_counts_without_warning_or_action(
     session_factory: async_sessionmaker[AsyncSession], io: FakeBudgetIO
 ) -> None:
-    gate = _gate(session_factory, io)
+    """A currency configured with a non-positive cap meters but never budgets — the
+    early-return that outlived bridge turns, now the sole way to run a currency
+    informationally (e.g. the owner unsetting ``openrouter_dollar_cap``)."""
+    gate = _gate(session_factory, io, dollar_cap=0.0)
     for _ in range(500):
-        assert await gate.record(usage.BRIDGE_TURNS, 1.0) is None
+        assert await gate.record(usage.OPENROUTER_DOLLARS, 1.0) is None
 
     assert io.sends == []
     assert io.cards == []
     async with session_factory() as s:
-        row = await usage.get_row(s, "2026-06", usage.BRIDGE_TURNS)
+        row = await usage.get_row(s, "2026-06", usage.OPENROUTER_DOLLARS)
     assert row is not None and row.amount == 500  # counted, never budgeted
+    assert await gate.mode(usage.OPENROUTER_DOLLARS) == usage.MODE_NORMAL
 
 
 async def test_mode_defaults_normal_with_no_row(
@@ -282,11 +298,13 @@ async def test_note_rate_limited_downgrades_the_dollar_currency(
     assert await gate.mode(usage.OPENROUTER_DOLLARS) == usage.MODE_DOWNGRADED
 
 
-async def test_note_rate_limited_noop_for_bridge(
+async def test_note_rate_limited_noop_for_unknown_currency(
     session_factory: async_sessionmaker[AsyncSession], io: FakeBudgetIO
 ) -> None:
+    """A currency with no policy is a no-op — the guard that used to absorb the
+    bridge's Max rate limits, and still covers any unmetered currency (#100)."""
     gate = _gate(session_factory, io)
-    assert await gate.note_rate_limited(usage.BRIDGE_TURNS) is None
+    assert await gate.note_rate_limited("nonexistent_currency") is None
     assert io.cards == [] and io.sends == []
 
 

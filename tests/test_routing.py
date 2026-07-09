@@ -150,10 +150,10 @@ async def test_edits_reject_a_class_outside_the_allowed_set(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     # Guardrail: an edit may only ever set copilot/openrouter — never a fabricated class
-    # (e.g. a guest-elevating or "bridge" one) the downstream guardrails don't cover.
+    # (a guest-elevating or paid one) the downstream guardrails don't cover.
     store = await _seeded(session_factory)
     with pytest.raises(RoutingEditError, match="target_class must be one of"):
-        await store.set_target("writing", target_class="bridge", model="x/y")
+        await store.set_target("writing", target_class="future-paid", model="x/y")
     with pytest.raises(RoutingEditError, match="target_class must be one of"):
         await store.add_category("evil", target_class="guest", model="x/y")
 

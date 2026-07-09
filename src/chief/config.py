@@ -350,9 +350,10 @@ class Settings(BaseSettings):
     # cap; crossing a budget_warn_fractions tier warns the owner once, and reaching
     # budget_exhaust_fraction runs that currency's action — premium requests pause the
     # owner's turns + post a choice card, OpenRouter dollars downgrade the openrouter
-    # categories onto Copilot budget_downgrade_model (``auto``). Bridge turns are
-    # informational only (no cap). Warnings + the card route to primary_thread_key, so
-    # budget_enabled wants it set (as the scheduler does). budget_cycle_anchor_day
+    # categories onto Copilot budget_downgrade_model (``auto``). A currency configured
+    # with a non-positive cap meters but never warns or acts. Warnings + the card route
+    # to primary_thread_key, so budget_enabled wants it set (as the scheduler does).
+    # budget_cycle_anchor_day
     # (1–28) is the cycle reset day in owner_tz. Inert when disabled.
     budget_enabled: bool = False
     premium_request_cap: int = 200

@@ -1,9 +1,8 @@
 """Per-currency usage-budget coordinator (#84) — meter, warn, pause/downgrade.
 
-chief's spend rides three native currencies with no cross-currency conversion (part of
-#72): Copilot **premium requests** (a raw count vs the 200/mo cap), **OpenRouter
-dollars** (metered spend vs a dollar cap), and **bridge turns** (informational only —
-Max limits are absorbed by the resilience slice's backoff/queue, not budgeted).
+chief's spend rides two native currencies with no cross-currency conversion (part of
+#72): Copilot **premium requests** (a raw count vs the 200/mo cap) and **OpenRouter
+dollars** (metered spend vs a dollar cap).
 :class:`BudgetGate` rolls each turn's usage into its currency's month-to-date row
 (:mod:`chief.persistence.usage`), warns the owner once per configured threshold, and on
 (near-)exhaustion runs that currency's configured action:
@@ -15,7 +14,8 @@ Max limits are absorbed by the resilience slice's backoff/queue, not budgeted).
   and return :data:`EFFECT_DOWNGRADE`, so the engine re-targets the openrouter routes
   onto the cheaper Copilot ``auto`` class (an overlay the resolver reads — no routing
   rows mutated) and switches live openrouter sessions across.
-* :data:`ACTION_NONE` (bridge turns) — count only.
+
+A currency configured with a non-positive cap meters but never warns or acts.
 
 Mostly pure + a thin IO seam, so it is testable without an SDK: :func:`cycle_key` is
 pure and everything else flows through ``session_factory`` + a small :class:`BudgetIO`.
@@ -40,13 +40,12 @@ from ..persistence import usage
 logger = logging.getLogger("chief.core.budget")
 
 #: How a currency folds each reading into its month-to-date total.
-ACCUM_ADD = "add"  # per-turn deltas sum (OpenRouter dollars, bridge turns)
+ACCUM_ADD = "add"  # per-turn deltas sum (OpenRouter dollars)
 ACCUM_MAX = "max"  # a cumulative snapshot; keep the high-water mark (premium requests)
 
 #: What a currency does when it crosses its exhaustion threshold.
 ACTION_PAUSE = "pause"  # flip to paused + post the owner choice card
 ACTION_DOWNGRADE = "downgrade"  # flip to downgraded + tell the engine to re-target
-ACTION_NONE = "none"  # informational currency (bridge turns) — never acts
 
 #: Returned by :meth:`BudgetGate.record` / :meth:`BudgetGate.note_rate_limited` when a
 #: currency just crossed into ``downgraded`` — the engine completes it by switching live
@@ -57,7 +56,6 @@ EFFECT_DOWNGRADE = "downgrade"
 _CURRENCY_LABEL = {
     usage.PREMIUM_REQUESTS: "premium requests",
     usage.OPENROUTER_DOLLARS: "OpenRouter spend",
-    usage.BRIDGE_TURNS: "bridge turns",
 }
 
 
@@ -86,7 +84,7 @@ class CurrencyPolicy:
     warn_fractions: tuple[float, ...]
     exhaust_fraction: float
     accumulation: str  # ACCUM_ADD | ACCUM_MAX
-    action: str  # ACTION_PAUSE | ACTION_DOWNGRADE | ACTION_NONE
+    action: str  # ACTION_PAUSE | ACTION_DOWNGRADE
 
 
 class BudgetIO(Protocol):
@@ -161,8 +159,8 @@ class BudgetGate:
             cycle = self._cycle()
             async with self._session_factory() as session:
                 total = await self._accumulate(session, cycle, currency, policy, amount)
-                if policy.action == ACTION_NONE or policy.cap <= 0:
-                    return None  # informational currency — never warns or acts
+                if policy.cap <= 0:
+                    return None  # uncapped currency — metered, never warns or acts
                 row = await usage.get_row(session, cycle, currency)
                 assert row is not None  # _accumulate just created/updated it
                 fraction = total / policy.cap
@@ -185,11 +183,11 @@ class BudgetGate:
         """A hard ``rejected`` rate limit on ``currency`` — treat like exhaustion.
 
         Runs the currency's exhaustion action (pause+card, or downgrade); returns
-        :data:`EFFECT_DOWNGRADE` when it downgraded, else ``None``. An informational or
-        unknown currency is a no-op (its Max limits are absorbed elsewhere).
+        :data:`EFFECT_DOWNGRADE` when it downgraded, else ``None``. An unknown currency
+        is a no-op.
         """
         policy = self._policies.get(currency)
-        if policy is None or policy.action == ACTION_NONE:
+        if policy is None:
             return None
         async with self._lock:
             cycle = self._cycle()
