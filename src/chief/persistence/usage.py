@@ -9,7 +9,6 @@ Anthropic-dollar month-to-date accumulator (part of #72):
   never double-counts a turn.
 * :data:`OPENROUTER_DOLLARS` — metered OpenRouter spend against a dollar cap; a turn's
   cost is additive (:func:`add_amount`).
-* :data:`BRIDGE_TURNS` — an informational turn count on the Max bridge (no cap/action).
 
 One row per ``(cycle, currency)`` — the cycle key is anchored in ``owner_tz``, so a new
 cycle has no row and the currency resets implicitly. ``mode`` carries the per-currency
@@ -25,10 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import UsageMeter
 
-#: The three native currencies chief budgets in — no cross-currency conversion (#84).
+#: The two native currencies chief budgets in — no cross-currency conversion (#84).
 PREMIUM_REQUESTS = "premium_requests"  # Copilot premium requests vs the monthly cap
 OPENROUTER_DOLLARS = "openrouter_dollars"  # metered OpenRouter spend vs a dollar cap
-BRIDGE_TURNS = "bridge_turns"  # informational Max-bridge turn count (no cap)
 
 #: Persisted per-currency budget modes for ``UsageMeter.mode`` (a threshold action or
 #: the owner's card choice picks one).
@@ -59,8 +57,8 @@ async def add_amount(
 ) -> float:
     """Add ``amount`` to ``(cycle, currency)``'s month-to-date total; return the total.
 
-    For a currency whose meter reports a **per-turn delta** (OpenRouter dollars, bridge
-    turns): the deltas sum into the running total.
+    For a currency whose meter reports a **per-turn delta** (OpenRouter dollars): the
+    deltas sum into the running total.
     """
     async with _lock:
         row = await _get_or_create(session, cycle, currency)
