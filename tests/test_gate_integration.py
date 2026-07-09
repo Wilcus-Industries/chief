@@ -9,17 +9,17 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from claude_agent_sdk import (
-    PermissionResultAllow,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.gate.approvals import ApprovalAction, ApprovalManager
 from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
+from chief.gate.types import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
 from test_approvals import FakeIO, RecordingAudit, _settle
 
 
@@ -120,13 +120,14 @@ def _events(audit: RecordingAudit, name: str) -> list[dict[str, object]]:
 async def test_read_only_allows_through_both_callbacks(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # A non-file read-only tool (no root needed) allows through both callbacks.
-    gate = await _gate(session_factory)
+    # A non-file read-only MCP tool declared via extra_read_only (e.g. calendar
+    # free/busy) allows through both callbacks with no approval round-trip (#88: the
+    # dropped WebSearch built-in no longer stands in for this path).
+    read_tool = "mcp__cal__freebusy"
+    gate = await _gate(session_factory, extra_read_only=frozenset({read_tool}))
 
-    decision = await gate.run_hook("WebSearch", {"query": "x"})
-    result = await gate.can_use_tool(
-        "WebSearch", {"query": "x"}, ToolPermissionContext()
-    )
+    decision = await gate.run_hook(read_tool, {})
+    result = await gate.can_use_tool(read_tool, {}, ToolPermissionContext())
 
     assert decision == "allow"
     assert isinstance(result, PermissionResultAllow)

@@ -1,11 +1,11 @@
 """chief-owned ``web-fetch`` + ``web-search`` custom tools (#81, part of #72).
 
-The Copilot SDK has no built-in web tools (unlike claude-agent-sdk's ``WebFetch`` /
-``WebSearch``), so chief owns them. Built the :mod:`chief.tools.shell` way (``@tool`` +
-:func:`create_sdk_mcp_server`), one in-process MCP server named ``chief_web`` reaches
-**both** backends automatically: claude-agent-sdk takes the ``mcp_servers`` entry
-directly, and :func:`chief.core.copilot_tools.partition_mcp_servers` converts it to a
-flat Copilot tool. So the tools are written once, not per backend.
+The Copilot SDK has no built-in web tools (the retired claude-agent-sdk backend had
+``WebFetch`` / ``WebSearch``), so chief owns them. Built the :mod:`chief.tools.shell`
+way (``@tool`` + :func:`create_sdk_mcp_server` from :mod:`chief.tools.inprocess`), one
+in-process server named ``chief_web`` is threaded into every owner session's
+``mcp_servers`` and :func:`chief.core.copilot_tools.partition_mcp_servers` converts it
+to a flat Copilot tool.
 
 **SSRF guard (security).** Core runs host-native (no sandbox container), so a bare
 ``httpx.get(url)`` on a model-supplied URL is a real server-side-request-forgery surface
@@ -33,9 +33,10 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
@@ -357,7 +358,7 @@ class WebService:
         """The SDK-qualified ``mcp__chief_web__search`` name (screening key)."""
         return f"mcp__{self.server_name}__search"
 
-    def _build_fetch_tool(self) -> SdkMcpTool[Any]:
+    def _build_fetch_tool(self) -> InProcessTool:
         fetcher = self.fetcher
 
         @tool("fetch", _FETCH_DESCRIPTION, {"url": str})
@@ -375,7 +376,7 @@ class WebService:
 
         return fetch
 
-    def _build_search_tool(self) -> SdkMcpTool[Any]:
+    def _build_search_tool(self) -> InProcessTool:
         searcher = self.searcher
 
         @tool("search", _SEARCH_DESCRIPTION, {"query": str})
@@ -391,7 +392,7 @@ class WebService:
 
         return search
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the fetch + search tools."""
         return create_sdk_mcp_server(
             self.server_name,

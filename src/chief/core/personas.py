@@ -127,12 +127,14 @@ _SERVICE_GUIDANCE = {
     "browser": _BROWSER_GUIDANCE,
 }
 
-#: Owner-only web guidance (M7). Web search/fetch are always wired for the owner.
+#: Owner-only web guidance (M7). Included only when the chief_web tools are wired
+#: (web_tools_enabled) — they default OFF, so this block is conditional (#88 MEDIUM-2).
 _WEB_GUIDANCE = (
     "## Web\n"
-    "You can search the web (WebSearch) and fetch a specific URL (WebFetch). Both are "
-    "read-only and need no approval — use them freely to look things up, then cite "
-    "what you found. WebFetch only performs GET requests."
+    "You can search the web (the chief_web search tool) and fetch a specific URL (the "
+    "chief_web fetch tool). Search is read-only and needs no approval. Each fetch may "
+    "ask {owner} for approval, performs GET requests only, and refuses private or "
+    "internal addresses. Cite what you find."
 )
 
 #: Owner-only workspace guidance (M7), included when the workspace is enabled.
@@ -198,6 +200,7 @@ def build_system_prompt(
     owner_tz: str | None = None,
     workspace_enabled: bool = False,
     shell_enabled: bool = False,
+    web_enabled: bool = False,
     guest_admin_enabled: bool = False,
     skills: Sequence[str] = (),
     platform: str | None = None,
@@ -208,8 +211,9 @@ def build_system_prompt(
     ``{"calendar", "drive"}``. Each contributes a guidance block so chief knows the
     service's rules (calendar booking states times in ``owner_tz``).
     ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + host-shell
-    guidance; the web block is always present for the owner (web tools are always
-    wired). ``skills`` (M10, owner only) names the enabled packaged skills, adding a
+    guidance; ``web_enabled`` adds the ## Web block only when the chief_web tools are
+    wired (they default off, #88 MEDIUM-2). ``skills`` (M10, owner only) names the
+    enabled packaged skills, adding a
     block that points chief at them. Guests get none of these.
     ``platform`` (issue #65) names the reply surface (``"telegram"`` or ``"discord"``);
     when set, a formatting guidance block is appended so the model knows whether
@@ -229,7 +233,8 @@ def build_system_prompt(
         for name, guidance in _SERVICE_GUIDANCE.items():
             if name in google_services:
                 sections.append(guidance.format(owner=owner_name, tz=tz))
-        sections.append(_WEB_GUIDANCE)
+        if web_enabled:
+            sections.append(_WEB_GUIDANCE.format(owner=owner_name))
         if workspace_enabled:
             sections.append(_WORKSPACE_GUIDANCE)
         if shell_enabled:

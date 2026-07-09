@@ -17,13 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+from ..inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
-
 from .accounts import EmailResolver, GoogleAccount, discover_accounts
 
 _SERVER_NAME = "chief_accounts"
@@ -78,7 +77,7 @@ class ListAccountsService:
         """SDK-qualified name: ``mcp__chief_accounts__list_accounts``."""
         return f"mcp__{self.server_name}__list_accounts"
 
-    def _build_tool(self) -> SdkMcpTool[Any]:
+    def _build_tool(self) -> InProcessTool:
         secrets_dir = self.secrets_dir
         email_resolver = self.email_resolver
         # Capture the static snapshot for the no-secrets_dir path.
@@ -97,6 +96,6 @@ class ListAccountsService:
 
         return list_accounts
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for this service."""
         return create_sdk_mcp_server(self.server_name, tools=[self._build_tool()])

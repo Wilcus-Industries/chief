@@ -21,8 +21,6 @@ import os
 from typing import cast
 
 import pytest
-from claude_agent_sdk import HookMatcher
-from claude_agent_sdk.types import HookCallback
 from copilot import (
     CopilotClient,
     CopilotSession,
@@ -41,6 +39,7 @@ from chief.core.copilot_gate import build_permission_handler, build_session_hook
 from chief.gate.approvals import ApprovalManager
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
+from chief.gate.types import HookCallback, HookMatcher
 from chief.persistence.models import Base
 from test_approvals import FakeIO, RecordingAudit
 

@@ -18,10 +18,11 @@ owner_model_opus: claude-opus-4-8
 opus_auto_detect: false
 guest_model: claude-sonnet-4-6
 
-# Agent backend seam (#75, part of #72). Every session the engine drives is built through
-# an AgentBackend: "claude" (the claude-agent-sdk path) or "copilot" (the GitHub Copilot
-# SDK, #76). Switch per deployment; "claude" stays the default.
-agent_backend: claude
+# Agent backend (#88): the GitHub Copilot SDK is chief's sole harness. The
+# claude-agent-sdk backend and the ``agent_backend`` selector are gone — do not re-add
+# an ``agent_backend:`` line here (``agent_backend: claude`` now fails the boot with a
+# migration message; ``copilot`` is tolerated but inert). The Copilot CLI manages its
+# own auth in ~/.copilot/config.json.
 
 # Model routing (#79, part of #72), opt-in. When routing_enabled, an owner task's
 # spawning message is auto-classified into one job category (on classifier_model, never a
@@ -68,7 +69,7 @@ guest_enabled: false
 concurrency: 3              # max tasks actively generating a turn at once
 turn_timeout_seconds: 300  # watchdog: a turn past this (wedged stream) is torn down, not frozen
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
-classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments
+classifier_model: anthropic/claude-haiku-4.5  # cheap stop-intent / warrants-a-task judgments; OpenRouter-namespaced id (vendor/model)
 
 # Permission gate + approval flow (M3, flipped host-native). Owner tool calls are
 # ALLOWED by default; only a blacklist match posts an approval card (which blocks until
@@ -105,11 +106,11 @@ approved_seed: []   # tools/commands pre-allowed with no prompt
 # fetched via the host shell (curl/wget) bypasses this seam entirely — both are
 # accepted residual gaps, not bugs.
 screening_enabled: true
-screening_model: claude-haiku-4-5
+screening_model: anthropic/claude-haiku-4.5  # OpenRouter-namespaced id (vendor/model); a bare id fails every screen OPEN
 screening_block: false
 # screening_tools:                 # which tools' results get screened (defaults shown)
-#   - WebFetch
-#   - WebSearch
+#   - mcp__chief_web__fetch
+#   - mcp__chief_web__search
 #   - mcp__playwright__browser_snapshot
 #   - mcp__playwright__browser_navigate
 #   - mcp__playwright__browser_navigate_back
@@ -199,6 +200,7 @@ primary_platform: telegram           # which configured stack the scheduler deli
 # quiet_hours_end: "07:00"           # HH:MM (owner_tz); deferred fires release here
 # heartbeat_url:                     # dead-man's-switch GET pinged on the interval; unset disables
 # heartbeat_interval_seconds: 300    # seconds between heartbeat pings
+# monitor_model: auto                # agent-monitor predicate model — Copilot-format id (NOT the OpenRouter classifier namespace); Student plan serves 'auto' regardless
 
 # Usage budgeting (#84, opt-in). With budget_enabled on, each turn is metered in the native
 # currency it spent (no cross-currency conversion): Copilot premium requests vs

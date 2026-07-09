@@ -3,9 +3,9 @@
 chief's gate (:mod:`chief.gate.gate`) is SDK-agnostic: :func:`~chief.gate.gate.classify`
 rules on a ``(tool_name, tool_input)`` pair, :func:`~chief.gate.gate.build_can_use_tool`
 owns the ASK → approval-card round-trip, and :func:`~chief.gate.gate.build_pretool_hook`
-is the fast classify+audit pass. The claude-agent-sdk backend feeds those two callbacks
-straight to the SDK. The Copilot SDK exposes the *same two seams* under different names
-and shapes, so this module is the thin boundary adapter between them.
+is the fast classify+audit pass. Those callbacks are spelled in chief's own SDK-neutral
+vocabulary (:mod:`chief.gate.types`); the Copilot SDK exposes the *same two seams* under
+different names and shapes, so this module is the thin boundary adapter between them.
 
 **The two seams.**
 
@@ -61,13 +61,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from claude_agent_sdk import (
-    CanUseTool,
-    HookMatcher,
-    PermissionResultDeny,
-    ToolPermissionContext,
-)
-from claude_agent_sdk.types import HookContext, HookEvent
 from copilot import (
     PermissionRequest,
     PermissionRequestResult,
@@ -90,14 +83,24 @@ from copilot.generated.session_events import (
     PermissionRequestWrite,
 )
 
+from ..gate.types import (
+    CanUseTool,
+    HookContext,
+    HookEvent,
+    HookMatcher,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ToolPermissionContext,
+)
+
 logger = logging.getLogger("chief.core.copilot_gate")
 
-#: chief's sandbox-shell command-tool name. Copilot's native ``shell`` permission kind
+#: chief's host-shell command-tool name. Copilot's native ``shell`` permission kind
 #: normalizes to it so the command string flows through the same ``COMMAND_TOOLS``
-#: safe-match (and "Run: …" approval preview) as the claude-agent-sdk path, and so an
-#: un-approved shell command falls through :func:`classify` to ASK — never a hard DENY
-#: (the built-in ``Bash`` hard-DENY is specific to the claude-agent-sdk in-core shell,
-#: which reaches the Max OAuth token; Copilot's shell runs in the separate runtime).
+#: safe-match (and "Run: …" approval preview) as chief's own ``bash`` tool, and so an
+#: un-approved shell command falls through :func:`classify` to ASK — never a hard DENY.
+#: (The built-in ``Bash`` hard-DENY names a separate SDK built-in chief keeps disabled
+#: so it can't run as a second, un-blacklisted shell beside the per-task host shell.)
 COPILOT_SHELL_TOOL = "mcp__chief_shell__bash"
 
 #: The ``on_permission_request`` callback shape: a kind-tagged request plus the SDK's
@@ -180,6 +183,10 @@ def build_permission_handler(can_use_tool: CanUseTool) -> PermissionHandlerFn:
     the real gate, and maps the result onto Copilot's decision vocabulary
     (:class:`PermissionDecisionApproveOnce` / :class:`PermissionDecisionReject`; see the
     module docstring for why never ``approve-for-session``).
+
+    Only an explicit :class:`PermissionResultAllow` approves — a deny **or any
+    unrecognized result type** rejects (fail closed). A gate that returns something the
+    contract doesn't cover must never coast through as an approval.
     """
 
     async def on_permission_request(
@@ -187,9 +194,17 @@ def build_permission_handler(can_use_tool: CanUseTool) -> PermissionHandlerFn:
     ) -> PermissionRequestResult:
         tool_name, tool_input = normalize_permission_request(request)
         result = await can_use_tool(tool_name, tool_input, ToolPermissionContext())
+        if isinstance(result, PermissionResultAllow):
+            return PermissionDecisionApproveOnce()
         if isinstance(result, PermissionResultDeny):
             return PermissionDecisionReject(feedback=result.message or None)
-        return PermissionDecisionApproveOnce()
+        # Unknown result type — reject rather than let it pass as an approval.
+        logger.warning(
+            "gate returned unrecognized result %r for %s; rejecting",
+            type(result).__name__,
+            tool_name,
+        )
+        return PermissionDecisionReject(feedback="unrecognized gate result")
 
     return on_permission_request
 

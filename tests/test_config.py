@@ -15,7 +15,6 @@ from chief.gate.policy import PolicyStore
 def _write_secrets(secrets_dir: Path) -> None:
     secrets_dir.mkdir(parents=True, exist_ok=True)
     (secrets_dir / "telegram_bot_token").write_text("tg-secret")
-    (secrets_dir / "claude_code_oauth_token").write_text("oauth-secret")
 
 
 def test_loads_from_yaml_and_secrets(
@@ -31,7 +30,6 @@ def test_loads_from_yaml_and_secrets(
     assert settings.owner_telegram_id == 42
     assert settings.owner_name == "Will"
     assert settings.telegram_bot_token == "tg-secret"
-    assert settings.claude_code_oauth_token == "oauth-secret"
     # Unset field falls back to its default.
     assert settings.owner_model_default == "claude-sonnet-4-6"
 
@@ -54,27 +52,30 @@ def test_env_provides_secrets_without_secrets_dir(
     (tmp_path / "config.yaml").write_text("owner_telegram_id: 7\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-tg")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-oauth")
     empty_secrets = tmp_path / "empty"
     empty_secrets.mkdir()
 
     settings = Settings(_secrets_dir=str(empty_secrets))  # type: ignore[call-arg]
 
     assert settings.telegram_bot_token == "env-tg"
-    assert settings.claude_code_oauth_token == "env-oauth"
 
 
-def test_rejects_anthropic_api_key(
+def test_builds_without_any_sdk_auth_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # #88: the Claude OAuth token and the ANTHROPIC_API_KEY guard are gone. The Copilot
+    # CLI owns its own auth, so Settings builds with neither a claude token secret nor
+    # any env-key guard tripping (an ANTHROPIC_API_KEY in the env is simply ignored).
     (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-be-here")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ignored-now")
 
-    with pytest.raises(ValidationError, match="ANTHROPIC_API_KEY"):
-        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.owner_telegram_id == 1
+    assert not hasattr(settings, "claude_code_oauth_token")
 
 
 def test_m2_defaults_and_env_override(
@@ -90,27 +91,37 @@ def test_m2_defaults_and_env_override(
 
     assert settings.concurrency == 5  # env override
     assert settings.idle_archive_seconds == 3600
-    assert settings.classifier_model == "claude-haiku-4-5"
+    # #88: the OpenRouter classifiers get namespaced ids (sent verbatim as the
+    # OpenRouter ``model`` field); the Copilot agent-monitor id is a different one.
+    assert settings.classifier_model == "anthropic/claude-haiku-4.5"
+    assert "/" in settings.classifier_model
+    assert "/" in settings.screening_model
+    assert settings.monitor_model == "auto"
 
 
-def test_agent_backend_defaults_to_claude(
+def test_agent_backend_claude_fails_with_migration_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The engine routes through the AgentBackend seam (#75); only "claude" is valid.
-    (tmp_path / "config.yaml").write_text("owner_telegram_id: 1\n")
+    # #88: the claude-agent-sdk backend is gone. A leftover ``agent_backend: claude`` in
+    # an old config.yaml must fail loudly with a migration message, never boot silently
+    # onto Copilot.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\nagent_backend: claude\n"
+    )
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)
     monkeypatch.chdir(tmp_path)
 
-    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="agent_backend: claude is no longer"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
-    assert settings.agent_backend == "claude"
 
-
-def test_agent_backend_accepts_copilot(
+def test_agent_backend_copilot_is_tolerated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # copilot (the GitHub Copilot SDK backend, #76) is now a valid selection.
+    # #88: ``agent_backend: copilot`` (the value that no longer means anything) is
+    # tolerated — silently dropped as an ignored extra, so an existing config keeps
+    # booting. The field itself no longer exists on Settings.
     (tmp_path / "config.yaml").write_text(
         "owner_telegram_id: 1\nagent_backend: copilot\n"
     )
@@ -120,22 +131,8 @@ def test_agent_backend_accepts_copilot(
 
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
-    assert settings.agent_backend == "copilot"
-
-
-def test_agent_backend_rejects_unknown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # claude and copilot are the only valid backends; anything else is a config error.
-    (tmp_path / "config.yaml").write_text(
-        "owner_telegram_id: 1\nagent_backend: gemini\n"
-    )
-    secrets = tmp_path / "secrets"
-    _write_secrets(secrets)
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises(ValidationError, match="agent_backend"):
-        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    assert settings.owner_telegram_id == 1
+    assert not hasattr(settings, "agent_backend")
 
 
 # ---- model routing config (#79) ---------------------------------------------
@@ -393,7 +390,6 @@ def test_discord_only_is_configured(
     secrets = tmp_path / "secrets"
     secrets.mkdir(parents=True, exist_ok=True)
     (secrets / "discord_bot_token").write_text("dc-secret")
-    (secrets / "claude_code_oauth_token").write_text("oauth-secret")
     monkeypatch.chdir(tmp_path)
 
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
@@ -731,6 +727,10 @@ def test_web_fetch_tool_defaults_to_blacklist_and_screening(
     assert "mcp__chief_web__search" not in settings.blacklist_tools
     assert "mcp__chief_web__fetch" in settings.screening_tools
     assert "mcp__chief_web__search" in settings.screening_tools
+    # #88: the claude-agent-sdk built-in web tool names are gone (they no longer exist
+    # under the Copilot backend); chief's own two web tools carry the invariant.
+    assert "WebFetch" not in settings.screening_tools
+    assert "WebSearch" not in settings.screening_tools
 
 
 async def test_web_fetch_blacklist_drives_owner_ask(
@@ -802,7 +802,9 @@ def test_default_screening_tools_covers_gmail_drive_and_browser_actions(
 
     settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
-    assert "WebFetch" in settings.screening_tools  # pre-existing default retained
+    # #88: chief's own web tool carries the web channel now (the claude built-in
+    # ``WebFetch`` name was dropped — it no longer exists under the Copilot backend).
+    assert "mcp__chief_web__fetch" in settings.screening_tools
     for tool in (
         "mcp__gmail_chief__gmail_list_messages",
         "mcp__gmail_chief__gmail_get_message",
@@ -823,7 +825,6 @@ def test_blank_owner_id_env_is_unset(
     secrets = tmp_path / "secrets"
     secrets.mkdir(parents=True, exist_ok=True)
     (secrets / "discord_bot_token").write_text("dc-secret")
-    (secrets / "claude_code_oauth_token").write_text("oauth-secret")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OWNER_TELEGRAM_ID", "")
 

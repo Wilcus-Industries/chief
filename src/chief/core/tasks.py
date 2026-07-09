@@ -32,8 +32,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from claude_agent_sdk import CanUseTool, HookMatcher
-from claude_agent_sdk.types import HookEvent
 from copilot import ProviderConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,6 +52,7 @@ from ..gate.gate import (
     build_pretool_hook,
 )
 from ..gate.policy import PolicyStore
+from ..gate.types import CanUseTool, HookEvent, HookMatcher
 from ..memory.store import MemoryStore
 from ..memory.versioning import NullVersioner, Versioner
 from ..obs.audit import AuditLog
@@ -95,8 +94,7 @@ from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
 from ..tools.web import WebService
 from . import classify
-from .agent import NO_REPLY
-from .backend import ClaudeBackend
+from .backend import CopilotBackend
 from .budget import EFFECT_DOWNGRADE, premium_request_total
 from .pdf import extract_pdf_attachments
 from .personas import build_system_prompt
@@ -111,7 +109,7 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
 # the engine's callers keep importing it from the TaskManager module.
-from .session import Final
+from .session import NO_REPLY, Final
 from .session import SessionProto as SessionProto
 from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
 
@@ -151,13 +149,10 @@ WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
 #: (``mcp__chief_shell__bash``), so its blacklist matching can't be bypassed.
 DISALLOWED_BUILTINS = sorted(BUILTIN_SHELL_TOOLS)
-#: Read-only web + meta tools the owner agent always gets (the gate treats all three as
-#: read-only/safe — see gate.READ_ONLY). ToolSearch loads deferred MCP tool schemas.
-WEB_META_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch", "ToolSearch")
 #: The owner-only built-ins a guest must never reach. The gate classifies these as
 #: read-only (ALLOW), so absence from a guest's allowed_tools is not enough — they are
 #: refused at the SDK layer (disallowed_tools), the same hard-deny used for the shell.
-GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS) | set(WEB_META_TOOLS))
+GUEST_DENIED = sorted(set(MEMORY_TOOLS) | set(WORKSPACE_TOOLS))
 #: System-prompt note appended to an owner session running on a GROUP surface (M11).
 #: Same owner toolset, but a reminder that replies are public to the whole group and
 #: that tool-approval prompts are DM'd privately — so the model neither leaks
@@ -239,11 +234,12 @@ class ResolvedTarget:
     model: str
     provider: ProviderConfig | None = None
 
-#: The engine builds sessions through an AgentBackend (#75). ClaudeBackend is the sole
-#: implementation today; ``app.build_engine`` selects it by config (only ``claude`` is
-#: valid) and passes its ``create_session`` as ``session_factory_sdk``. This default
-#: keeps a directly-constructed TaskManager (and every test) on the same seam.
-_default_session: SessionFactory = ClaudeBackend().create_session
+#: The engine builds sessions through the backend's ``create_session`` (the real seam,
+#: #88). :class:`~chief.core.backend.CopilotBackend` is chief's sole harness;
+#: ``app.build_engine`` constructs it and passes its ``create_session`` as
+#: ``session_factory_sdk``. This default keeps a directly-constructed TaskManager (and
+#: every test) on the same seam.
+_default_session: SessionFactory = CopilotBackend().create_session
 
 
 def _title(text: str) -> str:
@@ -302,6 +298,7 @@ class TaskManager:
         opus_auto_detect: bool = False,
         routing: RoutingStore | None = None,
         classify_category: CategoryClassifier = classify.classify_category,
+        classifier_api_key: str | None = None,
         openrouter_provider: ProviderConfig | None = None,
         routing_surface_defaults: dict[str, str] | None = None,
         default_category: str = DEFAULT_CATEGORY,
@@ -367,6 +364,11 @@ class TaskManager:
         # routing_surface_defaults pins a category per Surface. Inert (None) when off.
         self._routing = routing
         self._classify_category = classify_category
+        # The OpenRouter key the cheap text classifiers (stop-intent / warrants-task /
+        # complexity / category) authenticate their direct HTTP one-shots with (#88).
+        # None ⇒ they make no HTTP call and fail safe (no interrupt, no spawn, no
+        # escalation, routing falls back to the default category); the boot warns once.
+        self._classifier_api_key = classifier_api_key
         self._openrouter_provider = openrouter_provider
         self._routing_surface_defaults = routing_surface_defaults or {}
         self._default_category = default_category
@@ -531,7 +533,7 @@ class TaskManager:
             return
         is_casual = is_general
         if is_general and await self._warrants_task(
-            text, model=self._classifier_model
+            text, model=self._classifier_model, api_key=self._classifier_api_key
         ):
             new_key = await self._io.create_thread(
                 like_thread_key=thread_key, title=_title(text)
@@ -811,7 +813,7 @@ class TaskManager:
         # the plugin + enable-list ride only the owner's options. Both guard on a
         # configured plugin path so an enabled-but-unwired flag stays inert (no error).
         skills_on = self._skills_enabled and self._skills_plugin_path is not None
-        allowed = list(MEMORY_TOOLS) + list(WEB_META_TOOLS)
+        allowed = list(MEMORY_TOOLS)
         if workspace_on:
             # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
             allowed += list(WORKSPACE_TOOLS)
@@ -847,6 +849,7 @@ class TaskManager:
             owner_tz=self._owner_tz,
             workspace_enabled=workspace_on,
             shell_enabled=shell_on,
+            web_enabled=self._web_service is not None,
             guest_admin_enabled=admin is not None,
             skills=self._default_skills if skills_on else (),
             platform=self._platform,
@@ -867,16 +870,17 @@ class TaskManager:
             allowed_tools=allowed,
         )
         if skills_on:
-            # claude-agent-sdk shape: the plugin manifest provides the SKILL.md dirs;
-            # the skills= filter scopes the curated set (the SDK turns on the Skill tool
-            # itself). The Copilot backend ignores these two and reads skill_directories
-            # below — both are set so whichever backend is live picks its own.
+            # Skills flow to the Copilot backend ONLY through ``skill_directories`` (#88
+            # / #98). ``plugins`` + ``skills`` are the legacy claude-agent-sdk
+            # plugin-manifest shape — kept as accepted-but-ignored kwargs
+            # (:class:`~chief.core.backend.CopilotBackend` drops them by design), not a
+            # second live path.
             assert self._skills_plugin_path is not None  # narrowed by skills_on
             gate_kwargs["plugins"] = [
                 {"type": "local", "path": self._skills_plugin_path}
             ]
             gate_kwargs["skills"] = list(self._default_skills)
-            # Copilot shape (#87): the same curated set as absolute skill directories.
+            # The live path (#87): the curated set as absolute skill directories.
             gate_kwargs["skill_directories"] = skill_directories_for(
                 self._skills_plugin_path, self._default_skills
             )
@@ -1205,7 +1209,11 @@ class TaskManager:
         self._cancel_idle(task)
         if task.generating:
             if (
-                await self._stop_intent(turn.text, model=self._classifier_model)
+                await self._stop_intent(
+                    turn.text,
+                    model=self._classifier_model,
+                    api_key=self._classifier_api_key,
+                )
                 and task.generating
             ):
                 await task.session.interrupt()
@@ -1316,6 +1324,7 @@ class TaskManager:
                 categories=self._routing.categories(),
                 default=self._default_category,
                 descriptions=self._routing.descriptions(),
+                api_key=self._classifier_api_key,
             )
         return self._default_category
 
@@ -1612,7 +1621,9 @@ class TaskManager:
             or self._approvals is None
         ):
             return
-        if not await self._is_complex(text, model=self._classifier_model):
+        if not await self._is_complex(
+            text, model=self._classifier_model, api_key=self._classifier_api_key
+        ):
             return
         route = self._approval_route(
             tier="owner", thread_key=task.thread_key, surface=task.surface

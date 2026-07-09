@@ -19,7 +19,7 @@ deferred hard-blocked):
 
 from dataclasses import dataclass
 
-from claude_agent_sdk.types import McpHttpServerConfig
+from ...gate.types import McpHttpServerConfig
 
 
 def qualified(server_name: str, *tools: str) -> tuple[str, ...]:

@@ -28,6 +28,7 @@ from chief.persistence.schedules import (
 )
 from chief.tools.browser import mcp as browser_mcp
 from chief.tools.shell import ShellService
+from chief.tools.web import WebService
 
 NY = ZoneInfo("America/New_York")
 #: 12:00 EDT — midday, outside the 22:00→07:00 quiet window the quiet tests use.
@@ -87,6 +88,8 @@ def _make(
     heartbeat_url: str | None = None,
     http: Any = None,
     google_services: Any = (),
+    monitor_model: str = "auto",
+    web_service: WebService | None = None,
 ) -> Scheduler:
     return Scheduler(
         session_factory=session_factory,
@@ -104,6 +107,8 @@ def _make(
         http=http,
         now=lambda: now,
         google_services=google_services,
+        monitor_model=monitor_model,
+        web_service=web_service,
     )
 
 
@@ -439,12 +444,13 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the browser service is in google_services, READ_TOOLS join allowed_tools.
+    """Wired surfaces join allowed_tools; the removed WebFetch/WebSearch never do.
 
-    The predicate evaluator assembles the allowed surface from _WEB_READ_TOOLS plus
-    each GoogleService's read_tools. Passing the browser service means browser
-    READ_TOOLS must appear in allowed_tools and WRITE_TOOLS must be absent (the
-    predicate surface bypasses the gate — reads only).
+    The predicate evaluator assembles the allowed surface from the chief_web tools
+    (when a WebService is wired, #88 HIGH-2) plus each GoogleService's read_tools.
+    Passing the browser service means browser READ_TOOLS must appear in allowed_tools
+    and WRITE_TOOLS must be absent (the predicate surface bypasses the gate — reads
+    only), and the removed claude built-ins WebFetch/WebSearch must appear nowhere.
     """
     captured: dict[str, Any] = {}
 
@@ -454,8 +460,8 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
         model: str,
         allowed_tools: list[str],
         mcp_servers: dict[str, Any] | None = None,
-        max_turns: int = 4,
     ) -> bool:
+        captured["model"] = model
         captured["allowed_tools"] = list(allowed_tools)
         captured["mcp_servers"] = dict(mcp_servers or {})
         return True
@@ -463,6 +469,7 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
     monkeypatch.setattr(classify, "ask_condition", fake_ask_condition)
 
     browser_service = browser_mcp.service("http://mcp-playwright:3000/mcp")
+    web_service = WebService()
     async with session_factory() as s:
         await create_schedule(
             s,
@@ -475,11 +482,27 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
             predicate_type=PREDICATE_AGENT,
         )
     await _make(
-        session_factory, google_services=(browser_service,)
+        session_factory,
+        google_services=(browser_service,),
+        monitor_model="copilot/x",
+        web_service=web_service,
     ).tick()
 
     assert "allowed_tools" in captured, "ask_condition was never called"
+    # #88 HIGH-1: the monitor evaluates on the injected Copilot monitor_model, never the
+    # OpenRouter classifier setting.
+    assert captured["model"] == "copilot/x"
     allowed = set(captured["allowed_tools"])
+
+    # #88 HIGH-2: with a WebService wired the monitor gets BOTH chief_web tools and the
+    # chief_web server, alongside the Google reads.
+    assert web_service.search_tool_name in allowed
+    assert web_service.fetch_tool_name in allowed
+    assert web_service.server_name in captured["mcp_servers"]
+
+    # The removed claude built-ins must never appear.
+    assert "WebFetch" not in allowed
+    assert "WebSearch" not in allowed
 
     # All browser READ_TOOLS must be present.
     for tool in browser_mcp.READ_TOOLS:
@@ -501,7 +524,7 @@ async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When no browser service is wired, no browser tools appear in allowed_tools."""
+    """When nothing is wired, allowed_tools is empty (no browser, no chief_web)."""
     captured: dict[str, Any] = {}
 
     async def fake_ask_condition(
@@ -510,7 +533,6 @@ async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
         model: str,
         allowed_tools: list[str],
         mcp_servers: dict[str, Any] | None = None,
-        max_turns: int = 4,
     ) -> bool:
         captured["allowed_tools"] = list(allowed_tools)
         captured["mcp_servers"] = dict(mcp_servers or {})
@@ -518,7 +540,8 @@ async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
 
     monkeypatch.setattr(classify, "ask_condition", fake_ask_condition)
 
-    # No google_services → no browser service → no browser tools.
+    # No google_services and no web_service → allowed_tools is exactly the Google reads
+    # (here, none): no browser tools, no chief_web tools, no removed built-ins.
     async with session_factory() as s:
         await create_schedule(
             s,
@@ -530,10 +553,12 @@ async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
             predicate="is the dashboard green?",
             predicate_type=PREDICATE_AGENT,
         )
-    await _make(session_factory, google_services=()).tick()
+    await _make(session_factory, google_services=(), web_service=None).tick()
 
     assert "allowed_tools" in captured, "ask_condition was never called"
     allowed = set(captured["allowed_tools"])
+
+    assert allowed == set(), "no surface wired → allowed_tools must be empty"
 
     all_browser_tools = set(browser_mcp.READ_TOOLS) | set(browser_mcp.WRITE_TOOLS)
     for tool in all_browser_tools:
@@ -541,5 +566,11 @@ async def test_predicate_evaluator_excludes_browser_tools_when_disabled(
             f"browser tool {tool!r} leaked into predicate surface when disabled"
         )
 
-    # No playwright MCP server when browser is disabled.
-    assert "playwright" not in captured.get("mcp_servers", {})
+    # No chief_web surface and no removed built-ins when nothing is wired.
+    assert "mcp__chief_web__fetch" not in allowed
+    assert "mcp__chief_web__search" not in allowed
+    assert "WebFetch" not in allowed
+    assert "WebSearch" not in allowed
+
+    # No playwright / chief_web MCP servers when nothing is wired.
+    assert captured.get("mcp_servers", {}) == {}

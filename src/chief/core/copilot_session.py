@@ -104,10 +104,9 @@ from copilot.session_events import (
 
 from ..adapters.base import Attachment
 from ..config import Settings
-from .agent import NO_REPLY
 from .copilot_gate import PermissionHandlerFn
 from .copilot_tools import partition_mcp_servers
-from .session import Final, Milestone, TurnEvent
+from .session import NO_REPLY, Final, Milestone, TurnEvent
 
 logger = logging.getLogger("chief.core.copilot_session")
 

@@ -14,7 +14,7 @@ rule broader than what the owner actually approved. Two defences:
 
 Matching is exact on the canonical ``(tool, arg_pattern)``: a stored rule only ever
 auto-decides an identical call. ``arg_pattern is None`` is a whole-tool rule (e.g. NEVER
-the ``WebFetch`` tool outright).
+the ``mcp__chief_web__fetch`` tool outright).
 """
 
 import json

@@ -32,14 +32,13 @@ downstream guardrails don't already cover.
 from dataclasses import dataclass
 from typing import Any
 
-from claude_agent_sdk import (
-    McpSdkServerConfig,
-    SdkMcpTool,
+from ..core.routing import RoutingEditError, RoutingStore
+from .inprocess import (
+    InProcessServerConfig,
+    InProcessTool,
     create_sdk_mcp_server,
     tool,
 )
-
-from ..core.routing import RoutingEditError, RoutingStore
 
 #: The SDK names an in-process MCP tool ``mcp__<server>__<tool>`` — the exact strings
 #: chief's gate + blacklist key off (see :mod:`chief.config`).
@@ -118,7 +117,7 @@ class RoutingAdminService:
     routing: RoutingStore
     server_name: str = SERVER_NAME
 
-    def _build_set_target_tool(self) -> SdkMcpTool[Any]:
+    def _build_set_target_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool(
@@ -143,7 +142,7 @@ class RoutingAdminService:
 
         return set_target
 
-    def _build_add_category_tool(self) -> SdkMcpTool[Any]:
+    def _build_add_category_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool(
@@ -176,7 +175,7 @@ class RoutingAdminService:
 
         return add_category
 
-    def _build_remove_category_tool(self) -> SdkMcpTool[Any]:
+    def _build_remove_category_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool("remove_category", _REMOVE_CATEGORY_DESCRIPTION, {"category": str})
@@ -192,7 +191,7 @@ class RoutingAdminService:
 
         return remove_category
 
-    def _build_rename_category_tool(self) -> SdkMcpTool[Any]:
+    def _build_rename_category_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool(
@@ -213,7 +212,7 @@ class RoutingAdminService:
 
         return rename_category
 
-    def _build_describe_category_tool(self) -> SdkMcpTool[Any]:
+    def _build_describe_category_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool(
@@ -236,7 +235,7 @@ class RoutingAdminService:
 
         return describe_category
 
-    def _build_list_routing_tool(self) -> SdkMcpTool[Any]:
+    def _build_list_routing_tool(self) -> InProcessTool:
         routing = self.routing
 
         @tool("list_routing", _LIST_ROUTING_DESCRIPTION, {})
@@ -256,7 +255,7 @@ class RoutingAdminService:
 
         return list_routing
 
-    def server_config(self) -> McpSdkServerConfig:
+    def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the routing-admin tools."""
         return create_sdk_mcp_server(
             self.server_name,
