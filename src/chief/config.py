@@ -158,12 +158,15 @@ class Settings(BaseSettings):
     # no-activity → archive timer for real task threads; compaction_idle_seconds is the
     # casual-channel twin — instead of archiving (a ``:0`` channel has no closable
     # topic) it self-compacts at this idle window; classifier_model runs the cheap
-    # stop-intent / warrants-a-task judgments.
+    # stop-intent / warrants-a-task judgments. It is sent verbatim as OpenRouter's
+    # ``model`` field (classify.py), so it MUST be an OpenRouter-namespaced id
+    # (``vendor/model``) — a bare ``claude-haiku-4-5`` errors every classifier call and
+    # fails safe silently (boot warns; see app.warn_if_classifier_degraded).
     concurrency: int = 3
     turn_timeout_seconds: float = 300.0
     idle_archive_seconds: int = 3600
     compaction_idle_seconds: float = 3600.0
-    classifier_model: str = "claude-haiku-4-5"
+    classifier_model: str = "anthropic/claude-haiku-4.5"
 
     # Permission gate + approval flow (M3, flipped to default-allow for the owner in
     # the host-native rework). approval_timeout_seconds is the fail-closed deny window;
@@ -194,7 +197,10 @@ class Settings(BaseSettings):
     # screening_block defaults False, i.e. screening is advisory/annotate-only — it
     # never itself blocks a turn unless flipped on (MEDIUM/LOW finding).
     screening_enabled: bool = True
-    screening_model: str = "claude-haiku-4-5"
+    # Same OpenRouter-namespaced-id requirement as classifier_model above (it too is
+    # sent verbatim as OpenRouter's ``model``): a bare id fails every screen open
+    # (content passes UNSCREENED). Boot warns when it lacks a ``/`` namespace.
+    screening_model: str = "anthropic/claude-haiku-4.5"
     screening_block: bool = False
     # MEDIUM-2 fix: Gmail reads (email bodies are attacker-controlled), the Drive read,
     # and the playwright browser action tools that return an updated page
@@ -330,6 +336,12 @@ class Settings(BaseSettings):
     # and fires only on a false→true flip. This floor (seconds between checks) is
     # enforced at create time so an agent monitor can't poll every tick (Haiku budget).
     monitor_min_interval_seconds: int = 300
+    # An agent monitor evaluates its predicate in an ephemeral **Copilot** session
+    # (classify.ask_condition), so monitor_model is a Copilot-format id — a DIFFERENT
+    # namespace from classifier_model/screening_model (those are OpenRouter-namespaced
+    # HTTP one-shots). ``auto`` lets Copilot pick; the Student plan serves ``auto``
+    # regardless of any explicit pick (spike #74).
+    monitor_model: str = "auto"
 
     # Usage budgeting (#84, part of #72), default off. chief meters each turn in the
     # native currency it actually spent — no cross-currency conversion. Two currencies

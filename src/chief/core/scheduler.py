@@ -88,7 +88,8 @@ _WEB_READ_TOOLS = ("WebFetch", "WebSearch")
 #: :meth:`ShellService.run` seam, injectable so tests skip real subprocesses.
 RunCommand = Callable[[str, str], Awaitable[dict[str, Any]]]
 #: An agent monitor's predicate: judge whether ``question`` holds now (injectable so
-#: tests skip the live model; the default builds a read-only Haiku call in __init__).
+#: tests skip the live model; the default builds a read-only Copilot monitor call on
+#: ``monitor_model`` in __init__).
 AgentPredicate = Callable[[str], Awaitable[bool]]
 
 
@@ -134,7 +135,7 @@ class Scheduler:
         shell_service: ShellService | None = None,
         run_command: RunCommand | None = None,
         google_services: Sequence[GoogleService] = (),
-        classifier_model: str = "claude-haiku-4-5",
+        monitor_model: str = "auto",
         agent_predicate: AgentPredicate | None = None,
         owner_tz: str = "UTC",
         quiet_hours_start: str | None = None,
@@ -153,7 +154,7 @@ class Scheduler:
         self._shell_service = shell_service
         self._run_command = run_command
         self._google_services = tuple(google_services)
-        self._classifier_model = classifier_model
+        self._monitor_model = monitor_model
         self._agent_predicate = agent_predicate
         self._tz = ZoneInfo(owner_tz)
         self._quiet_start = quiet_hours_start
@@ -268,7 +269,10 @@ class Scheduler:
         return int(result.get("exit_code", 0)) == 0
 
     async def _evaluate_agent_predicate(self, question: str) -> bool:
-        """A read-only Haiku yes/no over the owner's web + Google read surface."""
+        """A read-only Copilot monitor yes/no over the owner's web + Google reads.
+
+        Runs on ``monitor_model`` (Copilot namespace), not the OpenRouter classifier.
+        """
         if self._agent_predicate is not None:  # injected (tests) — skip the live model
             return await self._agent_predicate(question)
         allowed = list(_WEB_READ_TOOLS)
@@ -278,7 +282,7 @@ class Scheduler:
             mcp_servers[svc.server_name] = svc.server_config()
         return await classify.ask_condition(
             question,
-            model=self._classifier_model,
+            model=self._monitor_model,
             allowed_tools=allowed,
             mcp_servers=mcp_servers,
         )

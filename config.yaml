@@ -69,7 +69,7 @@ guest_enabled: false
 concurrency: 3              # max tasks actively generating a turn at once
 turn_timeout_seconds: 300  # watchdog: a turn past this (wedged stream) is torn down, not frozen
 idle_archive_seconds: 3600 # mark done + archive a task after this much inactivity (~1h)
-classifier_model: claude-haiku-4-5  # cheap stop-intent / warrants-a-task judgments
+classifier_model: anthropic/claude-haiku-4.5  # cheap stop-intent / warrants-a-task judgments; OpenRouter-namespaced id (vendor/model)
 
 # Permission gate + approval flow (M3, flipped host-native). Owner tool calls are
 # ALLOWED by default; only a blacklist match posts an approval card (which blocks until
@@ -106,7 +106,7 @@ approved_seed: []   # tools/commands pre-allowed with no prompt
 # fetched via the host shell (curl/wget) bypasses this seam entirely — both are
 # accepted residual gaps, not bugs.
 screening_enabled: true
-screening_model: claude-haiku-4-5
+screening_model: anthropic/claude-haiku-4.5  # OpenRouter-namespaced id (vendor/model); a bare id fails every screen OPEN
 screening_block: false
 # screening_tools:                 # which tools' results get screened (defaults shown)
 #   - WebFetch
@@ -200,6 +200,7 @@ primary_platform: telegram           # which configured stack the scheduler deli
 # quiet_hours_end: "07:00"           # HH:MM (owner_tz); deferred fires release here
 # heartbeat_url:                     # dead-man's-switch GET pinged on the interval; unset disables
 # heartbeat_interval_seconds: 300    # seconds between heartbeat pings
+# monitor_model: auto                # agent-monitor predicate model — Copilot-format id (NOT the OpenRouter classifier namespace); Student plan serves 'auto' regardless
 
 # Usage budgeting (#84, opt-in). With budget_enabled on, each turn is metered in the native
 # currency it spent (no cross-currency conversion): Copilot premium requests vs

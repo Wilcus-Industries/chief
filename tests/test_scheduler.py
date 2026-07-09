@@ -87,6 +87,7 @@ def _make(
     heartbeat_url: str | None = None,
     http: Any = None,
     google_services: Any = (),
+    monitor_model: str = "auto",
 ) -> Scheduler:
     return Scheduler(
         session_factory=session_factory,
@@ -104,6 +105,7 @@ def _make(
         http=http,
         now=lambda: now,
         google_services=google_services,
+        monitor_model=monitor_model,
     )
 
 
@@ -454,8 +456,8 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
         model: str,
         allowed_tools: list[str],
         mcp_servers: dict[str, Any] | None = None,
-        max_turns: int = 4,
     ) -> bool:
+        captured["model"] = model
         captured["allowed_tools"] = list(allowed_tools)
         captured["mcp_servers"] = dict(mcp_servers or {})
         return True
@@ -475,10 +477,13 @@ async def test_predicate_evaluator_includes_browser_read_tools_when_enabled(
             predicate_type=PREDICATE_AGENT,
         )
     await _make(
-        session_factory, google_services=(browser_service,)
+        session_factory, google_services=(browser_service,), monitor_model="copilot/x"
     ).tick()
 
     assert "allowed_tools" in captured, "ask_condition was never called"
+    # #88 HIGH-1: the monitor evaluates on the injected Copilot monitor_model, never the
+    # OpenRouter classifier setting.
+    assert captured["model"] == "copilot/x"
     allowed = set(captured["allowed_tools"])
 
     # All browser READ_TOOLS must be present.

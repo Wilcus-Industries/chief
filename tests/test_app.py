@@ -40,7 +40,7 @@ def _settings(**overrides: object) -> Settings:
     base: dict[str, object] = dict(
         owner_telegram_id=42,
         telegram_bot_token="x:y",
-        classifier_model="claude-haiku-4-5",
+        classifier_model="anthropic/claude-haiku-4.5",
         memory_git=False,
     )
     base.update(overrides)
@@ -60,24 +60,39 @@ def _shared(
 def test_warns_at_boot_when_openrouter_key_missing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # #88 owner decision: keyless is allowed but must warn loudly — the classifiers and
-    # injection screening fail safe/open silently otherwise.
+    # #88 owner decision D2: keyless is allowed but must warn loudly — the classifiers
+    # and injection screening fail safe/open silently otherwise.
     with caplog.at_level("WARNING"):
-        app.warn_if_classifier_keyless(_settings(openrouter_api_key=None))
+        app.warn_if_classifier_degraded(_settings(openrouter_api_key=None))
     assert any(
         "openrouter_api_key is not set" in r.message for r in caplog.records
     )
     assert any("UNSCREENED" in r.message for r in caplog.records)
 
 
-def test_no_boot_warning_when_openrouter_key_present(
+def test_warns_at_boot_when_keyed_but_model_id_not_namespaced(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # #88 HIGH-1: a key is set but the id lacks an OpenRouter namespace, so OpenRouter
+    # rejects every classifier call — degrading exactly as if keyless, with no other
+    # signal. The warning must name the offending field.
     with caplog.at_level("WARNING"):
-        app.warn_if_classifier_keyless(_settings(openrouter_api_key="sk-or-x"))
-    assert not any(
-        "openrouter_api_key is not set" in r.message for r in caplog.records
-    )
+        app.warn_if_classifier_degraded(
+            _settings(openrouter_api_key="sk-or-x", classifier_model="claude-haiku-4-5")
+        )
+    warnings = " ".join(r.message for r in caplog.records)
+    assert "classifier_model" in warnings
+    assert "UNSCREENED" in warnings
+
+
+def test_no_boot_warning_when_key_present_and_ids_namespaced(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Keyed + the shipped namespaced defaults ⇒ silent.
+    with caplog.at_level("WARNING"):
+        app.warn_if_classifier_degraded(_settings(openrouter_api_key="sk-or-x"))
+    assert not any("openrouter_api_key" in r.message for r in caplog.records)
+    assert not any("namespace" in r.message for r in caplog.records)
 
 
 def test_build_google_services_includes_gmail_only_when_enabled() -> None:
@@ -132,13 +147,43 @@ def test_build_telegram_stack_wires_gate_into_engine_and_adapter(
     assert adapter._engine is manager
     assert adapter._owner_id == 42
     assert manager._platform == "telegram"
-    assert manager._classifier_model == "claude-haiku-4-5"
+    assert manager._classifier_model == "anthropic/claude-haiku-4.5"
     # The shared gate + memory thread through engine, adapter, and approval manager.
     assert manager._policy is policy
     assert manager._approvals is approvals
     assert adapter._approvals is approvals
     assert manager._memory is memory
     assert adapter._memory is memory
+
+
+async def test_classifier_and_monitor_models_read_different_settings(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #88 HIGH-1: the OpenRouter classifier (TaskManager) and the Copilot agent monitor
+    # (Scheduler) consume DIFFERENT settings — different id namespaces — never one
+    # shared setting. classifier_model → the manager; monitor_model → the scheduler.
+    settings = _settings(
+        classifier_model="vendor/x",
+        monitor_model="auto",
+        scheduler_enabled=True,
+        primary_thread_key="-100:1",
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+    stacks = app.build_stacks(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+    scheduler, _http = app.build_scheduler(
+        settings, stacks=stacks, session_factory=session_factory
+    )
+
+    (telegram,) = [s for s in stacks if s[0].platform == "telegram"]
+    assert telegram[0]._classifier_model == "vendor/x"
+    assert scheduler is not None
+    assert scheduler._monitor_model == "auto"
 
 
 def test_guest_params_thread_into_engine_and_adapter(
