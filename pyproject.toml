@@ -4,7 +4,10 @@ version = "0.0.0"
 description = "Personal AI assistant on the GitHub Copilot SDK."
 requires-python = ">=3.12"
 dependencies = [
-    "github-copilot-sdk>=1",
+    # Upper bound is load-bearing (#102): core/copilot_tools.py rides the undocumented
+    # dict contract of convert_mcp_call_tool_result, source-verified against 1.x only.
+    # tests/test_copilot_tools.py pins that shape — re-verify before widening this.
+    "github-copilot-sdk>=1,<2",
     "python-telegram-bot>=21",
     "sqlalchemy>=2",
     "aiosqlite>=0.20",

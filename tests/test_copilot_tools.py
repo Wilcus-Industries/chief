@@ -9,9 +9,11 @@ the tool at runtime) is out of scope; the in-process call is real.
 """
 
 import inspect
+from importlib.metadata import version
 from typing import Any
 
-from copilot import Tool, ToolInvocation, ToolResult
+import pytest
+from copilot import Tool, ToolInvocation, ToolResult, convert_mcp_call_tool_result
 from copilot.session import MCPHTTPServerConfig
 
 from chief.core.copilot_tools import (
@@ -160,3 +162,60 @@ async def test_convert_maps_is_error_to_failure_result() -> None:
     result = await _invoke(t, x="y")
     assert result.result_type == "failure"
     assert result.text_result_for_llm == "nope"
+
+
+# ---- the SDK's undocumented dict contract (#102) --------------------------
+#
+# Since #88 this seam is the *sole* path by which every in-process chief tool reaches
+# the model. ``convert_mcp_call_tool_result`` accepts a dict whose shape is guaranteed
+# by nothing but the installed SDK's source, so these tests assert it against the real
+# installed SDK (never a mock). They exist to turn a silent breakage into a red test.
+
+
+def test_installed_copilot_sdk_stays_below_the_pinned_major() -> None:
+    """``pyproject.toml`` pins ``github-copilot-sdk>=1,<2``. A major bump may rewrite
+    the dict contract wholesale, so it must be an explicit, reviewed upgrade rather
+    than something a resolver picks up."""
+    major = int(version("github-copilot-sdk").split(".")[0])
+    assert major == 1, (
+        f"github-copilot-sdk major {major} is installed but the tool seam's dict "
+        "contract was only source-verified against 1.x — re-verify "
+        "convert_mcp_call_tool_result before widening the pin in pyproject.toml"
+    )
+
+
+def test_convert_requires_a_content_key() -> None:
+    """The SDK subscripts ``call_result["content"]`` rather than ``.get``-ing it, so
+    the key is mandatory and must keep that exact name. A rename would raise here —
+    which is loud, but only because chief always supplies it."""
+    with pytest.raises(KeyError):
+        convert_mcp_call_tool_result({"isError": False})
+
+
+def test_convert_reads_iserror_as_camelcase_not_snake_case() -> None:
+    """The dangerous half of the contract. ``convert`` reads a **camelCase**
+    ``isError``; chief spells it that way in :mod:`chief.core.copilot_tools`. If the
+    SDK ever switched to snake_case, chief's dict would still convert *successfully*
+    and every failing tool would silently report success to the model — no exception,
+    no log. This pins the live key so that rename lands as a red test instead."""
+    failed = convert_mcp_call_tool_result({"content": [], "isError": True})
+    assert failed.result_type == "failure"
+
+    # snake_case is NOT honored today — the assertion that makes the rename visible.
+    ignored = convert_mcp_call_tool_result({"content": [], "is_error": True})
+    assert ignored.result_type == "success"
+
+
+def test_convert_flattens_text_blocks_onto_the_llm_result() -> None:
+    """The success path chief depends on: ``content`` is a list of typed blocks, and a
+    text block's ``text`` lands on ``ToolResult.text_result_for_llm``."""
+    result = convert_mcp_call_tool_result(
+        {
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ]
+        }
+    )
+    assert result.result_type == "success"
+    assert result.text_result_for_llm == "first\nsecond"
