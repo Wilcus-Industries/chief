@@ -95,8 +95,7 @@ from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
 from ..tools.web import WebService
 from . import classify
-from .agent import NO_REPLY
-from .backend import ClaudeBackend
+from .backend import CopilotBackend
 from .budget import EFFECT_DOWNGRADE, premium_request_total
 from .pdf import extract_pdf_attachments
 from .personas import build_system_prompt
@@ -111,7 +110,7 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
 # the engine's callers keep importing it from the TaskManager module.
-from .session import Final
+from .session import NO_REPLY, Final
 from .session import SessionProto as SessionProto
 from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
 
@@ -239,11 +238,12 @@ class ResolvedTarget:
     model: str
     provider: ProviderConfig | None = None
 
-#: The engine builds sessions through an AgentBackend (#75). ClaudeBackend is the sole
-#: implementation today; ``app.build_engine`` selects it by config (only ``claude`` is
-#: valid) and passes its ``create_session`` as ``session_factory_sdk``. This default
-#: keeps a directly-constructed TaskManager (and every test) on the same seam.
-_default_session: SessionFactory = ClaudeBackend().create_session
+#: The engine builds sessions through the backend's ``create_session`` (the real seam,
+#: #88). :class:`~chief.core.backend.CopilotBackend` is chief's sole harness;
+#: ``app.build_engine`` constructs it and passes its ``create_session`` as
+#: ``session_factory_sdk``. This default keeps a directly-constructed TaskManager (and
+#: every test) on the same seam.
+_default_session: SessionFactory = CopilotBackend().create_session
 
 
 def _title(text: str) -> str:

@@ -22,7 +22,6 @@ from chief.adapters.base import (
     Surface,
     apply_budget_decision,
 )
-from chief.core.agent import NO_REPLY
 from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -36,7 +35,7 @@ from chief.core.budget import (
 )
 from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
-from chief.core.session import Final, Milestone, TurnEvent
+from chief.core.session import NO_REPLY, Final, Milestone, TurnEvent
 from chief.core.tasks import (
     GROUP_MODE_NOTE,
     MEMORY_TOOLS,

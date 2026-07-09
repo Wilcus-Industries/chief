@@ -1,8 +1,9 @@
 """Typed application settings, split non-secret config from secrets.
 
 Non-secret values come from ``config.yaml`` (committed) with environment-variable
-overrides; secrets (the per-platform bot tokens + the Claude OAuth token) come from a
-``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` or the repo-local
+overrides; secrets (the per-platform bot tokens; the optional OpenRouter/Brave keys)
+come from a ``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` or the
+repo-local
 ``./secrets`` — see :func:`chief.app.load_settings`) with an environment fallback.
 Precedence, highest first: explicit init kwargs → environment → ``config.yaml`` → secret
 files. At least one chat platform (Telegram and/or Discord) must be fully configured.
@@ -141,11 +142,11 @@ class Settings(BaseSettings):
     ]
     routing_surface_defaults: dict[str, str] = {}
     guest_model: str = "claude-sonnet-4-6"
-    # Agent backend seam (#75, part of #72 — the strangler scaffold). Every session the
-    # engine drives is built through an AgentBackend; ``claude`` (claude-agent-sdk) is
-    # the incumbent and ``copilot`` (the GitHub Copilot SDK, #76) is the alternative.
-    # Config-selectable so the harness swap is a one-line change per deployment.
-    agent_backend: str = "claude"
+    # Agent backend (#88): the GitHub Copilot SDK is chief's sole harness — the
+    # claude-agent-sdk backend and the config ``agent_backend`` selector are gone. A
+    # leftover ``agent_backend: copilot`` in an old config.yaml is tolerated (silently
+    # dropped, ``extra="ignore"``); ``agent_backend: claude`` fails the boot loudly with
+    # a migration message (see ``_reject_removed_agent_backend``).
     db_path: str = "data/chief.db"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
@@ -393,11 +394,11 @@ class Settings(BaseSettings):
     group_context_max_messages: int = 50
 
     # Secrets (secrets_dir / env). The bot tokens are per-platform and optional, paired
-    # with their owner id by the configured-platform check; the OAuth token is always
-    # required (it authenticates the Claude SDK regardless of chat platform).
+    # with their owner id by the configured-platform check. The Copilot CLI manages its
+    # own auth in ``~/.copilot/config.json`` (#88 dropped the Claude OAuth token), so no
+    # SDK auth secret is a Settings field.
     telegram_bot_token: str | None = None
     discord_bot_token: str | None = None
-    claude_code_oauth_token: str
     # OpenRouter BYOK provider target class (#90, part of #72): the key for the SDK's
     # "openai" provider pointed at OpenRouter. Optional — only required when a session
     # is actually spawned on an ``openrouter`` target. Never the Copilot token itself,
@@ -460,20 +461,28 @@ class Settings(BaseSettings):
                 ) from exc
         return value
 
-    @field_validator("agent_backend")
+    @model_validator(mode="before")
     @classmethod
-    def _validate_agent_backend(cls, value: str) -> str:
-        """Only ``claude`` or ``copilot`` are valid backends (#75 / #76).
+    def _reject_removed_agent_backend(cls, data: Any) -> Any:
+        """Fail loudly on a leftover ``agent_backend: claude`` (#88 migration).
 
-        Fails the boot on an unknown name rather than at first turn; the runtime
-        registry (:func:`chief.core.backend.select_backend`) enforces the same rule.
+        The claude-agent-sdk backend is gone; the Copilot SDK is the sole harness. An
+        old config selecting ``claude`` would otherwise be silently ignored
+        (``extra="ignore"``) and boot onto Copilot with no warning, so it is rejected
+        with a migration message instead. ``agent_backend: copilot`` (the value that no
+        longer means anything) is tolerated — dropped as an ignored extra. Runs before
+        field validation so it fires regardless of which other fields are present. Only
+        a yaml/init/env value pydantic-settings collects is seen; a bare
+        ``AGENT_BACKEND`` env for the now-absent field is not surfaced here.
         """
-        valid = ("claude", "copilot")
-        if value not in valid:
+        if isinstance(data, dict) and data.get("agent_backend") == "claude":
             raise ValueError(
-                f"agent_backend must be one of {valid}, got {value!r}"
+                "agent_backend: claude is no longer supported — the claude-agent-sdk "
+                "backend was removed (#88). chief runs on the GitHub Copilot SDK only. "
+                "Remove the agent_backend line from config.yaml (copilot is the only "
+                "harness)."
             )
-        return value
+        return data
 
     @field_validator("routing_seed")
     @classmethod
@@ -688,23 +697,6 @@ class Settings(BaseSettings):
                 "to be a fully configured chat platform (owner id + bot token)."
             )
         return self
-
-    @model_validator(mode="before")
-    @classmethod
-    def _guard_anthropic_api_key(cls, data: Any) -> Any:
-        """Refuse to start if ``ANTHROPIC_API_KEY`` is set.
-
-        It outranks ``CLAUDE_CODE_OAUTH_TOKEN`` in the SDK's auth precedence, so its
-        mere presence would silently bill the pay-as-you-go API instead of the Max
-        subscription — the exact failure S0 exists to rule out. Runs before field
-        validation so the guard fires regardless of which other fields are present.
-        """
-        if os.environ.get("ANTHROPIC_API_KEY"):
-            raise ValueError(
-                "ANTHROPIC_API_KEY is set — it outranks CLAUDE_CODE_OAUTH_TOKEN and "
-                "would bill the API instead of the Max subscription. Unset it."
-            )
-        return data
 
     @classmethod
     def settings_customise_sources(

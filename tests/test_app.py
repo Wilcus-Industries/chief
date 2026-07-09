@@ -26,7 +26,6 @@ def test_load_settings_uses_env_when_no_secrets_dir(
     (tmp_path / "config.yaml").write_text("owner_telegram_id: 5\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-tg")
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-oauth")
     monkeypatch.setattr(
         app, "SECRETS_DIR_CANDIDATES", (str(tmp_path / "absent"),)
     )
@@ -41,7 +40,6 @@ def _settings(**overrides: object) -> Settings:
     base: dict[str, object] = dict(
         owner_telegram_id=42,
         telegram_bot_token="x:y",
-        claude_code_oauth_token="t",
         classifier_model="claude-haiku-4-5",
         memory_git=False,
     )
