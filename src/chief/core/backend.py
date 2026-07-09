@@ -152,7 +152,14 @@ class CopilotBackend:
     (the Google/browser containers). ``disallowed_tools`` becomes the SDK's
     ``excluded_tools``.
 
-    Three contract kwargs stay accepted-but-unforwarded, by design:
+    ``fork_session`` is wired (#93, part of #72): the branch request from
+    :meth:`chief.core.tasks.TaskManager.branch` forwards through to
+    :class:`~chief.core.copilot_session.CopilotTaskSession`, which forks the casual
+    channel's persisted history via the SDK's experimental ``sessions.fork`` RPC and
+    resumes the fork — so the branched thread gets an independent session id and the two
+    threads never share (and corrupt) each other's context.
+
+    Two contract kwargs stay accepted-but-unforwarded, by design:
 
     * ``allowed_tools`` — chief's pre-approval list, enforced by the gate
       (approve-once), not a visibility allowlist. The SDK's ``available_tools`` is a
@@ -161,9 +168,6 @@ class CopilotBackend:
     * ``plugins`` / ``skills`` — chief's ``[{"type":"local","path":…}]`` + ``list[str]``
       shape has no direct SDK analogue (the SDK takes ``skill_directories`` /
       ``plugin_directories`` paths); packaged skills stay a later #72 slice.
-    * ``fork_session`` — the SDK's ``resume_session`` has no fork concept, so the casual
-      reseed's fork request (:meth:`chief.core.tasks.TaskManager.branch`) is inert here:
-      the session still resumes, it just is not forked.
     """
 
     def __init__(
@@ -197,6 +201,7 @@ class CopilotBackend:
         return CopilotTaskSession(
             model=model,
             resume=resume,
+            fork_session=fork_session,
             cwd=cwd,
             on_permission_request=on_permission_request,
             hooks=copilot_hooks,
