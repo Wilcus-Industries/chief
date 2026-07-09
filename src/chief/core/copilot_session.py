@@ -20,8 +20,10 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
 * ``tool.execution_start`` (:class:`ToolExecutionStartData`) → ``Milestone("using …")``,
   the analogue of ``ToolUseBlock`` → ``Milestone``.
 * ``assistant.usage`` (:class:`AssistantUsageData`) → ``last_cost_usd`` (summed across
-  the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost) and
-  ``last_served_model`` (``data.model`` — the actually-served model, #90).
+  the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost),
+  ``last_served_model`` (``data.model`` — the actually-served model, #90), and
+  ``last_premium_requests`` (raw per-quota used-request counts, #80 — see
+  :func:`read_premium_requests`; recorded only, not wired into the dollar budget).
 * ``session.limits_exhausted`` → ``last_rate_limit_status = "rejected"`` so the budget
   gate can back off — Copilot's quota model has no per-turn allowed/warning status like
   claude-agent-sdk's ``RateLimitEvent``, so ``rejected`` is the only synthesised signal.
@@ -33,8 +35,15 @@ The permission gate is wired here (#77, part of #72): the backend hands this ses
 Copilot ``on_permission_request`` handler and ``SessionHooks`` (built from chief's gate
 by :mod:`chief.core.copilot_gate`), and :meth:`CopilotTaskSession._ensure_connected`
 threads them into the live session. They are non-persisted SDK callbacks, so **both**
-the create and the resume branch re-register them on every connect. Tools are accepted
-at the backend seam but not forwarded — later #72 slices map them.
+the create and the resume branch re-register them on every connect.
+
+**Tools + MCP servers (#80, part of #72).** chief's mixed ``mcp_servers`` mapping is
+split at connect by :func:`~chief.core.copilot_tools.partition_mcp_servers` into the
+SDK's two tool inputs — flat custom ``tools`` (the in-process shell/scheduler/guest
+servers, converted in-process) and HTTP ``mcp_servers`` (the Google/browser containers,
+passed through) — and re-supplied on every connect (the SDK persists neither).
+``disallowed_tools`` maps to the SDK's ``excluded_tools``. Resume self-heals onto a
+fresh session on a dead pointer, mirroring :class:`TaskSession`.
 
 **Persona via section-customization (#78).** chief's system prompt
 (:func:`chief.core.personas.build_system_prompt`) is a single flat string built for
@@ -61,8 +70,14 @@ import re
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Protocol
 
-from copilot import CopilotClient, ProviderConfig, SessionHooks
-from copilot.session import SectionOverride, SystemMessageConfig, SystemMessageSection
+from copilot import CopilotClient, ProviderConfig, SessionHooks, Tool
+from copilot._jsonrpc import JsonRpcError, ProcessExitedError
+from copilot.session import (
+    MCPServerConfig,
+    SectionOverride,
+    SystemMessageConfig,
+    SystemMessageSection,
+)
 from copilot.session_events import (
     AssistantMessageData,
     AssistantUsageData,
@@ -78,6 +93,7 @@ from ..adapters.base import Attachment
 from ..config import Settings
 from .agent import NO_REPLY
 from .copilot_gate import PermissionHandlerFn
+from .copilot_tools import partition_mcp_servers
 from .session import Final, Milestone, TurnEvent
 
 logger = logging.getLogger("chief.core.copilot_session")
@@ -119,6 +135,9 @@ class _CopilotClient(Protocol):
         hooks: SessionHooks | None = ...,
         system_message: SystemMessageConfig | None = ...,
         provider: ProviderConfig | None = ...,
+        tools: list[Tool] | None = ...,
+        mcp_servers: dict[str, MCPServerConfig] | None = ...,
+        excluded_tools: list[str] | None = ...,
     ) -> _CopilotSession: ...
     async def resume_session(
         self,
@@ -130,6 +149,9 @@ class _CopilotClient(Protocol):
         hooks: SessionHooks | None = ...,
         system_message: SystemMessageConfig | None = ...,
         provider: ProviderConfig | None = ...,
+        tools: list[Tool] | None = ...,
+        mcp_servers: dict[str, MCPServerConfig] | None = ...,
+        excluded_tools: list[str] | None = ...,
     ) -> _CopilotSession: ...
 
 
@@ -249,6 +271,31 @@ def openrouter_provider_config(settings: Settings) -> ProviderConfig:
     return config
 
 
+def read_premium_requests(data: AssistantUsageData) -> dict[str, int]:
+    """Raw per-quota premium-request counts from an ``assistant.usage`` event.
+
+    Reads the SDK's ``_quota_snapshots`` — an **internal**, underscore-prefixed field
+    (:class:`copilot.session_events.AssistantUsageData`) mapping a quota name (e.g. a
+    premium-request pool) to its snapshot, whose ``_used_requests`` is the running count
+    used this cycle. Isolated behind this one accessor and **fail-safe**: a missing or
+    reshaped field yields ``{}`` (no count), never a crash, since the field is not part
+    of the SDK's public surface.
+
+    SCOPE (#80, part of #72): this captures the **raw counts only**. It is deliberately
+    *not* wired into the dollar-based budget (:class:`~chief.core.budget.BudgetGate` /
+    ``MonthlyCost`` cap/warn/pause/downgrade) — that is rebuilt in the budget slice.
+    """
+    snapshots = getattr(data, "_quota_snapshots", None)
+    if not snapshots:
+        return {}
+    counts: dict[str, int] = {}
+    for name, snapshot in snapshots.items():
+        used = getattr(snapshot, "_used_requests", None)
+        if isinstance(used, int):
+            counts[name] = used
+    return counts
+
+
 def _describe_error(data: SessionErrorData | ModelCallFailureData) -> str:
     """A one-line reason from an error / failure event, for the raised exception."""
     if isinstance(data, SessionErrorData):
@@ -274,6 +321,8 @@ class CopilotTaskSession:
         on_permission_request: PermissionHandlerFn | None = None,
         hooks: SessionHooks | None = None,
         system_prompt: str | None = None,
+        mcp_servers: dict[str, Any] | None = None,
+        disallowed_tools: list[str] | None = None,
         client_factory: CopilotClientFactory = _default_copilot_client,
         provider: ProviderConfig | None = None,
     ) -> None:
@@ -287,6 +336,17 @@ class CopilotTaskSession:
         #: Built once from ``system_prompt`` (issue #78) — see
         #: :func:`build_persona_system_message` for the section mapping.
         self._system_message = build_persona_system_message(system_prompt)
+        #: chief's mixed ``mcp_servers`` mapping (#80) — split at connect into flat
+        #: Copilot tools (in-process shell/scheduler/guest) + HTTP MCP servers (Google/
+        #: browser) by :func:`~chief.core.copilot_tools.partition_mcp_servers`.
+        self._mcp_servers = mcp_servers
+        #: Hard-refused tool names → the SDK's ``excluded_tools`` (hidden from the
+        #: model). chief's ``allowed_tools`` is intentionally NOT mapped to the SDK's
+        #: ``available_tools`` — it is a pre-approval list the gate honours (approve-
+        #: once), not a visibility allowlist; forwarding it would hide the shell/
+        #: schedule tools chief deliberately keeps off the allowlist so they route
+        #: through the gate. See :class:`~chief.core.backend.CopilotBackend`.
+        self._disallowed_tools = disallowed_tools
         self._client_factory = client_factory
         #: BYOK provider config (e.g. :func:`openrouter_provider_config`) — ``None``
         #: keeps the session on plain Copilot quota (#90, part of #72).
@@ -309,6 +369,10 @@ class CopilotTaskSession:
         #: ``data.model`` (#90) — Copilot's ``auto`` and BYOK targets like OpenRouter
         #: both report it here regardless of what was requested. Reset each turn.
         self.last_served_model: str | None = None
+        #: This turn's raw premium-request counts (quota name → used-requests), captured
+        #: from usage events via :func:`read_premium_requests` (#80). Reset each turn.
+        #: SCOPE: recorded only — not wired into the dollar budget (budget slice).
+        self.last_premium_requests: dict[str, int] = {}
 
     def _on_event(self, event: SessionEvent) -> None:
         """Pump one SDK event onto the current turn's queue (thread-safe).
@@ -326,8 +390,14 @@ class CopilotTaskSession:
         self._loop = asyncio.get_running_loop()
         client = self._client_factory()
         await client.start()
+        # chief's mixed mcp_servers → the SDK's two tool inputs (#80): in-process
+        # shell/scheduler/guest become flat custom `tools`, HTTP Google/browser servers
+        # pass through as `mcp_servers`. disallowed_tools → excluded_tools (hidden).
+        tools, http_servers = await partition_mcp_servers(self._mcp_servers)
+        excluded = self._disallowed_tools or None
         # The gate callbacks are non-persisted, so both branches re-register them fresh;
-        # a resumed session is gated identically to a freshly created one (#77).
+        # a resumed session is gated identically to a freshly created one (#77). The
+        # tool surface is likewise re-supplied on resume — the SDK does not persist it.
         if self._resume is not None:
             session = await client.resume_session(
                 self._resume,
@@ -337,6 +407,9 @@ class CopilotTaskSession:
                 hooks=self._hooks,
                 system_message=self._system_message,
                 provider=self._provider,
+                tools=tools or None,
+                mcp_servers=http_servers or None,
+                excluded_tools=excluded,
             )
         else:
             session = await client.create_session(
@@ -346,6 +419,9 @@ class CopilotTaskSession:
                 hooks=self._hooks,
                 system_message=self._system_message,
                 provider=self._provider,
+                tools=tools or None,
+                mcp_servers=http_servers or None,
+                excluded_tools=excluded,
             )
         session.on(self._on_event)
         self._client = client
@@ -357,6 +433,34 @@ class CopilotTaskSession:
         self, text: str, attachments: Sequence[Attachment] = ()
     ) -> AsyncIterator[TurnEvent]:
         """Send ``text``, stream the response as ``Milestone`` / ``Final`` events.
+
+        A dead/expired resume id can make the connect or first send fail. If nothing
+        has streamed yet on the connecting turn and we were resuming, drop the resume
+        pointer and retry once on a fresh session rather than crashing — the new id is
+        then persisted by the engine, healing the stale pointer (mirrors
+        :meth:`TaskSession.run_turn`). Later turns (already connected) never self-heal,
+        so a mid-conversation fault surfaces instead of orphaning the transcript.
+        """
+        needs_connect = not self._connected
+        streamed = False
+        try:
+            async for event in self._stream_once(text, attachments):
+                streamed = True
+                yield event
+        except (JsonRpcError, ProcessExitedError) as exc:
+            if streamed or self._resume is None or not needs_connect:
+                raise
+            logger.warning(
+                "resume failed (%s); retrying on a fresh session", exc
+            )
+            await self._reset_to_fresh()
+            async for event in self._stream_once(text, attachments):
+                yield event
+
+    async def _stream_once(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        """One streamed turn against the current session (no resume fallback).
 
         Drains the event queue until ``session.idle`` (the turn boundary), mapping each
         event chief cares about. A turn that streams no assistant text still yields one
@@ -375,6 +479,7 @@ class CopilotTaskSession:
         self._queue = asyncio.Queue()
         self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
         self.last_served_model = None  # this turn's served model; reset each turn
+        self.last_premium_requests = {}  # this turn's raw quota counts; reset each turn
         text_blocks_seen = 0
         await self._session.send(text)
         while True:
@@ -391,12 +496,25 @@ class CopilotTaskSession:
                 if data.cost is not None:
                     self.last_cost_usd += data.cost
                 self.last_served_model = data.model
+                counts = read_premium_requests(data)
+                if counts:
+                    self.last_premium_requests.update(counts)
             elif isinstance(data, SessionLimitsExhaustedRequestedData):
                 self.last_rate_limit_status = "rejected"
             elif isinstance(data, (SessionErrorData, ModelCallFailureData)):
                 raise CopilotTurnError(_describe_error(data))
         if text_blocks_seen == 0:
             yield Final(text=NO_REPLY)
+
+    async def _reset_to_fresh(self) -> None:
+        """Tear down the failed resuming session and rebuild with no resume pointer."""
+        try:
+            await self.aclose()
+        except Exception:  # the runtime is already down; disconnect/stop may error
+            logger.debug("aclose during resume reset failed", exc_info=True)
+        self._resume = None
+        self.session_id = None
+        self._connected = False
 
     async def interrupt(self) -> None:
         """Abort the in-flight turn (steering 'stop / do X instead')."""

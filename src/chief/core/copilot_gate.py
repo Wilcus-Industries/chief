@@ -97,6 +97,22 @@ def _as_dict(args: Any) -> dict[str, Any]:
     return args if isinstance(args, dict) else {}
 
 
+def _qualify_mcp(server_name: str, tool_name: str) -> str:
+    """Rebuild the ``mcp__<server>__<tool>`` name chief's gate keys off.
+
+    The Copilot SDK delivers an MCP tool call as a *split* ``server_name`` + bare
+    ``tool_name`` (the two are separate fields on
+    :class:`~copilot.generated.session_events.PermissionRequestMcp`), so they are joined
+    into the qualified name chief's allowlists / ``COMMAND_TOOLS`` / blacklist all use.
+    Defensive: a ``tool_name`` already carrying the ``mcp__`` prefix is passed through
+    rather than double-qualified, so the mapping is correct whether the runtime sends
+    the bare or the pre-qualified form.
+    """
+    if tool_name.startswith("mcp__"):
+        return tool_name
+    return f"mcp__{server_name}__{tool_name}"
+
+
 def normalize_permission_request(
     request: PermissionRequest,
 ) -> tuple[str, dict[str, Any]]:
@@ -110,8 +126,14 @@ def normalize_permission_request(
     - ``write`` → ``("Write", {"file_path": file_name})`` — same rule (guest: DENY).
     - ``shell`` → ``(COPILOT_SHELL_TOOL, {"command": full_command_text})`` — routed to
       the command-tool safe-match, so it ASKs unless pre-approved.
-    - ``mcp`` / ``custom-tool`` → ``(tool_name, args)`` verbatim — chief classifies by
-      the real tool name (unknown/effectful → ASK); the ``@define_tool`` gating path.
+    - ``mcp`` → ``("mcp__<server>__<tool>", args)`` — the SDK carries the MCP tool as
+      *split* ``server_name`` + bare ``tool_name`` fields, so they are re-joined into
+      the ``mcp__<server>__<tool>`` name chief's allowlists / blacklist key off (the
+      Google/browser HTTP-server gating path). A bare name here would silently un-gate.
+    - ``custom-tool`` → ``(tool_name, args)`` verbatim — chief's in-process
+      shell/scheduler/guest tools are already registered under their SDK-qualified
+      ``mcp__<server>__<tool>`` names (see :mod:`chief.core.copilot_tools`), so the
+      custom-tool name arrives pre-qualified and matches chief's vocabulary directly.
     - ``url`` → ``("url", {"url": url})`` — no chief read-only analogue, so it ASKs.
 
     Any other kind (memory / hook / extension-*) has no chief analogue and falls through
@@ -124,7 +146,11 @@ def normalize_permission_request(
         return "Write", {"file_path": request.file_name}
     if isinstance(request, PermissionRequestShell):
         return COPILOT_SHELL_TOOL, {"command": request.full_command_text}
-    if isinstance(request, (PermissionRequestMcp, PermissionRequestCustomTool)):
+    if isinstance(request, PermissionRequestMcp):
+        return _qualify_mcp(request.server_name, request.tool_name), _as_dict(
+            request.args
+        )
+    if isinstance(request, PermissionRequestCustomTool):
         return request.tool_name, _as_dict(request.args)
     if isinstance(request, PermissionRequestUrl):
         return "url", {"url": request.url}
