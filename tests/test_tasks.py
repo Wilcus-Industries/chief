@@ -8,10 +8,12 @@ from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+from copilot import ProviderConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
 from chief.core.agent import NO_REPLY
+from chief.core.routing import RoutingStore
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
     GROUP_MODE_NOTE,
@@ -103,6 +105,9 @@ class FakeSession:
         self.closed = False
         self.last_cost_usd = 0.0
         self.last_rate_limit_status: str | None = None
+        #: Simulated served model (#79): defaults to the model the session was spawned
+        #: on, so a routed session reports the target it actually ran (set in run_turn).
+        self.last_served_model: str | None = None
         self._gate = gate
         self._on_start = on_start
         self._milestones = milestones or []
@@ -125,6 +130,7 @@ class FakeSession:
         self.session_id = f"sess-{text}"
         self.last_cost_usd = self._cost
         self.last_rate_limit_status = self._rate_limit
+        self.last_served_model = self.model  # the target this session actually ran on
         for milestone in self._after_gate:  # yielded post-gate (after a cancel flips)
             yield milestone
         yield Final(text=f"reply:{text}")
@@ -2622,3 +2628,222 @@ async def test_memory_auto_commit_git_skips_when_no_memory_change(
     assert len(commits) == 1, (
         f"no memory write → commit count must stay at 1, got {commits!r}"
     )
+
+
+# ---- model routing (#79, part of #72) ----------------------------------------
+
+_ROUTES = [
+    ("writing", "copilot", "auto"),
+    ("research", "copilot", "auto"),
+    ("general", "copilot", "auto"),
+    ("code", "openrouter", "deepseek/deepseek-v4-flash"),
+    ("reasoning", "openrouter", "deepseek/deepseek-v4-flash"),
+]
+
+_OPENROUTER = ProviderConfig(base_url="https://openrouter.ai/api/v1", api_key="k")
+
+
+def _recording_factory(created: list[dict[str, Any]]) -> Factory:
+    """A factory that records the model + provider + resume each session is built on."""
+
+    def factory(
+        *,
+        model: str,
+        resume: str | None = None,
+        provider: ProviderConfig | None = None,
+        **_: Any,
+    ) -> SessionProto:
+        sess = FakeSession(model=model, resume=resume)
+        created.append(
+            {"session": sess, "model": model, "provider": provider, "resume": resume}
+        )
+        return sess
+
+    return factory
+
+
+async def _routed_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    io: Any,
+    *,
+    factory: Factory,
+    classify_category: Callable[..., Any],
+    surface_defaults: dict[str, str] | None = None,
+    openrouter_provider: ProviderConfig | None = _OPENROUTER,
+) -> TaskManager:
+    routing = RoutingStore(session_factory)
+    await routing.seed(_ROUTES)
+    return TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        idle_archive_seconds=1000.0,
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+        routing=routing,
+        classify_category=classify_category,
+        openrouter_provider=openrouter_provider,
+        routing_surface_defaults=surface_defaults or {},
+    )
+
+
+async def test_owner_message_auto_routed_to_category_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC1: message types are auto-classified and served by the category's target —
+    served-model assert for the openrouter category, provider(None) assert for auto."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "code" if "bug" in text else "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    # A "code" message → the openrouter DeepSeek target: assert the served model.
+    await mgr.dispatch(thread_key="-100:5", text="fix this bug")
+    await _until(lambda: ("-100:5", "reply:fix this bug") in io.sends)
+    code = created[-1]
+    assert code["model"] == "deepseek/deepseek-v4-flash"
+    assert code["provider"] is _OPENROUTER  # BYOK provider for openrouter
+    assert code["session"].last_served_model == "deepseek/deepseek-v4-flash"
+
+    # A "writing" message → copilot auto: the request stays on Copilot quota (no BYOK
+    # provider), and auto is the served model.
+    await mgr.dispatch(thread_key="-100:6", text="draft a poem")
+    await _until(lambda: ("-100:6", "reply:draft a poem") in io.sends)
+    writing = created[-1]
+    assert writing["model"] == "auto"
+    assert writing["provider"] is None  # plain Copilot quota (the `auto` target)
+    await mgr.shutdown()
+
+
+async def test_route_command_overrides_task_and_respawns_on_new_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC2: /route overrides a task — persisted and, since a provider can't change on a
+    live session, the session is respawned (resume-preserving) onto the new target."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "writing"  # would auto-route to copilot auto
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="hello")
+    await _until(lambda: ("-100:5", "reply:hello") in io.sends)
+    assert created[-1]["model"] == "auto"  # auto-classified writing → copilot auto
+
+    reply = await mgr.route("-100:5", "code")
+
+    assert "code" in reply
+    respawned = created[-1]
+    assert respawned["model"] == "deepseek/deepseek-v4-flash"  # switched target class
+    assert respawned["provider"] is _OPENROUTER
+    assert respawned["resume"] == "sess-hello"  # context carried via resume
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+        assert db is not None and db.route_category == "code"  # persisted per task
+    await mgr.shutdown()
+
+
+async def test_route_rejects_unknown_category(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        return "general"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+    reply = await mgr.route("-100:5", "banana")
+    assert "Unknown category" in reply  # the table is the source of truth
+    await mgr.shutdown()
+
+
+async def test_surface_default_pins_category_without_classifying(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC2: config defaults apply per surface — a configured surface default pins the
+    category and skips the classifier entirely."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    classify_calls: list[str] = []
+
+    async def fake_classify(text: str, **_: Any) -> str:
+        classify_calls.append(text)
+        return "code"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+        surface_defaults={"group": "general"},
+    )
+
+    await mgr.dispatch(thread_key="-100:grp", text="anything", surface=Surface.GROUP)
+    await _until(lambda: ("-100:grp", "reply:anything") in io.sends)
+
+    # general → copilot auto (the surface default), not the classifier's "code".
+    assert created[-1]["model"] == "auto"
+    assert created[-1]["provider"] is None
+    assert classify_calls == []  # the classifier was never consulted
+    await mgr.shutdown()
+
+
+async def test_classifier_runs_on_fixed_cheap_model_never_a_target(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """AC3: the classifier runs on the fixed cheap classifier model, its label space is
+    the routing table's categories, and it is never handed a routing target model."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    seen: dict[str, Any] = {}
+
+    async def fake_classify(
+        text: str, *, model: str, categories: Any, default: str
+    ) -> str:
+        seen["model"] = model
+        seen["categories"] = set(categories)
+        return "code"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="fix the bug")
+    await _until(lambda: ("-100:5", "reply:fix the bug") in io.sends)
+
+    assert seen["model"] == "claude-haiku-4-5"  # the fixed cheap classifier target
+    assert seen["model"] != "deepseek/deepseek-v4-flash"  # never a routing target
+    assert seen["categories"] == {
+        "writing",
+        "research",
+        "general",
+        "code",
+        "reasoning",
+    }
+    await mgr.shutdown()

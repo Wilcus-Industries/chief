@@ -60,6 +60,8 @@ class Task(Base):
     sdk_session_id: Mapped[str | None]
     #: Per-thread active Google account label (issue #45). None = no account pinned.
     active_account: Mapped[str | None]
+    #: Per-task ``/route`` category override (#79). None = auto-classify at spawn.
+    route_category: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
@@ -88,6 +90,26 @@ class PolicyEntry(Base):
     list_name: Mapped[str]  # "NEVER" | "APPROVED"
     tool: Mapped[str]
     arg_pattern: Mapped[str | None]
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class Route(Base):
+    """One job category → routing target (owned by #79, part of #72).
+
+    The row *set* is the category set: every category with a row maps to a
+    ``{target_class, model}`` target — ``copilot`` (Copilot quota, e.g. ``auto``) or
+    ``openrouter`` (a BYOK per-model target). Seeded from ``config.yaml`` on boot
+    (mirrors :class:`PolicyEntry`); the self-config slice later makes both editable.
+    ``category`` is unique so a seed / edit upserts one target per category.
+    """
+
+    __tablename__ = "routes"
+    __table_args__ = (UniqueConstraint("category", name="uq_route_category"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str]
+    target_class: Mapped[str]  # "copilot" | "openrouter"
+    model: Mapped[str]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 

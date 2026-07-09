@@ -30,6 +30,8 @@ from .config import Settings
 from .core import screening
 from .core.backend import select_backend
 from .core.budget import BudgetGate, BudgetIO
+from .core.copilot_session import openrouter_provider_config
+from .core.routing import RoutingStore
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
 from .gate.approvals import ApprovalManager
@@ -293,6 +295,7 @@ def build_engine(
     audit: AuditLog,
     memory: MemoryStore,
     budget: BudgetGate | None = None,
+    routing: RoutingStore | None = None,
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
     guest_admin = (
@@ -346,6 +349,14 @@ def build_engine(
         # opus_auto_detect on, a complex owner turn also asks before escalating.
         owner_model_opus=settings.owner_model_opus,
         opus_auto_detect=settings.opus_auto_detect,
+        # Model routing (#79): the shared, seeded routing table (None when disabled),
+        # the OpenRouter BYOK provider built once from settings (only an openrouter
+        # target consumes it), and the per-surface category defaults.
+        routing=routing,
+        openrouter_provider=(
+            openrouter_provider_config(settings) if settings.routing_enabled else None
+        ),
+        routing_surface_defaults=settings.routing_surface_defaults,
         classifier_model=settings.classifier_model,
         concurrency=settings.concurrency,
         turn_timeout=settings.turn_timeout_seconds,
@@ -434,6 +445,7 @@ def build_telegram_stack(
     policy: PolicyStore,
     audit: AuditLog,
     memory: MemoryStore,
+    routing: RoutingStore | None = None,
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
@@ -462,6 +474,7 @@ def build_telegram_stack(
         audit=audit,
         memory=memory,
         budget=build_budget(settings, io=io, session_factory=session_factory),
+        routing=routing,
     )
     adapter = TelegramAdapter(
         application=application,
@@ -490,6 +503,7 @@ def build_discord_stack(
     policy: PolicyStore,
     audit: AuditLog,
     memory: MemoryStore,
+    routing: RoutingStore | None = None,
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
@@ -519,6 +533,7 @@ def build_discord_stack(
         audit=audit,
         memory=memory,
         budget=build_budget(settings, io=io, session_factory=session_factory),
+        routing=routing,
     )
     adapter = DiscordAdapter(
         client=client,
@@ -548,6 +563,7 @@ def build_stacks(
     policy: PolicyStore,
     audit: AuditLog,
     memory: MemoryStore,
+    routing: RoutingStore | None = None,
 ) -> list[Stack]:
     """Build one engine stack per configured platform (Telegram and/or Discord)."""
     stacks: list[Stack] = []
@@ -559,6 +575,7 @@ def build_stacks(
                 policy=policy,
                 audit=audit,
                 memory=memory,
+                routing=routing,
             )
         )
     if settings.discord_configured:
@@ -569,6 +586,7 @@ def build_stacks(
                 policy=policy,
                 audit=audit,
                 memory=memory,
+                routing=routing,
             )
         )
     return stacks
@@ -637,13 +655,18 @@ async def serve(settings: Settings) -> None:
     audit = AuditLog(settings.audit_log_path)
     policy = PolicyStore(factory, audit=audit)
     memory = build_memory(settings)
+    # Model routing (#79): one shared, seeded routing table across all stacks (None when
+    # disabled). Seeded from config below, before serving, like the policy lists.
+    routing = RoutingStore(factory) if settings.routing_enabled else None
 
-    # Seed NEVER/APPROVED + scaffold memory before serving so both are correct from the
-    # first message (no live connection needed; done once across all platforms).
+    # Seed NEVER/APPROVED + the routing table + scaffold memory before serving so all
+    # are correct from the first message (no live connection; once across platforms).
     await policy.seed(
         never=[s.as_pair() for s in settings.never_seed],
         approved=[s.as_pair() for s in settings.approved_seed],
     )
+    if routing is not None:
+        await routing.seed(s.as_tuple() for s in settings.routing_seed)
     await memory.ensure_scaffold()
     await memory.purge_expired()
 
@@ -653,6 +676,7 @@ async def serve(settings: Settings) -> None:
         policy=policy,
         audit=audit,
         memory=memory,
+        routing=routing,
     )
     # One scheduler loop across all stacks (it binds to the primary platform's manager),
     # owning an http client for the heartbeat when configured. None when disabled.

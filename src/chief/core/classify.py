@@ -14,6 +14,7 @@ reads) so Haiku can fetch/look something up before answering. It too fails safe 
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
@@ -86,6 +87,46 @@ async def warrants_task(text: str, *, model: str) -> bool:
 async def is_complex(text: str, *, model: str) -> bool:
     """True if an owner ``text`` needs the stronger model (deep reasoning/planning)."""
     return await ask_yes_no(text, model=model, system=_COMPLEX_SYSTEM)
+
+
+_CATEGORY_SYSTEM_TEMPLATE = (
+    "You sort a user's request into exactly one job category. The categories are: "
+    "{categories}. Reply with ONLY the single best-fitting category name, lowercase "
+    "and nothing else. If unsure, answer 'general'."
+)
+
+
+async def classify_category(
+    text: str, *, model: str, categories: Sequence[str], default: str
+) -> str:
+    """Sort ``text`` into one of ``categories`` on the fixed cheap ``model`` (#79).
+
+    Reuses the :func:`ask_yes_no` harness (a single ``max_turns=1`` turn with an empty
+    base tool set, so the model can only answer) but returns a category name instead of
+    a bool. Runs on the configured classifier model — **never** on a routing target, so
+    the classifier that feeds the routing table can't recurse through it. Fails **safe**
+    to ``default``: any error, an empty reply, or a reply naming no known category
+    returns ``default`` (the general fallback), so a mis-parse never wedges a spawn.
+    """
+    if not categories:
+        return default
+    system = _CATEGORY_SYSTEM_TEMPLATE.format(categories=", ".join(categories))
+    options = ClaudeAgentOptions(
+        max_turns=1, model=model, system_prompt=system, tools=[], allowed_tools=[]
+    )
+    parts: list[str] = []
+    try:
+        async for message in query(prompt=text, options=options):
+            if isinstance(message, AssistantMessage):
+                parts += [b.text for b in message.content if isinstance(b, TextBlock)]
+    except Exception:
+        logger.warning("category classifier failed; defaulting", exc_info=True)
+        return default
+    reply = "".join(parts).strip().lower()
+    for category in categories:
+        if category.lower() in reply:
+            return category
+    return default
 
 
 async def ask_condition(

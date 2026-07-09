@@ -35,6 +35,7 @@ class FakeEngine:
         self.branched: list[tuple[str, str]] = []
         self.escalated: list[str] = []
         self.reverted: list[str] = []
+        self.routed: list[tuple[str, str]] = []
         self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
@@ -86,6 +87,10 @@ class FakeEngine:
     async def revert(self, thread_key: str) -> str:
         self.reverted.append(thread_key)
         return "↩️ Back to Sonnet 4.6 for this thread."
+
+    async def route(self, thread_key: str, category: str) -> str:
+        self.routed.append((thread_key, category))
+        return f"🧭 Routing this thread as “{category}”."
 
     async def downgrade_live_sessions(self) -> None:
         self.downgraded += 1
@@ -1044,6 +1049,36 @@ async def test_opus_ignores_guest(
     )
 
     assert engine.escalated == []
+
+
+async def test_route_owner_overrides_category_and_replies(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/route code", channel=channel)
+    )
+
+    assert engine.routed == [("100:5", "code")]
+    channel.send.assert_awaited_once_with("🧭 Routing this thread as “code”.")
+
+
+async def test_route_without_argument_prints_usage(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/route", channel=channel)
+    )
+
+    assert engine.routed == []  # no category → nothing routed
+    channel.send.assert_awaited_once_with("Usage: /route <category>")
 
 
 # ---- DiscordTaskIO -----------------------------------------------------------
