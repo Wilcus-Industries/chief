@@ -12,11 +12,10 @@ subdirectory placeholder out of git.
 ```
 secrets/
 ├── README.md                          ← this file (tracked)
-├── claude_code_oauth_token            ← ignored, never commit
 ├── discord_bot_token                  ← ignored, never commit
 ├── google_oauth_client.json           ← ignored, never commit
 ├── telegram_bot_token                 ← ignored, never commit
-├── openrouter_api_key                 ← ignored, never commit (optional — #90)
+├── openrouter_api_key                 ← ignored, never commit (optional — #88/#90)
 ├── brave_search_api_key               ← ignored, never commit (optional — #81 web-search)
 └── google_tokens/                     ← dedicated Google account tokens subdir
     ├── .gitkeep                       ← tracked (keeps the dir in git)
@@ -24,17 +23,20 @@ secrets/
     └── google_token_<label>.json      ← ignored, never commit (additional accounts)
 ```
 
-**Not here: the GitHub Copilot token.** `agent_backend: copilot` (#76/#90, part of #72)
-authenticates via the `copilot` CLI's own login, which is CLI-managed at
-`~/.copilot/config.json` and auto-refreshes on its own. Never copy that token into this
-directory — it isn't a Docker secret and doesn't follow this file's pattern.
+**Not here: the agent token.** chief's sole harness is the GitHub Copilot SDK (#88),
+which authenticates via the `copilot` CLI's own login — CLI-managed at
+`~/.copilot/config.json`, auto-refreshing on its own. Never copy that token into this
+directory; it isn't a chief secret and doesn't follow this file's pattern.
+
+**Removed: `claude_code_oauth_token`.** #88 dropped the claude-agent-sdk backend, so the
+old Claude Max OAuth token is dead. A leftover `secrets/claude_code_oauth_token` file is
+silently ignored (no Settings field reads it) — **delete it**; it's a stale credential.
 
 Google account tokens live exclusively in `google_tokens/` — **not** directly under
 `secrets/`.  The host-native core scans it directly, and the four Google MCP
 containers (`mcp-calendar`, `mcp-drive`, `mcp-sheets`, `mcp-gmail`) bind-mount this
-single subdirectory (issue #58), which keeps `claude_code_oauth_token`,
-`discord_bot_token`, `google_oauth_client.json`, and `telegram_bot_token` out of those
-containers (issue #57).
+single subdirectory (issue #58), which keeps `discord_bot_token`,
+`google_oauth_client.json`, and `telegram_bot_token` out of those containers (issue #57).
 
 ## File permissions
 
@@ -42,7 +44,7 @@ Secret files **must be owner-readable only** (`0600`) so other host processes or
 cannot read them:
 
 ```sh
-chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
+chmod 0600 secrets/discord_bot_token \
            secrets/google_oauth_client.json secrets/telegram_bot_token \
            secrets/google_tokens/google_token.json secrets/openrouter_api_key \
            secrets/brave_search_api_key
@@ -52,7 +54,6 @@ chmod 0600 secrets/claude_code_oauth_token secrets/discord_bot_token \
 |------|-------|
 | `telegram_bot_token` | Bot token from @BotFather |
 | `discord_bot_token` | Bot token from the Discord Developer Portal (Bot → Reset Token) |
-| `claude_code_oauth_token` | Output of `claude setup-token` (1-year Max OAuth token) |
 | `google_oauth_client.json` | Google OAuth **Desktop app** client (downloaded — see below) |
 | `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 | `openrouter_api_key` | OpenRouter API key (optional — see "OpenRouter BYOK" below) |
@@ -72,23 +73,24 @@ For a platform you skip, simply leave its token file absent. The Discord bot als
 the privileged **message_content** intent — enable it under Bot → Privileged Gateway
 Intents in the Developer Portal, or Discord delivers empty message content.
 
-Do **not** create an `ANTHROPIC_API_KEY` — it outranks the OAuth token and would bill the
-API instead of the Max subscription. The app refuses to start if it is set.
+## OpenRouter (`openrouter_api_key`) — classifiers, screening, and BYOK
 
-## OpenRouter BYOK (issue #90, part of #72)
+`openrouter_api_key` now does double duty (#88):
 
-`openrouter_api_key` is the key for the `openrouter` provider target class: a session
-spawned on it runs through `CopilotBackend` (the GitHub Copilot SDK) against a concrete
-OpenRouter model, BYOK, at OpenRouter's own metered per-token rate — separate from the
-included Copilot subscription quota. Get a key from
-<https://openrouter.ai/settings/keys>.
+- **Cheap classifiers + injection screening.** The stop-intent steering, warrants-a-task
+  auto-spawn, complexity/routing judgments, and untrusted-content screening run as direct
+  OpenRouter chat-completions one-shots on the cheap `classifier_model` /
+  `screening_model`. **Without the key they make no call and fail safe** — no interrupt,
+  no spawn, no escalation — and screening fails **open** (web/browser/guest content
+  reaches the agent *unscreened*). The boot logs one warning when it is missing.
+- **BYOK routing (`openrouter` target class, #90).** A session routed to an `openrouter`
+  category runs through `CopilotBackend` (the GitHub Copilot SDK) against a concrete
+  OpenRouter model, at OpenRouter's metered per-token rate — separate from the Copilot
+  subscription quota.
 
-It is **optional** — only required when a session actually requests the `openrouter`
-target. If you don't use it yet, Docker still requires the referenced secret file to
-exist: `touch secrets/openrouter_api_key` (mirrors the platform-you-skip pattern above).
-
-This is a separate credential from the GitHub Copilot token itself — see "Not here: the
-GitHub Copilot token" above.
+Get a key from <https://openrouter.ai/settings/keys>. It is **optional**: leave the file
+absent and the behaviours above degrade as described. It is a separate credential from
+the Copilot login — see "Not here: the agent token" above.
 
 ## Web search (issue #81, part of #72)
 

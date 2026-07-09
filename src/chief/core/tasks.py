@@ -872,16 +872,17 @@ class TaskManager:
             allowed_tools=allowed,
         )
         if skills_on:
-            # claude-agent-sdk shape: the plugin manifest provides the SKILL.md dirs;
-            # the skills= filter scopes the curated set (the SDK turns on the Skill tool
-            # itself). The Copilot backend ignores these two and reads skill_directories
-            # below — both are set so whichever backend is live picks its own.
+            # Skills flow to the Copilot backend ONLY through ``skill_directories`` (#88
+            # / #98). ``plugins`` + ``skills`` are the legacy claude-agent-sdk
+            # plugin-manifest shape — kept as accepted-but-ignored kwargs
+            # (:class:`~chief.core.backend.CopilotBackend` drops them by design), not a
+            # second live path.
             assert self._skills_plugin_path is not None  # narrowed by skills_on
             gate_kwargs["plugins"] = [
                 {"type": "local", "path": self._skills_plugin_path}
             ]
             gate_kwargs["skills"] = list(self._default_skills)
-            # Copilot shape (#87): the same curated set as absolute skill directories.
+            # The live path (#87): the curated set as absolute skill directories.
             gate_kwargs["skill_directories"] = skill_directories_for(
                 self._skills_plugin_path, self._default_skills
             )
