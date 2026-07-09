@@ -202,11 +202,10 @@ class Settings(BaseSettings):
     # select_option/press_key/fill_form/file_upload/handle_dialog) are untrusted
     # channels too, not just the original fetch/search/navigate/snapshot set.
     # ``mcp__chief_web__fetch`` / ``__search`` (#81) are chief's own web tools — their
-    # results are internet content, so they must be screened too; the built-in
-    # ``WebFetch`` / ``WebSearch`` names are kept for the claude backend's built-ins.
+    # results are internet content, so they must be screened. (#88 dropped the built-in
+    # ``WebFetch`` / ``WebSearch`` names: those were claude-agent-sdk's built-ins, which
+    # no longer exist under the Copilot backend — chief's own two web tools remain.)
     screening_tools: tuple[str, ...] = (
-        "WebFetch",
-        "WebSearch",
         _WEB_FETCH_TOOL,
         _WEB_SEARCH_TOOL,
         "mcp__playwright__browser_snapshot",

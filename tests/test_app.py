@@ -57,6 +57,29 @@ def _shared(
     return policy, audit, memory
 
 
+def test_warns_at_boot_when_openrouter_key_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #88 owner decision: keyless is allowed but must warn loudly — the classifiers and
+    # injection screening fail safe/open silently otherwise.
+    with caplog.at_level("WARNING"):
+        app.warn_if_classifier_keyless(_settings(openrouter_api_key=None))
+    assert any(
+        "openrouter_api_key is not set" in r.message for r in caplog.records
+    )
+    assert any("UNSCREENED" in r.message for r in caplog.records)
+
+
+def test_no_boot_warning_when_openrouter_key_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING"):
+        app.warn_if_classifier_keyless(_settings(openrouter_api_key="sk-or-x"))
+    assert not any(
+        "openrouter_api_key is not set" in r.message for r in caplog.records
+    )
+
+
 def test_build_google_services_includes_gmail_only_when_enabled() -> None:
     def names(s: Settings) -> set[str]:
         return {svc.name for svc in app.build_google_services(s)}

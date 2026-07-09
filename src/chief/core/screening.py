@@ -30,6 +30,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+import httpx
+
 from ..gate.types import HookCallback, HookContext
 from .classify import ask_yes_no
 
@@ -70,10 +72,27 @@ RELAY_WARNING = (
 _MAX_SCREEN_CHARS = 20_000
 
 
-async def screen_text(text: str, *, model: str) -> bool:
-    """One Haiku judgment: does ``text`` smell like prompt injection? Fails safe."""
+async def screen_text(
+    text: str,
+    *,
+    model: str,
+    api_key: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> bool:
+    """One OpenRouter judgment: does ``text`` smell like prompt injection? Fails safe.
+
+    Fail-open by design (#88, owner decision): a flagged injection returns ``True``, but
+    **any** error — a missing key (no HTTP call), a non-2xx, an unreachable provider —
+    returns ``False``, so the content PASSES. Screening degrades silently when keyless;
+    :func:`chief.app.warn_if_classifier_keyless` warns once at boot so this is a
+    deliberate, pinned tradeoff rather than an accidental hole.
+    """
     return await ask_yes_no(
-        text[:_MAX_SCREEN_CHARS], model=model, system=_SCREEN_SYSTEM
+        text[:_MAX_SCREEN_CHARS],
+        model=model,
+        system=_SCREEN_SYSTEM,
+        api_key=api_key,
+        transport=transport,
     )
 
 
