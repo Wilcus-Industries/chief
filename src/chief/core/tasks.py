@@ -110,6 +110,7 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 # the engine's callers keep importing it from the TaskManager module.
 from .session import Final
 from .session import SessionProto as SessionProto
+from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
 
 logger = logging.getLogger("chief.core.tasks")
 
@@ -324,6 +325,7 @@ class TaskManager:
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
+        subagents_enabled: bool = False,
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
@@ -391,6 +393,10 @@ class TaskManager:
         self._skills_enabled = skills_enabled
         self._skills_plugin_path = skills_plugin_path
         self._default_skills = default_skills
+        # Category-routed subagents (#87), owner-only. When on, owner sessions carry
+        # chief's DEFAULT_SUBAGENTS with each subagent's model resolved through the live
+        # routing table; guests never do (the gate lives in build_custom_agents).
+        self._subagents_enabled = subagents_enabled
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
@@ -844,12 +850,28 @@ class TaskManager:
             allowed_tools=allowed,
         )
         if skills_on:
-            # The plugin manifest provides the SKILL.md dirs; the skills= filter scopes
-            # exactly the curated set on (the SDK turns on the Skill tool itself).
+            # claude-agent-sdk shape: the plugin manifest provides the SKILL.md dirs;
+            # the skills= filter scopes the curated set (the SDK turns on the Skill tool
+            # itself). The Copilot backend ignores these two and reads skill_directories
+            # below — both are set so whichever backend is live picks its own.
+            assert self._skills_plugin_path is not None  # narrowed by skills_on
             gate_kwargs["plugins"] = [
                 {"type": "local", "path": self._skills_plugin_path}
             ]
             gate_kwargs["skills"] = list(self._default_skills)
+            # Copilot shape (#87): the same curated set as absolute skill directories.
+            gate_kwargs["skill_directories"] = skill_directories_for(
+                self._skills_plugin_path, self._default_skills
+            )
+        if self._subagents_enabled:
+            # Owner-only, category-routed (#87): each subagent's model is resolved now
+            # through the live routing table, so a category renamed/removed later (#83)
+            # still resolves (RoutingStore.resolve falls back). Routing off ⇒ model
+            # omitted, the subagent runs on the parent model. Guests never reach this
+            # branch, and build_custom_agents refuses a non-owner tier regardless.
+            gate_kwargs["custom_agents"] = build_custom_agents(
+                DEFAULT_SUBAGENTS, routing=self._routing, tier="owner"
+            )
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
         # writes and the shell tool are absent from allowed_tools, so every call routes
         # through can_use_tool → classify(); under owner default-allow that ALLOWs a

@@ -19,6 +19,9 @@ drains the queue, mapping the handful of events chief cares about onto ``Milesto
   the analogue of claude-agent-sdk's ``TextBlock`` → ``Final``.
 * ``tool.execution_start`` (:class:`ToolExecutionStartData`) → ``Milestone("using …")``,
   the analogue of ``ToolUseBlock`` → ``Milestone``.
+* ``subagent.started`` (:class:`SubagentStartedData`) → ``Milestone("delegating to …")``
+  (#87) — surfaces a category-routed subagent turn *and* the model it runs on, so the
+  owner sees the delegation and its resolved model.
 * ``assistant.usage`` (:class:`AssistantUsageData`) → ``last_cost_usd`` (summed across
   the turn's model calls; ``0.0`` on Copilot quota, which reports no dollar cost),
   ``last_served_model`` (``data.model`` — the actually-served model, #90), and
@@ -62,6 +65,13 @@ customization.
 Copilot quota (the ``copilot`` target class); :func:`openrouter_provider_config` builds
 one for the ``openrouter`` target class (the SDK's "openai" provider pointed at
 OpenRouter, with a concrete model requested via the existing ``model=`` kwarg).
+
+**Subagents + skills (#87, part of #72).** ``custom_agents`` are category-routed
+subagents (built owner-only by :func:`chief.core.subagents.build_custom_agents`, each
+agent's model already resolved through the routing table) and ``skill_directories`` are
+the ported M10 skill dirs. Both are non-persisted SDK inputs, so — like the tools and
+gate callbacks — they are re-supplied on **every** connect (create and resume);
+``enable_skills`` is turned on exactly when skill dirs are present.
 """
 
 import asyncio
@@ -74,6 +84,7 @@ from copilot import CopilotClient, ProviderConfig, SessionHooks, Tool
 from copilot._jsonrpc import JsonRpcError, ProcessExitedError
 from copilot.generated.rpc import SessionsForkRequest, SessionsForkResult
 from copilot.session import (
+    CustomAgentConfig,
     MCPServerConfig,
     SectionOverride,
     SystemMessageConfig,
@@ -87,6 +98,7 @@ from copilot.session_events import (
     SessionEvent,
     SessionIdleData,
     SessionLimitsExhaustedRequestedData,
+    SubagentStartedData,
     ToolExecutionStartData,
 )
 
@@ -166,6 +178,9 @@ class _CopilotClient(Protocol):
         tools: list[Tool] | None = ...,
         mcp_servers: dict[str, MCPServerConfig] | None = ...,
         excluded_tools: list[str] | None = ...,
+        custom_agents: list[CustomAgentConfig] | None = ...,
+        skill_directories: list[str] | None = ...,
+        enable_skills: bool | None = ...,
     ) -> _CopilotSession: ...
     async def resume_session(
         self,
@@ -180,6 +195,9 @@ class _CopilotClient(Protocol):
         tools: list[Tool] | None = ...,
         mcp_servers: dict[str, MCPServerConfig] | None = ...,
         excluded_tools: list[str] | None = ...,
+        custom_agents: list[CustomAgentConfig] | None = ...,
+        skill_directories: list[str] | None = ...,
+        enable_skills: bool | None = ...,
     ) -> _CopilotSession: ...
 
 
@@ -324,6 +342,20 @@ def read_premium_requests(data: AssistantUsageData) -> dict[str, int]:
     return counts
 
 
+def _subagent_milestone(data: SubagentStartedData) -> str:
+    """Milestone text for a subagent starting (#87) — surfaces the delegation + model.
+
+    The ``subagent.started`` event carries the agent's name and the model it runs on;
+    including the model is what makes "runs on the model its category resolves to"
+    visible to the owner (the category's resolved model was set on the agent config).
+    ``model`` is optional on the event, so it's appended only when present.
+    """
+    name = data.agent_display_name or data.agent_name
+    if data.model:
+        return f"delegating to {name} ({data.model})"
+    return f"delegating to {name}"
+
+
 def _describe_error(data: SessionErrorData | ModelCallFailureData) -> str:
     """A one-line reason from an error / failure event, for the raised exception."""
     if isinstance(data, SessionErrorData):
@@ -354,6 +386,8 @@ class CopilotTaskSession:
         client_factory: CopilotClientFactory = _default_copilot_client,
         provider: ProviderConfig | None = None,
         fork_session: bool = False,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        skill_directories: list[str] | None = None,
     ) -> None:
         self._model = model
         self._resume = resume
@@ -386,6 +420,16 @@ class CopilotTaskSession:
         #: BYOK provider config (e.g. :func:`openrouter_provider_config`) — ``None``
         #: keeps the session on plain Copilot quota (#90, part of #72).
         self._provider = provider
+        #: Category-routed subagents (#87) — owner-declared specs whose model was
+        #: already resolved through the routing table by
+        #: :func:`chief.core.subagents.build_custom_agents`. Non-persisted, so
+        #: re-supplied on every connect (create *and* resume), like the tool surface.
+        #: Owner-only: guests are handed ``None`` at the wiring layer.
+        self._custom_agents = custom_agents
+        #: Ported M10 skill directories (#87) — the Copilot analogue of chief's plugin +
+        #: ``skills=`` filter. Non-empty turns skills on for this session; also
+        #: re-supplied on every connect.
+        self._skill_directories = skill_directories
         self._client: _CopilotClient | None = None
         self._session: _CopilotSession | None = None
         self._connected = False
@@ -430,6 +474,12 @@ class CopilotTaskSession:
         # pass through as `mcp_servers`. disallowed_tools → excluded_tools (hidden).
         tools, http_servers = await partition_mcp_servers(self._mcp_servers)
         excluded = self._disallowed_tools or None
+        # Subagents + skill dirs (#87) are non-persisted too, so re-supplied on every
+        # connect alongside the tools. `enable_skills` is turned on only when chief
+        # hands skill dirs — an empty-mode session otherwise defaults skills off (SDK).
+        custom_agents = self._custom_agents or None
+        skill_dirs = self._skill_directories or None
+        enable_skills = True if skill_dirs else None
         # The gate callbacks are non-persisted, so both branches re-register them fresh;
         # a resumed session is gated identically to a freshly created one (#77). The
         # tool surface is likewise re-supplied on resume — the SDK does not persist it.
@@ -454,6 +504,9 @@ class CopilotTaskSession:
                 tools=tools or None,
                 mcp_servers=http_servers or None,
                 excluded_tools=excluded,
+                custom_agents=custom_agents,
+                skill_directories=skill_dirs,
+                enable_skills=enable_skills,
             )
         else:
             session = await client.create_session(
@@ -466,6 +519,9 @@ class CopilotTaskSession:
                 tools=tools or None,
                 mcp_servers=http_servers or None,
                 excluded_tools=excluded,
+                custom_agents=custom_agents,
+                skill_directories=skill_dirs,
+                enable_skills=enable_skills,
             )
         session.on(self._on_event)
         self._client = client
@@ -534,6 +590,8 @@ class CopilotTaskSession:
                 if data.content:
                     text_blocks_seen += 1
                     yield Final(text=data.content)
+            elif isinstance(data, SubagentStartedData):
+                yield Milestone(text=_subagent_milestone(data))
             elif isinstance(data, ToolExecutionStartData):
                 yield Milestone(text=f"using {data.tool_name}")
             elif isinstance(data, AssistantUsageData):
