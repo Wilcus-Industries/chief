@@ -1314,11 +1314,22 @@ class TaskManager:
         if task.generating:
             await task.session.interrupt()
         await task.session.aclose()
+        # Carry the thread's active account forward so the rebuilt session's
+        # calendar MCP config still carries it (issue #91) — mirrors the
+        # reseed/branch rebuild paths (issue #46).
+        active_account_label: str | None = None
+        if self._set_account_service is not None:
+            active_account_label = (
+                await self._set_account_service.get_active_account_label(
+                    task.thread_key
+                )
+            )
         gate_kwargs = self._session_kwargs(
             thread_key=task.thread_key,
             tier=task.tier,
             db_id=task.db_id,
             surface=task.surface,
+            active_account_label=active_account_label,
         )
         task.session = self._session_factory_sdk(
             model=target.model, resume=resume, provider=provider, **gate_kwargs
