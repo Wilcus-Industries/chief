@@ -32,16 +32,26 @@ resolves to an ``openrouter`` target therefore requests that model name under th
 session's provider — the runtime falls back to the parent model if it can't serve it
 (the same Student-plan ``auto`` constraint the main session already lives under). Noted,
 not worked around, at this slice.
+
+**On-disk overrides (#105, part of #103).** :func:`load_subagent_specs` lets a
+chief-authored ``.md`` set replace :data:`DEFAULT_SUBAGENTS` — one file per subagent,
+loaded fresh at every session spawn (no restart, no approval card) from
+``Settings.subagents_dir``. Each file still only *declares* a category; the model is
+resolved the same way as the built-ins, through the live routing table.
 """
 
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
 from copilot.session import CustomAgentConfig
 
 from .routing import RoutingStore
+
+logger = logging.getLogger("chief.core.subagents")
 
 #: The tier that may carry subagents. Owner-only by construction (M10 skills, the
 #: owner tool surface) — the guest receptionist never delegates.
@@ -141,6 +151,76 @@ def build_custom_agents(
             agent["skills"] = list(spec.skills)
         agents.append(agent)
     return agents
+
+
+def _parse_subagent_md(path: Path) -> SubagentSpec | None:
+    """Parse one on-disk subagent ``.md`` into a :class:`SubagentSpec`, or ``None``.
+
+    Mirrors the degrade-and-skip shape of :func:`_skill_md_name`: malformed input —
+    missing frontmatter fences, unparsable YAML, a missing/wrong-typed required field —
+    returns ``None`` rather than raising, so one bad file never fails a session build.
+    ``model`` is deliberately never read from the frontmatter (#105 AC4): the model is
+    always the *category*'s live routing resolution, not something the file can pin.
+    """
+    lines = path.read_text().splitlines()
+    if not lines or lines[0] != "---":
+        return None
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return None
+    frontmatter_text = "\n".join(lines[1:end])
+    prompt = "\n".join(lines[end + 1 :]).strip()
+    try:
+        data = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    category = data.get("category")
+    description = data.get("description")
+    if not isinstance(category, str) or not category:
+        return None
+    if not isinstance(description, str) or not description:
+        return None
+    skills: tuple[str, ...] = ()
+    if "skills" in data:
+        raw_skills = data["skills"]
+        if not isinstance(raw_skills, list) or not all(
+            isinstance(s, str) for s in raw_skills
+        ):
+            return None
+        skills = tuple(raw_skills)
+    return SubagentSpec(
+        name=path.stem,
+        description=description,
+        prompt=prompt,
+        category=category,
+        skills=skills,
+    )
+
+
+def load_subagent_specs(directory: str | Path) -> tuple[SubagentSpec, ...]:
+    """Load chief subagents from on-disk ``.md`` files (#105, part of #103).
+
+    One ``.md`` per subagent: filename stem is the name, YAML frontmatter carries
+    ``category`` + ``description`` (and optional ``skills``), and the body after the
+    closing fence is the prompt — never ``model``, which stays a category resolution,
+    not a file-pinned value. A malformed file is skipped with a logged warning, never
+    fatal to building a session. ``directory`` absent or holding no loadable ``.md``
+    files returns ``()``, so the caller keeps :data:`DEFAULT_SUBAGENTS`.
+    """
+    path = Path(directory)
+    if not path.is_dir():
+        return ()
+    specs: list[SubagentSpec] = []
+    for md_path in sorted(path.glob("*.md")):
+        spec = _parse_subagent_md(md_path)
+        if spec is None:
+            logger.warning("skipping malformed subagent file %s", md_path)
+            continue
+        specs.append(spec)
+    return tuple(specs)
 
 
 def _skill_md_name(skill_md: Path) -> str | None:

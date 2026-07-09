@@ -1586,6 +1586,7 @@ async def _subagents_manager(
     subagents_enabled: bool = True,
     routed: bool = True,
     skills: bool = False,
+    subagents_dir: str | None = None,
 ) -> TaskManager:
     routing = None
     if routed:
@@ -1605,6 +1606,7 @@ async def _subagents_manager(
         front_desk_thread_key="-100:1",
         routing=routing,
         subagents_enabled=subagents_enabled,
+        subagents_dir=subagents_dir,
         skills_enabled=skills,
         skills_plugin_path="vendor/chief-skills" if skills else None,
         default_skills=("docx", "claude-api") if skills else (),
@@ -1678,6 +1680,117 @@ async def test_guest_session_never_gets_subagents(
     await mgr._ensure_task("555:0", tier="guest")
 
     assert "custom_agents" not in captured
+    await mgr.shutdown()
+
+
+# ---- on-disk subagent overrides (#105, part of #103) --------------------------
+
+
+def _write_subagent_md(
+    path: Path, *, category: str, description: str = "d", prompt: str = "p"
+) -> None:
+    frontmatter = f"category: {category}\ndescription: {description}"
+    path.write_text(f"---\n{frontmatter}\n---\n{prompt}")
+
+
+async def test_owner_subagents_dir_overrides_defaults_with_routed_model(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC1 end-to-end: an on-disk .md becomes the owner session's custom_agents,
+    # resolved through the live routing table at spawn.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["researcher"]["model"] == "auto"
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_dir_unknown_category_falls_back_not_dropped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC2: an unknown/renamed category still resolves via the default-target fallback;
+    # the subagent stays present rather than being dropped.
+    _write_subagent_md(tmp_path / "ghost.md", category="was-removed")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["ghost"]["model"] == "auto"  # default category "general" → auto
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_dir_routing_off_omits_model(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC3: routing off ⇒ subagent present with no model key.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        routed=False,
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["custom_agents"]
+    assert all("model" not in a for a in captured["custom_agents"])
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_subagents_dir(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC7: a guest session against the same populated dir gets no custom_agents.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "custom_agents" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_dir_absent_keeps_defaults(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC8: an absent/empty subagents_dir leaves DEFAULT_SUBAGENTS unchanged.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path / "does-not-exist"),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher", "coder"}
     await mgr.shutdown()
 
 
