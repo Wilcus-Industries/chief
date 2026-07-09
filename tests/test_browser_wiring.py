@@ -17,10 +17,6 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, cast
 
 import pytest
-from claude_agent_sdk import (
-    PermissionResultAllow,
-    ToolPermissionContext,
-)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import Attachment
@@ -35,6 +31,7 @@ from chief.gate.approvals import ApprovalAction, ApprovalManager
 from chief.gate.blacklist import Blacklist
 from chief.gate.gate import build_can_use_tool, build_pretool_hook
 from chief.gate.policy import PolicyStore
+from chief.gate.types import PermissionResultAllow, ToolPermissionContext
 from chief.memory.store import Fact
 from chief.memory.versioning import NullVersioner, Versioner
 from chief.tools.browser import mcp as browser_mcp

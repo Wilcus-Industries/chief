@@ -29,16 +29,16 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from claude_agent_sdk import (
+from ..persistence.policy import NEVER
+from .blacklist import Blacklist
+from .policy import PolicyStore
+from .types import (
+    HookCallback,
+    HookContext,
     PermissionResultAllow,
     PermissionResultDeny,
     ToolPermissionContext,
 )
-from claude_agent_sdk.types import HookCallback, HookContext
-
-from ..persistence.policy import NEVER
-from .blacklist import Blacklist
-from .policy import PolicyStore
 
 
 class GateDecision(Enum):

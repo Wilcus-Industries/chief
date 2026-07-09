@@ -13,11 +13,10 @@ dirs. The returned session runs the streaming turn (``run_turn``) and switches t
 
 from typing import Any
 
-from claude_agent_sdk import CanUseTool, HookMatcher
-from claude_agent_sdk.types import HookEvent
 from copilot import ProviderConfig
 from copilot.session import CustomAgentConfig
 
+from ..gate.types import CanUseTool, HookEvent, HookMatcher
 from .copilot_gate import build_permission_handler, build_session_hooks
 from .copilot_session import (
     CopilotClientFactory,
