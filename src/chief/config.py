@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     owner_model_opus: str = "claude-opus-4-8"
     opus_auto_detect: bool = False
     guest_model: str = "claude-sonnet-4-6"
+    # Agent backend seam (#75, part of #72 — the strangler scaffold). Every session the
+    # engine drives is built through an AgentBackend; ``claude`` (claude-agent-sdk) is
+    # the incumbent and ``copilot`` (the GitHub Copilot SDK, #76) is the alternative.
+    # Config-selectable so the harness swap is a one-line change per deployment.
+    agent_backend: str = "claude"
     db_path: str = "data/chief.db"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
@@ -307,6 +312,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     discord_bot_token: str | None = None
     claude_code_oauth_token: str
+    # OpenRouter BYOK provider target class (#90, part of #72): the key for the SDK's
+    # "openai" provider pointed at OpenRouter. Optional — only required when a session
+    # is actually spawned on an ``openrouter`` target. Never the Copilot token itself,
+    # which is CLI-managed in ``~/.copilot/config.json`` and never touches secrets_dir.
+    openrouter_api_key: str | None = None
 
     @field_validator(
         "owner_telegram_id",
@@ -358,6 +368,21 @@ class Settings(BaseSettings):
                     f"blacklist_shell_patterns entry {pattern!r} is not a valid "
                     f"regex: {exc}"
                 ) from exc
+        return value
+
+    @field_validator("agent_backend")
+    @classmethod
+    def _validate_agent_backend(cls, value: str) -> str:
+        """Only ``claude`` or ``copilot`` are valid backends (#75 / #76).
+
+        Fails the boot on an unknown name rather than at first turn; the runtime
+        registry (:func:`chief.core.backend.select_backend`) enforces the same rule.
+        """
+        valid = ("claude", "copilot")
+        if value not in valid:
+            raise ValueError(
+                f"agent_backend must be one of {valid}, got {value!r}"
+            )
         return value
 
     @field_validator("quiet_hours_start", "quiet_hours_end")

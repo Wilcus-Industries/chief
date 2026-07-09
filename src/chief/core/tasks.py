@@ -28,7 +28,7 @@ The engine is platform-neutral: speaks only :class:`TaskIO` (provided by the ada
 import asyncio
 import logging
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -92,9 +92,14 @@ from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
 from . import classify
 from .agent import NO_REPLY
+from .backend import ClaudeBackend
 from .personas import build_system_prompt
 from .screening import Screener, build_screening_hook, prefix_flagged
-from .session import Final, TaskSession, TurnEvent
+
+# SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
+# the engine's callers keep importing it from the TaskManager module.
+from .session import Final
+from .session import SessionProto as SessionProto
 
 logger = logging.getLogger("chief.core.tasks")
 
@@ -184,23 +189,6 @@ class TaskIO(Protocol):
     async def archive_thread(self, thread_key: str) -> None: ...
 
 
-class SessionProto(Protocol):
-    """The slice of :class:`TaskSession` the engine drives (structural)."""
-
-    session_id: str | None
-    #: This turn's SDK cost and latest rate-limit status, captured by the session and
-    #: read by the engine after a clean turn to drive the budget (M9).
-    last_cost_usd: float
-    last_rate_limit_status: str | None
-
-    def run_turn(
-        self, text: str, attachments: Sequence[Attachment] = ()
-    ) -> AsyncIterator[TurnEvent]: ...
-    async def interrupt(self) -> None: ...
-    async def set_model(self, model: str) -> None: ...
-    async def aclose(self) -> None: ...
-
-
 class BudgetProto(Protocol):
     """The slice of :class:`~chief.core.budget.BudgetGate` the engine drives (M9)."""
 
@@ -212,36 +200,11 @@ class BudgetProto(Protocol):
 SessionFactory = Callable[..., SessionProto]
 Classifier = Callable[..., Awaitable[bool]]
 
-
-def _default_session(
-    *,
-    model: str,
-    resume: str | None = None,
-    fork_session: bool = False,
-    can_use_tool: CanUseTool | None = None,
-    hooks: dict[HookEvent, list[HookMatcher]] | None = None,
-    system_prompt: str | None = None,
-    cwd: str | None = None,
-    allowed_tools: list[str] | None = None,
-    disallowed_tools: list[str] | None = None,
-    mcp_servers: dict[str, Any] | None = None,
-    plugins: list[Any] | None = None,
-    skills: list[str] | None = None,
-) -> SessionProto:
-    return TaskSession(
-        model=model,
-        resume=resume,
-        fork_session=fork_session,
-        can_use_tool=can_use_tool,
-        hooks=hooks,
-        system_prompt=system_prompt,
-        cwd=cwd,
-        allowed_tools=allowed_tools,
-        disallowed_tools=disallowed_tools,
-        mcp_servers=mcp_servers,
-        plugins=plugins,
-        skills=skills,
-    )
+#: The engine builds sessions through an AgentBackend (#75). ClaudeBackend is the sole
+#: implementation today; ``app.build_engine`` selects it by config (only ``claude`` is
+#: valid) and passes its ``create_session`` as ``session_factory_sdk``. This default
+#: keeps a directly-constructed TaskManager (and every test) on the same seam.
+_default_session: SessionFactory = ClaudeBackend().create_session
 
 
 def _title(text: str) -> str:
