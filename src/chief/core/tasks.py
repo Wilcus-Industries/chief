@@ -89,6 +89,7 @@ from ..tools.google.add_account_service import AddAccountService
 from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
 from ..tools.guest import GuestAdminService, GuestService
+from ..tools.routing_admin import RoutingAdminService
 from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
@@ -309,6 +310,7 @@ class TaskManager:
         owner_tz: str = "UTC",
         shell_service: ShellService | None = None,
         web_service: WebService | None = None,
+        routing_admin_service: RoutingAdminService | None = None,
         workspace_dir: str | None = None,
         guest_model: str | None = None,
         guest_calendar_service: GoogleService | None = None,
@@ -373,6 +375,9 @@ class TaskManager:
         # chief-owned web-fetch/web-search tools (#81), owner-only. Built the shell way
         # so the single in-process ``chief_web`` MCP server reaches both backends.
         self._web_service = web_service
+        # Self-config routing tool (#83), owner-only. Edits the shared RoutingStore's
+        # persisted table; its mutating verbs are gated via blacklist_tools (config.py).
+        self._routing_admin_service = routing_admin_service
         self._workspace_dir = workspace_dir
         self._guest_model = guest_model
         self._guest_calendar_service = guest_calendar_service
@@ -879,6 +884,14 @@ class TaskManager:
             # card is defense in depth. The one server reaches both backends.
             web = self._web_service
             mcp_servers[web.server_name] = web.server_config()
+        if self._routing_admin_service is not None:
+            # Self-config routing edits (#83), owner-only. Kept OFF allowed_tools so
+            # every call routes through can_use_tool → classify: each mutating verb
+            # trips its blacklist_tools entry (config.py) and raises an approval card,
+            # while the read-only list_routing ALLOWs. The gate is the security boundary
+            # for this self-modification surface. The one server reaches both backends.
+            routing_admin = self._routing_admin_service
+            mcp_servers[routing_admin.server_name] = routing_admin.server_config()
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
         if list_accounts is not None:
@@ -1237,6 +1250,7 @@ class TaskManager:
                 model=self._classifier_model,
                 categories=self._routing.categories(),
                 default=self._default_category,
+                descriptions=self._routing.descriptions(),
             )
         return self._default_category
 

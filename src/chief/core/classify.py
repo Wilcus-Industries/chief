@@ -14,7 +14,7 @@ reads) so Haiku can fetch/look something up before answering. It too fails safe 
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
@@ -96,8 +96,19 @@ _CATEGORY_SYSTEM_TEMPLATE = (
 )
 
 
+def _category_label(category: str, descriptions: Mapping[str, str] | None) -> str:
+    """``name`` or ``name (description)`` when the category has a description."""
+    description = (descriptions or {}).get(category)
+    return f"{category} ({description})" if description else category
+
+
 async def classify_category(
-    text: str, *, model: str, categories: Sequence[str], default: str
+    text: str,
+    *,
+    model: str,
+    categories: Sequence[str],
+    default: str,
+    descriptions: Mapping[str, str] | None = None,
 ) -> str:
     """Sort ``text`` into one of ``categories`` on the fixed cheap ``model`` (#79).
 
@@ -107,10 +118,15 @@ async def classify_category(
     the classifier that feeds the routing table can't recurse through it. Fails **safe**
     to ``default``: any error, an empty reply, or a reply naming no known category
     returns ``default`` (the general fallback), so a mis-parse never wedges a spawn.
+
+    The prompt — its label space *and* each category's optional ``descriptions`` blurb —
+    is derived from the live category set, so a self-config edit (#83: an added,
+    renamed, or re-described category) steers the classifier at the very next spawn.
     """
     if not categories:
         return default
-    system = _CATEGORY_SYSTEM_TEMPLATE.format(categories=", ".join(categories))
+    labels = [_category_label(c, descriptions) for c in categories]
+    system = _CATEGORY_SYSTEM_TEMPLATE.format(categories=", ".join(labels))
     options = ClaudeAgentOptions(
         max_turns=1, model=model, system_prompt=system, tools=[], allowed_tools=[]
     )

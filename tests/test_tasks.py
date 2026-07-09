@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import FILE_REPLY_NOTE, Attachment, Surface
 from chief.core.agent import NO_REPLY
+from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import (
@@ -43,6 +44,11 @@ from chief.persistence.tasks import (
 from chief.tools.calendar import mcp as calendar_mcp
 from chief.tools.gmail import mcp as gmail_mcp
 from chief.tools.guest import GuestAdminService
+from chief.tools.routing_admin import (
+    ADD_CATEGORY_TOOL,
+    SET_TARGET_TOOL,
+    RoutingAdminService,
+)
 from chief.tools.schedule import ScheduleBashService, ScheduleService
 from chief.tools.shell import ShellService
 
@@ -2698,6 +2704,7 @@ async def _routed_manager(
     openrouter_provider: ProviderConfig | None = _OPENROUTER,
     idle: float = 1000.0,
     compaction: float = 1000.0,
+    routing_admin: bool = False,
 ) -> TaskManager:
     routing = RoutingStore(session_factory)
     await routing.seed(_ROUTES)
@@ -2715,6 +2722,9 @@ async def _routed_manager(
         classify_category=classify_category,
         openrouter_provider=openrouter_provider,
         routing_surface_defaults=surface_defaults or {},
+        routing_admin_service=(
+            RoutingAdminService(routing=routing) if routing_admin else None
+        ),
     )
 
 
@@ -2850,7 +2860,7 @@ async def test_classifier_runs_on_fixed_cheap_model_never_a_target(
     seen: dict[str, Any] = {}
 
     async def fake_classify(
-        text: str, *, model: str, categories: Any, default: str
+        text: str, *, model: str, categories: Any, default: str, **_: Any
     ) -> str:
         seen["model"] = model
         seen["categories"] = set(categories)
@@ -2875,6 +2885,123 @@ async def test_classifier_runs_on_fixed_cheap_model_never_a_target(
         "code",
         "reasoning",
     }
+    await mgr.shutdown()
+
+
+# ---- self-config routing tool (#83, part of #72) ------------------------------
+
+
+async def _admin_tools(mgr: TaskManager) -> dict[str, Any]:
+    """The manager's live routing-admin tools as Copilot tools (the #80 adapter)."""
+    service = mgr._routing_admin_service
+    assert service is not None
+    tools = await sdk_server_to_tools(service.server_config())
+    return {t.name: t for t in tools}
+
+
+async def _invoke_admin(tool: Any, **arguments: Any) -> Any:
+    from copilot import ToolInvocation
+
+    result = tool.handler(ToolInvocation(arguments=arguments))
+    return await result
+
+
+async def test_self_config_edit_drives_the_next_spawn(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#83 AC1+AC2: a gated tool edit repoints a category AND grows the category set;
+    the very next spawn uses the new target and the classifier sees the new label
+    space — end to end through the engine, against the live shared routing table."""
+    io = FakeIO()
+    created: list[dict[str, Any]] = []
+    seen_categories: list[set[str]] = []
+
+    async def fake_classify(
+        text: str, *, categories: Any, **_: Any
+    ) -> str:
+        seen_categories.append(set(categories))
+        return "writing"
+
+    mgr = await _routed_manager(
+        session_factory,
+        io,
+        factory=_recording_factory(created),
+        classify_category=fake_classify,
+        routing_admin=True,
+    )
+
+    # First spawn: "writing" auto-routes to copilot auto (plain Copilot quota).
+    await mgr.dispatch(thread_key="-100:1", text="draft a poem")
+    await _until(lambda: ("-100:1", "reply:draft a poem") in io.sends)
+    assert created[-1]["model"] == "auto"
+    assert created[-1]["provider"] is None
+
+    # chief edits its own routing via the gated tool: repoint "writing" to an openrouter
+    # target, and add a whole new category.
+    tools = await _admin_tools(mgr)
+    repointed = await _invoke_admin(
+        tools[SET_TARGET_TOOL],
+        category="writing",
+        target_class="openrouter",
+        model="anthropic/claude-3.5",
+    )
+    assert repointed.result_type == "success"
+    await _invoke_admin(
+        tools[ADD_CATEGORY_TOOL],
+        category="legal",
+        target_class="copilot",
+        model="auto",
+        description="contracts",
+    )
+
+    # Next spawn (a fresh thread): the classifier's label space now includes "legal",
+    # and the repointed target drives the session the engine builds.
+    await mgr.dispatch(thread_key="-100:2", text="draft another poem")
+    await _until(lambda: ("-100:2", "reply:draft another poem") in io.sends)
+    assert "legal" in seen_categories[-1]  # classifier picked up the new set
+    assert created[-1]["model"] == "anthropic/claude-3.5"  # the edited target is used
+    assert created[-1]["provider"] is _OPENROUTER
+    await mgr.shutdown()
+
+
+async def test_routing_admin_tool_is_owner_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#83 guardrail / tier isolation: the self-config tool is wired only into owner
+    sessions and kept OFF allowed_tools (so every mutating call routes through the gate
+    → card); a guest session never gets it at all, so no edit can weaken a guest's
+    class. Mirrors the shell/web owner-only split."""
+    captured: dict[str, Any] = {}
+    routing = RoutingStore(session_factory)
+    await routing.seed(_ROUTES)
+    mgr = TaskManager(
+        session_factory=session_factory,
+        io=FakeIO(),
+        owner_model="owner-model",
+        guest_model="guest-model",
+        classifier_model="claude-haiku-4-5",
+        session_factory_sdk=_capture_factory(captured),
+        stop_intent=_no,
+        warrants_task=_no,
+        memory=FakeMemory(),
+        memory_dir="/tmp/mem",
+        owner_name="Will",
+        owner_tz="America/New_York",
+        front_desk_thread_key="-100:1",
+        routing=routing,
+        routing_admin_service=RoutingAdminService(routing=routing),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+    assert "chief_routing" in captured["mcp_servers"]
+    # Off allowed_tools → the mutating verbs route through can_use_tool → classify, so
+    # each edit raises an approval card rather than running un-carded.
+    assert SET_TARGET_TOOL not in captured["allowed_tools"]
+
+    await mgr._ensure_task("555:0", tier="guest")
+    # A guest never gets the self-config server, so no edit can change a guest's class.
+    assert "chief_routing" not in (captured.get("mcp_servers") or {})
+    assert captured["model"] == "guest-model"
     await mgr.shutdown()
 
 
