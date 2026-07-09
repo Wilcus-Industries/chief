@@ -22,6 +22,7 @@ Two shapes, split by cost (#88, part of #72):
   an evaluation error.
 """
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -47,6 +48,13 @@ _CLASSIFIER_TIMEOUT = 30.0
 #: Token cap for a classifier reply — a bare YES/NO or a single category name is tiny,
 #: so bound the spend hard. Kept generous enough for a one-word category.
 _MAX_TOKENS = 16
+
+#: Wall-clock bound (seconds) on one :func:`ask_condition` monitor evaluation. The
+#: evaluation is awaited inline in the scheduler tick loop, so a wedged Copilot turn
+#: must never block all scheduling. The old claude-backend ``max_turns=4`` bound has no
+#: Copilot equivalent (``CopilotBackend.create_session`` exposes none), so this
+#: timeout is the bound. Timeout → fail-safe ``False``.
+_CONDITION_TIMEOUT = 120.0
 
 #: The session-factory seam for :func:`ask_condition` (defaults to a real ephemeral
 #: :class:`~chief.core.backend.CopilotBackend` session; tests inject a fake).
@@ -299,6 +307,7 @@ async def ask_condition(
     allowed_tools: list[str],
     mcp_servers: dict[str, Any] | None = None,
     session_factory: CondSessionFactory | None = None,
+    timeout: float = _CONDITION_TIMEOUT,
 ) -> bool:
     """True iff an agent judges ``question`` holds now — read-only, fail-safe to False.
 
@@ -308,7 +317,10 @@ async def ask_condition(
     Google HTTP servers) — with a ``can_use_tool`` gate (:func:`_read_only_gate`) that
     allow-lists exactly those tools and denies everything else. The answer is the last
     non-empty final text, ``YES``/``NO``; anything else, or any exception, returns
-    ``False`` (a monitor never flips wrong). ``session_factory`` defaults to a real
+    ``False`` (a monitor never flips wrong). The turn is bounded by ``timeout`` seconds
+    (default :data:`_CONDITION_TIMEOUT`); a wedged turn times out to ``False`` and the
+    session is still closed, so it can never block the scheduler tick loop.
+    ``session_factory`` defaults to a real
     :class:`~chief.core.backend.CopilotBackend` session; tests inject a fake.
     """
     factory = (
@@ -325,11 +337,14 @@ async def ask_condition(
     )
     answer = ""
     try:
-        async for event in session.run_turn(question):
-            if isinstance(event, Final):
-                stripped = event.text.strip()
-                if stripped:  # keep the latest non-empty text as the standing answer
-                    answer = stripped
+        # TimeoutError is an Exception, so a wedged turn is caught here → False, and the
+        # finally below still tears the session down.
+        async with asyncio.timeout(timeout):
+            async for event in session.run_turn(question):
+                if isinstance(event, Final):
+                    stripped = event.text.strip()
+                    if stripped:  # keep the latest non-empty text as the answer
+                        answer = stripped
     except Exception:
         logger.warning("condition query failed; defaulting to NO", exc_info=True)
         return False

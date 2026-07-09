@@ -8,6 +8,7 @@ exercised for real. ``ask_condition`` (the tool-using monitor path) runs an ephe
 Copilot session and is covered separately.
 """
 
+import asyncio
 import json
 from typing import Any
 
@@ -214,11 +215,17 @@ class _FakeCondSession:
     """Records the session kwargs and replays a scripted final reply."""
 
     def __init__(
-        self, reply: str, *, raise_on_turn: bool = False, **kwargs: Any
+        self,
+        reply: str,
+        *,
+        raise_on_turn: bool = False,
+        hang: bool = False,
+        **kwargs: Any,
     ) -> None:
         self.kwargs = kwargs
         self._reply = reply
         self._raise = raise_on_turn
+        self._hang = hang
         self.closed = False
         self.session_id: str | None = None
         self.last_cost_usd = 0.0
@@ -229,6 +236,8 @@ class _FakeCondSession:
     async def run_turn(self, text: str, attachments: Any = ()) -> Any:
         if self._raise:
             raise RuntimeError("copilot down")
+        if self._hang:  # a wedged turn that never terminates its stream
+            await asyncio.Event().wait()
         yield Final(text=self._reply)
 
     async def interrupt(self) -> None: ...
@@ -238,10 +247,16 @@ class _FakeCondSession:
 
 
 def _cond_factory(
-    reply: str, *, raise_on_turn: bool = False, captured: dict[str, Any] | None = None
+    reply: str,
+    *,
+    raise_on_turn: bool = False,
+    hang: bool = False,
+    captured: dict[str, Any] | None = None,
 ) -> Any:
     def factory(**kwargs: Any) -> _FakeCondSession:
-        session = _FakeCondSession(reply, raise_on_turn=raise_on_turn, **kwargs)
+        session = _FakeCondSession(
+            reply, raise_on_turn=raise_on_turn, hang=hang, **kwargs
+        )
         if captured is not None:
             captured["session"] = session
         return session
@@ -288,3 +303,19 @@ async def test_ask_condition_parses_no() -> None:
         session_factory=_cond_factory("NO"),
     )
     assert result is False
+
+
+async def test_ask_condition_times_out_and_closes_session() -> None:
+    # MEDIUM-1: a monitor evaluation is awaited inline in the scheduler tick loop, so a
+    # wedged turn must never block all scheduling. A wall-clock timeout fails safe to
+    # False and still tears the ephemeral session down.
+    captured: dict[str, Any] = {}
+    result = await classify.ask_condition(
+        "?",
+        model="m",
+        allowed_tools=["WebSearch"],
+        session_factory=_cond_factory("YES", hang=True, captured=captured),
+        timeout=0.05,
+    )
+    assert result is False
+    assert captured["session"].closed is True
