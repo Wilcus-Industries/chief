@@ -139,11 +139,15 @@ SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
 ROUTE_CONFIRM = "🧭 Routing this thread as “{category}” → {target_class}:{model}."
 ROUTING_DISABLED = "Model routing isn't enabled."
 UNKNOWN_CATEGORY = "Unknown category “{category}”. Known: {known}."
-#: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
+#: Read-only file tools chief gets at M4. ``classify()`` has no ``file_path`` check, so
+#: owner reads are unconfined — not fenced to the memory dir. Containment is the
+#: approval blacklist, untrusted-content screening, and the audit log, not a path check
+#: (footgun-catcher, not a security boundary — see ``chief/gate/blacklist.py``).
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
-#: ``allowed_tools`` but confined to memory ∪ workspace by the gate (writes elsewhere
-#: DENY).
+#: ``allowed_tools`` unconfined (``classify()`` has no ``file_path`` check; the
+#: workspace dir is a cwd convention, not a fence). Containment is the approval
+#: blacklist, untrusted-content screening, and the audit log.
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
 #: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
@@ -810,7 +814,9 @@ class TaskManager:
         skills_on = self._skills_enabled and self._skills_plugin_path is not None
         allowed = list(MEMORY_TOOLS)
         if workspace_on:
-            # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
+            # Write/Edit join the allow-list unconfined (no file_path check in
+            # classify()) — containment is the approval blacklist, untrusted-content
+            # screening, and the audit log.
             allowed += list(WORKSPACE_TOOLS)
         for svc in services:
             # Reads only — writes stay off the allow-list, but under owner default-allow
