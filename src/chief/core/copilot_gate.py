@@ -26,6 +26,15 @@ and shapes, so this module is the thin boundary adapter between them.
   hook. It fires with Copilot's *native* tool names (which chief may not recognise), so
   it acts as a fast hard-deny + audit + "ask = defer to the handler" pass; the precise
   per-kind decision is made in ``on_permission_request``.
+* ``on_post_tool_use`` (:data:`~copilot.PostToolUseHandler`, also inside
+  :data:`~copilot.SessionHooks`) is Copilot's ``PostToolUse`` hook, running *after* a
+  tool returns — the seam chief's untrusted-content injection screening
+  (:func:`chief.core.screening.build_screening_hook`) and screenshot delivery hang off.
+  :func:`build_session_hooks` forwards chief's ``PostToolUse`` hook(s) here too;
+  :func:`_adapt_post_output` bridges chief's block / ``additionalContext`` output onto
+  the SDK's ``PostToolUseHookOutput`` (which has no ``block`` field — a block becomes a
+  ``modifiedResult`` that replaces the flagged content). Dropping this (the pre-#95 bug)
+  makes host-native screening a silent no-op on the Copilot backend.
 
 **Decision-vocabulary mapping.** chief owns its own persisted allowlist
 (:class:`~chief.gate.policy.PolicyStore`) and audit trail, so it must stay the single
@@ -188,6 +197,15 @@ _LooseHook = Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any
 _DECISION_PRECEDENCE = ("deny", "ask", "allow")
 
 
+#: The Copilot session-hook callback shape both adapters produce: a runtime input dict
+#: plus the SDK's per-invocation metadata, resolved to a Copilot hook-output dict (or
+#: ``None`` for "no change"). Cast to :data:`SessionHooks`' strict per-hook types at the
+#: map boundary — same runtime shape, see ``build_session_hooks``.
+_SessionHookFn = Callable[
+    [dict[str, Any], dict[str, str]], Awaitable[dict[str, Any] | None]
+]
+
+
 def _pretool_hooks(hooks: dict[HookEvent, list[HookMatcher]]) -> list[_LooseHook]:
     """The flat list of ``PreToolUse`` hook callbacks bound in the SDK ``hooks`` map."""
     return [
@@ -197,19 +215,19 @@ def _pretool_hooks(hooks: dict[HookEvent, list[HookMatcher]]) -> list[_LooseHook
     ]
 
 
-def build_session_hooks(
-    hooks: dict[HookEvent, list[HookMatcher]],
-) -> SessionHooks | None:
-    """Wrap chief's ``PreToolUse`` hook(s) as a Copilot :data:`SessionHooks` map.
+def _posttool_hooks(hooks: dict[HookEvent, list[HookMatcher]]) -> list[_LooseHook]:
+    """The flat list of ``PostToolUse`` hook callbacks bound in the SDK hooks map."""
+    return [
+        cast(_LooseHook, hook)
+        for matcher in hooks.get("PostToolUse", [])
+        for hook in matcher.hooks
+    ]
 
-    Returns ``None`` when no ``PreToolUse`` hook is bound, so the caller passes no hooks
-    to the SDK rather than an empty handler. The wrapped handler classifies + audits
-    every call (chief's hook writes the audit line) and returns the fast allow/deny/ask
-    verdict; ``ask`` defers the real decision to ``on_permission_request``.
-    """
-    pretool = _pretool_hooks(hooks)
-    if not pretool:
-        return None
+
+def _build_pre_handler(pretool: list[_LooseHook]) -> _SessionHookFn:
+    """The ``on_pre_tool_use`` callback: run chief's ``PreToolUse`` hook(s), most-
+    restrictive decision wins (:data:`_DECISION_PRECEDENCE`); ``ask`` defers to
+    ``on_permission_request``."""
 
     async def on_pre_tool_use(
         hook_input: dict[str, Any], invocation: dict[str, str]
@@ -233,4 +251,84 @@ def build_session_hooks(
                 }
         return None
 
-    return {"on_pre_tool_use": cast(Any, on_pre_tool_use)}
+    return on_pre_tool_use
+
+
+def _adapt_post_output(chief_output: dict[str, Any]) -> dict[str, Any]:
+    """Map a chief ``PostToolUse`` hook's output onto ``PostToolUseHookOutput``.
+
+    chief's screening hook returns a **block** decision, an ``additionalContext``
+    **annotation**, or ``{}`` when the result passes clean; the screenshot-delivery hook
+    returns only the empty ``hookSpecificOutput`` envelope (its work is a ``send_file``
+    side effect). The Copilot post-hook output has **no** ``block`` field, so a block is
+    expressed as a ``modifiedResult`` that REPLACES the flagged result — the model never
+    reads the injection content — carrying the warning, with the same warning also as
+    ``additionalContext`` so the block reason is explicit. An annotation maps to
+    ``additionalContext`` (the result is still delivered, warning appended). A clean or
+    empty result maps to ``{}`` (no change).
+    """
+    if not chief_output:
+        return {}
+    if chief_output.get("decision") == "block":
+        reason = chief_output.get("reason", "")
+        return {"modifiedResult": reason, "additionalContext": reason}
+    spec = chief_output.get("hookSpecificOutput", {})
+    context = spec.get("additionalContext")
+    if context:
+        return {"additionalContext": context}
+    return {}
+
+
+def _build_post_handler(posttool: list[_LooseHook]) -> _SessionHookFn:
+    """The ``on_post_tool_use`` callback: run chief's ``PostToolUse`` hook(s) on a tool
+    result, merging each one's :func:`_adapt_post_output` into one Copilot output.
+
+    chief's ``PostToolUse`` input shape is ``(tool_name, tool_response)`` — the Copilot
+    ``toolName`` / ``toolResult`` fields are remapped onto it, just as the pre adapter
+    remaps ``toolName`` / ``toolArgs``. Returns ``None`` when nothing was annotated or
+    blocked, so the SDK leaves the result untouched.
+    """
+
+    async def on_post_tool_use(
+        hook_input: dict[str, Any], invocation: dict[str, str]
+    ) -> dict[str, Any] | None:
+        chief_input = {
+            "tool_name": hook_input.get("toolName", ""),
+            "tool_response": hook_input.get("toolResult"),
+        }
+        output: dict[str, Any] = {}
+        for hook in posttool:
+            result = await hook(chief_input, None, HookContext(signal=None))
+            output.update(_adapt_post_output(result))
+        return output or None
+
+    return on_post_tool_use
+
+
+def build_session_hooks(
+    hooks: dict[HookEvent, list[HookMatcher]],
+) -> SessionHooks | None:
+    """Wrap chief's ``PreToolUse`` + ``PostToolUse`` hook(s) as a :data:`SessionHooks`.
+
+    Returns ``None`` only when *neither* a pre- nor a post-tool hook is bound, so the
+    caller passes no hooks to the SDK rather than an empty handler — a map is built
+    whenever *either* kind is present (so a post-only gate is honoured, not dropped).
+
+    * ``on_pre_tool_use`` (when a ``PreToolUse`` hook is bound) classifies + audits each
+      call and returns the fast allow/deny/ask verdict; ``ask`` defers the real decision
+      to ``on_permission_request``.
+    * ``on_post_tool_use`` (when a ``PostToolUse`` hook is bound) runs chief's real
+      result-screening (:func:`chief.core.screening.build_screening_hook`) and
+      screenshot-delivery hooks on the tool result — the host-native injection boundary,
+      which is a no-op on this backend if the post hooks are dropped at the adapter.
+    """
+    pretool = _pretool_hooks(hooks)
+    posttool = _posttool_hooks(hooks)
+    if not pretool and not posttool:
+        return None
+    session_hooks: SessionHooks = {}
+    if pretool:
+        session_hooks["on_pre_tool_use"] = cast(Any, _build_pre_handler(pretool))
+    if posttool:
+        session_hooks["on_post_tool_use"] = cast(Any, _build_post_handler(posttool))
+    return session_hooks
