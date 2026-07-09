@@ -19,6 +19,7 @@ from typing import Any, Protocol
 from claude_agent_sdk import CanUseTool, HookMatcher
 from claude_agent_sdk.types import HookEvent
 from copilot import ProviderConfig
+from copilot.session import CustomAgentConfig
 
 from .copilot_gate import build_permission_handler, build_session_hooks
 from .copilot_session import (
@@ -44,7 +45,11 @@ class AgentBackend(Protocol):
     ``mcp_servers`` / ``plugins`` / ``skills``), and returns a
     :class:`~chief.core.session.SessionProto`. ``provider`` (#90, part of #72) is an
     optional BYOK provider-target override (e.g. OpenRouter) — Copilot-specific, so
-    :class:`ClaudeBackend` accepts and ignores it.
+    :class:`ClaudeBackend` accepts and ignores it. ``custom_agents`` and
+    ``skill_directories`` (#87, part of #72) are the Copilot-shaped category-routed
+    subagents and the ported M10 skills directories — likewise Copilot-specific,
+    accepted and ignored by :class:`ClaudeBackend` (which carries subagents/skills via
+    its own ``plugins`` / ``skills`` path instead).
     """
 
     def create_session(
@@ -63,6 +68,8 @@ class AgentBackend(Protocol):
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
         provider: ProviderConfig | None = None,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        skill_directories: list[str] | None = None,
     ) -> SessionProto: ...
 
 
@@ -94,9 +101,12 @@ class ClaudeBackend:
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
         provider: ProviderConfig | None = None,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        skill_directories: list[str] | None = None,
     ) -> SessionProto:
-        # `provider` is a Copilot BYOK concept (#90) — claude-agent-sdk has no analogue,
-        # so it's accepted (to satisfy AgentBackend) and intentionally not forwarded.
+        # `provider`, `custom_agents`, and `skill_directories` are Copilot-shaped
+        # concepts (#90 / #87) — claude-agent-sdk carries subagents/skills via `plugins`
+        # / `skills` instead, so these are accepted (per AgentBackend) and dropped.
         return TaskSession(
             model=model,
             resume=resume,
@@ -159,6 +169,14 @@ class CopilotBackend:
     resumes the fork — so the branched thread gets an independent session id and the two
     threads never share (and corrupt) each other's context.
 
+    Category-routed subagents + M10 skills are wired (#87, part of #72):
+    ``custom_agents`` (built by :func:`chief.core.subagents.build_custom_agents` from
+    owner-declared, routing-resolved specs) and ``skill_directories`` (the ported M10
+    skill dirs) forward through to :class:`CopilotTaskSession` and onto the SDK's
+    ``create_session`` / ``resume_session``. Both are owner-only at the wiring layer
+    (:meth:`chief.core.tasks.TaskManager._wire_owner_session`) — a guest session carries
+    neither.
+
     Two contract kwargs stay accepted-but-unforwarded, by design:
 
     * ``allowed_tools`` — chief's pre-approval list, enforced by the gate
@@ -166,8 +184,8 @@ class CopilotBackend:
       *hard* allowlist that would hide the shell/schedule tools chief deliberately keeps
       off ``allowed_tools`` so they route through the gate, so it stays unset.
     * ``plugins`` / ``skills`` — chief's ``[{"type":"local","path":…}]`` + ``list[str]``
-      shape has no direct SDK analogue (the SDK takes ``skill_directories`` /
-      ``plugin_directories`` paths); packaged skills stay a later #72 slice.
+      shape is claude-agent-sdk's plugin-manifest form; the Copilot equivalent is
+      ``skill_directories`` (above), so these two stay unforwarded here.
     """
 
     def __init__(
@@ -191,6 +209,8 @@ class CopilotBackend:
         plugins: list[Any] | None = None,
         skills: list[str] | None = None,
         provider: ProviderConfig | None = None,
+        custom_agents: list[CustomAgentConfig] | None = None,
+        skill_directories: list[str] | None = None,
     ) -> SessionProto:
         on_permission_request = (
             build_permission_handler(can_use_tool)
@@ -210,6 +230,8 @@ class CopilotBackend:
             disallowed_tools=disallowed_tools,
             client_factory=self._client_factory,
             provider=provider,
+            custom_agents=custom_agents,
+            skill_directories=skill_directories,
         )
 
 
