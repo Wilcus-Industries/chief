@@ -1171,23 +1171,6 @@ class TaskManager:
             turn = await task.queue.get()
             await self._run_turn(task, turn)
 
-    # ---- budget enforcement (M9) ----------------------------------------
-
-    async def _owner_session_model(self, *, persisted: str | None = None) -> str:
-        """The model a new owner session opens on.
-
-        A persisted Opus escalation (``Task.model``, M11) wins outright: explicit
-        escalation overrides an active budget downgrade so a reopened thread comes back
-        on Opus. Otherwise the cheaper budget model while the cycle is ``downgraded``
-        (M9), else the configured owner model.
-        """
-        if persisted == self._owner_model_opus:
-            return self._owner_model_opus
-        if self._budget is not None and self._budget_downgrade_model is not None:
-            if await self._budget.mode() == usage.MODE_DOWNGRADED:
-                return self._budget_downgrade_model
-        return self._owner_model
-
     # ---- model routing (#79) --------------------------------------------
 
     async def _resolve_owner_target(
@@ -1298,25 +1281,32 @@ class TaskManager:
     async def _respawn_for_route(
         self, task: _RunningTask, category: str
     ) -> None:
-        """Rebuild a live session on the routed category's target (resume-preserving).
-
-        A ``/route`` may switch target class, and a provider can't change on a live
-        session, so the honest move is to tear the session down and reconnect on the new
-        model + provider — carrying the resume id so the conversation's context follows.
-        """
+        """Rebuild a live session on the routed category's target, resume-preserving."""
         assert self._routing is not None
         target = self._routing.resolve(category)
         assert target is not None
         provider = provider_for_target(
             target, openrouter_provider=self._openrouter_provider
         )
+        await self._respawn_session(task, ResolvedTarget(target.model, provider))
+
+    async def _respawn_session(
+        self, task: _RunningTask, target: ResolvedTarget
+    ) -> None:
+        """Tear a live session down and reconnect it on ``target`` (resume-preserving).
+
+        A provider can't change on a live session, so any switch that crosses the
+        provider class has to rebuild rather than :meth:`SessionProto.set_model` — a
+        ``/route`` target-class change (#79), or an ``/opus`` / ``/sonnet`` that moves a
+        routed openrouter thread on or off plain Copilot quota (#94). Carries the resume
+        id so the conversation's context follows, and the thread's active Google account
+        so its calendar MCP config survives (#91) — mirrors the reseed/branch rebuild
+        paths (issue #46).
+        """
         resume = task.session.session_id
         if task.generating:
             await task.session.interrupt()
         await task.session.aclose()
-        # Carry the thread's active account forward so the rebuilt session's
-        # calendar MCP config still carries it (issue #91) — mirrors the
-        # reseed/branch rebuild paths (issue #46).
         active_account_label: str | None = None
         if self._set_account_service is not None:
             active_account_label = (
@@ -1332,10 +1322,27 @@ class TaskManager:
             active_account_label=active_account_label,
         )
         task.session = self._session_factory_sdk(
-            model=target.model, resume=resume, provider=provider, **gate_kwargs
+            model=target.model, resume=resume, provider=target.provider, **gate_kwargs
         )
         task.model = target.model
-        task.provider = provider
+        task.provider = target.provider
+
+    async def _switch_live_session(
+        self, task: _RunningTask, target: ResolvedTarget
+    ) -> None:
+        """Move a live session onto ``target`` the cheapest safe way.
+
+        A same-provider model change is a live :meth:`SessionProto.set_model`; a switch
+        that crosses the provider class (copilot ↔ openrouter) can't be done on a live
+        session, so it goes through the resume-preserving respawn
+        (:meth:`_respawn_session`). Shared by ``/route`` (via its own resolve),
+        ``/opus``, and ``/sonnet`` (#94).
+        """
+        if target.provider != task.provider:
+            await self._respawn_session(task, target)
+        else:
+            await task.session.set_model(target.model)
+            task.model = target.model
 
     async def _budget_admits(self) -> bool:
         """False when the cycle is paused at budget — the turn must be skipped without
@@ -1372,13 +1379,13 @@ class TaskManager:
         """Switch every live owner session to the budget downgrade model (M9).
 
         Invoked when the owner taps **Downgrade** on the budget card; new sessions
-        already pick the model up via :meth:`_owner_session_model`. No-op when no
+        already pick the model up via :meth:`_resolve_owner_target`. No-op when no
         downgrade model is configured (budget disabled).
 
         An Opus-pinned thread is **skipped** (M11): an explicit escalation overrides a
         budget downgrade — the owner chose to spend faster and was warned — so a
         Downgrade tap leaves it on Opus (live and persisted stay in agreement, matching
-        the reopen precedence in :meth:`_owner_session_model`; ``/sonnet`` drops it).
+        the reopen precedence in :meth:`_resolve_owner_target`; ``/sonnet`` drops it).
         """
         if self._budget_downgrade_model is None:
             return
@@ -1403,11 +1410,13 @@ class TaskManager:
         that triggered an auto-detect card) runs on Opus. Explicit escalation overrides
         an active budget downgrade; the reply warns that Opus burns the credit faster.
 
-        Clears ``task.provider`` (#92): escalation wins outright onto plain Copilot
-        quota (no BYOK provider) per the resolution order in
-        :meth:`_resolve_owner_target`, so a previously-routed task's tracked provider
-        doesn't linger stale for a later reseed/branch (or the downgrade skip-check) to
-        misread as still-openrouter.
+        Escalation wins outright onto plain Copilot quota (no BYOK provider) per the
+        resolution order in :meth:`_resolve_owner_target`, so the live switch targets
+        ``{opus, provider=None}``. For a routed openrouter thread that crosses the
+        provider class, so :meth:`_switch_live_session` respawns rather than a bare
+        ``set_model`` that would strand the turn on opus-through-OpenRouter (#94); it
+        also clears the tracked ``task.provider`` so a later reseed/branch (or the
+        downgrade skip-check) can't misread it as still-openrouter (#92).
         """
         async with self._session_factory() as session:
             db = await get_or_create_task(
@@ -1416,9 +1425,8 @@ class TaskManager:
             await set_task_model(session, db, self._owner_model_opus)
         task = self._tasks.get(thread_key)
         if task is not None:
-            await task.session.set_model(self._owner_model_opus)
-            task.model = self._owner_model_opus
-            task.provider = None
+            opus = ResolvedTarget(self._owner_model_opus)  # opus, plain Copilot quota
+            await self._switch_live_session(task, opus)
             task.auto_escalate_suppressed = False
         note = ""
         if (
@@ -1429,10 +1437,17 @@ class TaskManager:
         return f"{OPUS_CONFIRM}{note}"
 
     async def revert(self, thread_key: str) -> str:
-        """Clear an Opus escalation; drop back to the default model (``/sonnet``, M11).
+        """Clear an Opus escalation; drop back to the thread's resolved target
+        (``/sonnet``, M11).
 
-        Clears the persisted ``Task.model`` and, if a session is live, switches it back:
-        the budget-downgrade model when the cycle is downgraded, else the owner model.
+        Clears the persisted ``Task.model`` and, if a session is live, restores what the
+        thread otherwise resolves to via :meth:`_resolve_owner_target` — routing-aware
+        (#94), so an openrouter-routed thread returns to its category's
+        ``{model, provider}`` rather than plain owner-model Copilot quota. Precedence
+        after the escalation clears is budget downgrade > routing > owner model. Because
+        dropping the escalation can cross the provider class (Opus runs on plain Copilot
+        quota; the restored target may be openrouter), :meth:`_switch_live_session`
+        respawns when the provider changes — a live ``set_model`` can't move it.
         """
         async with self._session_factory() as session:
             db = await get_task(
@@ -1442,9 +1457,13 @@ class TaskManager:
                 await set_task_model(session, db, None)
         task = self._tasks.get(thread_key)
         if task is not None:
-            model = await self._owner_session_model()
-            await task.session.set_model(model)
-            task.model = model
+            target = await self._resolve_owner_target(
+                thread_key=thread_key,
+                persisted=None,
+                surface=task.surface,
+                classify_text=None,
+            )
+            await self._switch_live_session(task, target)
             task.auto_escalate_suppressed = False
         return SONNET_CONFIRM
 
