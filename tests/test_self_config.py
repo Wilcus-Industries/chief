@@ -109,6 +109,10 @@ def test_screening_enabled_flip_dropped(
         ("harness_dir: /tmp/evil\n", "harness_dir", "data/harness"),
         ("subagents_dir: /tmp/evil\n", "subagents_dir", "data/harness/subagents"),
         ("chief_skills_dir: /tmp/evil\n", "chief_skills_dir", "data/harness/skills"),
+        # The audit log is one of the three controls left after the sandbox went away
+        # (blacklist + screening + audit log). Repointing it defeats forensics exactly
+        # as flipping harness_git off defeats revert, so it is denied too (#120).
+        ("audit_log_path: /tmp/evil.jsonl\n", "audit_log_path", "data/audit.jsonl"),
         ("shell_enabled: true\n", "shell_enabled", False),
         ("front_desk_thread_key: 'telegram:1'\n", "front_desk_thread_key", None),
         ("self_config_path: elsewhere.yaml\n", "self_config_path",
