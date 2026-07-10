@@ -248,6 +248,10 @@ subagents_enabled: false
 # subagents_dir: data/harness/subagents  # on-disk overrides (#105): one .md per
 #   subagent (stem = name, frontmatter category/description/skills, body = prompt);
 #   absent/empty keeps the built-ins above.
+# self_config_path: data/harness/self_config.yaml  # chief-authored overlay (#107): deep-
+#   merged over this file at boot; security keys (blacklists, seeds, screening, *_enabled,
+#   owner ids, secrets, db_path, MCP urls, thread keys, memory/harness_git) are dropped
+#   with a warning. Applies at the next restart; absent/broken file boots clean.
 
 # Group chats (M11, opt-in). With group_chat_enabled on, chief works in group chats it's
 # invited to (any non-home group/supergroup or guild) beyond the owner's home and 1:1 DMs.
