@@ -45,10 +45,15 @@ original `never self-deployed` rule for chief-authored skills is **reversed**. c
 manages its own harness (issue #103).
 
 - **Skills and subagents self-deploy.** chief writes them as plain files under
-  `data/skills/` and `data/subagents/`, git-versioned by the existing `GitVersioner`.
-  They are picked up at the next session build — **no approval card, no restart**.
-  Subagents route by **category, never a pinned model id**, which preserves the
-  guest/budget guardrail (it keys off the target class).
+  `data/harness/skills/` and `data/harness/subagents/`, version-controlled by their
+  own `GitVersioner` instance rooted at `harness_dir` (#110, part of #103) — a second
+  repo, separate from the memory dir's, so every chief-authored write is its own
+  revertible commit and an owner `git revert` there is reflected the next time a
+  session spawns (fresh dir scan, no cache). Commits after each turn alongside the
+  existing memory auto-commit; opt-out via `harness_git` (owner-only, denylisted like
+  `memory_git`). They are picked up at the next session build — **no approval card,
+  no restart**. Subagents route by **category, never a pinned model id**, which
+  preserves the guest/budget guardrail (it keys off the target class).
 - **Config self-edits are lazy and fenced.** A `self_config.yaml` overlay merges above
   the YAML settings source at boot, default-allow **except a hard denylist**
   (`blacklist_*`, `never_seed`/`approved_seed`, `screening_*`, every `*_enabled` flag,

@@ -104,6 +104,7 @@ def test_screening_enabled_flip_dropped(
         ("gmail_mcp_url: http://evil/mcp\n", "gmail_mcp_url",
          "http://127.0.0.1:8004/mcp"),
         ("memory_git: false\n", "memory_git", True),
+        ("harness_git: false\n", "harness_git", True),
         ("shell_enabled: true\n", "shell_enabled", False),
         ("front_desk_thread_key: 'telegram:1'\n", "front_desk_thread_key", None),
         ("self_config_path: elsewhere.yaml\n", "self_config_path",
@@ -124,12 +125,14 @@ def test_denylist_families_dropped(
 def test_harness_git_dropped_and_logged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # harness_git isn't a Settings field yet (#103 sibling); the logged drop — not
-    # extra="ignore" — is what proves the denylist caught it.
+    # harness_git is a real Settings field (#110); the logged drop proves the
+    # denylist still catches it by name — chief cannot switch off its own
+    # reversibility, same as memory_git.
     with caplog.at_level(logging.WARNING, logger="chief.config"):
         settings = _boot(tmp_path, monkeypatch, overlay="harness_git: false\n")
     assert settings.owner_telegram_id == 42  # boot succeeded
     assert "harness_git" in caplog.text
+    assert settings.harness_git is True
 
 
 def test_absent_empty_broken_overlay_boot_clean(
