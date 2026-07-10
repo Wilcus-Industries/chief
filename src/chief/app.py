@@ -534,6 +534,9 @@ def build_engine(
             os.path.abspath(SKILLS_PLUGIN_DIR) if settings.skills_enabled else None
         ),
         default_skills=settings.default_skills,
+        # chief-authored skills root (#106, part of #103): scanned fresh at every owner
+        # spawn; absent/empty is inert (resolves to no extra dirs).
+        chief_skills_dir=settings.chief_skills_dir,
         # Owner-only category-routed subagents (#87). Inert unless the flag is on; the
         # model each subagent runs on is resolved through the routing table at spawn.
         # subagents_dir (#105) lets an on-disk .md set override DEFAULT_SUBAGENTS with
