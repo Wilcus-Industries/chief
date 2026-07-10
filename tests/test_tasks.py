@@ -1579,6 +1579,11 @@ async def test_guest_session_never_gets_skills(
 # ---- category-routed subagents wiring (#87) ----------------------------------
 
 
+#: ``skills_plugin_path`` default: couple it to the ``skills`` flag the way production
+#: ``app.py`` does. A test that needs the incoherent pairing (#118) passes ``None``.
+_COUPLE_TO_SKILLS_FLAG = "<couple-to-skills-flag>"
+
+
 async def _subagents_manager(
     session_factory: async_sessionmaker[AsyncSession],
     io: FakeIO,
@@ -1589,7 +1594,10 @@ async def _subagents_manager(
     skills: bool = False,
     subagents_dir: str | None = None,
     chief_skills_dir: str | None = None,
+    skills_plugin_path: str | None = _COUPLE_TO_SKILLS_FLAG,
 ) -> TaskManager:
+    if skills_plugin_path == _COUPLE_TO_SKILLS_FLAG:
+        skills_plugin_path = "vendor/chief-skills" if skills else None
     routing = None
     if routed:
         routing = RoutingStore(session_factory)
@@ -1610,7 +1618,7 @@ async def _subagents_manager(
         subagents_enabled=subagents_enabled,
         subagents_dir=subagents_dir,
         skills_enabled=skills,
-        skills_plugin_path="vendor/chief-skills" if skills else None,
+        skills_plugin_path=skills_plugin_path,
         default_skills=("docx", "claude-api") if skills else (),
         chief_skills_dir=chief_skills_dir,
     )
@@ -1995,6 +2003,30 @@ async def test_owner_chief_skills_dir_skips_malformed_with_warning(
     dirs = captured["skill_directories"]
     assert str((tmp_path / "ok").resolve()) in dirs
     assert any("broken" in record.message for record in caplog.records)
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_needs_the_vendored_path_too(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # #118: skills_enabled=True with no skills_plugin_path is incoherent — production
+    # app.py couples them, but the gate must express that coupling itself. Gated on the
+    # flag alone, chief's authored dirs went in without the curated vendored set.
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        skills_plugin_path=None,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "skill_directories" not in captured
     await mgr.shutdown()
 
 
