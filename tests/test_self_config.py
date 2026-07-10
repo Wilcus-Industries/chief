@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from chief.config import (
     DEFAULT_SELF_CONFIG_PATH,
@@ -193,6 +194,43 @@ def test_env_repoints_overlay_path(
         overlay=None,
     )
     assert settings.turn_timeout_seconds == 77.0
+
+
+def test_self_config_path_expands_a_leading_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #121: a ``~``-relative overlay path must expand on both paths that read it —
+    # ``SelfConfigSettingsSource._resolve_path`` (which reads the raw pre-validation
+    # yaml value, so it expands for itself) and the ``_expand_user_paths`` field
+    # validator. Real files, real home: an unexpanded "~/alt.yaml" resolves to no file
+    # and the overlay would silently no-op.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "alt.yaml").write_text("turn_timeout_seconds: 88.0\n")
+
+    settings = _boot(
+        tmp_path,
+        monkeypatch,
+        base="owner_telegram_id: 42\nself_config_path: ~/alt.yaml\n",
+        overlay=None,
+    )
+
+    assert settings.turn_timeout_seconds == 88.0  # _resolve_path expanded and read it
+    assert settings.self_config_path == str(tmp_path / "alt.yaml")  # field validator
+
+
+def test_type_invalid_overlay_value_fails_the_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #122: pins fail-on-boot as the INTENDED behavior for a well-formed overlay
+    # carrying a type-invalid value. This is the convention every other config
+    # validator states out loud (`_validate_blacklist_patterns`: "a typo fails the
+    # boot, not the first shell command"), and it is fail-loud: chief not booting
+    # stops the heartbeat, so the external dead-man's switch pages the owner. The
+    # alternative — skip+log — would leave chief running on a stale value while its
+    # own overlay says otherwise. The denylist/structural drops above are a different
+    # class: those are an unusable or hostile *file*, not a plain typo.
+    with pytest.raises(ValidationError):
+        _boot(tmp_path, monkeypatch, overlay="concurrency: banana\n")
 
 
 # --- #109: every Settings field is denied or explicitly merge-safe -----------------
