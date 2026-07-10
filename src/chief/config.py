@@ -897,6 +897,17 @@ class SelfConfigSettingsSource(PydanticBaseSettingsSource):
     The security-relevant families (:data:`SELF_CONFIG_DENYLIST`) are stripped *before*
     the merge, with one warning naming every dropped key. A missing, empty, or broken
     overlay yields ``{}`` — chief always boots on ``config.yaml`` alone.
+
+    **A type-invalid value is not "broken" in that sense — it fails the boot** (#122).
+    The drops above are for a file that is unusable (absent, unparseable, not a mapping)
+    or hostile (a denied key); each is dropped so a *usable* config survives. A
+    well-formed overlay carrying ``concurrency: banana`` is neither. It is a plain
+    config typo, and this module fails the boot on those by long-standing convention
+    (see ``_validate_blacklist_patterns``, ``_validate_hhmm``). That is the fail-loud
+    choice, not the fragile one: chief failing to boot stops the heartbeat, so the
+    external dead-man's switch pages the owner within one interval. Skipping the value
+    instead would leave chief running on a stale setting while its own overlay claims
+    otherwise, and the only signal would be a log line nobody reads.
     """
 
     def __init__(
