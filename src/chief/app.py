@@ -171,6 +171,12 @@ def build_harness_versioner(settings: Settings) -> Versioner:
     common parent of ``subagents_dir``/``chief_skills_dir`` — so every
     chief-authored subagent/skill write is its own revertible commit, separate
     from the memory repo's lock and history.
+
+    It stages the whole root (``git add -A``), so the tracked set is subagents, skills,
+    **and** ``self_config.yaml``, which defaults inside ``harness_dir`` (#125). That is
+    intended: the overlay is chief-authored, reversible content of exactly the kind this
+    versioner exists to make revertible. Anything else chief writes under the root is
+    versioned on the same terms.
     """
     return (
         GitVersioner(
