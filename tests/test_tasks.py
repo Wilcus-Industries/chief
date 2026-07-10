@@ -1617,14 +1617,19 @@ async def _subagents_manager(
 
 
 async def test_owner_subagents_run_on_their_category_resolved_model(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     # AC1 (central mechanism): each built-in subagent is configured with the model ITS
     # declared category resolves to via the live routing table — researcher→research
     # →auto, coder→code→the openrouter model. Distinct models, one table, at spawn.
+    # subagents_dir is the sole source (#103): an empty tmp_path scaffolds both
+    # built-ins on first boot.
     captured: dict[str, Any] = {}
     mgr = await _subagents_manager(
-        session_factory, FakeIO(), factory=_capture_factory(captured)
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
     )
 
     await mgr._ensure_task("-100:5", tier="owner")
@@ -1636,13 +1641,17 @@ async def test_owner_subagents_run_on_their_category_resolved_model(
 
 
 async def test_owner_subagents_use_parent_model_when_routing_off(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     # Routing disabled: subagents are still wired, but each omits its model so the SDK
     # runs it on the parent session's model (the decision when routing is off).
     captured: dict[str, Any] = {}
     mgr = await _subagents_manager(
-        session_factory, FakeIO(), factory=_capture_factory(captured), routed=False
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        routed=False,
+        subagents_dir=str(tmp_path),
     )
 
     await mgr._ensure_task("-100:5", tier="owner")
@@ -1778,20 +1787,104 @@ async def test_guest_session_never_gets_subagents_dir(
     await mgr.shutdown()
 
 
-async def test_owner_subagents_dir_absent_keeps_defaults(
+async def test_owner_first_boot_scaffolds_and_builds_from_dir(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    # AC8: an absent/empty subagents_dir leaves DEFAULT_SUBAGENTS unchanged.
+    # AC1: an absent subagents_dir is scaffolded on the first owner-session build, and
+    # the built custom_agents reflect the freshly-written files.
+    target = tmp_path / "subagents"
     captured: dict[str, Any] = {}
     mgr = await _subagents_manager(
         session_factory,
         FakeIO(),
         factory=_capture_factory(captured),
-        subagents_dir=str(tmp_path / "does-not-exist"),
+        subagents_dir=str(target),
     )
 
     await mgr._ensure_task("-100:5", tier="owner")
 
+    assert target.is_dir()
+    assert (target / "researcher.md").is_file()
+    assert (target / "coder.md").is_file()
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher", "coder"}
+    await mgr.shutdown()
+
+
+async def test_owner_second_boot_preserves_edited_file(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC3: a second boot never overwrites an edited scaffolded file; the edit survives
+    # and drives the built custom_agents through its own (edited) category.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+
+    edited = "researcher's own edited prompt"
+    _write_subagent_md(
+        tmp_path / "researcher.md", category="code", description="edited", prompt=edited
+    )
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert (tmp_path / "researcher.md").read_text() == (
+        f"---\ncategory: code\ndescription: edited\n---\n{edited}"
+    )
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["researcher"]["model"] == "deepseek/deepseek-v4-flash"
+    await mgr.shutdown()
+
+
+async def test_owner_deleting_one_file_no_reseed(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC4: deleting one scaffolded file leaves the dir non-empty, so the next boot
+    # does not re-seed it; the session builds with the surviving subagent alone.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+    (tmp_path / "coder.md").unlink()
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert not (tmp_path / "coder.md").exists()
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher"}
+    await mgr.shutdown()
+
+
+async def test_owner_emptying_dir_reseeds_both(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC5: emptying the directory entirely re-seeds both files on the next boot.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+    (tmp_path / "researcher.md").unlink()
+    (tmp_path / "coder.md").unlink()
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert (tmp_path / "researcher.md").is_file()
+    assert (tmp_path / "coder.md").is_file()
     names = {a["name"] for a in captured["custom_agents"]}
     assert names == {"researcher", "coder"}
     await mgr.shutdown()
