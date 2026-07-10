@@ -4,12 +4,19 @@ Real files, real ``Settings`` construction, nothing mocked — the overlay sourc
 is the central mechanism, so every test drives it end to end.
 """
 
+import fnmatch
 import logging
 from pathlib import Path
 
 import pytest
 
-from chief.config import DEFAULT_SELF_CONFIG_PATH, Settings
+from chief.config import (
+    DEFAULT_SELF_CONFIG_PATH,
+    MERGE_SAFE,
+    SELF_CONFIG_DENYLIST,
+    Settings,
+    _overlay_denied,
+)
 from chief.gate.blacklist import DEFAULT_SHELL_PATTERNS
 
 
@@ -186,3 +193,70 @@ def test_env_repoints_overlay_path(
         overlay=None,
     )
     assert settings.turn_timeout_seconds == 77.0
+
+
+# --- #109: every Settings field is denied or explicitly merge-safe -----------------
+#
+# These are pure logic tests over ``SELF_CONFIG_DENYLIST`` / ``MERGE_SAFE`` and
+# ``Settings.model_fields`` — no ``_boot``, no tmp_path, no I/O.
+
+#: For each wildcard denylist pattern, the field names it is claimed to cover. This
+#: is a lower bound: a test below fails if a claimed field no longer exists or no
+#: longer matches its pattern (e.g. a field is renamed out from under it).
+_PATTERN_COVERAGE = {
+    "blacklist_*": {"blacklist_shell_patterns", "blacklist_tools"},
+    "screening_*": {"screening_enabled", "screening_model",
+                    "screening_block", "screening_tools"},
+    "*_enabled": {
+        "routing_enabled", "screening_enabled", "guest_enabled",
+        "calendar_enabled", "drive_enabled", "sheets_enabled", "gmail_enabled",
+        "playwright_enabled", "shell_enabled", "workspace_enabled",
+        "web_tools_enabled", "scheduler_enabled", "budget_enabled",
+        "skills_enabled", "subagents_enabled", "group_chat_enabled",
+    },
+    "owner_*_id": {"owner_telegram_id", "owner_discord_id",
+                   "owner_home_chat_id", "owner_home_guild_id"},
+    "*_token": {"telegram_bot_token", "discord_bot_token"},
+    "*_api_key": {"openrouter_api_key", "brave_search_api_key"},
+    "*_mcp_url": {"calendar_mcp_url", "drive_mcp_url", "sheets_mcp_url",
+                  "gmail_mcp_url", "playwright_mcp_url"},
+    "*_thread_key": {"front_desk_thread_key", "primary_thread_key"},
+}
+
+
+def test_every_settings_field_classified() -> None:
+    for name in Settings.model_fields:
+        assert _overlay_denied(name) or name in MERGE_SAFE, (
+            f"Settings field {name!r} is unclassified: add it to "
+            "SELF_CONFIG_DENYLIST if security-sensitive, else to MERGE_SAFE."
+        )
+
+
+def test_denied_and_merge_safe_disjoint() -> None:
+    denied = {n for n in Settings.model_fields if _overlay_denied(n)}
+    assert denied.isdisjoint(MERGE_SAFE), sorted(denied & MERGE_SAFE)
+    assert denied | MERGE_SAFE == set(Settings.model_fields)
+
+
+def test_no_stale_merge_safe_entries() -> None:
+    assert set(MERGE_SAFE) <= set(Settings.model_fields), sorted(
+        set(MERGE_SAFE) - set(Settings.model_fields)
+    )
+
+
+def test_denylist_patterns_cover_claimed_fields() -> None:
+    wildcard_patterns = {p for p in SELF_CONFIG_DENYLIST if "*" in p or "?" in p}
+    assert set(_PATTERN_COVERAGE) == wildcard_patterns, (
+        "_PATTERN_COVERAGE is out of sync with SELF_CONFIG_DENYLIST's wildcard "
+        f"patterns: coverage={sorted(_PATTERN_COVERAGE)} "
+        f"patterns={sorted(wildcard_patterns)}"
+    )
+    for pattern, claimed in _PATTERN_COVERAGE.items():
+        for name in claimed:
+            assert name in Settings.model_fields, (
+                f"{name!r} claimed by pattern {pattern!r} is no longer a "
+                "Settings field"
+            )
+            assert fnmatch.fnmatchcase(name, pattern), (
+                f"{name!r} no longer matches its claimed pattern {pattern!r}"
+            )
