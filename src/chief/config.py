@@ -92,7 +92,7 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
     "memory_git",
-    "harness_git",       # not a field yet (#103 sibling); denied by name regardless
+    "harness_git",       # own reversibility isn't chief's to disable (#110)
     "self_config_path",  # the overlay cannot re-point itself
 )
 
@@ -447,6 +447,12 @@ class Settings(BaseSettings):
     # spawn, gated by skills_enabled. Absent/empty ⇒ only the curated vendored set
     # (default_skills) is handed in.
     chief_skills_dir: str = "data/harness/skills"
+    # Common parent of subagents_dir/chief_skills_dir (#110, part of #103): a second,
+    # independent GitVersioner roots here so every chief-authored subagent/skill change
+    # is a revertible commit — sibling data/chief.db and data/workspace/ sit outside
+    # this root and are never staged. harness_git mirrors memory_git's opt-out shape.
+    harness_dir: str = "data/harness"
+    harness_git: bool = True
     # Chief-authored behavioral overlay (#107, part of #103): a self_config.yaml chief
     # writes for itself, deep-merged over config.yaml at boot by
     # ``SelfConfigSettingsSource`` (below env, so env still wins; secrets unreachable).
@@ -510,6 +516,7 @@ class Settings(BaseSettings):
         "playwright_screenshots_dir",
         "subagents_dir",
         "chief_skills_dir",
+        "harness_dir",
         "self_config_path",
     )
     @classmethod

@@ -347,6 +347,7 @@ class TaskManager:
         subagents_dir: str | None = None,
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
+        harness_versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
         screener: Screener | None = None,
         screening_tools: tuple[str, ...] = (),
@@ -457,6 +458,12 @@ class TaskManager:
         # NullVersioner when unset — no commit overhead for tests / no-git runs.
         self._versioner: Versioner = (
             versioner if versioner is not None else NullVersioner()
+        )
+        # Separate versioner over data/harness/ (#110): its own root and its own
+        # asyncio.Lock mean harness and memory commits never collide, even though
+        # both fire at the end of the same turn.
+        self._harness_versioner: Versioner = (
+            harness_versioner if harness_versioner is not None else NullVersioner()
         )
 
     # ---- scheduler hooks -------------------------------------------------
@@ -1739,6 +1746,10 @@ class TaskManager:
                 # versioner self-serializes concurrent callers; it also skips empty
                 # commits, so no-op turns cost one git status check (< 1 ms).
                 await self._versioner.commit("chief: memory auto-save")
+                # Commit the harness dir too (#110): a separate root + lock from the
+                # memory versioner above, so a subagent/skill write this turn made
+                # lands as its own revertible commit. Also skips empty commits.
+                await self._harness_versioner.commit("chief: harness auto-save")
                 # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
         except TimeoutError:

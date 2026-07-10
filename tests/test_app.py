@@ -477,6 +477,50 @@ def test_build_engine_wires_versioner_from_memory(
     assert isinstance(manager2._versioner, NullVersioner)
 
 
+def test_build_stack_wires_harness_versioner(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # harness_git=True → build_harness_versioner returns a real GitVersioner rooted
+    # at harness_dir; build_telegram_stack must thread that exact instance through
+    # build_engine into TaskManager (#110), separate from the memory versioner.
+    settings = _settings(harness_git=True, harness_dir=str(tmp_path / "harness"))
+    policy, audit, memory = _shared(settings, session_factory)
+    hv = app.build_harness_versioner(settings)
+
+    manager, _, _ = app.build_telegram_stack(
+        settings,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+        harness_versioner=hv,
+    )
+
+    assert manager._harness_versioner is hv
+    assert isinstance(manager._harness_versioner, GitVersioner)
+
+    # Inverse: harness_git=False gives a NullVersioner, and no .git is ever created.
+    settings_null = _settings(
+        harness_git=False, harness_dir=str(tmp_path / "harness_off")
+    )
+    _, audit2, memory_null = _shared(settings_null, session_factory)
+    policy2 = PolicyStore(session_factory, audit=audit2)
+    hv_null = app.build_harness_versioner(settings_null)
+
+    manager2, _, _ = app.build_telegram_stack(
+        settings_null,
+        session_factory=session_factory,
+        policy=policy2,
+        audit=audit2,
+        memory=memory_null,
+        harness_versioner=hv_null,
+    )
+
+    assert isinstance(manager2._harness_versioner, NullVersioner)
+    assert not (tmp_path / "harness_off" / ".git").exists()
+
+
 def test_group_params_thread_into_telegram_engine_and_adapter(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

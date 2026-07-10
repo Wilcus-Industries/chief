@@ -8,10 +8,13 @@ routing-off / removed-category fallbacks, and the manifest→``skill_directories
 are each covered.
 """
 
+import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.core.routing import RoutingStore
@@ -25,6 +28,10 @@ from chief.core.subagents import (
     scaffold_default_subagents,
     skill_directories_for,
 )
+from chief.memory.versioning import GitVersioner
+
+_GIT = shutil.which("git")
+requires_git = pytest.mark.skipif(_GIT is None, reason="git not on PATH")
 
 _REPO = Path(__file__).resolve().parents[1]
 _PLUGIN = str(_REPO / "vendor" / "chief-skills")
@@ -457,3 +464,35 @@ def test_scaffold_reseeds_emptied_dir(tmp_path: Path) -> None:
 
     assert (tmp_path / "researcher.md").is_file()
     assert (tmp_path / "coder.md").is_file()
+
+
+@requires_git
+async def test_git_revert_of_subagent_reflected_in_next_load(tmp_path: Path) -> None:
+    # #110: a git revert of a committed subagent file is an owner action outside
+    # chief's own turn loop, so the next fresh scan must reflect it — proving the
+    # spawn path (load_subagent_specs re-reads the dir every time) sees a revert,
+    # not a stale in-memory view.
+    harness = tmp_path / "harness"
+    subagents = harness / "subagents"
+    subagents.mkdir(parents=True)
+    versioner = GitVersioner(
+        harness, author_name="chief", author_email="chief@localhost"
+    )
+    await versioner.init()
+
+    _write_md(
+        subagents / "foo.md",
+        "category: general\ndescription: a temp subagent",
+        "temporary prompt",
+    )
+    await versioner.commit("chief: harness auto-save")
+    assert {s.name for s in load_subagent_specs(subagents)} == {"foo"}
+
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(harness), "revert", "--no-edit", "HEAD",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    assert proc.returncode == 0, err.decode()
+
+    assert "foo" not in {s.name for s in load_subagent_specs(subagents)}

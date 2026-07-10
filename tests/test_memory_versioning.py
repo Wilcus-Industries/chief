@@ -137,3 +137,66 @@ async def test_concurrent_commit_and_empty_commit_no_op(tmp_path: Path) -> None:
     assert errors == [], f"concurrent commits (mixed) raised: {errors}"
     # Exactly one commit (the "real write"); the empty-commit callers are no-ops.
     assert await _commit_count(tmp_path) == 1
+
+
+@requires_git
+async def test_harness_versioner_stages_only_its_root(tmp_path: Path) -> None:
+    """A GitVersioner rooted at data/harness/ must never see its siblings (#110).
+
+    db_path and workspace_dir live outside harness_dir by construction; this proves
+    a real repo rooted there stages only what's under it.
+    """
+    harness = tmp_path / "harness"
+    (harness / "skills").mkdir(parents=True)
+    (harness / "subagents").mkdir(parents=True)
+    (harness / "skills" / "s.md").write_text("skill")
+    (harness / "subagents" / "a.md").write_text("agent")
+    # Siblings outside the harness root — must never be staged.
+    (tmp_path / "chief.db").write_text("db")
+    (tmp_path / "workspace").mkdir()
+    (tmp_path / "workspace" / "x").write_text("scratch")
+
+    versioner = GitVersioner(
+        harness, author_name="chief", author_email="chief@localhost"
+    )
+    await versioner.init()
+    await versioner.commit("chief: harness auto-save")
+
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(harness), "ls-files",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    tracked = sorted(out.decode().split())
+    assert tracked == ["skills/s.md", "subagents/a.md"]
+
+
+@requires_git
+async def test_two_versioners_over_separate_roots_no_collision(
+    tmp_path: Path,
+) -> None:
+    """Two GitVersioners over distinct roots must commit concurrently without
+    tripping over each other's index.lock — each owns its own lock + repo (#110)."""
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    versioner_a = GitVersioner(
+        root_a, author_name="chief", author_email="chief@localhost"
+    )
+    versioner_b = GitVersioner(
+        root_b, author_name="chief", author_email="chief@localhost"
+    )
+    await versioner_a.init()
+    await versioner_b.init()
+    (root_a / "dirty.md").write_text("a")
+    (root_b / "dirty.md").write_text("b")
+
+    results = await asyncio.gather(
+        versioner_a.commit("commit a"),
+        versioner_b.commit("commit b"),
+        return_exceptions=True,
+    )
+
+    errors = [r for r in results if isinstance(r, BaseException)]
+    assert errors == [], f"separate-root commits raised: {errors}"
+    assert await _commit_count(root_a) == 1
+    assert await _commit_count(root_b) == 1

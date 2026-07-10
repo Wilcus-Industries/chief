@@ -3322,6 +3322,7 @@ def _versioned_manager(
     factory: Factory,
     versioner: Any,
     memory_dir: str,
+    harness_versioner: Any = None,
 ) -> TaskManager:
     """Build a TaskManager wired with a versioner and memory_dir for #22 tests."""
     return TaskManager(
@@ -3333,6 +3334,9 @@ def _versioned_manager(
         stop_intent=_no,
         warrants_task=_no,
         versioner=versioner,
+        harness_versioner=(
+            harness_versioner if harness_versioner is not None else NullVersioner()
+        ),
         memory=FakeMemory(),
         memory_dir=memory_dir,
         owner_name="Will",
@@ -3435,6 +3439,121 @@ async def test_memory_auto_commit_git_skips_when_no_memory_change(
     commits = await _git_log(mem_dir)
     assert len(commits) == 1, (
         f"no memory write → commit count must stay at 1, got {commits!r}"
+    )
+
+
+# ---- harness auto-commit after turn (#110, part of #103) ---------------------
+
+
+@requires_git
+async def test_harness_auto_commit_one_commit_per_changed_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Writing a subagent file mid-turn produces exactly one harness commit whose
+    diff is exactly that file — a separate root/lock from the memory versioner."""
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    harness_dir = tmp_path / "harness"
+    harness_versioner = GitVersioner(
+        harness_dir, author_name="chief", author_email="chief@localhost"
+    )
+    await harness_versioner.init()
+
+    fake_h = FakeVersioner()
+
+    class _DelegatingHarnessVersioner:
+        async def init(self) -> None:
+            return None
+
+        async def commit(self, message: str) -> None:
+            fake_h.commits.append(message)
+            await harness_versioner.commit(message)
+            fake_h.committed.set()  # set only once the real commit has landed
+
+    def _write_subagent() -> None:
+        subagents = harness_dir / "subagents"
+        subagents.mkdir(parents=True, exist_ok=True)
+        (subagents / "foo.md").write_text("---\ncategory: general\n---\nfoo")
+
+    sess = FakeSession(model="claude-sonnet-4-6", on_start=_write_subagent)
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=NullVersioner(),
+        memory_dir=str(mem_dir),
+        harness_versioner=_DelegatingHarnessVersioner(),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="add a subagent")
+    await asyncio.wait_for(fake_h.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    assert len(fake_h.commits) == 1
+    assert fake_h.commits[0] == "chief: harness auto-save"
+    commits = await _git_log(harness_dir)
+    assert len(commits) == 1
+
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(harness_dir), "show", "--name-only", "--pretty=",
+        "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    changed = [line for line in out.decode().splitlines() if line.strip()]
+    assert changed == ["subagents/foo.md"]
+
+
+@requires_git
+async def test_harness_auto_commit_skips_unchanged_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn that writes nothing under data/harness/ produces no harness commit."""
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    harness_dir = tmp_path / "harness"
+    harness_versioner = GitVersioner(
+        harness_dir, author_name="chief", author_email="chief@localhost"
+    )
+    await harness_versioner.init()
+    (harness_dir / "subagents").mkdir()
+    (harness_dir / "subagents" / "seed.md").write_text("seed")
+    await harness_versioner.commit("initial scaffold")
+
+    fake_h = FakeVersioner()
+
+    class _DelegatingHarnessVersioner:
+        async def init(self) -> None:
+            return None
+
+        async def commit(self, message: str) -> None:
+            fake_h.commits.append(message)
+            await harness_versioner.commit(message)
+            fake_h.committed.set()
+
+    sess = FakeSession(model="claude-sonnet-4-6")  # no on_start → nothing written
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=NullVersioner(),
+        memory_dir=str(mem_dir),
+        harness_versioner=_DelegatingHarnessVersioner(),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="what time is it?")
+    await asyncio.wait_for(fake_h.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    assert len(fake_h.commits) == 1  # the versioner always tries
+    commits = await _git_log(harness_dir)
+    assert len(commits) == 1, (
+        f"no harness write → commit count must stay at 1, got {commits!r}"
     )
 
 
