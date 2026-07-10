@@ -1023,7 +1023,13 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   the **M7 sandbox image** — which the 2026-07 host-native rework **deleted**. `install.sh`
   does not provision that toolchain, so on a stock host the four skills fail at the shell/
   import step. Accepted gap until the toolchain is added to `install.sh` (e.g. an opt-in
-  `--skills` flag).
+  `--skills` flag). **Chief-authored skills (#106, part of #103):** a second source,
+  `chief_skills_dir` (default `data/harness/skills`), is scanned fresh at every owner
+  spawn — `subagents.chief_skill_directories` walks it for leaf `SKILL.md` dirs (same
+  leaf invariant and malformed-file-skip-with-warning shape as `skill_directories_for`
+  and `load_subagent_specs`) and joins them into the same `skill_directories` kwarg
+  alongside the curated vendored set. Gated by `skills_enabled` alone, so both sources
+  switch off together; an absent/empty dir is inert.
 - **M11 group chats — ✅ done.** A third **surface** (`Surface` enum: `HOME | DM |
   GROUP`, orthogonal to `Tier`) beyond the owner's home forum/server and 1:1 DMs. In a
   GROUP (any non-home group/supergroup or guild chief is invited to, opt-in via

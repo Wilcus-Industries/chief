@@ -1,6 +1,7 @@
 """TaskManager: hybrid grace, steering, interrupt, semaphore, idle, recovery, spawn."""
 
 import asyncio
+import logging
 import shutil
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
@@ -1587,6 +1588,7 @@ async def _subagents_manager(
     routed: bool = True,
     skills: bool = False,
     subagents_dir: str | None = None,
+    chief_skills_dir: str | None = None,
 ) -> TaskManager:
     routing = None
     if routed:
@@ -1610,6 +1612,7 @@ async def _subagents_manager(
         skills_enabled=skills,
         skills_plugin_path="vendor/chief-skills" if skills else None,
         default_skills=("docx", "claude-api") if skills else (),
+        chief_skills_dir=chief_skills_dir,
     )
 
 
@@ -1816,6 +1819,157 @@ async def test_owner_skills_on_wires_copilot_skill_directories(
     assert any(d.endswith("/upstream/skills/docx") for d in dirs)
     # The claude-shaped path stays set too, so a claude backend still works.
     assert captured["plugins"] == [{"type": "local", "path": "vendor/chief-skills"}]
+    await mgr.shutdown()
+
+
+# ---- chief-authored skills root (#106, part of #103) ---------------------------
+
+
+def _write_skill_md(path: Path, *, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\n---\nDo the thing.")
+
+
+async def test_owner_chief_skills_dir_joins_vendored_skill_directories(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC1: a real on-disk chief-authored SKILL.md contributes its absolute dir
+    # alongside the curated vendored set (skill_directories_for's docx entry).
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "morning-note").resolve()) in dirs
+    assert any(d.endswith("/upstream/skills/docx") for d in dirs)
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_nested_skill_excludes_parent_root(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC2/AC3: a nested foo/bar/SKILL.md contributes foo/bar only, never foo or root.
+    _write_skill_md(tmp_path / "foo" / "bar" / "SKILL.md", name="bar")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "foo" / "bar").resolve()) in dirs
+    assert str((tmp_path / "foo").resolve()) not in dirs
+    assert str(tmp_path.resolve()) not in dirs
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_skips_malformed_with_warning(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path, caplog: Any
+) -> None:
+    # AC4: a malformed SKILL.md alongside a valid one is skipped with a logged
+    # warning; the session still builds and the valid authored dir still loads.
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "SKILL.md").write_text("not frontmatter at all")
+    _write_skill_md(tmp_path / "ok" / "SKILL.md", name="ok")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "ok").resolve()) in dirs
+    assert any("broken" in record.message for record in caplog.records)
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_inert_when_skills_disabled(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC5: skills_enabled=False gates BOTH sources — no authored dir handed in, and
+    # no skill_directories key at all (the vendored source is gated the same way).
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=False,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "skill_directories" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_absent_keeps_vendored_set_exact(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC6: an absent chief_skills_dir leaves skill_directories exactly the current
+    # vendored set — existing skill behavior is untouched.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path / "does-not-exist"),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    from chief.core.subagents import skill_directories_for
+
+    expected = skill_directories_for("vendor/chief-skills", ("docx", "claude-api"))
+    assert captured["skill_directories"] == expected
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_chief_skill_directories(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC7: a guest session against the same populated chief dir gets no
+    # skill_directories at all.
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "skill_directories" not in captured
     await mgr.shutdown()
 
 

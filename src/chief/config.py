@@ -397,6 +397,11 @@ class Settings(BaseSettings):
     # restart, no approval card. Absent or empty ⇒ falls back to the built-in
     # ``DEFAULT_SUBAGENTS``.
     subagents_dir: str = "data/harness/subagents"
+    # chief-authored skills root (#106, part of #103): presence of a SKILL.md beneath
+    # it makes that dir active for the next owner task; scanned fresh at every owner
+    # spawn, gated by skills_enabled. Absent/empty ⇒ only the curated vendored set
+    # (default_skills) is handed in.
+    chief_skills_dir: str = "data/harness/skills"
 
     # Group chats (M11), default off (mirror the opt-in subsystem pattern). A GROUP is
     # any multi-party chat chief is invited to that ISN'T the owner's own HOME surface —
@@ -453,6 +458,7 @@ class Settings(BaseSettings):
         "workspace_dir",
         "playwright_screenshots_dir",
         "subagents_dir",
+        "chief_skills_dir",
     )
     @classmethod
     def _expand_user_paths(cls, value: str) -> str:

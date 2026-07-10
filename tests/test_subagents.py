@@ -19,6 +19,7 @@ from chief.core.subagents import (
     DEFAULT_SUBAGENTS,
     SubagentSpec,
     build_custom_agents,
+    chief_skill_directories,
     load_subagent_specs,
     resolve_subagent_model,
     skill_directories_for,
@@ -336,3 +337,55 @@ def test_load_subagent_specs_absent_dir_returns_empty(tmp_path: Path) -> None:
 
 def test_load_subagent_specs_empty_dir_returns_empty(tmp_path: Path) -> None:
     assert load_subagent_specs(tmp_path) == ()
+
+
+# --- chief-authored skills root scanner (#106, part of #103) ------------------------
+
+
+def _write_skill_md(path: Path, *, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\n---\nDo the thing.")
+
+
+def test_chief_skill_directories_finds_flat_skill(tmp_path: Path) -> None:
+    # AC1: a flat foo/SKILL.md contributes the absolute directory of foo.
+    _write_skill_md(tmp_path / "foo" / "SKILL.md", name="foo")
+
+    dirs = chief_skill_directories(tmp_path)
+
+    assert dirs == [str((tmp_path / "foo").resolve())]
+
+
+def test_chief_skill_directories_nested_skill_excludes_parent_root(
+    tmp_path: Path,
+) -> None:
+    # AC2/AC3: foo/bar/SKILL.md with no SKILL.md directly in foo/ contributes foo/bar
+    # only — never the ancestor foo/ or the scanned root itself.
+    _write_skill_md(tmp_path / "foo" / "bar" / "SKILL.md", name="bar")
+
+    dirs = chief_skill_directories(tmp_path)
+
+    assert dirs == [str((tmp_path / "foo" / "bar").resolve())]
+    assert str((tmp_path / "foo").resolve()) not in dirs
+    assert str(tmp_path.resolve()) not in dirs
+
+
+def test_chief_skill_directories_skips_malformed_alongside_valid(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # AC4: a SKILL.md with no frontmatter fence is skipped with a logged warning; the
+    # valid sibling skill still loads.
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "SKILL.md").write_text("not frontmatter at all")
+    _write_skill_md(tmp_path / "ok" / "SKILL.md", name="ok")
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        dirs = chief_skill_directories(tmp_path)
+
+    assert dirs == [str((tmp_path / "ok").resolve())]
+    assert any("broken" in record.message for record in caplog.records)
+
+
+def test_chief_skill_directories_absent_dir_returns_empty(tmp_path: Path) -> None:
+    # AC6: an absent directory yields [] so the caller adds nothing extra.
+    assert chief_skill_directories(tmp_path / "does-not-exist") == []

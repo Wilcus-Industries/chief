@@ -114,6 +114,7 @@ from .session import SessionProto as SessionProto
 from .subagents import (
     DEFAULT_SUBAGENTS,
     build_custom_agents,
+    chief_skill_directories,
     load_subagent_specs,
     skill_directories_for,
 )
@@ -341,6 +342,7 @@ class TaskManager:
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
+        chief_skills_dir: str | None = None,
         subagents_enabled: bool = False,
         subagents_dir: str | None = None,
         group_context_max_messages: int = 50,
@@ -418,6 +420,10 @@ class TaskManager:
         self._skills_enabled = skills_enabled
         self._skills_plugin_path = skills_plugin_path
         self._default_skills = default_skills
+        # chief-authored skills root (#106) — its leaf SKILL.md dirs join the curated
+        # vendored set in the owner session's skill_directories; gated by
+        # skills_enabled, owner-only.
+        self._chief_skills_dir = chief_skills_dir
         # Category-routed subagents (#87), owner-only. When on, owner sessions carry
         # chief's DEFAULT_SUBAGENTS with each subagent's model resolved through the live
         # routing table; guests never do (the gate lives in build_custom_agents).
@@ -897,6 +903,16 @@ class TaskManager:
             gate_kwargs["skill_directories"] = skill_directories_for(
                 self._skills_plugin_path, self._default_skills
             )
+        # chief-authored skills (#106, part of #103): the flag gates this source too,
+        # so chief can't switch its own skills on (skills_enabled is a denied overlay
+        # key, #103). Each leaf SKILL.md dir joins the curated vendored set in the
+        # same kwarg; guests never reach here.
+        if self._skills_enabled and self._chief_skills_dir is not None:
+            authored = chief_skill_directories(self._chief_skills_dir)
+            if authored:
+                gate_kwargs["skill_directories"] = (
+                    gate_kwargs.get("skill_directories", []) + authored
+                )
         if self._subagents_enabled:
             # Owner-only, category-routed (#87): each subagent's model is resolved now
             # through the live routing table, so a category renamed/removed later (#83)
