@@ -115,6 +115,62 @@ def _overlay_denied(key: str) -> bool:
     return any(fnmatch.fnmatchcase(key, pat) for pat in SELF_CONFIG_DENYLIST)
 
 
+#: Review-time allow-list: the explicit complement of ``SELF_CONFIG_DENYLIST`` over
+#: ``Settings.model_fields`` (#109). Every ``Settings`` field must be either denied
+#: by ``SELF_CONFIG_DENYLIST`` or listed here as merge-safe — the guard test
+#: (``tests/test_self_config.py``) fails a field that is in neither set, in both, or
+#: listed here but no longer a real field. This is a hand-maintained literal, not
+#: computed from the denylist, so it can't silently track the denylist's growth —
+#: adding a new ``Settings`` field always requires a deliberate edit here (or to
+#: ``SELF_CONFIG_DENYLIST``), which is the point of a review-time default-deny.
+MERGE_SAFE: frozenset[str] = frozenset(
+    {
+        "owner_name",
+        "owner_model_default",
+        "owner_model_opus",
+        "opus_auto_detect",
+        "routing_seed",
+        "routing_surface_defaults",
+        "guest_model",
+        "guest_ack",
+        "concurrency",
+        "turn_timeout_seconds",
+        "idle_archive_seconds",
+        "compaction_idle_seconds",
+        "classifier_model",
+        "approval_timeout_seconds",
+        "guest_rate_per_window",
+        "guest_rate_window_seconds",
+        "guest_global_rate_per_window",
+        "git_author_name",
+        "git_author_email",
+        "owner_tz",
+        "playwright_screenshots_dir",
+        "workspace_dir",
+        "shell_timeout_seconds",
+        "shell_output_limit",
+        "web_fetch_timeout_seconds",
+        "web_fetch_max_bytes",
+        "web_search_count",
+        "scheduler_tick_seconds",
+        "quiet_hours_start",
+        "quiet_hours_end",
+        "heartbeat_url",
+        "heartbeat_interval_seconds",
+        "monitor_min_interval_seconds",
+        "monitor_model",
+        "premium_request_cap",
+        "openrouter_dollar_cap",
+        "budget_warn_fractions",
+        "budget_exhaust_fraction",
+        "budget_downgrade_model",
+        "budget_cycle_anchor_day",
+        "default_skills",
+        "group_context_max_messages",
+    }
+)
+
+
 class PolicySeed(BaseModel):
     """One boot-seeded permission rule. ``arg_pattern`` ``None`` = whole-tool rule."""
 
@@ -833,9 +889,10 @@ class SelfConfigSettingsSource(PydanticBaseSettingsSource):
     ``file_secret_settings`` sits *last* in the chain — lowest precedence — so the
     overlay outranks it. What actually keeps chief from writing itself a credential is
     that every secret-shaped field matches a :data:`SELF_CONFIG_DENYLIST` pattern
-    (``*_token``, ``*_api_key``), and the ``test_every_settings_field_is_classified``
+    (``*_token``, ``*_api_key``), and the ``test_every_settings_field_classified``
     guard (#109) forces any newly-added field to be denied or explicitly marked
-    merge-safe. Do not add a secret field whose name escapes those patterns.
+    merge-safe in :data:`MERGE_SAFE`. Do not add a secret field whose name escapes
+    those patterns.
 
     The security-relevant families (:data:`SELF_CONFIG_DENYLIST`) are stripped *before*
     the merge, with one warning naming every dropped key. A missing, empty, or broken
