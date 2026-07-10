@@ -847,11 +847,19 @@ class SelfConfigSettingsSource(PydanticBaseSettingsSource):
                 type(loaded).__name__,
             )
             return {}
-        dropped = sorted(k for k in loaded if _overlay_denied(str(k)))
+        non_str = [k for k in loaded if not isinstance(k, str)]
+        if non_str:
+            logger.warning(
+                "self_config overlay at %s has non-string keys %s; dropping them.",
+                path,
+                sorted(repr(k) for k in non_str),
+            )
+            loaded = {k: v for k, v in loaded.items() if isinstance(k, str)}
+        dropped = sorted(k for k in loaded if _overlay_denied(k))
         if dropped:
             logger.warning(
                 "self_config overlay at %s tried to set denied keys %s; dropping them.",
                 path,
                 dropped,
             )
-        return {k: v for k, v in loaded.items() if not _overlay_denied(str(k))}
+        return {k: v for k, v in loaded.items() if not _overlay_denied(k)}
