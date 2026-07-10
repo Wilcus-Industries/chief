@@ -378,6 +378,25 @@ def test_chief_skill_directories_nested_skill_excludes_parent_root(
     assert str(tmp_path.resolve()) not in dirs
 
 
+def test_chief_skill_directories_logs_the_parent_root_it_skips(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # #117: a valid foo/SKILL.md holding a nested bar/SKILL.md is dropped by the
+    # leaf-check. Silently, before this: a vanished skill was undiagnosable. The log
+    # must name both the skipped dir and the nested path that triggered the guard.
+    _write_skill_md(tmp_path / "foo" / "SKILL.md", name="foo")
+    _write_skill_md(tmp_path / "foo" / "bar" / "SKILL.md", name="bar")
+
+    with caplog.at_level(logging.DEBUG, logger="chief.core.subagents"):
+        dirs = chief_skill_directories(tmp_path)
+
+    # Guard behavior is unchanged: the leaf wins, the parent root is never returned.
+    assert dirs == [str((tmp_path / "foo" / "bar").resolve())]
+    message = " ".join(record.getMessage() for record in caplog.records)
+    assert str(tmp_path / "foo") in message
+    assert str(tmp_path / "foo" / "bar" / "SKILL.md") in message
+
+
 def test_chief_skill_directories_skips_malformed_alongside_valid(
     tmp_path: Path, caplog: Any
 ) -> None:
@@ -464,6 +483,43 @@ def test_scaffold_reseeds_emptied_dir(tmp_path: Path) -> None:
 
     assert (tmp_path / "researcher.md").is_file()
     assert (tmp_path / "coder.md").is_file()
+
+
+def test_scaffold_degrades_when_dir_is_a_non_directory_file(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # #123: subagents_dir pointing at an existing file made the unguarded mkdir raise
+    # FileExistsError, aborting every owner session build. It must log and return,
+    # degrading like the rest of the module.
+    target = tmp_path / "subagents"
+    target.write_text("not a directory")
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        scaffold_default_subagents(target)
+
+    assert target.read_text() == "not a directory"  # never clobbered
+    assert any("subagents" in record.message for record in caplog.records)
+
+
+def test_scaffold_is_idempotent_across_repeated_and_concurrent_builds(
+    tmp_path: Path,
+) -> None:
+    # #124: the emptiness scan runs on every owner spawn and its check-then-write is a
+    # TOCTOU. It stays benign because the seed content is fixed and each write is
+    # exists-guarded, so racing builds converge on identical bytes and none raise.
+    async def _race() -> None:
+        await asyncio.gather(
+            *(asyncio.to_thread(scaffold_default_subagents, tmp_path) for _ in range(8))
+        )
+
+    asyncio.run(_race())
+    first = {p.name: p.read_text() for p in sorted(tmp_path.glob("*.md"))}
+
+    for _ in range(3):
+        scaffold_default_subagents(tmp_path)
+
+    assert {p.name: p.read_text() for p in sorted(tmp_path.glob("*.md"))} == first
+    assert set(load_subagent_specs(tmp_path)) == set(DEFAULT_SUBAGENTS)
 
 
 @requires_git
