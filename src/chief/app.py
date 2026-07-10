@@ -26,6 +26,7 @@ from telegram.ext import Application
 from .adapters.base import Adapter, ReadyHook
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
+from .client_plane import SocketServer
 from .config import Settings
 from .core import screening
 from .core.backend import CopilotBackend
@@ -822,6 +823,10 @@ async def serve(settings: Settings) -> None:
     gets its own stack and runs concurrently (``asyncio.gather``). Boot-time setup that
     needs no live connection (policy seed, memory scaffold/purge) runs once up front;
     per-platform recovery + approval re-arm fire in each stack's ``on_ready``.
+
+    The always-on client-plane socket listener (#130) runs unconditionally alongside the
+    stacks — a chief with zero platform tokens still boots and stays alive on just the
+    socket, which is removed on clean shutdown.
     """
     warn_if_classifier_degraded(settings)
     engine: AsyncEngine = create_engine(settings.db_path)
@@ -863,6 +868,9 @@ async def serve(settings: Settings) -> None:
     scheduler, http = build_scheduler(
         settings, stacks=stacks, session_factory=factory
     )
+    # #130 unconditional client-plane listener: it keeps the gather (and the process)
+    # alive on a zero-platform, no-scheduler boot, where every other coro is absent.
+    socket_server = SocketServer(settings.socket_path)
 
     def make_ready(manager: TaskManager, approvals: ApprovalManager) -> ReadyHook:
         async def on_ready() -> None:
@@ -877,6 +885,8 @@ async def serve(settings: Settings) -> None:
     ]
     if scheduler is not None:
         coros.append(scheduler.run())
+    # Unconditional (#130): a socket-only chief has no other coro to keep gather alive.
+    coros.append(socket_server.run())
 
     try:
         await asyncio.gather(*coros)
@@ -898,6 +908,12 @@ async def serve(settings: Settings) -> None:
                 await http.aclose()
             except Exception:
                 logger.exception("heartbeat http close failed during shutdown")
+        # Close the client-plane listener (removes the socket file) before disposing the
+        # engine; guarded so a stop failure can't mask the dispose (#130).
+        try:
+            await socket_server.stop()
+        except Exception:
+            logger.exception("socket server stop failed during shutdown")
         await engine.dispose()
 
 

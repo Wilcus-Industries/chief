@@ -91,6 +91,9 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     "*_token",           # telegram_bot_token, discord_bot_token
     "*_api_key",         # openrouter_api_key, brave_search_api_key
     "db_path",
+    # Repointing the control socket relocates a privileged local-control surface —
+    # same fence class as db_path (an overlay must not move where chief listens).
+    "socket_path",
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
@@ -264,6 +267,9 @@ class Settings(BaseSettings):
     # dropped, ``extra="ignore"``); ``agent_backend: claude`` fails the boot loudly with
     # a migration message (see ``_reject_removed_agent_backend``).
     db_path: str = "data/chief.db"
+    # #130 always-on client-plane listener: chief binds this unix socket whenever it
+    # runs (owner-only 0600, unlinked on clean shutdown), independent of any platform.
+    socket_path: str = "data/chief.sock"
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
     )
@@ -582,6 +588,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "db_path",
+        "socket_path",
         "audit_log_path",
         "memory_dir",
         "workspace_dir",
@@ -774,21 +781,6 @@ class Settings(BaseSettings):
     def discord_configured(self) -> bool:
         """True iff both the Discord owner id and bot token are set (non-empty)."""
         return bool(self.owner_discord_id) and bool(self.discord_bot_token)
-
-    @model_validator(mode="after")
-    def _require_a_platform(self) -> "Settings":
-        """Refuse to start unless at least one chat platform is fully configured.
-
-        Each platform needs both its owner id and its bot token; a half-set platform
-        (id without token, or vice versa) does not count. This replaces the old
-        "Telegram is mandatory" shape now that Discord is a first-class peer.
-        """
-        if not self.telegram_configured and not self.discord_configured:
-            raise ValueError(
-                "no chat platform configured — set owner_telegram_id + "
-                "telegram_bot_token and/or owner_discord_id + discord_bot_token."
-            )
-        return self
 
     @model_validator(mode="after")
     def _require_front_desk_for_guests(self) -> "Settings":
