@@ -117,6 +117,23 @@ async def test_non_object_frame_gets_invalid_frame(server: SocketServer) -> None
             await writer.wait_closed()
 
 
+async def test_oversized_line_gets_line_too_long_and_closes(
+    server: SocketServer,
+) -> None:
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b"x" * (2**16 + 1) + b"\n")
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "line_too_long"
+        assert await asyncio.wait_for(reader.readline(), 5) == b""
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
 async def test_two_clients_function_simultaneously(server: SocketServer) -> None:
     r1, w1 = await asyncio.open_unix_connection(server.path)
     r2, w2 = await asyncio.open_unix_connection(server.path)
@@ -163,6 +180,29 @@ async def test_stop_closes_connections_and_removes_file(tmp_path: Path) -> None:
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+async def test_cancel_with_connected_client_completes(tmp_path: Path) -> None:
+    # Regression (#130 review): the production shutdown path is CANCELLATION of
+    # run() while a client is still connected. On 3.13 serve_forever()'s cancel
+    # handler awaited wait_closed() with the client's transport still attached,
+    # hanging shutdown forever. Nothing here disconnects before the cancel.
+    srv = SocketServer(str(tmp_path / "hang.sock"))
+    task = asyncio.create_task(srv.run())
+    await asyncio.wait_for(srv.started.wait(), 5)
+    reader, writer = await asyncio.open_unix_connection(srv.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        task.cancel()  # client still connected and parked — the deadlock shape
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        assert not Path(srv.path).exists()
+        # The server force-closed the connection: the client reads EOF.
+        assert await asyncio.wait_for(reader.readline(), 5) == b""
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
 
 
 async def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:

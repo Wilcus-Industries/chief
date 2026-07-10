@@ -35,8 +35,10 @@ class SocketServer:
     def __init__(self, path: str) -> None:
         self.path = path
         self.started = asyncio.Event()
+        self._stopped = asyncio.Event()
+        self._closing = False
         self._server: asyncio.Server | None = None
-        self._writers: set[asyncio.StreamWriter] = set()
+        self._handlers: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         """Bind the socket and serve until cancelled or :meth:`stop`.
@@ -56,19 +58,31 @@ class SocketServer:
         os.chmod(self.path, _SOCKET_MODE)
         self.started.set()
         try:
-            async with self._server:
-                await self._server.serve_forever()
+            # start_unix_server() is already accepting; nothing to drive. Park until
+            # stop() or cancellation — NOT serve_forever(): on 3.13 its CancelledError
+            # handler awaits wait_closed() before our cleanup can close clients, which
+            # deadlocks shutdown against any still-connected client.
+            await self._stopped.wait()
         finally:
-            # serve_forever() is cancelled on shutdown; unlink here too so a cancel that
-            # skips stop() (fixture teardown) still cleans up. Idempotent with stop().
-            self._server = None
-            Path(self.path).unlink(missing_ok=True)
+            # Runs on cancellation too (fixture teardown / gather cancel skips stop()),
+            # so a bare cancel performs the same full shutdown. Idempotent with stop().
+            await self._shutdown()
 
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         """Serve one connection: greet, then loop answering frames until EOF."""
-        self._writers.add(writer)
+        if self._closing:
+            # Accepted in the window between accept and this task's first step,
+            # after shutdown snapshotted the handler set — self-close instead of
+            # parking, or wait_closed() below would block on our transport forever.
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+            return
+        task = asyncio.current_task()
+        assert task is not None  # streams always run this callback inside a task
+        self._handlers.add(task)
         try:
             writer.write(encode(hello_frame()))
             await writer.drain()
@@ -87,7 +101,7 @@ class SocketServer:
         except (ConnectionResetError, BrokenPipeError):
             pass  # the client vanished mid-exchange — nothing left to answer
         finally:
-            self._writers.discard(writer)
+            self._handlers.discard(task)
             writer.close()
             with suppress(OSError):
                 await writer.wait_closed()
@@ -113,27 +127,37 @@ class SocketServer:
             )
         await writer.drain()
 
-    async def stop(self) -> None:
-        """Stop accepting, close every live connection, and remove the socket file.
+    async def _shutdown(self) -> None:
+        """Stop accepting, force-close live connections, remove the socket file.
 
-        Idempotent — safe to call twice (shutdown may race the run() finally). Note
-        ``Server.close()`` only stops *accepting*; the explicit writer sweep is what
-        closes already-established connections, and it is version-independent (unlike
-        ``Server.close_clients()``, which is new and behaves differently across minors).
-
-        The sweep runs *before* ``wait_closed()``: on 3.13 ``wait_closed()`` blocks
-        until every connection handler task finishes, and a handler parked on
-        ``reader.readline()`` unblocks only once we close its writer — so waiting first
-        would deadlock shutdown against a still-connected client.
+        Order is load-bearing. Set :attr:`_closing` first so a connection accepted in
+        the registration window (accept done, handler not yet in the set) self-closes
+        instead of parking. Then stop *accepting*, then cancel each handler task: a
+        handler parked on ``reader.readline()`` unblocks on cancel, its ``finally``
+        closes the writer, and the transport detaches — only *then* does
+        ``wait_closed()`` return (on 3.13 it blocks until every handler finishes, so
+        cancelling first is what breaks the deadlock against a still-connected client).
+        Idempotent: a second call sees ``_server is None`` and a drained snapshot.
         """
+        self._closing = True
         server, self._server = self._server, None
         if server is not None:
             server.close()  # stop accepting; established connections stay open
-        for writer in list(self._writers):
-            writer.close()
-            with suppress(OSError):
-                await writer.wait_closed()
-        self._writers.clear()
+        handlers = list(self._handlers)
+        for task in handlers:
+            task.cancel()
+        if handlers:
+            await asyncio.gather(*handlers, return_exceptions=True)
         if server is not None:
             await server.wait_closed()
         Path(self.path).unlink(missing_ok=True)
+
+    async def stop(self) -> None:
+        """Shut the listener down; idempotent, safe to call twice.
+
+        A thin wrapper over :meth:`_shutdown`. :attr:`_stopped` is set *last* so a
+        ``run()`` parked on it wakes only after cleanup has finished — its own
+        ``finally``-``_shutdown`` then finds nothing left to do (a no-op).
+        """
+        await self._shutdown()
+        self._stopped.set()
