@@ -1176,6 +1176,12 @@ async def test_sdk_force_stop_kills_a_spawned_cli_process() -> None:
     # _cli_process (a deliberate seam pin, same spirit as read_premium_requests reading
     # _quota_snapshots) and prove force_stop kills it. The client is never start()ed, so
     # the explicit stdio path avoids any runtime download.
+    #
+    # The full chain this stands in for — real spawned CLI, wedged destroy, live orphan,
+    # force_stop reap — was run end to end against sdk 1.0.5 / CLI 1.0.67 and passed,
+    # so the contract mirrored here is the real one, not an assumption (#112). It lives
+    # in tests/test_copilot_backend_live.py behind CHIEF_COPILOT_LIVE=1; re-run it on
+    # any SDK bump, since the done-check never exercises it.
     client = CopilotClient(
         connection=RuntimeConnection.for_stdio(path=sys.executable)
     )
