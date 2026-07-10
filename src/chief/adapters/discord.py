@@ -27,7 +27,6 @@ import discord
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..gate.approvals import ApprovalAction, ApprovalCard
-from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
     BUDGET_BUTTON_LABELS,
@@ -54,7 +53,6 @@ from .base import (
     budget_outcome_text,
     budget_payload,
     classify_tier,
-    default_branch_title,
     handle_guest_message,
     is_engaged,
     is_supported_media,
@@ -63,6 +61,7 @@ from .base import (
     parse_callback,
     split_message,
 )
+from .commands import OWNER_COMMANDS, CommandContext, CommandRegistry
 
 logger = logging.getLogger("chief.adapters.discord")
 
@@ -272,6 +271,7 @@ class DiscordAdapter(Adapter):
         guest_global_rate: int = 60,
         group_chat_enabled: bool = False,
         owner_home_guild_id: int | None = None,
+        commands: CommandRegistry | None = None,
     ) -> None:
         self._client = client
         self._token = token
@@ -293,6 +293,7 @@ class DiscordAdapter(Adapter):
         self._owner_home_guild_id = owner_home_guild_id
         # Contacts already prompted this run — dedupe the admission card (see Telegram).
         self._prompted_admission: set[int] = set()
+        self._commands = commands or OWNER_COMMANDS
         self._ready_hook: ReadyHook | None = None
         self._ready_fired = False
         self._register()
@@ -496,77 +497,28 @@ class DiscordAdapter(Adapter):
     async def _run_command(
         self, raw: discord.Message, message: Message, text: str
     ) -> None:
-        """Run an owner ``/command`` (parsed inline — base Client has no router).
+        """Dispatch an owner ``/command`` through the shared registry (#129).
 
         The owner gate already passed in :meth:`on_message`; an unknown command is a
-        silent no-op, matching Telegram (where ``MessageHandler`` ignores commands).
+        silent no-op via :meth:`CommandRegistry.dispatch`, matching Telegram (where
+        ``MessageHandler`` ignores commands).
         """
         name, _, arg = text[1:].partition(" ")
-        channel = raw.channel
-        match name.lower():
-            case "cancel":
-                stopped = await self._engine.cancel(message.thread_key)
-                await channel.send(
-                    "Cancelled." if stopped else "Nothing running here."
-                )
-            case "tasks":
-                tasks = await self._engine.active_tasks()
-                if not tasks:
-                    await channel.send("No active tasks.")
-                else:
-                    lines = [
-                        f"• {t.title or t.thread_key} — {t.status}" for t in tasks
-                    ]
-                    await channel.send("\n".join(lines))
-            case "memory":
-                if self._memory is None:
-                    await channel.send("Memory isn't enabled.")
-                    return
-                facts = self._memory.list_facts(OWNER_NAMESPACE)
-                if not facts:
-                    await channel.send("No memories yet.")
-                else:
-                    await channel.send("\n".join(f"• {f.title}" for f in facts))
-            case "forget":
-                if self._memory is None:
-                    await channel.send("Memory isn't enabled.")
-                    return
-                query = arg.strip()
-                if not query:
-                    await channel.send("Usage: /forget <text>")
-                    return
-                removed = await self._memory.forget(OWNER_NAMESPACE, query)
-                if not removed:
-                    await channel.send("Nothing matched.")
-                else:
-                    await channel.send(
-                        "Forgot: " + ", ".join(f.title for f in removed)
-                    )
-            case "branch":
-                # Only the casual inbox (``:0``) carries lossy context worth promoting;
-                # a thread is already a tracked task. Optional arg names the new thread.
-                if not message.thread_key.endswith(":0"):
-                    await channel.send("/branch only works in the casual channel.")
-                    return
-                title = arg.strip() or default_branch_title()
-                await self._engine.branch(message.thread_key, title)
-                await channel.send(f'→ Branched into "{title}".')
-            case "opus":
-                # Escalate this thread to Opus — pre-approved, no card (M11).
-                await channel.send(await self._engine.escalate(message.thread_key))
-            case "sonnet":
-                # Revert this thread to the default model (M11).
-                await channel.send(await self._engine.revert(message.thread_key))
-            case "route":
-                # Override this thread's routing category (#79); respawns the session on
-                # the category's target. A bare /route prints usage.
-                category = arg.strip()
-                if not category:
-                    await channel.send("Usage: /route <category>")
-                    return
-                await channel.send(
-                    await self._engine.route(message.thread_key, category)
-                )
+
+        async def reply(out: str) -> None:
+            await raw.channel.send(out)
+
+        await self._commands.dispatch(
+            name.lower(),
+            CommandContext(
+                engine=self._engine,
+                memory=self._memory,
+                thread_key=message.thread_key,
+                arg=arg.strip(),
+                is_casual=message.thread_key.endswith(":0"),
+                reply=reply,
+            ),
+        )
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         """Resolve an approval, admission, or budget card button tap (owner only)."""
