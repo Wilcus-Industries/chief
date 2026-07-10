@@ -229,6 +229,7 @@ class _FakeCondSession:
         self._hang = hang
         self._hang_close = hang_close
         self.closed = False
+        self.force_closed = False
         self.session_id: str | None = None
         self.last_cost_usd = 0.0
         self.last_rate_limit_status: str | None = None
@@ -248,6 +249,9 @@ class _FakeCondSession:
         if self._hang_close:  # a wedged teardown that never terminates
             await asyncio.Event().wait()
         self.closed = True
+
+    async def force_close(self) -> None:  # the bounded reap the helper falls back to
+        self.force_closed = True
 
 
 def _cond_factory(
@@ -350,3 +354,24 @@ async def test_ask_condition_time_boxes_a_wedged_teardown(
             timeout=0.05,
         )
     assert result is False
+
+
+async def test_ask_condition_reaps_a_wedged_teardown(monkeypatch: Any) -> None:
+    # #101: a wedged aclose is not just unbounded — a cancelled one leaks the Copilot
+    # CLI subprocess. The finally routes through close_wedged_session, which on expiry
+    # falls back to force_close (the bounded kill). Turn hangs AND aclose hangs; the
+    # call must fail safe to False and force-close the session to reap the orphan.
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(classify, "_CLOSE_TIMEOUT", 0.05)
+    async with asyncio.timeout(5):
+        result = await classify.ask_condition(
+            "?",
+            model="m",
+            allowed_tools=["mcp__chief_web__search"],
+            session_factory=_cond_factory(
+                "YES", hang=True, hang_close=True, captured=captured
+            ),
+            timeout=0.05,
+        )
+    assert result is False
+    assert captured["session"].force_closed is True

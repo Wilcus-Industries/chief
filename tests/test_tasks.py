@@ -1,6 +1,7 @@
 """TaskManager: hybrid grace, steering, interrupt, semaphore, idle, recovery, spawn."""
 
 import asyncio
+import logging
 import shutil
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from chief.adapters.base import (
     Surface,
     apply_budget_decision,
 )
+from chief.core import tasks
 from chief.core.budget import (
     ACCUM_ADD,
     ACCUM_MAX,
@@ -131,6 +133,7 @@ class FakeSession:
         self.attachments_seen: list[tuple[Attachment, ...]] = []
         self.interrupted = False
         self.closed = False
+        self.force_closed = False
         self.last_cost_usd = 0.0
         self.last_rate_limit_status: str | None = None
         #: Raw premium-request snapshot the engine sums into the premium currency (#84).
@@ -176,6 +179,12 @@ class FakeSession:
         self.model = model
 
     async def aclose(self) -> None:
+        self.closed = True
+
+    async def force_close(self) -> None:
+        # The reap's real effect: the CLI is killed and the session reconnects fresh
+        # next turn — same post-state as a clean aclose (#101).
+        self.force_closed = True
         self.closed = True
 
 
@@ -1090,6 +1099,53 @@ async def test_watchdog_times_out_wedged_turn_and_recovers(
     await mgr.shutdown()
 
 
+class _WedgedCloseSession(HangSession):
+    """A wedged session whose ``aclose`` also hangs — only ``force_close`` frees it.
+
+    Models the #101 leak: a time-boxed ``aclose`` cancelled mid-teardown never reaps the
+    Copilot CLI, so ``_reset_session`` must fall back to the bounded ``force_close``.
+    """
+
+    async def aclose(self) -> None:
+        if not self.force_closed:  # unbounded until the reap kills the CLI
+            await asyncio.Event().wait()
+        self.closed = True
+
+
+async def test_watchdog_reaps_a_wedged_session_teardown(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: Any,
+) -> None:
+    # #101: the watchdog reset time-boxes aclose; a cancelled aclose leaks the CLI, so
+    # the reset falls back to force_close to reap the orphan and free the consumer.
+    io = FakeIO()
+    sessions: list[FakeSession] = []
+    monkeypatch.setattr(tasks, "_RESET_TIMEOUT", 0.05)
+
+    def factory(*, model: str, resume: str | None = None, **_: Any) -> SessionProto:
+        sess: FakeSession = (
+            _WedgedCloseSession(model=model)
+            if not sessions
+            else FakeSession(model=model)
+        )
+        sessions.append(sess)
+        return sess
+
+    mgr = _manager(
+        session_factory, io, factory=factory, concurrency=1, turn_timeout=0.05
+    )
+
+    await mgr.dispatch(thread_key="-100:1", text="hang")
+    await _until(lambda: ("-100:1", TURN_TIMEOUT_NOTE) in io.sends)
+
+    # The wedged aclose was time-boxed and the orphan reaped via force_close (which runs
+    # just after the note); the consumer slot is then freed (generating reset) rather
+    # than re-frozen on the hung close.
+    await _until(lambda: bool(sessions) and sessions[0].force_closed)
+    await _until(lambda: mgr._tasks["-100:1"].generating is False)
+    await mgr.shutdown()
+
+
 async def test_recover_pings_without_autoresume_then_resumes(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1523,6 +1579,11 @@ async def test_guest_session_never_gets_skills(
 # ---- category-routed subagents wiring (#87) ----------------------------------
 
 
+#: ``skills_plugin_path`` default: couple it to the ``skills`` flag the way production
+#: ``app.py`` does. A test that needs the incoherent pairing (#118) passes ``None``.
+_COUPLE_TO_SKILLS_FLAG = "<couple-to-skills-flag>"
+
+
 async def _subagents_manager(
     session_factory: async_sessionmaker[AsyncSession],
     io: FakeIO,
@@ -1531,7 +1592,12 @@ async def _subagents_manager(
     subagents_enabled: bool = True,
     routed: bool = True,
     skills: bool = False,
+    subagents_dir: str | None = None,
+    chief_skills_dir: str | None = None,
+    skills_plugin_path: str | None = _COUPLE_TO_SKILLS_FLAG,
 ) -> TaskManager:
+    if skills_plugin_path == _COUPLE_TO_SKILLS_FLAG:
+        skills_plugin_path = "vendor/chief-skills" if skills else None
     routing = None
     if routed:
         routing = RoutingStore(session_factory)
@@ -1550,21 +1616,28 @@ async def _subagents_manager(
         front_desk_thread_key="-100:1",
         routing=routing,
         subagents_enabled=subagents_enabled,
+        subagents_dir=subagents_dir,
         skills_enabled=skills,
-        skills_plugin_path="vendor/chief-skills" if skills else None,
+        skills_plugin_path=skills_plugin_path,
         default_skills=("docx", "claude-api") if skills else (),
+        chief_skills_dir=chief_skills_dir,
     )
 
 
 async def test_owner_subagents_run_on_their_category_resolved_model(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     # AC1 (central mechanism): each built-in subagent is configured with the model ITS
     # declared category resolves to via the live routing table — researcher→research
     # →auto, coder→code→the openrouter model. Distinct models, one table, at spawn.
+    # subagents_dir is the sole source (#103): an empty tmp_path scaffolds both
+    # built-ins on first boot.
     captured: dict[str, Any] = {}
     mgr = await _subagents_manager(
-        session_factory, FakeIO(), factory=_capture_factory(captured)
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
     )
 
     await mgr._ensure_task("-100:5", tier="owner")
@@ -1576,13 +1649,17 @@ async def test_owner_subagents_run_on_their_category_resolved_model(
 
 
 async def test_owner_subagents_use_parent_model_when_routing_off(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     # Routing disabled: subagents are still wired, but each omits its model so the SDK
     # runs it on the parent session's model (the decision when routing is off).
     captured: dict[str, Any] = {}
     mgr = await _subagents_manager(
-        session_factory, FakeIO(), factory=_capture_factory(captured), routed=False
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        routed=False,
+        subagents_dir=str(tmp_path),
     )
 
     await mgr._ensure_task("-100:5", tier="owner")
@@ -1626,6 +1703,201 @@ async def test_guest_session_never_gets_subagents(
     await mgr.shutdown()
 
 
+# ---- on-disk subagent overrides (#105, part of #103) --------------------------
+
+
+def _write_subagent_md(
+    path: Path, *, category: str, description: str = "d", prompt: str = "p"
+) -> None:
+    frontmatter = f"category: {category}\ndescription: {description}"
+    path.write_text(f"---\n{frontmatter}\n---\n{prompt}")
+
+
+async def test_owner_subagents_dir_overrides_defaults_with_routed_model(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC1 end-to-end: an on-disk .md becomes the owner session's custom_agents,
+    # resolved through the live routing table at spawn.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["researcher"]["model"] == "auto"
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_dir_unknown_category_falls_back_not_dropped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC2: an unknown/renamed category still resolves via the default-target fallback;
+    # the subagent stays present rather than being dropped.
+    _write_subagent_md(tmp_path / "ghost.md", category="was-removed")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["ghost"]["model"] == "auto"  # default category "general" → auto
+    await mgr.shutdown()
+
+
+async def test_owner_subagents_dir_routing_off_omits_model(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC3: routing off ⇒ subagent present with no model key.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        routed=False,
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert captured["custom_agents"]
+    assert all("model" not in a for a in captured["custom_agents"])
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_subagents_dir(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC7: a guest session against the same populated dir gets no custom_agents.
+    _write_subagent_md(tmp_path / "researcher.md", category="research")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "custom_agents" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_first_boot_scaffolds_and_builds_from_dir(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC1: an absent subagents_dir is scaffolded on the first owner-session build, and
+    # the built custom_agents reflect the freshly-written files.
+    target = tmp_path / "subagents"
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(target),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert target.is_dir()
+    assert (target / "researcher.md").is_file()
+    assert (target / "coder.md").is_file()
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher", "coder"}
+    await mgr.shutdown()
+
+
+async def test_owner_second_boot_preserves_edited_file(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC3: a second boot never overwrites an edited scaffolded file; the edit survives
+    # and drives the built custom_agents through its own (edited) category.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+
+    edited = "researcher's own edited prompt"
+    _write_subagent_md(
+        tmp_path / "researcher.md", category="code", description="edited", prompt=edited
+    )
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert (tmp_path / "researcher.md").read_text() == (
+        f"---\ncategory: code\ndescription: edited\n---\n{edited}"
+    )
+    agents = {a["name"]: a for a in captured["custom_agents"]}
+    assert agents["researcher"]["model"] == "deepseek/deepseek-v4-flash"
+    await mgr.shutdown()
+
+
+async def test_owner_deleting_one_file_no_reseed(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC4: deleting one scaffolded file leaves the dir non-empty, so the next boot
+    # does not re-seed it; the session builds with the surviving subagent alone.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+    (tmp_path / "coder.md").unlink()
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert not (tmp_path / "coder.md").exists()
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher"}
+    await mgr.shutdown()
+
+
+async def test_owner_emptying_dir_reseeds_both(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC5: emptying the directory entirely re-seeds both files on the next boot.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")  # first boot: scaffolds both
+    (tmp_path / "researcher.md").unlink()
+    (tmp_path / "coder.md").unlink()
+
+    await mgr._ensure_task("-100:6", tier="owner")  # second boot: distinct thread key
+
+    assert (tmp_path / "researcher.md").is_file()
+    assert (tmp_path / "coder.md").is_file()
+    names = {a["name"] for a in captured["custom_agents"]}
+    assert names == {"researcher", "coder"}
+    await mgr.shutdown()
+
+
 async def test_owner_skills_on_wires_copilot_skill_directories(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1648,6 +1920,181 @@ async def test_owner_skills_on_wires_copilot_skill_directories(
     assert any(d.endswith("/upstream/skills/docx") for d in dirs)
     # The claude-shaped path stays set too, so a claude backend still works.
     assert captured["plugins"] == [{"type": "local", "path": "vendor/chief-skills"}]
+    await mgr.shutdown()
+
+
+# ---- chief-authored skills root (#106, part of #103) ---------------------------
+
+
+def _write_skill_md(path: Path, *, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\n---\nDo the thing.")
+
+
+async def test_owner_chief_skills_dir_joins_vendored_skill_directories(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC1: a real on-disk chief-authored SKILL.md contributes its absolute dir
+    # alongside the curated vendored set (skill_directories_for's docx entry).
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "morning-note").resolve()) in dirs
+    assert any(d.endswith("/upstream/skills/docx") for d in dirs)
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_nested_skill_excludes_parent_root(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC2/AC3: a nested foo/bar/SKILL.md contributes foo/bar only, never foo or root.
+    _write_skill_md(tmp_path / "foo" / "bar" / "SKILL.md", name="bar")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "foo" / "bar").resolve()) in dirs
+    assert str((tmp_path / "foo").resolve()) not in dirs
+    assert str(tmp_path.resolve()) not in dirs
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_skips_malformed_with_warning(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path, caplog: Any
+) -> None:
+    # AC4: a malformed SKILL.md alongside a valid one is skipped with a logged
+    # warning; the session still builds and the valid authored dir still loads.
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "SKILL.md").write_text("not frontmatter at all")
+    _write_skill_md(tmp_path / "ok" / "SKILL.md", name="ok")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        await mgr._ensure_task("-100:5", tier="owner")
+
+    dirs = captured["skill_directories"]
+    assert str((tmp_path / "ok").resolve()) in dirs
+    assert any("broken" in record.message for record in caplog.records)
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_needs_the_vendored_path_too(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # #118: skills_enabled=True with no skills_plugin_path is incoherent — production
+    # app.py couples them, but the gate must express that coupling itself. Gated on the
+    # flag alone, chief's authored dirs went in without the curated vendored set.
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        skills_plugin_path=None,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "skill_directories" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_inert_when_skills_disabled(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC5: skills_enabled=False gates BOTH sources — no authored dir handed in, and
+    # no skill_directories key at all (the vendored source is gated the same way).
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=False,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    assert "skill_directories" not in captured
+    await mgr.shutdown()
+
+
+async def test_owner_chief_skills_dir_absent_keeps_vendored_set_exact(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC6: an absent chief_skills_dir leaves skill_directories exactly the current
+    # vendored set — existing skill behavior is untouched.
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path / "does-not-exist"),
+    )
+
+    await mgr._ensure_task("-100:5", tier="owner")
+
+    from chief.core.subagents import skill_directories_for
+
+    expected = skill_directories_for("vendor/chief-skills", ("docx", "claude-api"))
+    assert captured["skill_directories"] == expected
+    await mgr.shutdown()
+
+
+async def test_guest_session_never_gets_chief_skill_directories(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # AC7: a guest session against the same populated chief dir gets no
+    # skill_directories at all.
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    captured: dict[str, Any] = {}
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory(captured),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    await mgr._ensure_task("555:0", tier="guest")
+
+    assert "skill_directories" not in captured
     await mgr.shutdown()
 
 
@@ -2907,6 +3354,7 @@ def _versioned_manager(
     factory: Factory,
     versioner: Any,
     memory_dir: str,
+    harness_versioner: Any = None,
 ) -> TaskManager:
     """Build a TaskManager wired with a versioner and memory_dir for #22 tests."""
     return TaskManager(
@@ -2918,6 +3366,9 @@ def _versioned_manager(
         stop_intent=_no,
         warrants_task=_no,
         versioner=versioner,
+        harness_versioner=(
+            harness_versioner if harness_versioner is not None else NullVersioner()
+        ),
         memory=FakeMemory(),
         memory_dir=memory_dir,
         owner_name="Will",
@@ -3020,6 +3471,121 @@ async def test_memory_auto_commit_git_skips_when_no_memory_change(
     commits = await _git_log(mem_dir)
     assert len(commits) == 1, (
         f"no memory write → commit count must stay at 1, got {commits!r}"
+    )
+
+
+# ---- harness auto-commit after turn (#110, part of #103) ---------------------
+
+
+@requires_git
+async def test_harness_auto_commit_one_commit_per_changed_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Writing a subagent file mid-turn produces exactly one harness commit whose
+    diff is exactly that file — a separate root/lock from the memory versioner."""
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    harness_dir = tmp_path / "harness"
+    harness_versioner = GitVersioner(
+        harness_dir, author_name="chief", author_email="chief@localhost"
+    )
+    await harness_versioner.init()
+
+    fake_h = FakeVersioner()
+
+    class _DelegatingHarnessVersioner:
+        async def init(self) -> None:
+            return None
+
+        async def commit(self, message: str) -> None:
+            fake_h.commits.append(message)
+            await harness_versioner.commit(message)
+            fake_h.committed.set()  # set only once the real commit has landed
+
+    def _write_subagent() -> None:
+        subagents = harness_dir / "subagents"
+        subagents.mkdir(parents=True, exist_ok=True)
+        (subagents / "foo.md").write_text("---\ncategory: general\n---\nfoo")
+
+    sess = FakeSession(model="claude-sonnet-4-6", on_start=_write_subagent)
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=NullVersioner(),
+        memory_dir=str(mem_dir),
+        harness_versioner=_DelegatingHarnessVersioner(),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="add a subagent")
+    await asyncio.wait_for(fake_h.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    assert len(fake_h.commits) == 1
+    assert fake_h.commits[0] == "chief: harness auto-save"
+    commits = await _git_log(harness_dir)
+    assert len(commits) == 1
+
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(harness_dir), "show", "--name-only", "--pretty=",
+        "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, _ = await proc.communicate()
+    changed = [line for line in out.decode().splitlines() if line.strip()]
+    assert changed == ["subagents/foo.md"]
+
+
+@requires_git
+async def test_harness_auto_commit_skips_unchanged_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A turn that writes nothing under data/harness/ produces no harness commit."""
+    mem_dir = tmp_path / "memory"
+    mem_dir.mkdir()
+    harness_dir = tmp_path / "harness"
+    harness_versioner = GitVersioner(
+        harness_dir, author_name="chief", author_email="chief@localhost"
+    )
+    await harness_versioner.init()
+    (harness_dir / "subagents").mkdir()
+    (harness_dir / "subagents" / "seed.md").write_text("seed")
+    await harness_versioner.commit("initial scaffold")
+
+    fake_h = FakeVersioner()
+
+    class _DelegatingHarnessVersioner:
+        async def init(self) -> None:
+            return None
+
+        async def commit(self, message: str) -> None:
+            fake_h.commits.append(message)
+            await harness_versioner.commit(message)
+            fake_h.committed.set()
+
+    sess = FakeSession(model="claude-sonnet-4-6")  # no on_start → nothing written
+    io = FakeIO()
+    mgr = _versioned_manager(
+        session_factory,
+        io,
+        factory=_one(sess),
+        versioner=NullVersioner(),
+        memory_dir=str(mem_dir),
+        harness_versioner=_DelegatingHarnessVersioner(),
+    )
+
+    await mgr.dispatch(thread_key="-100:5", text="what time is it?")
+    await asyncio.wait_for(fake_h.committed.wait(), timeout=2.0)
+    await mgr.shutdown()
+
+    assert len(fake_h.commits) == 1  # the versioner always tries
+    commits = await _git_log(harness_dir)
+    assert len(commits) == 1, (
+        f"no harness write → commit count must stay at 1, got {commits!r}"
     )
 
 

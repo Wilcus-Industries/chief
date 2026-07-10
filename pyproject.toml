@@ -7,6 +7,15 @@ dependencies = [
     # Upper bound is load-bearing (#102): core/copilot_tools.py rides the undocumented
     # dict contract of convert_mcp_call_tool_result, source-verified against 1.x only.
     # tests/test_copilot_tools.py pins that shape — re-verify before widening this.
+    #
+    # Two more private seams ride this pin, and a bump *within* <2 can break either
+    # silently (#112). Re-check both before bumping, not just before widening:
+    #   * client._cli_process — the spawned-CLI handle, pinned by
+    #     test_sdk_force_stop_kills_a_spawned_cli_process.
+    #   * force_stop's kill-without-graceful-wait contract, mirrored by the
+    #     _WedgedRuntimeClient fake in tests/test_copilot_session.py.
+    # The real end-to-end chain behind them runs only under CHIEF_COPILOT_LIVE=1
+    # (tests/test_copilot_backend_live.py), so the done-check will not catch a drift.
     "github-copilot-sdk>=1,<2",
     "python-telegram-bot>=21",
     "sqlalchemy>=2",
@@ -79,6 +88,13 @@ ignore_missing_imports = true
 # croniter ships no py.typed; used by chief.core.schedule_time for cron next-fire.
 [[tool.mypy.overrides]]
 module = ["croniter.*"]
+ignore_missing_imports = true
+
+# pyyaml ships no inline stubs for the bare `import yaml` module name (only for
+# `yaml.*` submodules); used by chief.core.subagents to parse on-disk subagent
+# frontmatter (#105) and by chief.config to load the self_config.yaml overlay (#107).
+[[tool.mypy.overrides]]
+module = ["yaml"]
 ignore_missing_imports = true
 
 # ``mcp`` (+ its starlette transitive) is now a dev-group dependency (#88 relit the
