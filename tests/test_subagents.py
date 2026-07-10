@@ -304,6 +304,22 @@ async def test_load_subagent_specs_skips_unreadable_directory_entry(
     assert any("notafile.md" in record.message for record in caplog.records)
 
 
+async def test_load_subagent_specs_skips_non_utf8_file(
+    tmp_path: Path, caplog: Any
+) -> None:
+    # #115: read_text() raises UnicodeDecodeError on non-UTF8 bytes, and that is a
+    # ValueError -- NOT an OSError -- so the OSError-only guard let it abort the
+    # session build. A non-UTF8 *.md must skip with a warning like any malformed file.
+    (tmp_path / "latin1.md").write_bytes(b"---\ncategory: caf\xe9\n---\nprompt")
+    _write_md(tmp_path / "ok.md", "category: general\ndescription: fine", "a prompt")
+
+    with caplog.at_level(logging.WARNING, logger="chief.core.subagents"):
+        specs = load_subagent_specs(tmp_path)
+
+    assert [s.name for s in specs] == ["ok"]
+    assert any("latin1.md" in record.message for record in caplog.records)
+
+
 async def test_load_subagent_specs_missing_category_is_malformed(
     tmp_path: Path,
 ) -> None:

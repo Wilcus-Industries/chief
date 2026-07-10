@@ -158,15 +158,17 @@ def _parse_subagent_md(path: Path) -> SubagentSpec | None:
 
     Mirrors the degrade-and-skip shape of :func:`_skill_md_name`: malformed input —
     missing frontmatter fences, unparsable YAML, a missing/wrong-typed required field,
-    or an unreadable path (a directory, broken symlink, or permission-denied ``.md``,
-    #105 AC5) — returns ``None`` rather than raising, so one bad file never fails a
-    session build. ``model`` is deliberately never read from the frontmatter (#105
+    an unreadable path (a directory, broken symlink, or permission-denied ``.md``,
+    #105 AC5), or non-UTF8 bytes (#115) — returns ``None`` rather than raising, so one
+    bad file never fails a session build. ``model`` is deliberately never read (#105
     AC4): the model is always the *category*'s live routing resolution, not something
     the file can pin.
     """
     try:
         lines = path.read_text().splitlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError (#115) — a non-UTF8 .md
+        # would otherwise escape this guard and abort the session build.
         return None
     if not lines or lines[0] != "---":
         return None
