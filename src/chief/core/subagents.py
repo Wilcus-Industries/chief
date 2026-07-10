@@ -258,7 +258,16 @@ def chief_skill_directories(directory: str | Path) -> list[str]:
             logger.warning("skipping malformed chief skill file %s", skill_md)
             continue
         skill_dir = skill_md.parent
-        if list(skill_dir.rglob("SKILL.md")) != [skill_dir / "SKILL.md"]:
+        nested = sorted(p for p in skill_dir.rglob("SKILL.md") if p != skill_md)
+        if nested:
+            # A parent root, skipped so the runtime's recursive scan can't re-expose
+            # everything beneath it. Logged because the drop is otherwise invisible:
+            # a valid skill simply vanishes from the session (#117).
+            logger.warning(
+                "skipping chief skill dir %s: a parent root, nested SKILL.md at %s",
+                skill_dir,
+                ", ".join(str(p) for p in nested),
+            )
             continue
         directories.append(str(skill_dir.resolve()))
     return directories
@@ -286,11 +295,32 @@ def scaffold_default_subagents(directory: str | Path) -> None:
     seed is not re-created: the owner (or chief) has expressed a preference. Emptying
     the directory entirely re-seeds both on the next boot. An existing file is never
     overwritten, so an edited ``researcher.md`` survives every subsequent boot.
+
+    A ``directory`` that exists but is not a directory (a misconfigured
+    ``subagents_dir`` pointing at a file) is logged and skipped, not raised on (#123):
+    an owner session still builds, just with no subagents scaffolded — the degrade shape
+    the rest of this module uses.
+
+    **The emptiness check is a TOCTOU, and benign by construction (#124).** It runs on
+    every owner spawn, so two concurrent builds can both observe an empty directory and
+    both proceed to seed it. Neither the race nor a repeat can corrupt the result: the
+    seed is a fixed constant, every write is guarded by ``dest.exists()``, and racing
+    writers therefore emit byte-identical content. The worst outcome is a redundant
+    write of the bytes already there. Do not "fix" this with a lock — the invariant is
+    the fixed content, not the exclusion.
     """
     path = Path(directory)
     if path.is_dir() and any(path.iterdir()):
         return
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(
+            "cannot scaffold subagents into %s; skipping (no subagents this build)",
+            path,
+            exc_info=True,
+        )
+        return
     for spec in DEFAULT_SUBAGENTS:
         dest = path / f"{spec.name}.md"
         if not dest.exists():
