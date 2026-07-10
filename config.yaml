@@ -245,9 +245,10 @@ skills_enabled: false
 # with routing_enabled off, a subagent runs on the parent session's model. Owner-only:
 # guests never get subagents. Milestones surface each subagent delegation and its model.
 subagents_enabled: false
-# subagents_dir: data/harness/subagents  # on-disk overrides (#105): one .md per
-#   subagent (stem = name, frontmatter category/description/skills, body = prompt);
-#   absent/empty keeps the built-ins above.
+# subagents_dir: data/harness/subagents  # on-disk subagents (#105, part of #103): one
+#   .md per subagent (stem = name, frontmatter category/description/skills, body =
+#   prompt); seeded from the built-ins above on first boot (empty-dir only), then the
+#   sole source thereafter.
 # self_config_path: data/harness/self_config.yaml  # chief-authored overlay (#107): deep-
 #   merged over this file at boot; security keys (blacklists, seeds, screening, *_enabled,
 #   owner ids, secrets, db_path, MCP urls, thread keys, memory/harness_git) are dropped

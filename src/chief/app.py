@@ -539,8 +539,8 @@ def build_engine(
         chief_skills_dir=settings.chief_skills_dir,
         # Owner-only category-routed subagents (#87). Inert unless the flag is on; the
         # model each subagent runs on is resolved through the routing table at spawn.
-        # subagents_dir (#105) lets an on-disk .md set override DEFAULT_SUBAGENTS with
-        # no restart; absent/empty keeps the built-ins.
+        # subagents_dir (#105, part of #103) is the sole source: the built-ins are
+        # scaffolded there on first boot (empty dir only), no restart needed after.
         subagents_enabled=settings.subagents_enabled,
         subagents_dir=settings.subagents_dir,
         # Share the exact versioner the memory store uses so auto-commit and memory

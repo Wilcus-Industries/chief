@@ -22,6 +22,7 @@ from chief.core.subagents import (
     chief_skill_directories,
     load_subagent_specs,
     resolve_subagent_model,
+    scaffold_default_subagents,
     skill_directories_for,
 )
 
@@ -389,3 +390,70 @@ def test_chief_skill_directories_skips_malformed_alongside_valid(
 def test_chief_skill_directories_absent_dir_returns_empty(tmp_path: Path) -> None:
     # AC6: an absent directory yields [] so the caller adds nothing extra.
     assert chief_skill_directories(tmp_path / "does-not-exist") == []
+
+
+# --- scaffolding DEFAULT_SUBAGENTS to disk (#108, part of #103) ---------------------
+
+
+def test_scaffold_writes_default_subagents_to_empty_dir(tmp_path: Path) -> None:
+    # AC1: an empty dir gets both built-ins seeded as .md files.
+    scaffold_default_subagents(tmp_path)
+
+    assert (tmp_path / "researcher.md").is_file()
+    assert (tmp_path / "coder.md").is_file()
+
+
+def test_scaffold_creates_absent_directory(tmp_path: Path) -> None:
+    # AC1: an absent directory is created and seeded.
+    target = tmp_path / "subagents"
+
+    scaffold_default_subagents(target)
+
+    assert target.is_dir()
+    assert (target / "researcher.md").is_file()
+    assert (target / "coder.md").is_file()
+
+
+def test_scaffolded_files_round_trip_to_defaults(tmp_path: Path) -> None:
+    # AC2: scaffolded files round-trip through load_subagent_specs back to
+    # DEFAULT_SUBAGENTS. Set comparison, not tuple/list: load_subagent_specs sorts
+    # alphabetically (coder, researcher) while DEFAULT_SUBAGENTS is declaration order
+    # (researcher, coder); SubagentSpec is frozen/hashable so set equality is exact.
+    scaffold_default_subagents(tmp_path)
+
+    assert set(load_subagent_specs(tmp_path)) == set(DEFAULT_SUBAGENTS)
+
+
+def test_scaffold_skips_when_dir_non_empty(tmp_path: Path) -> None:
+    # AC4 mechanism: a non-empty dir (even with only one file) is never re-seeded.
+    _write_md(
+        tmp_path / "researcher.md",
+        "category: research\ndescription: mine",
+        "my own researcher prompt",
+    )
+
+    scaffold_default_subagents(tmp_path)
+
+    assert not (tmp_path / "coder.md").exists()
+
+
+def test_scaffold_never_overwrites_edited_file(tmp_path: Path) -> None:
+    # AC3 mechanism: an edited scaffolded file survives verbatim.
+    edited = "---\ncategory: code\ndescription: edited\n---\nedited prompt\n"
+    (tmp_path / "researcher.md").write_text(edited)
+
+    scaffold_default_subagents(tmp_path)
+
+    assert (tmp_path / "researcher.md").read_text() == edited
+
+
+def test_scaffold_reseeds_emptied_dir(tmp_path: Path) -> None:
+    # AC5: emptying the directory entirely re-seeds both files on the next boot.
+    scaffold_default_subagents(tmp_path)
+    (tmp_path / "researcher.md").unlink()
+    (tmp_path / "coder.md").unlink()
+
+    scaffold_default_subagents(tmp_path)
+
+    assert (tmp_path / "researcher.md").is_file()
+    assert (tmp_path / "coder.md").is_file()
