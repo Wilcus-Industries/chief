@@ -72,12 +72,13 @@ DEFAULT_SELF_CONFIG_PATH = "data/harness/self_config.yaml"
 #: overlay lets chief rewrite its *behavioral* config at runtime, but the security
 #: boundary — the gate blacklists, policy seeds, screening, every opt-in subsystem
 #: ``*_enabled`` flag, the owner-identity ids, secrets, the db, MCP endpoints, inbox
-#: thread-key routing, and the git-versioning toggles — stays owner-only. Patterns are
-#: matched with :func:`fnmatch.fnmatchcase` against the overlay's top-level keys only;
-#: every denied family is a top-level ``Settings`` field, so no denied key hides inside
-#: a mergeable nested mapping. ``primary_platform`` is denied as an inbox-routing key
-#: (it picks the platform the owner inbox lives on); ``self_config_path`` is denied so a
-#: self-repointing overlay can't misreport where the resolved config came from.
+#: thread-key routing, and the git-versioning toggles and their versioned roots — stays
+#: owner-only. Patterns are matched with :func:`fnmatch.fnmatchcase` against the
+#: overlay's top-level keys only; every denied family is a top-level ``Settings``
+#: field, so no denied key hides inside a mergeable nested mapping.
+#: ``primary_platform`` is denied as an inbox-routing key (it picks the platform the
+#: owner inbox lives on); ``self_config_path`` is denied so a self-repointing overlay
+#: can't misreport where the resolved config came from.
 SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     "blacklist_*",       # blacklist_shell_patterns, blacklist_tools
     "never_seed",
@@ -91,8 +92,16 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
+    # Reversibility is owner-only: not just the *_git toggle, but the path that
+    # defines each versioned root — repointing the root (or moving chief's write
+    # targets outside it) escapes revert exactly as flipping the toggle off would
+    # (#110). memory and harness are treated identically.
     "memory_git",
-    "harness_git",       # own reversibility isn't chief's to disable (#110)
+    "memory_dir",
+    "harness_git",
+    "harness_dir",
+    "subagents_dir",     # chief's harness write target — stays inside harness_dir
+    "chief_skills_dir",  # chief's harness write target — stays inside harness_dir
     "self_config_path",  # the overlay cannot re-point itself
 )
 
