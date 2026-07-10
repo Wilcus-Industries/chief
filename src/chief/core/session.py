@@ -98,7 +98,10 @@ async def close_wedged_session(session: SessionProto, *, timeout: float) -> None
         )
     force = getattr(session, "force_close", None)
     if force is None:
-        return  # non-Copilot fakes: nothing to reap
+        # Every session that doesn't offer the hatch: today's non-Copilot test fakes,
+        # but equally any future non-Copilot backend, which would silently get no reap
+        # here. A backend that spawns a subprocess must implement ``force_close``.
+        return
     try:
         await force()
     except Exception:
