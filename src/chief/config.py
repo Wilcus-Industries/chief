@@ -65,7 +65,9 @@ _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
 )
 
 #: Where chief writes its own behavioral overlay (#107, part of #103). Kept as a
-#: constant so the field default and the source's fallback can't drift apart.
+#: constant so the field default and the source's fallback can't drift apart. It sits
+#: inside ``harness_dir`` on purpose: the harness ``GitVersioner`` stages that whole
+#: root, so every self-edit of the overlay is its own revertible commit (#125).
 DEFAULT_SELF_CONFIG_PATH = "data/harness/self_config.yaml"
 
 #: Top-level overlay keys chief's own ``self_config.yaml`` may never set (#107). The

@@ -145,12 +145,18 @@ async def test_harness_versioner_stages_only_its_root(tmp_path: Path) -> None:
 
     db_path and workspace_dir live outside harness_dir by construction; this proves
     a real repo rooted there stages only what's under it.
+
+    It stages **everything** under it, not just ``skills/`` and ``subagents/`` (#125):
+    ``self_config.yaml`` is chief-authored, reversible content living in the same root,
+    so ``git add -A`` tracks it too — deliberately. Excluding it would leave chief's
+    most behavior-significant self-authored file the only unrevertible one.
     """
     harness = tmp_path / "harness"
     (harness / "skills").mkdir(parents=True)
     (harness / "subagents").mkdir(parents=True)
     (harness / "skills" / "s.md").write_text("skill")
     (harness / "subagents" / "a.md").write_text("agent")
+    (harness / "self_config.yaml").write_text("concurrency: 4\n")
     # Siblings outside the harness root — must never be staged.
     (tmp_path / "chief.db").write_text("db")
     (tmp_path / "workspace").mkdir()
@@ -168,7 +174,7 @@ async def test_harness_versioner_stages_only_its_root(tmp_path: Path) -> None:
     )
     out, _ = await proc.communicate()
     tracked = sorted(out.decode().split())
-    assert tracked == ["skills/s.md", "subagents/a.md"]
+    assert tracked == ["self_config.yaml", "skills/s.md", "subagents/a.md"]
 
 
 @requires_git

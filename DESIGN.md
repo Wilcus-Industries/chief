@@ -49,7 +49,9 @@ manages its own harness (issue #103).
   own `GitVersioner` instance rooted at `harness_dir` (#110, part of #103) — a second
   repo, separate from the memory dir's, so every chief-authored write is its own
   revertible commit and an owner `git revert` there is reflected the next time a
-  session spawns (fresh dir scan, no cache). Commits after each turn alongside the
+  session spawns (fresh dir scan, no cache). That versioner stages its whole root, so
+  it tracks `self_config.yaml` too (#125) — chief-authored, reversible, same terms.
+  Commits after each turn alongside the
   existing memory auto-commit; opt-out via `harness_git` (owner-only, denylisted like
   `memory_git`). They are picked up at the next session build — **no approval card,
   no restart**. Subagents route by **category, never a pinned model id**, which
