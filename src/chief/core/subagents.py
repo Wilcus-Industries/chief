@@ -33,11 +33,12 @@ session's provider — the runtime falls back to the parent model if it can't se
 (the same Student-plan ``auto`` constraint the main session already lives under). Noted,
 not worked around, at this slice.
 
-**On-disk overrides (#105, part of #103).** :func:`load_subagent_specs` lets a
-chief-authored ``.md`` set replace :data:`DEFAULT_SUBAGENTS` — one file per subagent,
-loaded fresh at every session spawn (no restart, no approval card) from
-``Settings.subagents_dir``. Each file still only *declares* a category; the model is
-resolved the same way as the built-ins, through the live routing table.
+**On-disk overrides (#105, part of #103).** :data:`DEFAULT_SUBAGENTS` is scaffolded to
+``Settings.subagents_dir`` on first boot (:func:`scaffold_default_subagents`), and the
+directory is thereafter the **sole** source: :func:`load_subagent_specs` reads it fresh
+at every session spawn (no restart, no approval card) — the built-ins survive in source
+only as that seed. Each file still only *declares* a category; the model is resolved the
+same way as the built-ins, through the live routing table.
 """
 
 import json
@@ -215,7 +216,8 @@ def load_subagent_specs(directory: str | Path) -> tuple[SubagentSpec, ...]:
     closing fence is the prompt — never ``model``, which stays a category resolution,
     not a file-pinned value. A malformed file is skipped with a logged warning, never
     fatal to building a session. ``directory`` absent or holding no loadable ``.md``
-    files returns ``()``, so the caller keeps :data:`DEFAULT_SUBAGENTS`.
+    files returns ``()`` — the directory is the sole source, so an empty result means
+    the owner deliberately emptied it, not a fallback signal.
     """
     path = Path(directory)
     if not path.is_dir():
@@ -228,6 +230,39 @@ def load_subagent_specs(directory: str | Path) -> tuple[SubagentSpec, ...]:
             continue
         specs.append(spec)
     return tuple(specs)
+
+
+def _spec_to_md(spec: SubagentSpec) -> str:
+    """Serialise a spec to the exact on-disk shape :func:`_parse_subagent_md` reads:
+    YAML frontmatter (``category``, ``description``, optional ``skills``) + prompt body.
+    """
+    frontmatter: dict[str, object] = {
+        "category": spec.category,
+        "description": spec.description,
+    }
+    if spec.skills:
+        frontmatter["skills"] = list(spec.skills)
+    fm_text = yaml.safe_dump(frontmatter, sort_keys=False).strip()
+    return f"---\n{fm_text}\n---\n{spec.prompt}\n"
+
+
+def scaffold_default_subagents(directory: str | Path) -> None:
+    """Seed :data:`DEFAULT_SUBAGENTS` to disk as ``.md`` files (part of #103).
+
+    Re-scaffold rule: this fires **only when the directory is empty** — absent, or a
+    directory holding no entries. A single surviving file leaves it non-empty, so the
+    seed is not re-created: the owner (or chief) has expressed a preference. Emptying
+    the directory entirely re-seeds both on the next boot. An existing file is never
+    overwritten, so an edited ``researcher.md`` survives every subsequent boot.
+    """
+    path = Path(directory)
+    if path.is_dir() and any(path.iterdir()):
+        return
+    path.mkdir(parents=True, exist_ok=True)
+    for spec in DEFAULT_SUBAGENTS:
+        dest = path / f"{spec.name}.md"
+        if not dest.exists():
+            dest.write_text(_spec_to_md(spec))
 
 
 def _skill_md_name(skill_md: Path) -> str | None:
