@@ -245,9 +245,10 @@ skills_enabled: false
 # with routing_enabled off, a subagent runs on the parent session's model. Owner-only:
 # guests never get subagents. Milestones surface each subagent delegation and its model.
 subagents_enabled: false
-# subagents_dir: data/harness/subagents  # on-disk overrides (#105): one .md per
-#   subagent (stem = name, frontmatter category/description/skills, body = prompt);
-#   absent/empty keeps the built-ins above.
+# subagents_dir: data/harness/subagents  # on-disk subagents (#105, part of #103): one
+#   .md per subagent (stem = name, frontmatter category/description/skills, body =
+#   prompt); seeded from the built-ins above on first boot (empty-dir only), then the
+#   sole source thereafter.
 
 # Group chats (M11, opt-in). With group_chat_enabled on, chief works in group chats it's
 # invited to (any non-home group/supergroup or guild) beyond the owner's home and 1:1 DMs.

@@ -112,9 +112,9 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 from .session import NO_REPLY, Final, close_wedged_session
 from .session import SessionProto as SessionProto
 from .subagents import (
-    DEFAULT_SUBAGENTS,
     build_custom_agents,
     load_subagent_specs,
+    scaffold_default_subagents,
     skill_directories_for,
 )
 
@@ -418,12 +418,13 @@ class TaskManager:
         self._skills_enabled = skills_enabled
         self._skills_plugin_path = skills_plugin_path
         self._default_skills = default_skills
-        # Category-routed subagents (#87), owner-only. When on, owner sessions carry
-        # chief's DEFAULT_SUBAGENTS with each subagent's model resolved through the live
-        # routing table; guests never do (the gate lives in build_custom_agents).
-        # subagents_dir (#105, part of #103) overrides the built-ins on disk: a
-        # directory holding ≥1 loadable spec wins, resolved through the routing table
-        # at each spawn (no restart) — absent/empty keeps DEFAULT_SUBAGENTS.
+        # Category-routed subagents (#87), owner-only. subagents_dir is the SOLE source
+        # (#103): scaffold_default_subagents seeds chief's built-ins there on first boot
+        # (empty dir only), then load_subagent_specs reads it fresh at each spawn (no
+        # restart). Each subagent's model is resolved through the live routing table;
+        # guests never carry one (the gate lives in build_custom_agents). subagents_dir
+        # is None ⇒ nothing to scaffold/load, so no subagents (production always passes
+        # Settings.subagents_dir, a non-empty string).
         self._subagents_enabled = subagents_enabled
         self._subagents_dir = subagents_dir
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
@@ -897,20 +898,17 @@ class TaskManager:
             gate_kwargs["skill_directories"] = skill_directories_for(
                 self._skills_plugin_path, self._default_skills
             )
-        if self._subagents_enabled:
-            # Owner-only, category-routed (#87): each subagent's model is resolved now
-            # through the live routing table, so a category renamed/removed later (#83)
-            # still resolves (RoutingStore.resolve falls back). Routing off ⇒ model
-            # omitted, the subagent runs on the parent model. Guests never reach this
-            # branch, and build_custom_agents refuses a non-owner tier regardless.
-            # subagents_dir (#105): on-disk specs win when the dir holds ≥1 loadable
-            # spec, resolved fresh at every spawn (no restart, no approval card);
-            # an absent/empty dir keeps DEFAULT_SUBAGENTS.
-            specs = DEFAULT_SUBAGENTS
-            if self._subagents_dir is not None:
-                loaded = load_subagent_specs(self._subagents_dir)
-                if loaded:
-                    specs = loaded
+        if self._subagents_enabled and self._subagents_dir is not None:
+            # Owner-only, category-routed (#87). The subagents_dir is the SOLE source
+            # (#103): scaffold_default_subagents seeds chief's built-ins there on first
+            # boot (empty dir only — a surviving file is an expressed preference, never
+            # overwritten), then load_subagent_specs reads them fresh at every spawn.
+            # Each spec's model is resolved now through the live routing table, so a
+            # category renamed/removed later (#83) still resolves; routing off ⇒
+            # model omitted, the subagent runs on the parent model. build_custom_agents
+            # refuses a non-owner tier regardless, so guests never carry a subagent.
+            scaffold_default_subagents(self._subagents_dir)
+            specs = load_subagent_specs(self._subagents_dir)
             gate_kwargs["custom_agents"] = build_custom_agents(
                 specs, routing=self._routing, tier="owner"
             )
