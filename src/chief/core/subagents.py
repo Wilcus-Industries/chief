@@ -230,6 +230,38 @@ def load_subagent_specs(directory: str | Path) -> tuple[SubagentSpec, ...]:
     return tuple(specs)
 
 
+def chief_skill_directories(directory: str | Path) -> list[str]:
+    """Absolute leaf directory of every parseable ``SKILL.md`` beneath ``directory``.
+
+    Mirrors :func:`load_subagent_specs`: ``directory`` absent returns ``[]`` (#106).
+    Every ``SKILL.md`` found is parsed via :func:`_skill_md_name`; a malformed or
+    unreadable one is skipped with a logged warning rather than aborting the scan.
+
+    Per :func:`skill_directories_for`'s verified note, the Copilot runtime scans each
+    ``skill_directories`` entry *recursively* for SKILL.md, so a parent root would
+    over-expose everything nested beneath it. Each returned dir is therefore checked
+    to be a *leaf* — its subtree holds exactly its own SKILL.md — and a dir with a
+    nested SKILL.md below it (a parent root) is skipped, never returned.
+    """
+    root = Path(directory)
+    if not root.is_dir():
+        return []
+    directories: list[str] = []
+    for skill_md in sorted(root.rglob("SKILL.md")):
+        try:
+            name = _skill_md_name(skill_md)
+        except (OSError, UnicodeDecodeError):
+            name = None
+        if name is None:
+            logger.warning("skipping malformed chief skill file %s", skill_md)
+            continue
+        skill_dir = skill_md.parent
+        if list(skill_dir.rglob("SKILL.md")) != [skill_dir / "SKILL.md"]:
+            continue
+        directories.append(str(skill_dir.resolve()))
+    return directories
+
+
 def _skill_md_name(skill_md: Path) -> str | None:
     """The ``name:`` from a SKILL.md's leading YAML frontmatter block, or ``None``.
 
