@@ -145,6 +145,23 @@ def test_absent_empty_broken_overlay_boot_clean(
     assert "self_config" in caplog.text
 
 
+def test_non_string_keys_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # YAML 1.1: unquoted ``on`` parses to bool True, ``42`` to int — neither may
+    # reach pydantic-settings as a kwarg (TypeError: keywords must be strings).
+    with caplog.at_level(logging.WARNING, logger="chief.config"):
+        settings = _boot(
+            tmp_path,
+            monkeypatch,
+            overlay="on: fast\n42: x\nturn_timeout_seconds: 55.0\n",
+        )
+    assert settings.turn_timeout_seconds == 55.0  # string keys still apply
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "non-string keys" in message
+    assert "True" in message and "42" in message
+
+
 def test_env_repoints_overlay_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
