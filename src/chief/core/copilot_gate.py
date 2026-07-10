@@ -140,9 +140,14 @@ def normalize_permission_request(
     The tuple is what :func:`~chief.gate.gate.classify` reads, so each Copilot kind is
     mapped onto the chief tool vocabulary that drives the right verdict:
 
-    - ``read`` → ``("Read", {"file_path": path})`` — chief's file-op confinement applies
-      (owner: allowed within memory ∪ workspace; guest with no roots: DENY).
-    - ``write`` → ``("Write", {"file_path": file_name})`` — same rule (guest: DENY).
+    - ``read`` → ``("Read", {"file_path": path})`` — owner reads are unconfined at the
+      ``classify()`` layer (no ``file_path`` check); a guest never reaches ``Read`` at
+      all, since it's in ``GUEST_DENIED`` (``disallowed_tools`` at the SDK layer, per
+      ``tasks.py``'s ``GUEST_DENIED = sorted(set(MEMORY_TOOLS) |
+      set(WORKSPACE_TOOLS))``) — not because of a path fence.
+    - ``write`` → ``("Write", {"file_path": file_name})`` — same rule: owner writes are
+      unconfined at ``classify()``; a guest never reaches ``Write`` (also in
+      ``GUEST_DENIED``).
     - ``shell`` → ``(COPILOT_SHELL_TOOL, {"command": full_command_text})`` — routed to
       the command-tool safe-match, so it ASKs unless pre-approved.
     - ``mcp`` → ``("mcp__<server>__<tool>", args)`` — the SDK carries the MCP tool as

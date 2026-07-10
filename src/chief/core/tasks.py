@@ -109,9 +109,15 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
 # the engine's callers keep importing it from the TaskManager module.
-from .session import NO_REPLY, Final
+from .session import NO_REPLY, Final, close_wedged_session
 from .session import SessionProto as SessionProto
-from .subagents import DEFAULT_SUBAGENTS, build_custom_agents, skill_directories_for
+from .subagents import (
+    build_custom_agents,
+    chief_skill_directories,
+    load_subagent_specs,
+    scaffold_default_subagents,
+    skill_directories_for,
+)
 
 logger = logging.getLogger("chief.core.tasks")
 
@@ -120,8 +126,10 @@ logger = logging.getLogger("chief.core.tasks")
 #: so the engine tears the session down rather than freezing the task forever.
 TURN_TIMEOUT_NOTE = "⚠️ that turn timed out — try again."
 #: Bound on the watchdog's own teardown of a wedged session: ``interrupt`` may hang on
-#: the same wedged control stream, so it is time-boxed before ``aclose`` forces a fresh
-#: subprocess on the next turn. Keeps a hung teardown from re-freezing the consumer.
+#: the same wedged control stream, so it is time-boxed before the session is closed. A
+#: time-boxed ``aclose`` cancelled mid-teardown *leaks* the Copilot CLI subprocess
+#: (#101), so the close goes through :func:`close_wedged_session`, which reaps the
+#: orphan on expiry. Keeps a hung teardown from re-freezing the consumer.
 _RESET_TIMEOUT = 10.0
 #: Owner reminder when a turn is skipped because the cycle is paused at budget (M9).
 #: The choice card was already posted when the cycle paused; this nudges once per
@@ -139,11 +147,15 @@ SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
 ROUTE_CONFIRM = "🧭 Routing this thread as “{category}” → {target_class}:{model}."
 ROUTING_DISABLED = "Model routing isn't enabled."
 UNKNOWN_CATEGORY = "Unknown category “{category}”. Known: {known}."
-#: Read-only file tools chief gets at M4, confined to the memory dir by the gate.
+#: Read-only file tools chief gets at M4. ``classify()`` has no ``file_path`` check, so
+#: owner reads are unconfined — not fenced to the memory dir. Containment is the
+#: approval blacklist, untrusted-content screening, and the audit log, not a path check
+#: (footgun-catcher, not a security boundary — see ``chief/gate/blacklist.py``).
 MEMORY_TOOLS = sorted(FILE_OP_TOOLS)
 #: Write file tools the owner gets at M7 when the workspace is enabled — added to
-#: ``allowed_tools`` but confined to memory ∪ workspace by the gate (writes elsewhere
-#: DENY).
+#: ``allowed_tools`` unconfined (``classify()`` has no ``file_path`` check; the
+#: workspace dir is a cwd convention, not a fence). Containment is the approval
+#: blacklist, untrusted-content screening, and the audit log.
 WORKSPACE_TOOLS = sorted(WRITE_OP_TOOLS)
 #: Built-in shell tools refused outright at the SDK layer (belt-and-braces with the
 #: gate's hard DENY) — chief keeps ONE shell surface, the per-task host shell
@@ -330,9 +342,12 @@ class TaskManager:
         skills_enabled: bool = False,
         skills_plugin_path: str | None = None,
         default_skills: tuple[str, ...] = (),
+        chief_skills_dir: str | None = None,
         subagents_enabled: bool = False,
+        subagents_dir: str | None = None,
         group_context_max_messages: int = 50,
         versioner: Versioner | None = None,
+        harness_versioner: Versioner | None = None,
         screenshots_dir: str | None = None,
         screener: Screener | None = None,
         screening_tools: tuple[str, ...] = (),
@@ -406,10 +421,19 @@ class TaskManager:
         self._skills_enabled = skills_enabled
         self._skills_plugin_path = skills_plugin_path
         self._default_skills = default_skills
-        # Category-routed subagents (#87), owner-only. When on, owner sessions carry
-        # chief's DEFAULT_SUBAGENTS with each subagent's model resolved through the live
-        # routing table; guests never do (the gate lives in build_custom_agents).
+        # chief-authored skills root (#106) — its leaf SKILL.md dirs join the curated
+        # vendored set in the owner session's skill_directories; gated by
+        # skills_enabled, owner-only.
+        self._chief_skills_dir = chief_skills_dir
+        # Category-routed subagents (#87), owner-only. subagents_dir is the SOLE source
+        # (#103): scaffold_default_subagents seeds chief's built-ins there on first boot
+        # (empty dir only), then load_subagent_specs reads it fresh at each spawn (no
+        # restart). Each subagent's model is resolved through the live routing table;
+        # guests never carry one (the gate lives in build_custom_agents). subagents_dir
+        # is None ⇒ nothing to scaffold/load, so no subagents (production always passes
+        # Settings.subagents_dir, a non-empty string).
         self._subagents_enabled = subagents_enabled
+        self._subagents_dir = subagents_dir
         # Screenshot delivery (issue #34): when set, the PostToolUse hook reads
         # screenshots from this dir (shared volume) and delivers them via send_file.
         self._screenshots_dir = screenshots_dir
@@ -434,6 +458,12 @@ class TaskManager:
         # NullVersioner when unset — no commit overhead for tests / no-git runs.
         self._versioner: Versioner = (
             versioner if versioner is not None else NullVersioner()
+        )
+        # Separate versioner over data/harness/ (#110): its own root and its own
+        # asyncio.Lock mean harness and memory commits never collide, even though
+        # both fire at the end of the same turn.
+        self._harness_versioner: Versioner = (
+            harness_versioner if harness_versioner is not None else NullVersioner()
         )
 
     # ---- scheduler hooks -------------------------------------------------
@@ -810,7 +840,9 @@ class TaskManager:
         skills_on = self._skills_enabled and self._skills_plugin_path is not None
         allowed = list(MEMORY_TOOLS)
         if workspace_on:
-            # Write/Edit join the allow-list; gate confines them to memory ∪ workspace.
+            # Write/Edit join the allow-list unconfined (no file_path check in
+            # classify()) — containment is the approval blacklist, untrusted-content
+            # screening, and the audit log.
             allowed += list(WORKSPACE_TOOLS)
         for svc in services:
             # Reads only — writes stay off the allow-list, but under owner default-allow
@@ -879,14 +911,30 @@ class TaskManager:
             gate_kwargs["skill_directories"] = skill_directories_for(
                 self._skills_plugin_path, self._default_skills
             )
-        if self._subagents_enabled:
-            # Owner-only, category-routed (#87): each subagent's model is resolved now
-            # through the live routing table, so a category renamed/removed later (#83)
-            # still resolves (RoutingStore.resolve falls back). Routing off ⇒ model
-            # omitted, the subagent runs on the parent model. Guests never reach this
-            # branch, and build_custom_agents refuses a non-owner tier regardless.
+        # chief-authored skills (#106, part of #103): gated on the same composed
+        # ``skills_on`` as the vendored source (#118), so chief can't switch its own
+        # skills on (skills_enabled is a denied overlay key, #103) and an authored dir
+        # never arrives without the curated vendored set beside it. Each leaf SKILL.md
+        # dir joins that set in the same kwarg; guests never reach here.
+        if skills_on and self._chief_skills_dir is not None:
+            authored = chief_skill_directories(self._chief_skills_dir)
+            if authored:
+                gate_kwargs["skill_directories"] = (
+                    gate_kwargs.get("skill_directories", []) + authored
+                )
+        if self._subagents_enabled and self._subagents_dir is not None:
+            # Owner-only, category-routed (#87). The subagents_dir is the SOLE source
+            # (#103): scaffold_default_subagents seeds chief's built-ins there on first
+            # boot (empty dir only — a surviving file is an expressed preference, never
+            # overwritten), then load_subagent_specs reads them fresh at every spawn.
+            # Each spec's model is resolved now through the live routing table, so a
+            # category renamed/removed later (#83) still resolves; routing off ⇒
+            # model omitted, the subagent runs on the parent model. build_custom_agents
+            # refuses a non-owner tier regardless, so guests never carry a subagent.
+            scaffold_default_subagents(self._subagents_dir)
+            specs = load_subagent_specs(self._subagents_dir)
             gate_kwargs["custom_agents"] = build_custom_agents(
-                DEFAULT_SUBAGENTS, routing=self._routing, tier="owner"
+                specs, routing=self._routing, tier="owner"
             )
         # Each Google container (docker/mcp-*) + the in-process shell server. Google
         # writes and the shell tool are absent from allowed_tools, so every call routes
@@ -1699,6 +1747,10 @@ class TaskManager:
                 # versioner self-serializes concurrent callers; it also skips empty
                 # commits, so no-op turns cost one git status check (< 1 ms).
                 await self._versioner.commit("chief: memory auto-save")
+                # Commit the harness dir too (#110): a separate root + lock from the
+                # memory versioner above, so a subagent/skill write this turn made
+                # lands as its own revertible commit. Also skips empty commits.
+                await self._harness_versioner.commit("chief: harness auto-save")
                 # Only a clean turn re-arms the idle→archive timer.
                 self._arm_idle(task)
         except TimeoutError:
@@ -1717,21 +1769,19 @@ class TaskManager:
         """Best-effort teardown of a wedged session so the next turn reconnects fresh.
 
         The watchdog fired because the turn never terminated, so ``interrupt`` may also
-        hang on the wedged control stream; ``aclose`` (subprocess disconnect) then gets
-        a fresh CLI next turn. Both are time-boxed and guarded — this teardown runs on
-        the consumer loop, so a hung step here would re-freeze the task we just rescued.
+        hang on the wedged control stream; it is time-boxed and guarded. The close then
+        gets a fresh CLI next turn — but a time-boxed ``aclose`` cancelled mid-teardown
+        *leaks* the Copilot CLI subprocess (#101), so it goes through the shared
+        :func:`close_wedged_session`, which reaps the orphan on expiry. This teardown
+        runs on the consumer loop, so a hung step here would re-freeze the task we just
+        rescued — hence the bounds.
         """
-        for label, teardown in (
-            ("interrupt", task.session.interrupt),
-            ("aclose", task.session.aclose),
-        ):
-            try:
-                async with asyncio.timeout(_RESET_TIMEOUT):
-                    await teardown()
-            except Exception:
-                logger.debug(
-                    "%s during turn-timeout reset failed", label, exc_info=True
-                )
+        try:
+            async with asyncio.timeout(_RESET_TIMEOUT):
+                await task.session.interrupt()
+        except Exception:
+            logger.debug("interrupt during turn-timeout reset failed", exc_info=True)
+        await close_wedged_session(task.session, timeout=_RESET_TIMEOUT)
 
     async def _emit_final(self, task: _RunningTask, text: str) -> None:
         """Deliver the final reply: a Markdown file when long, else split messages (M8).

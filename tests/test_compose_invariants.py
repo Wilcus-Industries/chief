@@ -11,7 +11,7 @@ token-directory contract (issues #56-#58).
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 _COMPOSE_PATH = Path(__file__).parent.parent / "docker-compose.yml"
 

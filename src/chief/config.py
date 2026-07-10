@@ -5,16 +5,22 @@ overrides; secrets (the per-platform bot tokens; the optional OpenRouter/Brave k
 come from a ``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` or the
 repo-local
 ``./secrets`` — see :func:`chief.app.load_settings`) with an environment fallback.
-Precedence, highest first: explicit init kwargs → environment → ``config.yaml`` → secret
-files. At least one chat platform (Telegram and/or Discord) must be fully configured.
+Precedence, highest first: init kwargs → environment → ``self_config.yaml`` overlay
+(denylist-filtered) → ``config.yaml`` → secret files. At least one chat platform
+(Telegram and/or Discord) must be fully configured.
 """
 
+import fnmatch
+import logging
 import os
 import re
 from datetime import time
+from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel, field_validator, model_validator
+from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -30,6 +36,8 @@ from .tools.routing_admin import MUTATING_TOOL_NAMES as _ROUTING_ADMIN_TOOLS
 from .tools.sheets.mcp import WRITE_TOOLS as _SHEETS_WRITE_TOOLS
 from .tools.web import FETCH_TOOL_NAME as _WEB_FETCH_TOOL
 from .tools.web import SEARCH_TOOL_NAME as _WEB_SEARCH_TOOL
+
+logger = logging.getLogger("chief.config")
 
 #: Default ``blacklist_tools`` seed (MEDIUM-1 fix): under the owner's default-allow
 #: gate, being absent from ``allowed_tools`` no longer routes a call to an approval
@@ -54,6 +62,114 @@ _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     + _SHEETS_WRITE_TOOLS
     + (_WEB_FETCH_TOOL,)
     + _ROUTING_ADMIN_TOOLS
+)
+
+#: Where chief writes its own behavioral overlay (#107, part of #103). Kept as a
+#: constant so the field default and the source's fallback can't drift apart. It sits
+#: inside ``harness_dir`` on purpose: the harness ``GitVersioner`` stages that whole
+#: root, so every self-edit of the overlay is its own revertible commit (#125).
+DEFAULT_SELF_CONFIG_PATH = "data/harness/self_config.yaml"
+
+#: Top-level overlay keys chief's own ``self_config.yaml`` may never set (#107). The
+#: overlay lets chief rewrite its *behavioral* config at runtime, but the security
+#: boundary — the gate blacklists, policy seeds, screening, every opt-in subsystem
+#: ``*_enabled`` flag, the owner-identity ids, secrets, the db, MCP endpoints, inbox
+#: thread-key routing, and the git-versioning toggles and their versioned roots — stays
+#: owner-only. Patterns are matched with :func:`fnmatch.fnmatchcase` against the
+#: overlay's top-level keys only; every denied family is a top-level ``Settings``
+#: field, so no denied key hides inside a mergeable nested mapping.
+#: ``primary_platform`` is denied as an inbox-routing key (it picks the platform the
+#: owner inbox lives on); ``self_config_path`` is denied so a self-repointing overlay
+#: can't misreport where the resolved config came from.
+SELF_CONFIG_DENYLIST: tuple[str, ...] = (
+    "blacklist_*",       # blacklist_shell_patterns, blacklist_tools
+    "never_seed",
+    "approved_seed",
+    "screening_*",       # screening_enabled/_model/_block/_tools
+    "*_enabled",         # every opt-in subsystem flag (16 fields today)
+    "owner_*_id",        # owner_telegram_id/_discord_id/_home_chat_id/_home_guild_id
+    "*_token",           # telegram_bot_token, discord_bot_token
+    "*_api_key",         # openrouter_api_key, brave_search_api_key
+    "db_path",
+    "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
+    "*_thread_key",      # front_desk_thread_key, primary_thread_key
+    "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
+    # Reversibility is owner-only: not just the *_git toggle, but the path that
+    # defines each versioned root — repointing the root (or moving chief's write
+    # targets outside it) escapes revert exactly as flipping the toggle off would
+    # (#110). memory and harness are treated identically.
+    "memory_git",
+    "memory_dir",
+    "harness_git",
+    "harness_dir",
+    # The audit log is one of the three controls that survived the sandbox (blacklist +
+    # screening + audit log). Repointing it blinds forensics the same way flipping
+    # harness_git off escapes revert — same class, same fence (#120).
+    "audit_log_path",
+    "subagents_dir",     # chief's harness write target — stays inside harness_dir
+    "chief_skills_dir",  # chief's harness write target — stays inside harness_dir
+    "self_config_path",  # the overlay cannot re-point itself
+)
+
+
+def _overlay_denied(key: str) -> bool:
+    """True when a ``self_config.yaml`` top-level key hits the denylist (#107)."""
+    return any(fnmatch.fnmatchcase(key, pat) for pat in SELF_CONFIG_DENYLIST)
+
+
+#: Review-time allow-list: the explicit complement of ``SELF_CONFIG_DENYLIST`` over
+#: ``Settings.model_fields`` (#109). Every ``Settings`` field must be either denied
+#: by ``SELF_CONFIG_DENYLIST`` or listed here as merge-safe — the guard test
+#: (``tests/test_self_config.py``) fails a field that is in neither set, in both, or
+#: listed here but no longer a real field. This is a hand-maintained literal, not
+#: computed from the denylist, so it can't silently track the denylist's growth —
+#: adding a new ``Settings`` field always requires a deliberate edit here (or to
+#: ``SELF_CONFIG_DENYLIST``), which is the point of a review-time default-deny.
+MERGE_SAFE: frozenset[str] = frozenset(
+    {
+        "owner_name",
+        "owner_model_default",
+        "owner_model_opus",
+        "opus_auto_detect",
+        "routing_seed",
+        "routing_surface_defaults",
+        "guest_model",
+        "guest_ack",
+        "concurrency",
+        "turn_timeout_seconds",
+        "idle_archive_seconds",
+        "compaction_idle_seconds",
+        "classifier_model",
+        "approval_timeout_seconds",
+        "guest_rate_per_window",
+        "guest_rate_window_seconds",
+        "guest_global_rate_per_window",
+        "git_author_name",
+        "git_author_email",
+        "owner_tz",
+        "playwright_screenshots_dir",
+        "workspace_dir",
+        "shell_timeout_seconds",
+        "shell_output_limit",
+        "web_fetch_timeout_seconds",
+        "web_fetch_max_bytes",
+        "web_search_count",
+        "scheduler_tick_seconds",
+        "quiet_hours_start",
+        "quiet_hours_end",
+        "heartbeat_url",
+        "heartbeat_interval_seconds",
+        "monitor_min_interval_seconds",
+        "monitor_model",
+        "premium_request_cap",
+        "openrouter_dollar_cap",
+        "budget_warn_fractions",
+        "budget_exhaust_fraction",
+        "budget_downgrade_model",
+        "budget_cycle_anchor_day",
+        "default_skills",
+        "group_context_max_messages",
+    }
 )
 
 
@@ -391,6 +507,30 @@ class Settings(BaseSettings):
     # (routing off ⇒ the subagent runs on the parent model). Owner-only — no guest gets
     # subagents.
     subagents_enabled: bool = False
+    # On-disk subagents (#105, part of #103): one ``.md`` per subagent, filename stem =
+    # name, YAML frontmatter (``category``, ``description``, optional ``skills``), body
+    # = prompt. Resolved through the live routing table at spawn — no restart, no
+    # approval card. Seeded from chief's built-in subagents on first boot (empty-dir
+    # only) and thereafter the sole source.
+    subagents_dir: str = "data/harness/subagents"
+    # chief-authored skills root (#106, part of #103): presence of a SKILL.md beneath
+    # it makes that dir active for the next owner task; scanned fresh at every owner
+    # spawn, gated by skills_enabled. Absent/empty ⇒ only the curated vendored set
+    # (default_skills) is handed in.
+    chief_skills_dir: str = "data/harness/skills"
+    # Common parent of subagents_dir/chief_skills_dir (#110, part of #103): a second,
+    # independent GitVersioner roots here so every chief-authored subagent/skill change
+    # is a revertible commit — sibling data/chief.db and data/workspace/ sit outside
+    # this root and are never staged. harness_git mirrors memory_git's opt-out shape.
+    harness_dir: str = "data/harness"
+    harness_git: bool = True
+    # Chief-authored behavioral overlay (#107, part of #103): a self_config.yaml chief
+    # writes for itself, deep-merged over config.yaml at boot by
+    # ``SelfConfigSettingsSource`` (below env, so env still wins; secrets are fenced by
+    # the denylist's *_token/*_api_key patterns, NOT by source order — see #119).
+    # Security keys are denied (``SELF_CONFIG_DENYLIST``). Edits apply lazily at the
+    # next restart; an absent or broken file boots clean.
+    self_config_path: str = DEFAULT_SELF_CONFIG_PATH
 
     # Group chats (M11), default off (mirror the opt-in subsystem pattern). A GROUP is
     # any multi-party chat chief is invited to that ISN'T the owner's own HOME surface —
@@ -446,6 +586,10 @@ class Settings(BaseSettings):
         "memory_dir",
         "workspace_dir",
         "playwright_screenshots_dir",
+        "subagents_dir",
+        "chief_skills_dir",
+        "harness_dir",
+        "self_config_path",
     )
     @classmethod
     def _expand_user_paths(cls, value: str) -> str:
@@ -719,9 +863,109 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # ``yaml_source`` is passed twice on purpose: once as a path lookup (to resolve
+        # self_config_path from config.yaml) and once as the config.yaml source itself.
+        # It caches its file read at construction, so the extra lookup call is free.
+        yaml_source = YamlConfigSettingsSource(settings_cls)
         return (
             init_settings,
             env_settings,
-            YamlConfigSettingsSource(settings_cls),
+            SelfConfigSettingsSource(
+                settings_cls, init_settings, env_settings, yaml_source
+            ),
+            yaml_source,
             file_secret_settings,
         )
+
+
+class SelfConfigSettingsSource(PydanticBaseSettingsSource):
+    """Chief's own behavioral overlay (#107, part of #103).
+
+    Reads ``self_config_path`` (``data/harness/self_config.yaml`` by default), the file
+    chief writes to reconfigure *itself* at runtime, and returns it as a settings source
+    that sits between ``env`` and ``config.yaml``. pydantic-settings deep-merges the
+    source chain, so an overlay key wins over ``config.yaml`` while env vars still win
+    over the overlay.
+
+    **Secrets are protected by the denylist, not by source order** (#119).
+    ``file_secret_settings`` sits *last* in the chain — lowest precedence — so the
+    overlay outranks it. What actually keeps chief from writing itself a credential is
+    that every secret-shaped field matches a :data:`SELF_CONFIG_DENYLIST` pattern
+    (``*_token``, ``*_api_key``), and the ``test_every_settings_field_classified``
+    guard (#109) forces any newly-added field to be denied or explicitly marked
+    merge-safe in :data:`MERGE_SAFE`. Do not add a secret field whose name escapes
+    those patterns.
+
+    The security-relevant families (:data:`SELF_CONFIG_DENYLIST`) are stripped *before*
+    the merge, with one warning naming every dropped key. A missing, empty, or broken
+    overlay yields ``{}`` — chief always boots on ``config.yaml`` alone.
+
+    **A type-invalid value is not "broken" in that sense — it fails the boot** (#122).
+    The drops above are for a file that is unusable (absent, unparseable, not a mapping)
+    or hostile (a denied key); each is dropped so a *usable* config survives. A
+    well-formed overlay carrying ``concurrency: banana`` is neither. It is a plain
+    config typo, and this module fails the boot on those by long-standing convention
+    (see ``_validate_blacklist_patterns``, ``_validate_hhmm``). That is the fail-loud
+    choice, not the fragile one: chief failing to boot stops the heartbeat, so the
+    external dead-man's switch pages the owner within one interval. Skipping the value
+    instead would leave chief running on a stale setting while its own overlay claims
+    otherwise, and the only signal would be a log line nobody reads.
+    """
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        *path_lookups: PydanticBaseSettingsSource,
+    ) -> None:
+        super().__init__(settings_cls)
+        # Sources consulted (in precedence order) only to resolve self_config_path:
+        # init kwargs > env > config.yaml, falling back to DEFAULT_SELF_CONFIG_PATH.
+        self._path_lookups = path_lookups
+
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Any, str, bool]:
+        # Required abstract method; unused — ``__call__`` is overridden wholesale.
+        return (None, field_name, False)
+
+    def _resolve_path(self) -> Path:
+        for source in self._path_lookups:
+            value = source().get("self_config_path")
+            if value:
+                return Path(os.path.expanduser(str(value)))
+        return Path(DEFAULT_SELF_CONFIG_PATH)
+
+    def __call__(self) -> dict[str, Any]:
+        path = self._resolve_path()
+        if not path.is_file():
+            return {}  # absence is the normal state — silent.
+        try:
+            loaded = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as exc:
+            logger.warning("self_config overlay at %s is unparseable: %s", path, exc)
+            return {}
+        if loaded is None:
+            return {}  # empty file — silent.
+        if not isinstance(loaded, dict):
+            logger.warning(
+                "self_config overlay at %s is not a mapping (got %s); ignoring.",
+                path,
+                type(loaded).__name__,
+            )
+            return {}
+        non_str = [k for k in loaded if not isinstance(k, str)]
+        if non_str:
+            logger.warning(
+                "self_config overlay at %s has non-string keys %s; dropping them.",
+                path,
+                sorted(repr(k) for k in non_str),
+            )
+            loaded = {k: v for k, v in loaded.items() if isinstance(k, str)}
+        dropped = sorted(k for k in loaded if _overlay_denied(k))
+        if dropped:
+            logger.warning(
+                "self_config overlay at %s tried to set denied keys %s; dropping them.",
+                path,
+                dropped,
+            )
+        return {k: v for k, v in loaded.items() if not _overlay_denied(k)}

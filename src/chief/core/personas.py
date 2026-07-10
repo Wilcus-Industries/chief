@@ -6,7 +6,8 @@ auto-generated ``facts/`` listing plus the memory-writing guidance block (when/w
 to persist durable facts). The ``facts/`` listing is derived from the directory at
 prompt-build time (injected only when non-empty); no stored index file is read or
 written. Chief can Write to ``User.md`` or the ``facts/`` tree in the same session via
-its memory-confined Write tool.
+its Write tool — unconfined at the ``classify()`` layer; containment is the approval
+blacklist, untrusted-content screening, and the audit log.
 
 Tier isolation is by construction (DESIGN): a guest prompt never carries the owner's
 ``User.md``, facts listing, or memory-writing guidance, and guest sessions are wired

@@ -164,6 +164,31 @@ def build_memory(settings: Settings) -> MemoryStore:
     )
 
 
+def build_harness_versioner(settings: Settings) -> Versioner:
+    """Construct the harness dir's own versioner from settings (#110).
+
+    A second, independent :class:`GitVersioner` rooted at ``harness_dir`` — the
+    common parent of ``subagents_dir``/``chief_skills_dir`` — so every
+    chief-authored subagent/skill write is its own revertible commit, separate
+    from the memory repo's lock and history.
+
+    It stages the whole root (``git add -A``), so the tracked set is subagents, skills,
+    **and** ``self_config.yaml``, which defaults inside ``harness_dir`` (#125). That is
+    intended: the overlay is chief-authored, reversible content of exactly the kind this
+    versioner exists to make revertible. Anything else chief writes under the root is
+    versioned on the same terms.
+    """
+    return (
+        GitVersioner(
+            settings.harness_dir,
+            author_name=settings.git_author_name,
+            author_email=settings.git_author_email,
+        )
+        if settings.harness_git
+        else NullVersioner()
+    )
+
+
 def build_google_services(settings: Settings) -> list[GoogleService]:
     """Resolve the enabled Google MCP servers from settings (owner-only at runtime)."""
     services: list[GoogleService] = []
@@ -404,6 +429,7 @@ def build_engine(
     memory: MemoryStore,
     budget: BudgetGate | None = None,
     routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
     guest_admin = (
@@ -534,13 +560,23 @@ def build_engine(
             os.path.abspath(SKILLS_PLUGIN_DIR) if settings.skills_enabled else None
         ),
         default_skills=settings.default_skills,
+        # chief-authored skills root (#106, part of #103): scanned fresh at every owner
+        # spawn; absent/empty is inert (resolves to no extra dirs).
+        chief_skills_dir=settings.chief_skills_dir,
         # Owner-only category-routed subagents (#87). Inert unless the flag is on; the
         # model each subagent runs on is resolved through the routing table at spawn.
+        # subagents_dir (#105, part of #103) is the sole source: the built-ins are
+        # scaffolded there on first boot (empty dir only), no restart needed after.
         subagents_enabled=settings.subagents_enabled,
+        subagents_dir=settings.subagents_dir,
         # Share the exact versioner the memory store uses so auto-commit and memory
         # mutations go through the same git instance. The versioner self-serializes
         # all callers via its internal asyncio.Lock (#22 / #29).
         versioner=memory.versioner,
+        # Separate versioner over data/harness/ (#110): its own root and its own
+        # asyncio.Lock mean harness and memory commits never collide, even though
+        # both fire at the end of the same turn.
+        harness_versioner=harness_versioner,
         # Screenshot delivery (issue #34): when playwright is enabled, pass the
         # screenshots dir so the PostToolUse hook can read files and send_file them.
         screenshots_dir=(
@@ -574,6 +610,7 @@ def build_telegram_stack(
     audit: AuditLog,
     memory: MemoryStore,
     routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
@@ -603,6 +640,7 @@ def build_telegram_stack(
         memory=memory,
         budget=build_budget(settings, io=io, session_factory=session_factory),
         routing=routing,
+        harness_versioner=harness_versioner,
     )
     adapter = TelegramAdapter(
         application=application,
@@ -632,6 +670,7 @@ def build_discord_stack(
     audit: AuditLog,
     memory: MemoryStore,
     routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
@@ -662,6 +701,7 @@ def build_discord_stack(
         memory=memory,
         budget=build_budget(settings, io=io, session_factory=session_factory),
         routing=routing,
+        harness_versioner=harness_versioner,
     )
     adapter = DiscordAdapter(
         client=client,
@@ -692,6 +732,7 @@ def build_stacks(
     audit: AuditLog,
     memory: MemoryStore,
     routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
 ) -> list[Stack]:
     """Build one engine stack per configured platform (Telegram and/or Discord)."""
     stacks: list[Stack] = []
@@ -704,6 +745,7 @@ def build_stacks(
                 audit=audit,
                 memory=memory,
                 routing=routing,
+                harness_versioner=harness_versioner,
             )
         )
     if settings.discord_configured:
@@ -715,6 +757,7 @@ def build_stacks(
                 audit=audit,
                 memory=memory,
                 routing=routing,
+                harness_versioner=harness_versioner,
             )
         )
     return stacks
@@ -787,6 +830,9 @@ async def serve(settings: Settings) -> None:
     audit = AuditLog(settings.audit_log_path)
     policy = PolicyStore(factory, audit=audit)
     memory = build_memory(settings)
+    # Second, independent versioner over data/harness/ (#110) — its own root and lock
+    # mean a harness commit never collides with a memory commit in the same turn.
+    harness_versioner = build_harness_versioner(settings)
     # Model routing (#79): one shared, seeded routing table across all stacks (None when
     # disabled). Seeded from config below, before serving, like the policy lists.
     routing = RoutingStore(factory) if settings.routing_enabled else None
@@ -801,6 +847,7 @@ async def serve(settings: Settings) -> None:
         await routing.seed(s.as_tuple() for s in settings.routing_seed)
     await memory.ensure_scaffold()
     await memory.purge_expired()
+    await harness_versioner.init()
 
     stacks = build_stacks(
         settings,
@@ -809,6 +856,7 @@ async def serve(settings: Settings) -> None:
         audit=audit,
         memory=memory,
         routing=routing,
+        harness_versioner=harness_versioner,
     )
     # One scheduler loop across all stacks (it binds to the primary platform's manager),
     # owning an http client for the heartbeat when configured. None when disabled.
