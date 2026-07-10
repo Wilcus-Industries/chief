@@ -1,6 +1,9 @@
 """Entrypoint settings loading and per-platform component wiring."""
 
+import asyncio
+import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -720,3 +723,40 @@ async def test_re_arm_on_boot_recovers_pending(
     rearmed = await approvals.re_arm()
 
     assert rearmed == [approval_id]
+
+
+async def test_serve_tokenless_boots_socket_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #130 central mechanism, real end-to-end: serve() with ZERO platform tokens boots,
+    # runs real migrations + memory scaffold, and binds the client-plane socket. A real
+    # client connects and reads a real hello frame; clean shutdown removes the socket.
+    (tmp_path / "config.yaml").write_text("memory_git: false\nharness_git: false\n")
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()  # empty: no telegram/discord tokens
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    task = asyncio.create_task(app.serve(settings))
+    socket_path = tmp_path / "data" / "chief.sock"
+    try:
+        for _ in range(100):  # ~5s: boot runs migrations + scaffold before binding
+            if socket_path.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert socket_path.exists(), "serve() never bound the client-plane socket"
+        assert stat.S_IMODE(os.stat(socket_path).st_mode) == 0o600
+
+        reader, writer = await asyncio.open_unix_connection(str(socket_path))
+        hello = json.loads(await asyncio.wait_for(reader.readline(), 5))
+        assert hello["type"] == "hello"
+        assert hello["protocol"] == 1
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # Clean shutdown unlinked the socket file.
+    assert not socket_path.exists()

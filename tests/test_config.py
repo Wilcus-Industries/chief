@@ -355,17 +355,41 @@ def test_group_chat_disabled_ignores_missing_targets(
     assert settings.owner_home_guild_id is None
 
 
-def test_no_platform_configured_errors(
+def test_no_platform_configured_boots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Token present but no owner id → Telegram half-set, Discord absent: rejected.
+    # #130: a chief with zero platform tokens boots — the always-on client-plane socket
+    # is unconditional infrastructure, so no chat platform is required at boot.
     (tmp_path / "config.yaml").write_text("owner_name: Will\n")  # no owner_telegram_id
     secrets = tmp_path / "secrets"
     _write_secrets(secrets)
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValidationError, match="no chat platform configured"):
-        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+    assert settings.telegram_configured is False  # token present, no owner id
+    assert settings.discord_configured is False
+
+
+def test_socket_path_default_and_tilde_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #130: the socket path defaults under the data dir and, like every other host path,
+    # a leading ``~`` expands so a config can point at a home-dir location.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 42\nsocket_path: ~/x/chief.sock\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    assert settings.socket_path == str(tmp_path / "x" / "chief.sock")
+
+    (tmp_path / "config.yaml").write_text("owner_telegram_id: 42\n")
+    default = Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+    assert default.socket_path == "data/chief.sock"
 
 
 def test_telegram_only_is_configured(
