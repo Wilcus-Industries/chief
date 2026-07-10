@@ -83,7 +83,7 @@ ignore_missing_imports = true
 
 # pyyaml ships no inline stubs for the bare `import yaml` module name (only for
 # `yaml.*` submodules); used by chief.core.subagents to parse on-disk subagent
-# frontmatter (#105).
+# frontmatter (#105) and by chief.config to load the self_config.yaml overlay (#107).
 [[tool.mypy.overrides]]
 module = ["yaml"]
 ignore_missing_imports = true
