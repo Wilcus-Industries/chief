@@ -100,6 +100,10 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     "memory_dir",
     "harness_git",
     "harness_dir",
+    # The audit log is one of the three controls that survived the sandbox (blacklist +
+    # screening + audit log). Repointing it blinds forensics the same way flipping
+    # harness_git off escapes revert — same class, same fence (#120).
+    "audit_log_path",
     "subagents_dir",     # chief's harness write target — stays inside harness_dir
     "chief_skills_dir",  # chief's harness write target — stays inside harness_dir
     "self_config_path",  # the overlay cannot re-point itself
@@ -464,7 +468,8 @@ class Settings(BaseSettings):
     harness_git: bool = True
     # Chief-authored behavioral overlay (#107, part of #103): a self_config.yaml chief
     # writes for itself, deep-merged over config.yaml at boot by
-    # ``SelfConfigSettingsSource`` (below env, so env still wins; secrets unreachable).
+    # ``SelfConfigSettingsSource`` (below env, so env still wins; secrets are fenced by
+    # the denylist's *_token/*_api_key patterns, NOT by source order — see #119).
     # Security keys are denied (``SELF_CONFIG_DENYLIST``). Edits apply lazily at the
     # next restart; an absent or broken file boots clean.
     self_config_path: str = DEFAULT_SELF_CONFIG_PATH
@@ -822,10 +827,19 @@ class SelfConfigSettingsSource(PydanticBaseSettingsSource):
     chief writes to reconfigure *itself* at runtime, and returns it as a settings source
     that sits between ``env`` and ``config.yaml``. pydantic-settings deep-merges the
     source chain, so an overlay key wins over ``config.yaml`` while env vars still win
-    over the overlay and secret files stay unreachable. The security-relevant families
-    (:data:`SELF_CONFIG_DENYLIST`) are stripped *before* the merge, with one warning
-    naming every dropped key. A missing, empty, or broken overlay yields ``{}`` — chief
-    always boots on ``config.yaml`` alone.
+    over the overlay.
+
+    **Secrets are protected by the denylist, not by source order** (#119).
+    ``file_secret_settings`` sits *last* in the chain — lowest precedence — so the
+    overlay outranks it. What actually keeps chief from writing itself a credential is
+    that every secret-shaped field matches a :data:`SELF_CONFIG_DENYLIST` pattern
+    (``*_token``, ``*_api_key``), and the ``test_every_settings_field_is_classified``
+    guard (#109) forces any newly-added field to be denied or explicitly marked
+    merge-safe. Do not add a secret field whose name escapes those patterns.
+
+    The security-relevant families (:data:`SELF_CONFIG_DENYLIST`) are stripped *before*
+    the merge, with one warning naming every dropped key. A missing, empty, or broken
+    overlay yields ``{}`` — chief always boots on ``config.yaml`` alone.
     """
 
     def __init__(
