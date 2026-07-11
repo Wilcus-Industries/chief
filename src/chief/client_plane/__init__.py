@@ -10,6 +10,7 @@ adapter installs one); the #132 client imports only the protocol vocabulary.
 from .protocol import (
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
+    MILESTONE_PREFIX,
     PROTOCOL_VERSION,
     TYPE_COMMAND,
     TYPE_ERROR,
@@ -28,6 +29,7 @@ from .protocol import (
     file_frame,
     hello_frame,
     milestone_frame,
+    outbound_frame,
     pong_frame,
     reply_frame,
     user_frame,
@@ -37,6 +39,7 @@ from .server import ConnectHook, FrameHandler, FrameSender, SocketServer
 __all__ = [
     "CLI_PLATFORM",
     "DEFAULT_THREAD_KEY",
+    "MILESTONE_PREFIX",
     "PROTOCOL_VERSION",
     "TYPE_COMMAND",
     "TYPE_ERROR",
@@ -59,6 +62,7 @@ __all__ = [
     "file_frame",
     "hello_frame",
     "milestone_frame",
+    "outbound_frame",
     "pong_frame",
     "reply_frame",
     "user_frame",
