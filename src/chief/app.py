@@ -651,7 +651,7 @@ def build_telegram_stack(
     mirror = MirrorTaskIO(
         io,
         platform="telegram",
-        session_factory=session_factory,
+        log=MessageLog(session_factory),
         server=socket_server,
     )
     manager = build_engine(
@@ -723,7 +723,7 @@ def build_discord_stack(
     mirror = MirrorTaskIO(
         io,
         platform="discord",
-        session_factory=session_factory,
+        log=MessageLog(session_factory),
         server=socket_server,
     )
     manager = build_engine(
@@ -784,11 +784,10 @@ def build_cli_stack(
     directions and powers detach-replay — a frame emitted while no client is attached is
     logged held, then replayed by the adapter's connect hook on the next attach.
 
-    The engine io is additionally wrapped in :class:`MirrorTaskIO` (#133) with
-    ``server=None`` — the inner ``CliTaskIO`` already broadcasts (the socket *is* its
-    delivery), so the mirror adds only its own message-log record, never a duplicate
-    frame. The approval manager and budget keep the raw ``CliTaskIO``.
-
+    Unlike the chat stacks, the engine io is **not** wrapped in :class:`MirrorTaskIO`
+    (#133): the ``CliTaskIO`` is already this stack's broadcaster *and* its recorder, so
+    a mirror would only broadcast nothing and log every outbound a second time. One
+    outbound, one recorder.
     """
     message_log = MessageLog(session_factory)
     io = CliTaskIO(socket_server, log=message_log)
@@ -799,13 +798,10 @@ def build_cli_stack(
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
     )
-    mirror = MirrorTaskIO(
-        io, platform="cli", session_factory=session_factory, server=None
-    )
     manager = build_engine(
         settings,
         platform="cli",
-        io=mirror,
+        io=io,
         session_factory=session_factory,
         policy=policy,
         approvals=approvals,
