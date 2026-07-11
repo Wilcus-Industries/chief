@@ -42,6 +42,12 @@ FrameHandler = Callable[
     [Mapping[str, object], FrameSender], Awaitable[bool]
 ]
 
+#: Runs once per accepted connection, after the hello and before the connection joins
+#: the broadcast set; the #132 CLI adapter replays held frames through it. Frames it
+#: sends through its ``FrameSender`` reach only this connection and precede any live
+#: traffic on it.
+ConnectHook = Callable[[FrameSender], Awaitable[None]]
+
 #: Socket file mode: owner read/write only. The socket is a local-control surface, so no
 #: group/other access — mirrors the db_path fence class (config.SELF_CONFIG_DENYLIST).
 _SOCKET_MODE = 0o600
@@ -70,6 +76,18 @@ class SocketServer:
         #: The injected inbound application (#131). ``None`` ⇒ transport-only (#130):
         #: every non-ping frame falls through to the ``unknown_type`` error.
         self._handler: FrameHandler | None = None
+        #: The injected per-connection connect hook (#132). ``None`` ⇒ no replay: a new
+        #: connection registers for broadcast the instant after its hello, as in #131.
+        self._connect_hook: ConnectHook | None = None
+
+    @property
+    def has_clients(self) -> bool:
+        """True iff at least one live (not-closing) client is attached (#132).
+
+        The #132 CLI IO snapshots this *before* a broadcast to decide whether an
+        outbound frame is delivered live or logged held for the next attach.
+        """
+        return any(not w.is_closing() for w in self._clients)
 
     def set_handler(self, handler: FrameHandler | None) -> None:
         """Install (or clear, with ``None``) the inbound-frame application (#131).
@@ -80,6 +98,16 @@ class SocketServer:
         it first.
         """
         self._handler = handler
+
+    def set_connect_hook(self, hook: ConnectHook | None) -> None:
+        """Install (or clear, with ``None``) the per-connection connect hook (#132).
+
+        With no hook — before this is called and after it is cleared on shutdown — a
+        new connection registers for broadcast the instant after its hello, byte-for-
+        byte as in #131. With a hook set, each accepted connection runs it (after the
+        hello, before registration) so the #132 CLI adapter can replay held frames.
+        """
+        self._connect_hook = hook
 
     async def broadcast(self, frame: Mapping[str, object]) -> None:
         """Push ``frame`` to every live client — engine output fans out here (#131).
@@ -148,10 +176,24 @@ class SocketServer:
         task = asyncio.current_task()
         assert task is not None  # streams always run this callback inside a task
         self._handlers.add(task)
-        self._clients.add(writer)  # register for outbound broadcast (#131)
         try:
             writer.write(encode(hello_frame()))
             await writer.drain()
+            # Register for broadcast only AFTER the hello and the connect hook: this is
+            # what guarantees the hook's replay frames precede any live traffic on this
+            # connection. A broadcast racing the hook is either delivered to other live
+            # clients or logged held for the next attach — never interleaved here.
+            if self._connect_hook is not None:
+
+                async def sender(reply: Mapping[str, object]) -> None:
+                    writer.write(encode(reply))
+                    await writer.drain()
+
+                try:
+                    await self._connect_hook(sender)
+                except Exception:
+                    logger.exception("client-plane connect hook raised")
+            self._clients.add(writer)  # register for outbound broadcast (#131)
             while True:
                 try:
                     line = await reader.readline()

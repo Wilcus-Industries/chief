@@ -32,7 +32,7 @@ from .protocol import (
     reply_frame,
     user_frame,
 )
-from .server import FrameHandler, FrameSender, SocketServer
+from .server import ConnectHook, FrameHandler, FrameSender, SocketServer
 
 __all__ = [
     "CLI_PLATFORM",
@@ -47,6 +47,7 @@ __all__ = [
     "TYPE_PONG",
     "TYPE_REPLY",
     "TYPE_USER",
+    "ConnectHook",
     "FrameError",
     "FrameHandler",
     "FrameSender",

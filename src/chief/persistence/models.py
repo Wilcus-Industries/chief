@@ -8,7 +8,7 @@ so persistence stays independent of the adapter layer.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -161,6 +161,43 @@ class UsageMeter(Base):
     mode: Mapped[str] = mapped_column(default="normal")  # usage.MODE_* (string const)
     warned_fraction: Mapped[float] = mapped_column(default=0.0)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
+class MessageLogEntry(Base):
+    """One logged message on a thread — both directions of every stack (#132).
+
+    The per-thread message log and future dashboard read model (#128): every inbound
+    owner message and every outbound chief frame lands one row, so a client that
+    detaches and reattaches can replay what it missed. Held (undelivered) is not a
+    separate outbox — the log *is* the mechanism: an outbound row snapshots
+    ``delivered`` from whether any client was attached at emit time, and replay claims
+    the undelivered rows on the next attach (restart-proof).
+
+    Persistence stays adapter-independent, so ``role`` is a plain string
+    (``messages.ROLE_*``), ``surface`` an adapter ``Surface`` value, and ``kind`` a wire
+    frame type — none imported here (same rule as ``tier``). The
+    ``(platform, delivered)`` index keeps the replay claim cheap as the log grows.
+
+    ``delivered`` semantics: outbound rows are ``False`` when no client was attached at
+    emit and ``True`` otherwise; inbound rows and direct command replies are always
+    ``True`` (they reached their destination live and are never replayed).
+    """
+
+    __tablename__ = "message_log"
+    __table_args__ = (
+        Index("ix_message_log_platform_delivered", "platform", "delivered"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str]
+    thread_key: Mapped[str]
+    role: Mapped[str]  # messages.ROLE_* ("owner" | "chief")
+    surface: Mapped[str]  # adapters Surface value, e.g. "dm"
+    kind: Mapped[str]  # wire frame type: user/command/reply/milestone/file
+    text: Mapped[str]
+    payload: Mapped[str | None]  # outbound wire-frame JSON (replay src); None inbound
+    delivered: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
 class Schedule(Base):
