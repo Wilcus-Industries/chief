@@ -357,6 +357,10 @@ async def test_tap_during_card_post_is_not_clobbered_by_notified_write(
     assert row is not None
     assert row.state == appr_repo.APPROVED
     assert row.decided_by == "42"
+    # The tap landed before `msg_ref` was assigned (mid-`send_card`), so `resolve`
+    # couldn't edit_card immediately — the stashed outcome must still surface once
+    # `request` gets the ref back, instead of silently dropping the card_resolved edit.
+    assert io.edits == [(f"ref-{approval_id}", "✅ Approved (once) — by 42")]
 
 
 async def test_resolve_in_post_card_pre_future_window_still_wakes(
