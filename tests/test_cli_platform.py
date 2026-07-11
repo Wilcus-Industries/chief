@@ -1168,6 +1168,11 @@ async def test_switch_backfills_foreign_thread_then_live_frames_follow(
             reply = await _read_frame(reader)
             assert reply["type"] == "reply"
 
+            # MirrorTaskIO broadcasts before it records the message_log row
+            # (broadcast-before-record, #132) — wait for the row so the switch
+            # below can't race the commit and see a short/empty backfill.
+            await _wait_for_rows(session_factory, lambda r: r.text == "reply:hi")
+
             writer.write(
                 json.dumps(switch_frame("telegram", "-100:5")).encode() + b"\n"
             )
