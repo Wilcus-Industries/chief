@@ -1,31 +1,34 @@
-"""The #133 broadcast bus: mirror every stack's engine outbound onto the socket.
+"""The #133 broadcast bus: mirror the chat stacks' engine outbound onto the socket.
 
-:class:`MirrorTaskIO` wraps a platform IO (CLI / Telegram / Discord) at the ``TaskIO``
-seam. On ``send``/``send_file`` it delivers to the real platform IO **first**, then
-broadcasts a platform-tagged frame onto the client-plane socket
-(:mod:`chief.client_plane`) and records the message in the ``message_log`` table. The
-mirror tail is fully contained: a broadcast or DB failure is logged, never raised, so
-phone-side delivery is never disturbed. If the inner IO itself raises, mirroring is
-skipped and the exception propagates exactly as today.
+:class:`MirrorTaskIO` wraps a **chat** platform IO (Telegram / Discord) at the
+``TaskIO`` seam. On ``send``/``send_file`` it delivers to the platform IO **first**,
+then broadcasts a platform-tagged frame onto the client-plane socket
+(:mod:`chief.client_plane`) and records the message in the ``message_log`` table through
+the shared :class:`~chief.persistence.messages.MessageLog` — the one recorder over that
+table. The mirror tail is fully contained: a broadcast or DB failure is logged, never
+raised, so phone-side delivery is never disturbed. If the inner IO itself raises,
+mirroring is skipped and the exception propagates exactly as today.
 
 Only ``send`` and ``send_file`` are mirrored/logged — the engine's task milestones and
 replies. ``create_thread``/``archive_thread`` and the three card methods are pure
 delegation: approval cards on the socket are #136's slice, budget traffic stays
 unmirrored.
 
-``server=None`` is passed for the CLI stack, whose inner ``CliTaskIO`` already
-broadcasts (the socket *is* its delivery); there the mirror adds only the message-log
-record, never a duplicate frame.
+The CLI stack is **not** wrapped: its :class:`~chief.adapters.cli.CliTaskIO` already
+broadcasts (the socket *is* its delivery) and already records each outbound — with the
+payload and the pre-broadcast ``delivered`` snapshot that #132 detach-replay needs.
+Wrapping it would log every CLI message twice. One outbound, one recorder.
+
+``server=None`` is accepted for a tokenless/socketless boot: the mirror then records
+without broadcasting.
 """
 
 import logging
 from typing import Protocol
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 from ..client_plane import SocketServer, file_frame, outbound_frame
 from ..gate.approvals import ApprovalCard
-from ..persistence import message_log
+from ..persistence.messages import KIND_FILE, ROLE_CHIEF, MessageLog
 from .base import BudgetCard
 
 logger = logging.getLogger(__name__)
@@ -56,21 +59,24 @@ class PlatformIO(Protocol):
 
 
 class MirrorTaskIO:
-    """Wrap a platform IO: deliver first, then broadcast + log the outbound (#133)."""
+    """Wrap a chat platform IO: deliver first, then broadcast + log the outbound (#133).
+
+    Never wraps the CLI stack — that stack's ``CliTaskIO`` is its own broadcaster and
+    its own recorder (see the module docstring).
+    """
 
     def __init__(
         self,
         inner: PlatformIO,
         *,
         platform: str,
-        session_factory: async_sessionmaker[AsyncSession],
+        log: MessageLog,
         server: SocketServer | None,
     ) -> None:
         self._inner = inner
         self._platform = platform
-        self._session_factory = session_factory
-        #: ``None`` for the CLI stack, whose inner IO already broadcasts — the mirror
-        #: then adds only the message-log record, never a second frame.
+        self._log = log
+        #: ``None`` when this boot has no client-plane socket — log-only mirroring.
         self._server = server
 
     async def send(self, thread_key: str, text: str) -> None:
@@ -98,7 +104,7 @@ class MirrorTaskIO:
         )
         await self._mirror(
             frame,
-            kind=message_log.KIND_FILE,
+            kind=KIND_FILE,
             text=caption or "",
             filename=filename,
         )
@@ -113,6 +119,13 @@ class MirrorTaskIO:
     ) -> None:
         """Broadcast ``frame`` (when a server is set) and record the row (#133).
 
+        The row is ``ROLE_CHIEF`` — the same outbound role the CLI recorder writes, so
+        the read model (#134) sees one role per direction across every platform. It
+        carries no ``payload``: a chat message's delivery already happened on the chat
+        platform, so there is nothing for a client attach to replay, and the row is
+        recorded ``delivered=True`` (the ``record`` default) so a replay claim never
+        sweeps it.
+
         Wrapped in a blanket ``except`` on purpose: mirroring is a best-effort side
         channel, so a broadcast or DB failure must never break — or reorder — the
         platform delivery that already happened before this call.
@@ -120,17 +133,14 @@ class MirrorTaskIO:
         try:
             if self._server is not None:
                 await self._server.broadcast(frame)
-            async with self._session_factory() as session:
-                await message_log.record(
-                    session,
-                    platform=self._platform,
-                    thread_key=str(frame["thread_key"]),
-                    role=message_log.ROLE_ASSISTANT,
-                    kind=kind,
-                    text=text,
-                    filename=filename,
-                )
-                await session.commit()
+            await self._log.record(
+                platform=self._platform,
+                thread_key=str(frame["thread_key"]),
+                role=ROLE_CHIEF,
+                kind=kind,
+                text=text,
+                filename=filename,
+            )
         except Exception:
             logger.exception("mirror failed for %s frame", kind)
 
