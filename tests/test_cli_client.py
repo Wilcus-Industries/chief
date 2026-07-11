@@ -263,6 +263,23 @@ async def test_other_platform_and_thread_frames_filtered_but_cards_shown(
         assert "cross-platform card" in blob
 
 
+async def test_malformed_frame_does_not_kill_pump(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test():
+        await peer.push({"type": "reply", "thread_key": "cli:main", "text": "no plat"})
+        await peer.push({"type": "card", "platform": "cli", "approval_id": "bad"})
+        await peer.push(reply_frame("cli:main", "still alive"))
+        await _settle(
+            app, lambda: any(line.text == "still alive" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "malformed" in line.text
+            for line in app.transcript
+        )
+        assert not app._pending
+
+
 async def test_unknown_command_forwarded_then_error_rendered(
     app: ChiefCliApp, peer: ScriptedPeer
 ) -> None:
