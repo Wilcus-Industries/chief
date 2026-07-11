@@ -25,13 +25,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
-from chief.adapters.base import Attachment
+from chief.adapters.base import Attachment, Surface
 from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
 from chief.adapters.mirror import MirrorTaskIO
 from chief.client_plane import (
     SocketServer,
     answer_frame,
     command_frame,
+    list_threads_frame,
+    switch_frame,
     user_frame,
 )
 from chief.config import Settings
@@ -42,9 +44,10 @@ from chief.gate.blacklist import Blacklist
 from chief.gate.policy import PolicyStore
 from chief.gate.types import ToolPermissionContext
 from chief.obs.audit import AuditLog
-from chief.persistence.messages import MessageLog
+from chief.persistence.messages import ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
+from chief.persistence.tasks import OPEN, get_task
 from test_broadcast_bus import _RecordingInner
 from test_tasks import FakeSession
 
@@ -106,6 +109,41 @@ def _cli_manager(
     )
 
 
+def _mirror_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+    server: SocketServer,
+    inner: Any,
+    *,
+    factory: Factory,
+) -> tuple[TaskManager, Any]:
+    """A real ``platform="telegram"`` engine mirrored onto the socket (#134 fixture).
+
+    Built the way ``app.build_stacks`` builds a chat stack: ``inner`` (the platform bot
+    seam) wrapped in a real :class:`MirrorTaskIO` over the shared real
+    :class:`MessageLog`, so a foreign-platform thread's turn lands real rows in
+    ``message_log`` for ``switch``'s backfill to read.
+    """
+    io = MirrorTaskIO(
+        inner, platform="telegram", log=MessageLog(session_factory), server=server
+    )
+    manager = TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        platform="telegram",
+        concurrency=3,
+        turn_timeout=1000.0,
+        idle_archive_seconds=1000.0,
+        compaction_idle_seconds=1000.0,
+        message_limit=CLI_LIMIT,
+        session_factory_sdk=factory,
+        stop_intent=_no,
+        warrants_task=_no,
+    )
+    return manager, inner
+
+
 async def _running_server(path: str) -> tuple[SocketServer, asyncio.Task[None]]:
     server = SocketServer(path)
     task = asyncio.create_task(server.run())
@@ -129,6 +167,7 @@ async def cli_stack(
         *,
         message_limit: int = CLI_LIMIT,
         replay_limit: int = 100,
+        backfill_limit: int = 50,
     ) -> CliStack:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
         log = MessageLog(session_factory)
@@ -139,7 +178,10 @@ async def cli_stack(
             factory=_seq_factory(sessions),
             message_limit=message_limit,
         )
-        CliAdapter(server=server, engine=manager, log=log, replay_limit=replay_limit)
+        CliAdapter(
+            server=server, engine=manager, log=log, replay_limit=replay_limit,
+            session_factory=session_factory, backfill_limit=backfill_limit,
+        )
         built.append((server, task, manager))
         return CliStack(server, io)
 
@@ -359,6 +401,30 @@ async def _wait_for_rows(
             await asyncio.sleep(0.01)
 
     return await asyncio.wait_for(_poll(), 5)
+
+
+async def _wait_for_task_open(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    platform: str,
+    thread_key: str,
+) -> None:
+    """Poll until ``(platform, thread_key)``'s task settles back to OPEN (bounded 5s).
+
+    ``_run_turn`` emits the reply frame *before* it flips the task status back to OPEN
+    (tasks.py), so a test that reads the reply off the socket and immediately queries
+    the task's status races that flip. Polling the DB directly closes that race.
+    """
+
+    async def _poll() -> None:
+        while True:
+            async with session_factory() as session:
+                task = await get_task(session, platform=platform, thread_key=thread_key)
+            if task is not None and task.status == OPEN:
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_poll(), 5)
 
 
 async def test_emit_records_undelivered_when_no_clients(
@@ -1007,6 +1073,199 @@ async def test_cross_surface_card_and_answer_resolve_a_foreign_platform_approval
         await writer.drain()
         error = await _read_frame(reader)
         assert error["type"] == "error" and error["code"] == "already_resolved"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+# ---- #134: cross-platform navigation — list_threads + stateless switch backfill ----
+
+
+async def test_list_threads_returns_every_platforms_threads(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The central mechanism: a real CLI turn and a real (mirrored) telegram turn both
+    # leave a task row, and list_threads reads the tasks table across BOTH platforms.
+    server, _io = await cli_stack([FakeSession(model="m")])
+    tg_manager, _inner = _mirror_manager(
+        session_factory,
+        server,
+        _RecordingInner(),
+        factory=_seq_factory([FakeSession(model="m")]),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            writer.write(json.dumps(user_frame("cli:main", "hi")).encode() + b"\n")
+            await writer.drain()
+            assert (await _read_frame(reader))["text"] == "reply:hi"
+            await _wait_for_task_open(
+                session_factory, platform="cli", thread_key="cli:main"
+            )
+
+            await tg_manager.dispatch(
+                thread_key="-100:5", text="hi", surface=Surface.DM
+            )
+            mirrored = await _read_frame(reader)  # drain the mirrored reply
+            assert mirrored["platform"] == "telegram"
+            await _wait_for_task_open(
+                session_factory, platform="telegram", thread_key="-100:5"
+            )
+
+            writer.write(json.dumps(list_threads_frame()).encode() + b"\n")
+            await writer.drain()
+            frame = await _read_frame(reader)
+            assert frame["type"] == "threads"
+            threads = {
+                (t["platform"], t["thread_key"]): t
+                for t in frame["threads"]  # type: ignore[attr-defined]
+            }
+            assert set(threads) == {("cli", "cli:main"), ("telegram", "-100:5")}
+            for entry in threads.values():
+                assert entry["status"] == "open"
+                assert "title" in entry
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_switch_backfills_foreign_thread_then_live_frames_follow(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The stateless handoff: switch answers ONE backfill batch of the mirrored chief
+    # lines in order, and a subsequent live turn on the same thread still arrives by
+    # unmarked broadcast — no server-side subscription was ever created.
+    server, _io = await cli_stack([])
+    tg_manager, _inner = _mirror_manager(
+        session_factory,
+        server,
+        _RecordingInner(),
+        factory=_seq_factory(
+            [
+                FakeSession(model="m", milestones=[Milestone(text="using Bash")]),
+                FakeSession(model="m"),
+            ]
+        ),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            await tg_manager.dispatch(
+                thread_key="-100:5", text="hi", surface=Surface.DM
+            )
+            milestone = await _read_frame(reader)
+            assert milestone["type"] == "milestone"
+            reply = await _read_frame(reader)
+            assert reply["type"] == "reply"
+
+            # MirrorTaskIO broadcasts before it records the message_log row
+            # (broadcast-before-record, #132) — wait for the row so the switch
+            # below can't race the commit and see a short/empty backfill.
+            await _wait_for_rows(session_factory, lambda r: r.text == "reply:hi")
+
+            writer.write(
+                json.dumps(switch_frame("telegram", "-100:5")).encode() + b"\n"
+            )
+            await writer.drain()
+            backfill = await _read_frame(reader)
+            assert backfill["type"] == "backfill"
+            assert backfill["platform"] == "telegram"
+            assert backfill["thread_key"] == "-100:5"
+            texts = [m["text"] for m in backfill["messages"]]  # type: ignore[attr-defined]
+            assert texts == ["using Bash", "reply:hi"]
+
+            await tg_manager.dispatch(
+                thread_key="-100:5", text="again", surface=Surface.DM
+            )
+            # Same underlying session (thread already active): it streams its fixed
+            # milestone again before the reply — drain that, then check the reply.
+            live_milestone = await _read_frame(reader)
+            assert live_milestone["type"] == "milestone"
+            live = await _read_frame(reader)
+            assert live["type"] == "reply"
+            assert live["platform"] == "telegram"
+            assert "backfill" not in live and "replay" not in live
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_backfill_is_bounded_and_distinct_from_live(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Bounded: backfill_limit=3 returns only the most-recent three rows, in order, and
+    # its frame type is "backfill" (not reply/milestone) — the distinctness marker.
+    server, _io = await cli_stack([FakeSession(model="m")], backfill_limit=3)
+    log = MessageLog(session_factory)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        # A real turn first, so a task row exists for cli:main.
+        writer.write(json.dumps(user_frame("cli:main", "hi")).encode() + b"\n")
+        await writer.drain()
+        assert (await _read_frame(reader))["text"] == "reply:hi"
+        # The CliTaskIO records its own row asynchronously (broadcast-before-record,
+        # #132) — wait for it so the manual rows below land at strictly later ids.
+        await _wait_for_rows(session_factory, lambda r: r.text == "reply:hi")
+
+        for i in range(6):
+            await log.record(
+                platform="cli", thread_key="cli:main", role=ROLE_CHIEF,
+                kind="reply", text=f"m{i}", payload=None,
+            )
+
+        writer.write(json.dumps(switch_frame("cli", "cli:main")).encode() + b"\n")
+        await writer.drain()
+        backfill = await _read_frame(reader)
+        assert backfill["type"] == "backfill"
+        texts = [m["text"] for m in backfill["messages"]]  # type: ignore[attr-defined]
+        assert texts == ["m3", "m4", "m5"]
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_switch_to_unknown_thread_errors(cli_stack: Callable[..., Any]) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(switch_frame("telegram", "nope")).encode() + b"\n")
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "unknown_thread"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_switch_missing_fields_gets_invalid_fields(
+    cli_stack: Callable[..., Any],
+) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(b'{"type":"switch","platform":"telegram"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "invalid_fields"
     finally:
         writer.close()
         with suppress(OSError):
