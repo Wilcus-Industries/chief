@@ -510,6 +510,65 @@ def test_scheduler_enabled_requires_configured_primary_platform(
         Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
 
 
+def test_scheduler_accepts_cli_primary_without_any_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #139: the client-plane socket is always-on infrastructure, so a chief with
+    # no Telegram/Discord id or token can still run the scheduler over ``cli``.
+    (tmp_path / "config.yaml").write_text(
+        "scheduler_enabled: true\n"
+        "primary_platform: cli\n"
+        'primary_thread_key: "cli:main"\n'
+    )
+    empty_secrets = tmp_path / "empty"
+    empty_secrets.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("OWNER_TELEGRAM_ID", raising=False)
+    monkeypatch.delenv("OWNER_DISCORD_ID", raising=False)
+
+    settings = Settings(_secrets_dir=str(empty_secrets))  # type: ignore[call-arg]
+
+    assert settings.primary_platform == "cli"
+    assert settings.telegram_configured is False
+    assert settings.discord_configured is False
+
+
+def test_scheduler_still_rejects_unconfigured_primary_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unknown platform name must still fail the same as an unconfigured one.
+    (tmp_path / "config.yaml").write_text(
+        "owner_telegram_id: 1\n"
+        "scheduler_enabled: true\n"
+        'primary_thread_key: "-100:7"\n'
+        "primary_platform: slack\n"
+    )
+    secrets = tmp_path / "secrets"
+    _write_secrets(secrets)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValidationError, match="primary_platform"):
+        Settings(_secrets_dir=str(secrets))  # type: ignore[call-arg]
+
+
+def test_scheduler_cli_primary_still_requires_primary_thread_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "scheduler_enabled: true\nprimary_platform: cli\n"
+    )
+    empty_secrets = tmp_path / "empty"
+    empty_secrets.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+    with pytest.raises(ValidationError, match="primary_thread_key"):
+        Settings(_secrets_dir=str(empty_secrets))  # type: ignore[call-arg]
+
+
 def test_scheduler_enabled_ok(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
