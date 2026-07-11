@@ -301,6 +301,29 @@ async def test_handler_declining_a_frame_falls_through_to_unknown_type(
             await writer.wait_closed()
 
 
+async def test_clearing_the_handler_restores_unknown_type_fallthrough(
+    server: SocketServer,
+) -> None:
+    # set_handler(None) detaches the app (shutdown path) — the server is #130 again.
+    async def handler(frame: Mapping[str, object], sender: FrameSender) -> bool:
+        await sender({"type": "reply", "text": "owned"})
+        return True
+
+    server.set_handler(handler)
+    server.set_handler(None)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"user","text":"hi"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "unknown_type"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
 async def test_raising_handler_gets_internal_error_and_loop_survives(
     server: SocketServer,
 ) -> None:

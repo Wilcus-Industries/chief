@@ -10,7 +10,7 @@ real :class:`CliAdapter`, a real ``TaskManager`` on ``platform="cli"``, and a re
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -59,6 +59,7 @@ def _cli_manager(
     io: CliTaskIO,
     *,
     factory: Factory,
+    message_limit: int = CLI_LIMIT,
 ) -> TaskManager:
     """A real ``platform="cli"`` engine over the CLI IO, LLM stubbed by ``factory``."""
     return TaskManager(
@@ -71,7 +72,7 @@ def _cli_manager(
         turn_timeout=1000.0,
         idle_archive_seconds=1000.0,
         compaction_idle_seconds=1000.0,
-        message_limit=CLI_LIMIT,
+        message_limit=message_limit,
         session_factory_sdk=factory,
         stop_intent=_no,
         warrants_task=_no,
@@ -88,20 +89,27 @@ async def _running_server(path: str) -> tuple[SocketServer, asyncio.Task[None]]:
 @pytest.fixture
 async def cli_stack(
     tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
-) -> AsyncIterator[Callable[[Sequence[FakeSession]], SocketServer]]:
+) -> AsyncIterator[Callable[..., Awaitable[SocketServer]]]:
     """Bring up a real server + CLI stack; the test supplies the fake LLM sessions."""
     built: list[tuple[SocketServer, asyncio.Task[None], TaskManager]] = []
 
-    async def _build(sessions: Sequence[FakeSession]) -> SocketServer:
+    async def _build(
+        sessions: Sequence[FakeSession], *, message_limit: int = CLI_LIMIT
+    ) -> SocketServer:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
         io = CliTaskIO(server)
-        manager = _cli_manager(session_factory, io, factory=_seq_factory(sessions))
+        manager = _cli_manager(
+            session_factory,
+            io,
+            factory=_seq_factory(sessions),
+            message_limit=message_limit,
+        )
         CliAdapter(server=server, engine=manager)
         built.append((server, task, manager))
         return server
 
     try:
-        yield _build  # type: ignore[misc]
+        yield _build
     finally:
         # Shut the engine down FIRST — it cancels the background consumers so no turn
         # touches the DB after the session_factory fixture disposes its engine.
@@ -238,23 +246,30 @@ async def test_two_threads_stay_tagged_and_interleave(
             await writer.wait_closed()
 
 
-async def test_send_file_broadcasts_a_base64_file_frame() -> None:
-    # CliTaskIO.send_file → a file frame whose data base64-decodes to the raw bytes.
-    server = SocketServer("/unused")
-    io = CliTaskIO(server)
-    sent: list[dict[str, object]] = []
-
-    async def fake_broadcast(frame: Any) -> None:
-        sent.append(dict(frame))
-
-    server.broadcast = fake_broadcast  # type: ignore[method-assign]
-    await io.send_file("cli:main", "reply.md", b"long body", caption="note")
-
-    (frame,) = sent
-    assert frame["type"] == "file"
-    assert frame["filename"] == "reply.md"
-    assert frame["caption"] == "note"
-    assert base64.b64decode(str(frame["data"])) == b"long body"
+async def test_oversized_reply_streams_a_real_file_frame(
+    cli_stack: Callable[..., Any],
+) -> None:
+    # The M8 file path, driven end-to-end (no monkeypatched broadcast): a reply over a
+    # small injected message_limit crosses should_send_as_file, so the engine emits
+    # send_file → a REAL file frame over the REAL socket, encode() and all. The client
+    # base64-decodes the data back to the exact reply bytes.
+    session = FakeSession(model="m")
+    server = await cli_stack([session], message_limit=32)  # file threshold 32×4 = 128
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        long_text = "x" * 200  # reply "reply:xxx…" is 206 chars > 128 → file frame
+        writer.write(json.dumps(user_frame("cli:main", long_text)).encode() + b"\n")
+        await writer.drain()
+        frame = await _read_frame(reader)
+        assert frame["type"] == "file"
+        assert frame["platform"] == "cli"
+        assert frame["thread_key"] == "cli:main"
+        assert base64.b64decode(str(frame["data"])) == f"reply:{long_text}".encode()
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
 
 
 async def test_send_detects_milestone_prefix_vs_reply() -> None:
