@@ -21,6 +21,12 @@ Cards are answerable (#136): an approval card is a real ``card`` frame with the 
 buttons, and a socket ``answer`` frame resolves it through the shared
 :class:`~chief.gate.approvals.ApprovalRegistry` — which may be *this* stack's manager,
 or a chat stack's, since one registry is shared across every stack.
+
+Navigation is stateless on the server (#134): ``list_threads`` reads the tasks table
+directly (every platform, not just this stack's), and ``switch`` validates a
+``(platform, thread_key)`` and answers one bounded ``backfill`` batch from the #132 log
+— the active thread stays client-side state, so live frames keep arriving by broadcast
+exactly as before, with no per-connection subscription.
 """
 
 import asyncio
@@ -28,23 +34,36 @@ import itertools
 import json
 import logging
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from ..client_plane import (
     CLI_PLATFORM,
     TYPE_ANSWER,
     TYPE_COMMAND,
+    TYPE_LIST_THREADS,
     TYPE_REPLY,
+    TYPE_SWITCH,
     TYPE_USER,
     FrameSender,
     SocketServer,
+    backfill_frame,
     card_frame,
     card_resolved_frame,
     error_frame,
     file_frame,
     outbound_frame,
     reply_frame,
+    threads_frame,
 )
 from ..gate.approvals import ApprovalAction, ApprovalCard
-from ..persistence.messages import REPLAY_LIMIT, ROLE_CHIEF, ROLE_OWNER, MessageLog
+from ..persistence.messages import (
+    BACKFILL_LIMIT,
+    REPLAY_LIMIT,
+    ROLE_CHIEF,
+    ROLE_OWNER,
+    MessageLog,
+)
+from ..persistence.tasks import get_task, list_active
 from .base import (
     Adapter,
     ApprovalResolver,
@@ -191,6 +210,8 @@ class CliAdapter(Adapter):
         log: MessageLog | None = None,
         replay_limit: int = REPLAY_LIMIT,
         approvals: ApprovalResolver | None = None,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+        backfill_limit: int = BACKFILL_LIMIT,
     ) -> None:
         self._server = server
         self._engine = engine
@@ -203,6 +224,11 @@ class CliAdapter(Adapter):
         #: The shared answer router (#136). ``None`` ⇒ an ``answer`` frame falls through
         #: to ``unknown_type`` — byte-identical to #131's answer-less behavior.
         self._approvals = approvals
+        #: The tasks-table session factory (#134). ``None`` ⇒ ``list_threads`` and
+        #: ``switch`` fall through to ``unknown_type`` — byte-identical to pre-#134,
+        #: same escape hatch as ``log=None`` / ``approvals=None``.
+        self._session_factory = session_factory
+        self._backfill_limit = backfill_limit
         self._stopped = asyncio.Event()
         server.set_handler(self._on_frame)
         server.set_connect_hook(self._on_connect)
@@ -259,6 +285,10 @@ class CliAdapter(Adapter):
             return await self._handle_command(frame, sender)
         if ftype == TYPE_ANSWER:
             return await self._handle_answer(frame, sender)
+        if ftype == TYPE_LIST_THREADS:
+            return await self._handle_list_threads(sender)
+        if ftype == TYPE_SWITCH:
+            return await self._handle_switch(frame, sender)
         return False
 
     async def _handle_user(self, frame: object, sender: FrameSender) -> bool:
@@ -369,6 +399,75 @@ class CliAdapter(Adapter):
                     f"approval {approval_id} is unknown or already resolved",
                 )
             )
+        return True
+
+    async def _handle_list_threads(self, sender: FrameSender) -> bool:
+        """Answer with every platform's non-terminal threads (#134).
+
+        Read straight off the tasks table with ``platform=None`` — deliberately NOT
+        ``engine.active_tasks()``, which is scoped to this stack's own platform. A
+        CLI-born thread and a Telegram thread come back side by side, each tagged with
+        the platform that owns it and its live ``status`` (open/running/waiting).
+        """
+        if self._session_factory is None:
+            return False
+        async with self._session_factory() as session:
+            tasks = await list_active(session)
+        await sender(
+            threads_frame(
+                [
+                    {
+                        "platform": task.platform,
+                        "thread_key": task.thread_key,
+                        "title": task.title,
+                        "status": task.status,
+                    }
+                    for task in tasks
+                ]
+            )
+        )
+        return True
+
+    async def _handle_switch(self, frame: object, sender: FrameSender) -> bool:
+        """Backfill a thread's recent history onto the switching client (#134).
+
+        Stateless on the server: the active thread is client state (frames are
+        broadcast to every client, which filters). The switch's job is the handoff —
+        one bounded ``backfill`` batch from the #132 log, sent on this connection
+        before the live frames that keep arriving by broadcast. ``get_task`` (not
+        ``list_active``) validates, so a finished thread is still switchable.
+
+        Ordering note: this backfill is written on the connection's read loop while
+        broadcasts are written from the engine's turn loop, so a live frame for the
+        switched thread emitted *between* the client's ``switch`` and this answer could
+        in principle land first. Single-owner, human-speed switching makes this
+        practically unreachable, and a client can dedupe on render — no lock is added
+        for it here.
+        """
+        if self._session_factory is None or self._log is None:
+            return False
+        platform, thread_key = _get(frame, "platform"), _get(frame, "thread_key")
+        if not _nonempty_str(platform) or not _nonempty_str(thread_key):
+            await sender(
+                error_frame(
+                    "invalid_fields", "switch frame needs platform and thread_key"
+                )
+            )
+            return True
+        assert isinstance(platform, str) and isinstance(thread_key, str)
+        async with self._session_factory() as session:
+            task = await get_task(session, platform=platform, thread_key=thread_key)
+        if task is None:
+            await sender(
+                error_frame(
+                    "unknown_thread", f"no thread {thread_key!r} on {platform!r}"
+                )
+            )
+            return True
+        messages = await self._log.history(
+            platform=platform, thread_key=thread_key, limit=self._backfill_limit
+        )
+        await sender(backfill_frame(platform, thread_key, messages))
         return True
 
 

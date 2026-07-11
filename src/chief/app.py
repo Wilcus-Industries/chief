@@ -803,6 +803,9 @@ def build_cli_stack(
     #136: the adapter is given the shared ``registry`` (defaults to a fresh one) as
     its ``ApprovalResolver``, so a socket ``answer`` frame resolves through whichever
     stack's manager parked the approval.
+
+    #134: the adapter reads the tasks table directly (``session_factory``) for the
+    cross-platform thread list and the shared log for switch backfill.
     """
     registry = registry or ApprovalRegistry()
     message_log = MessageLog(session_factory)
@@ -834,6 +837,7 @@ def build_cli_stack(
         memory=memory,
         log=message_log,
         approvals=registry,
+        session_factory=session_factory,
     )
     return manager, adapter, approvals
 
