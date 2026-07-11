@@ -103,8 +103,13 @@ class CliTaskIO:
         return f"{route}|{card.approval_id}"
 
     async def edit_card(self, msg_ref: str, text: str) -> None:
-        """Broadcast a card's outcome text to its route (no in-place edit on socket)."""
-        route = msg_ref.split("|", 1)[0]
+        """Broadcast a card's outcome text to its route (no in-place edit on socket).
+
+        ``rsplit`` (not ``split``): the route is a client-supplied ``thread_key`` that
+        may itself contain ``|``, but the appended ``approval_id`` is numeric, so
+        splitting from the right recovers the exact route.
+        """
+        route = msg_ref.rsplit("|", 1)[0]
         await self._server.broadcast(reply_frame(route, text))
 
     async def send_budget_card(self, route: str, card: BudgetCard) -> None:
@@ -142,71 +147,82 @@ class CliAdapter(Adapter):
         await self._stopped.wait()
 
     async def stop(self) -> None:
-        """Release :meth:`run` so the stack's coro returns on shutdown."""
+        """Release :meth:`run` and detach the handler so no frame dispatches after.
+
+        Clearing the handler closes the shutdown window: without it, a frame arriving
+        after ``manager.shutdown()`` but before ``socket_server.stop()`` would dispatch
+        into an already-torn-down engine and spawn a zombie session. After this, an
+        inbound frame falls through to the server's ``unknown_type`` (harmless).
+        """
+        self._server.set_handler(None)
         self._stopped.set()
 
     async def _on_frame(self, frame: object, sender: FrameSender) -> bool:
         """Dispatch one inbound frame; return ``True`` iff this adapter owns its type.
 
-        ``user`` → an owner engine turn (enqueued fast; the turn runs on the consumer,
-        so this read loop never blocks). ``command`` → the shared owner registry, the
-        unknown-command error produced *here* (the registry keeps its silent-no-op
+        ``user`` → an owner engine turn; ``command`` → the shared owner registry, with
+        the unknown-command error produced *here* (the registry keeps its silent-no-op
         contract). Anything else → ``False``, so the server answers ``unknown_type`` and
-        every #130 test stays green.
+        every #130 test stays green. Dispatch runs inline on the connection's read loop
+        (matching the chat adapters' sequential profile): it can await DB work and, on a
+        busy thread, a stop-intent classifier round-trip, so a frame is head-of-line
+        blocked behind the prior frame's dispatch — acceptable for a single owner.
         """
         ftype = _get(frame, "type")
         if ftype == TYPE_USER:
-            thread_key, text = _get(frame, "thread_key"), _get(frame, "text")
-            if not _nonempty_str(thread_key) or not _nonempty_str(text):
-                await sender(
-                    error_frame(
-                        "invalid_fields", "user frame needs thread_key and text"
-                    )
-                )
-                return True
-            assert isinstance(thread_key, str) and isinstance(text, str)
-            await self._engine.dispatch(
-                thread_key=thread_key, text=text, surface=Surface.DM
-            )
-            return True
+            return await self._handle_user(frame, sender)
         if ftype == TYPE_COMMAND:
-            thread_key, name = _get(frame, "thread_key"), _get(frame, "name")
-            arg = _get(frame, "arg", "")
-            if (
-                not _nonempty_str(thread_key)
-                or not _nonempty_str(name)
-                or not isinstance(arg, str)
-            ):
-                await sender(
-                    error_frame(
-                        "invalid_fields",
-                        "command frame needs thread_key, name, and a string arg",
-                    )
-                )
-                return True
-            assert isinstance(thread_key, str) and isinstance(name, str)
-            assert isinstance(arg, str)
-            if name not in self._commands.names():
-                await sender(
-                    error_frame("unknown_command", f"unknown command: {name!r}")
-                )
-                return True
-            key = thread_key
-
-            async def reply(reply_text: str) -> None:
-                await sender(reply_frame(key, reply_text))
-
-            ctx = CommandContext(
-                engine=self._engine,
-                memory=self._memory,
-                thread_key=thread_key,
-                arg=arg.strip(),
-                is_casual=False,
-                reply=reply,
-            )
-            await self._commands.dispatch(name, ctx)
-            return True
+            return await self._handle_command(frame, sender)
         return False
+
+    async def _handle_user(self, frame: object, sender: FrameSender) -> bool:
+        """Route a ``user`` frame into a real owner engine turn (#131)."""
+        thread_key, text = _get(frame, "thread_key"), _get(frame, "text")
+        if not _nonempty_str(thread_key) or not _nonempty_str(text):
+            await sender(
+                error_frame("invalid_fields", "user frame needs thread_key and text")
+            )
+            return True
+        assert isinstance(thread_key, str) and isinstance(text, str)
+        await self._engine.dispatch(
+            thread_key=thread_key, text=text, surface=Surface.DM
+        )
+        return True
+
+    async def _handle_command(self, frame: object, sender: FrameSender) -> bool:
+        """Route a ``command`` frame through the shared owner registry (#131)."""
+        thread_key, name = _get(frame, "thread_key"), _get(frame, "name")
+        arg = _get(frame, "arg", "")
+        if (
+            not _nonempty_str(thread_key)
+            or not _nonempty_str(name)
+            or not isinstance(arg, str)
+        ):
+            await sender(
+                error_frame(
+                    "invalid_fields",
+                    "command frame needs thread_key, name, and a string arg",
+                )
+            )
+            return True
+        assert isinstance(thread_key, str) and isinstance(name, str)
+        if name not in self._commands.names():
+            await sender(error_frame("unknown_command", f"unknown command: {name!r}"))
+            return True
+
+        async def reply(reply_text: str) -> None:
+            await sender(reply_frame(thread_key, reply_text))
+
+        ctx = CommandContext(
+            engine=self._engine,
+            memory=self._memory,
+            thread_key=thread_key,
+            arg=arg.strip(),
+            is_casual=False,
+            reply=reply,
+        )
+        await self._commands.dispatch(name, ctx)
+        return True
 
 
 def _get(frame: object, field: str, default: object = None) -> object:

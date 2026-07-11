@@ -71,12 +71,13 @@ class SocketServer:
         #: every non-ping frame falls through to the ``unknown_type`` error.
         self._handler: FrameHandler | None = None
 
-    def set_handler(self, handler: FrameHandler) -> None:
-        """Install the inbound-frame application (the CLI adapter, #131).
+    def set_handler(self, handler: FrameHandler | None) -> None:
+        """Install (or clear, with ``None``) the inbound-frame application (#131).
 
-        Before this is called the server is byte-identical to #130: pings pong,
-        everything else errors ``unknown_type``. After, each decoded non-ping frame is
-        offered to ``handler`` first.
+        Before this is called — and after it is cleared with ``None`` on shutdown — the
+        server is byte-identical to #130: pings pong, everything else errors
+        ``unknown_type``. With a handler set, each decoded non-ping frame is offered to
+        it first.
         """
         self._handler = handler
 
@@ -85,11 +86,14 @@ class SocketServer:
 
         Deliberately does **not** ``drain()``: it is awaited from inside the engine's
         turn loop (``_run_turn`` → ``CliTaskIO.send``), so blocking on a wedged client's
-        backpressure would freeze the turn for every thread. A write to a closing/dead
-        writer raises, and that client is dropped (its handler's ``readline`` will hit
-        EOF and clean up the rest). Unbounded write buffers are bounded in practice by
-        the local-trust 0600 socket and small frames; #134 subscriptions are the
-        structural fix, and the async signature is kept for it.
+        backpressure would freeze the turn for every thread. A dead client is reaped by
+        two other paths, not by this write: the ``is_closing()`` skip drops one already
+        detaching, and its handler's ``readline`` hits EOF and discards it in the
+        ``_handle`` finally. (A CPython ``StreamWriter.write`` to a broken transport
+        does not raise synchronously — it schedules ``connection_lost`` — so the
+        ``OSError`` guard is belt-and-braces, not the reaper.) Unbounded write buffers
+        are bounded in practice by the local-trust 0600 socket and small frames; #134
+        subscriptions are the structural fix, and the async signature is kept for it.
         """
         wire = encode(frame)
         for writer in list(self._clients):

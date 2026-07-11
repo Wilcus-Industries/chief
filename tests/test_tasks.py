@@ -662,7 +662,11 @@ async def test_owner_per_block_empty_block_is_dropped(
     mgr = _manager(session_factory, io, factory=_one(sess))
 
     await mgr.dispatch(thread_key="-100:5", text="go", surface=Surface.DM)
-    await _until(lambda: ("-100:5", "hello") in io.sends)
+    # Wait for the turn to settle (consumer exited, status persisted) rather than racing
+    # the reply send against the status → OPEN tail — the latter lands just after the
+    # send, so under full-suite load a send-only wait reads the status still RUNNING.
+    await _until(lambda: not mgr._tasks["-100:5"].generating)
+    await asyncio.sleep(0.05)  # let the consumer fully drain
 
     block_sends = [t for k, t in io.sends if k == "-100:5"]
     assert block_sends == ["hello"]
