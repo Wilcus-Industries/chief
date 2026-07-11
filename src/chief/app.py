@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram.ext import Application
 
 from .adapters.base import Adapter, ReadyHook
+from .adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .client_plane import SocketServer
@@ -89,6 +90,15 @@ SKILLS_PLUGIN_DIR = "vendor/chief-skills"
 #: One built engine stack for a platform: its engine, its adapter, and its approval
 #: manager (the adapter's ``run`` drives the connection; the manager needs shutdown).
 Stack = tuple[TaskManager, Adapter, ApprovalManager]
+
+#: The split-vs-file output cap per platform (M8). The engine filters every query by
+#: ``platform``, and each surface caps its message length differently: Telegram/Discord
+#: at the chat limit, the CLI at the large socket-frame limit (#131).
+_PLATFORM_LIMITS = {
+    "telegram": TELEGRAM_LIMIT,
+    "discord": DISCORD_LIMIT,
+    "cli": CLI_LIMIT,
+}
 
 
 def load_settings() -> Settings:
@@ -501,8 +511,8 @@ def build_engine(
         turn_timeout=settings.turn_timeout_seconds,
         idle_archive_seconds=settings.idle_archive_seconds,
         compaction_idle_seconds=settings.compaction_idle_seconds,
-        # The cap that decides split-vs-file output differs per platform (M8).
-        message_limit=TELEGRAM_LIMIT if platform == "telegram" else DISCORD_LIMIT,
+        # The cap that decides split-vs-file output differs per platform (M8, #131).
+        message_limit=_PLATFORM_LIMITS[platform],
         policy=policy,
         approvals=approvals,
         audit=audit,
@@ -725,9 +735,55 @@ def build_discord_stack(
     return manager, adapter, approvals
 
 
+def build_cli_stack(
+    settings: Settings,
+    *,
+    socket_server: SocketServer,
+    session_factory: async_sessionmaker[AsyncSession],
+    policy: PolicyStore,
+    audit: AuditLog,
+    memory: MemoryStore,
+    routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
+) -> Stack:
+    """Build the CLI engine stack bound to the always-on client-plane socket (#131).
+
+    The always-on plane (no ``cli_configured`` gate): the socket is the CLI's transport,
+    so this stack is built unconditionally — a tokenless boot still yields one (cli)
+    stack. The one :class:`CliTaskIO` doubles as the engine's ``TaskIO`` and approval
+    ``ApprovalIO`` (like the chat stacks), so cards broadcast out the same socket as
+    replies. ``socket_server`` is constructed by ``serve`` *before* this call so the
+    adapter can install its inbound handler before the server is run.
+    """
+    io = CliTaskIO(socket_server)
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=io,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=settings.approval_timeout_seconds,
+    )
+    manager = build_engine(
+        settings,
+        platform="cli",
+        io=io,
+        session_factory=session_factory,
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        memory=memory,
+        budget=build_budget(settings, io=io, session_factory=session_factory),
+        routing=routing,
+        harness_versioner=harness_versioner,
+    )
+    adapter = CliAdapter(server=socket_server, engine=manager, memory=memory)
+    return manager, adapter, approvals
+
+
 def build_stacks(
     settings: Settings,
     *,
+    socket_server: SocketServer,
     session_factory: async_sessionmaker[AsyncSession],
     policy: PolicyStore,
     audit: AuditLog,
@@ -735,7 +791,12 @@ def build_stacks(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
 ) -> list[Stack]:
-    """Build one engine stack per configured platform (Telegram and/or Discord)."""
+    """Build one engine stack per configured platform, plus the always-on CLI stack.
+
+    Telegram and Discord are gated on their tokens; the CLI stack is unconditional (the
+    socket is always-on infrastructure, #131) and appended last, so even a zero-token
+    boot yields exactly one — the CLI — stack.
+    """
     stacks: list[Stack] = []
     if settings.telegram_configured:
         stacks.append(
@@ -761,6 +822,18 @@ def build_stacks(
                 harness_versioner=harness_versioner,
             )
         )
+    stacks.append(
+        build_cli_stack(
+            settings,
+            socket_server=socket_server,
+            session_factory=session_factory,
+            policy=policy,
+            audit=audit,
+            memory=memory,
+            routing=routing,
+            harness_versioner=harness_versioner,
+        )
+    )
     return stacks
 
 
@@ -854,8 +927,16 @@ async def serve(settings: Settings) -> None:
     await memory.purge_expired()
     await harness_versioner.init()
 
+    # #130 unconditional client-plane listener — constructed BEFORE the stacks so the
+    # #131 CLI stack can bind to it (the CliAdapter installs its inbound handler in its
+    # ctor; construction ≠ binding, so this order resolves the cycle: the handler is in
+    # place before socket_server.run() is gathered below). It also keeps the gather (and
+    # the process) alive on a zero-platform, no-scheduler boot, where every other
+    # long-lived coro is absent.
+    socket_server = SocketServer(settings.socket_path)
     stacks = build_stacks(
         settings,
+        socket_server=socket_server,
         session_factory=factory,
         policy=policy,
         audit=audit,
@@ -868,9 +949,6 @@ async def serve(settings: Settings) -> None:
     scheduler, http = build_scheduler(
         settings, stacks=stacks, session_factory=factory
     )
-    # #130 unconditional client-plane listener: it keeps the gather (and the process)
-    # alive on a zero-platform, no-scheduler boot, where every other coro is absent.
-    socket_server = SocketServer(settings.socket_path)
 
     def make_ready(manager: TaskManager, approvals: ApprovalManager) -> ReadyHook:
         async def on_ready() -> None:
