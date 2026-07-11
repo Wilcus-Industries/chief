@@ -80,7 +80,10 @@ class ChiefCliApp(App[None]):
 
     async def _pump(self) -> None:
         async for frame in self._conn.frames():
-            self._render(frame)
+            try:
+                self._render(frame)
+            except (KeyError, ValueError, TypeError):
+                self._write(f"! malformed frame: {frame.get('type', '?')}", "red")
         self._write("— disconnected —", "red")
 
     async def on_unmount(self) -> None:
@@ -127,7 +130,8 @@ class ChiefCliApp(App[None]):
             self._write(f"[file] {frame.get('filename')}{suffix}", "italic")
         elif ftype == TYPE_CARD:
             approval_id = frame["approval_id"]
-            assert isinstance(approval_id, int)
+            if not isinstance(approval_id, int):
+                raise ValueError("card approval_id must be an int")
             self._write(
                 f"{tag}[approval #{approval_id}] {frame.get('text')}", "bold yellow"
             )
@@ -135,7 +139,8 @@ class ChiefCliApp(App[None]):
             self._prompt_card()
         elif ftype == TYPE_CARD_RESOLVED:
             approval_id = frame["approval_id"]
-            assert isinstance(approval_id, int)
+            if not isinstance(approval_id, int):
+                raise ValueError("card_resolved approval_id must be an int")
             self._write(f"{tag}[approval #{approval_id}] {frame.get('text')}", "dim")
             if approval_id in self._pending:
                 self._pending.remove(approval_id)
