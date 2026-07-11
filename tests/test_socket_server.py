@@ -9,13 +9,13 @@ import asyncio
 import json
 import os
 import stat
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
-from chief.client_plane import SocketServer
+from chief.client_plane import FrameSender, SocketServer
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> dict[str, object]:
@@ -199,6 +199,149 @@ async def test_cancel_with_connected_client_completes(tmp_path: Path) -> None:
         assert not Path(srv.path).exists()
         # The server force-closed the connection: the client reads EOF.
         assert await asyncio.wait_for(reader.readline(), 5) == b""
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_broadcast_reaches_every_live_client(server: SocketServer) -> None:
+    # #131 push seam: engine output fans out to all clients tagged by thread_key.
+    r1, w1 = await asyncio.open_unix_connection(server.path)
+    r2, w2 = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(r1))["type"] == "hello"
+        assert (await _read_frame(r2))["type"] == "hello"
+        # A handler must be registered for the writers to exist; broadcast is orthogonal
+        # to inbound handling, so we can push straight away once both are connected.
+        await asyncio.sleep(0.05)  # let both handler tasks register their writers
+        await server.broadcast({"type": "reply", "text": "hi"})
+        assert await _read_frame(r1) == {"type": "reply", "text": "hi"}
+        assert await _read_frame(r2) == {"type": "reply", "text": "hi"}
+    finally:
+        for writer in (w1, w2):
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
+
+async def test_broadcast_skips_a_dropped_client_and_reaches_survivor(
+    server: SocketServer,
+) -> None:
+    # A dead client must not break delivery to a live one (no drain, dropped on error).
+    r1, w1 = await asyncio.open_unix_connection(server.path)
+    r2, w2 = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(r1))["type"] == "hello"
+        assert (await _read_frame(r2))["type"] == "hello"
+        await asyncio.sleep(0.05)
+        # Client 1 hangs up; the server hasn't noticed yet.
+        w1.close()
+        with suppress(OSError):
+            await w1.wait_closed()
+        await asyncio.sleep(0.05)
+        await server.broadcast({"type": "reply", "text": "survivor"})
+        assert await _read_frame(r2) == {"type": "reply", "text": "survivor"}
+    finally:
+        for writer in (w1, w2):
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
+
+async def test_broadcast_with_zero_clients_is_a_noop(server: SocketServer) -> None:
+    # No connections registered → broadcast returns cleanly, no error.
+    await server.broadcast({"type": "reply", "text": "nobody"})
+
+
+async def test_handler_owns_a_frame_and_answers_through_sender(
+    server: SocketServer,
+) -> None:
+    # #131 inbound seam: an installed handler answers a frame it owns via the sender.
+    async def handler(frame: Mapping[str, object], sender: FrameSender) -> bool:
+        if frame.get("type") == "user":
+            await sender({"type": "reply", "text": f"got {frame.get('text')}"})
+            return True
+        return False
+
+    server.set_handler(handler)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"user","text":"hi"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "reply", "text": "got hi"}
+        # Transport frames still answer even with a handler installed.
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_handler_declining_a_frame_falls_through_to_unknown_type(
+    server: SocketServer,
+) -> None:
+    async def handler(frame: Mapping[str, object], sender: FrameSender) -> bool:
+        return False  # owns nothing
+
+    server.set_handler(handler)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"user","text":"hi"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "unknown_type"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_clearing_the_handler_restores_unknown_type_fallthrough(
+    server: SocketServer,
+) -> None:
+    # set_handler(None) detaches the app (shutdown path) — the server is #130 again.
+    async def handler(frame: Mapping[str, object], sender: FrameSender) -> bool:
+        await sender({"type": "reply", "text": "owned"})
+        return True
+
+    server.set_handler(handler)
+    server.set_handler(None)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"user","text":"hi"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "unknown_type"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_raising_handler_gets_internal_error_and_loop_survives(
+    server: SocketServer,
+) -> None:
+    async def handler(frame: Mapping[str, object], sender: FrameSender) -> bool:
+        raise RuntimeError("boom")
+
+    server.set_handler(handler)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"user","text":"hi"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "internal_error"
+        # The connection loop survived a raising handler — ping still pongs.
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
     finally:
         writer.close()
         with suppress(OSError):

@@ -1,21 +1,38 @@
-"""The client-plane wire protocol: LF-delimited JSON frames (#130).
+"""The client-plane wire protocol: LF-delimited JSON frames (#130, #131).
 
 The socket speaks one JSON object per line: UTF-8, LF-terminated, no embedded newlines
 (``json.dumps`` escapes them). This module is the pure vocabulary — frame builders plus
-:func:`encode`/:func:`decode` — kept free of any server/asyncio code so a future client
-(#131+) can import it without pulling in the listener.
+:func:`encode`/:func:`decode` — kept free of any server/asyncio code so a client (the
+#132 CLI) can import it without pulling in the listener.
 
-Frames:
+Transport frames (#130):
 
 - ``hello`` (server→client on connect): ``{"type": "hello", "protocol": <int>}``.
 - ``ping`` (client→server): ``{"type": "ping"}`` → ``pong`` ``{"type": "pong"}``.
 - ``error`` (server→client): ``{"type": "error", "code": <str>, "message": <str>}``.
 
+CLI session frames (#131), tagged ``platform="cli"`` + ``thread_key`` on every
+server→client frame so a client can demux threads (broadcast-to-all; clients filter):
+
+- ``user`` (client→server): ``{"type": "user", "thread_key": <str>, "text": <str>}``.
+- ``command`` (client→server): ``{"type": "command", "thread_key": <str>,
+  "name": <str>, "arg": <str>}`` — ``name`` carries no leading ``/``.
+- ``reply`` (server→client): a final answer block for a thread.
+- ``milestone`` (server→client): a progress line (the engine's ``· `` prefix is
+  stripped — the frame *type* carries that semantics, not a text marker).
+- ``file`` (server→client): an oversized reply delivered as a base64 attachment. The
+  ``data`` field is base64-ascii, so a client must decode it; a client's
+  ``open_unix_connection`` read limit must be large enough for the encoded frame.
+
 Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 (parseable JSON but not an object), ``unknown_type`` (missing/unrecognized ``type``),
-``line_too_long`` (the read stream limit was overrun; the connection then closes).
+``line_too_long`` (the read stream limit was overrun; the connection then closes),
+``invalid_fields`` (a client frame is missing a required field or has a wrong type),
+``unknown_command`` (a command frame named a command the registry does not carry),
+``internal_error`` (an inbound handler raised — the connection loop survives).
 """
 
+import base64
 import json
 from collections.abc import Mapping
 from typing import Final
@@ -23,6 +40,27 @@ from typing import Final
 #: The wire-protocol version announced in the hello frame. Bump on any incompatible
 #: change to the frame vocabulary so a client can refuse a mismatch.
 PROTOCOL_VERSION: Final[int] = 1
+
+#: Frame ``type`` strings. Plain ``Final[str]`` consts, NOT an enum — frames stay plain
+#: dicts and :func:`decode` stays type-agnostic (it never validates the type). One name
+#: per wire value so a typo is a NameError, not a silently-wrong frame.
+TYPE_HELLO: Final[str] = "hello"
+TYPE_PING: Final[str] = "ping"
+TYPE_PONG: Final[str] = "pong"
+TYPE_ERROR: Final[str] = "error"
+TYPE_USER: Final[str] = "user"
+TYPE_COMMAND: Final[str] = "command"
+TYPE_REPLY: Final[str] = "reply"
+TYPE_MILESTONE: Final[str] = "milestone"
+TYPE_FILE: Final[str] = "file"
+
+#: The platform tag every CLI session frame carries. The engine filters every query by
+#: ``platform``, so the CLI stack runs as its own platform alongside telegram/discord.
+CLI_PLATFORM: Final[str] = "cli"
+
+#: The thread key the #132 client opens its default (flat) session on when the owner
+#: does not name a thread. Exported so client and server agree on the one default.
+DEFAULT_THREAD_KEY: Final[str] = "cli:main"
 
 
 class FrameError(Exception):
@@ -35,17 +73,66 @@ class FrameError(Exception):
 
 def hello_frame() -> dict[str, object]:
     """The versioned greeting the server sends the instant a client connects."""
-    return {"type": "hello", "protocol": PROTOCOL_VERSION}
+    return {"type": TYPE_HELLO, "protocol": PROTOCOL_VERSION}
 
 
 def pong_frame() -> dict[str, object]:
     """The reply to a ``ping`` frame."""
-    return {"type": "pong"}
+    return {"type": TYPE_PONG}
 
 
 def error_frame(code: str, message: str) -> dict[str, object]:
     """An error frame carrying a machine-readable ``code`` and a human ``message``."""
-    return {"type": "error", "code": code, "message": message}
+    return {"type": TYPE_ERROR, "code": code, "message": message}
+
+
+def user_frame(thread_key: str, text: str) -> dict[str, object]:
+    """A client→server owner message for ``thread_key`` (#131)."""
+    return {"type": TYPE_USER, "thread_key": thread_key, "text": text}
+
+
+def command_frame(thread_key: str, name: str, arg: str = "") -> dict[str, object]:
+    """A client→server owner slash-command (``name`` carries no leading ``/``, #131)."""
+    return {"type": TYPE_COMMAND, "thread_key": thread_key, "name": name, "arg": arg}
+
+
+def reply_frame(thread_key: str, text: str) -> dict[str, object]:
+    """A server→client final answer block, tagged ``platform="cli"`` + thread (#131)."""
+    return {
+        "type": TYPE_REPLY,
+        "platform": CLI_PLATFORM,
+        "thread_key": thread_key,
+        "text": text,
+    }
+
+
+def milestone_frame(thread_key: str, text: str) -> dict[str, object]:
+    """A server→client progress line (no ``· `` prefix — the type is the marker)."""
+    return {
+        "type": TYPE_MILESTONE,
+        "platform": CLI_PLATFORM,
+        "thread_key": thread_key,
+        "text": text,
+    }
+
+
+def file_frame(
+    thread_key: str, filename: str, data: bytes, caption: str | None = None
+) -> dict[str, object]:
+    """A server→client attachment: ``data`` bytes base64-ascii encoded (#131).
+
+    An oversized owner reply (over the file threshold, or an un-splittable code fence)
+    is delivered as one file frame rather than a wall of hard-cut messages. The client
+    base64-decodes ``data`` back to bytes; ``caption`` is the short note beside it.
+    """
+    return {
+        "type": TYPE_FILE,
+        "platform": CLI_PLATFORM,
+        "thread_key": thread_key,
+        "filename": filename,
+        "data": base64.b64encode(data).decode("ascii"),
+        "caption": caption,
+    }
 
 
 def encode(frame: Mapping[str, object]) -> bytes:
