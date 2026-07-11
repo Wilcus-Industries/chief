@@ -31,7 +31,6 @@ from telegram.ext import (
 )
 
 from ..gate.approvals import ApprovalAction, ApprovalCard
-from ..memory.store import OWNER_NAMESPACE
 from ..persistence.contacts import get_or_create_contact
 from .base import (
     ADMISSION_PREFIX,
@@ -60,7 +59,6 @@ from .base import (
     budget_outcome_text,
     budget_payload,
     classify_tier,
-    default_branch_title,
     handle_guest_message,
     is_engaged,
     is_supported_media,
@@ -71,6 +69,7 @@ from .base import (
 from .base import (
     split_message as _split,
 )
+from .commands import OWNER_COMMANDS, CommandContext, CommandRegistry
 
 logger = logging.getLogger("chief.adapters.telegram")
 
@@ -278,6 +277,7 @@ class TelegramAdapter(Adapter):
         guest_global_rate: int = 60,
         group_chat_enabled: bool = False,
         owner_home_chat_id: int | None = None,
+        commands: CommandRegistry | None = None,
     ) -> None:
         self._app = application
         self._engine = engine
@@ -299,18 +299,14 @@ class TelegramAdapter(Adapter):
         # Contacts already prompted this run — dedupe the admission card so a pending
         # guest who keeps messaging doesn't re-card the owner (their notes still relay).
         self._prompted_admission: set[int] = set()
+        self._commands = commands or OWNER_COMMANDS
         self._stop = asyncio.Event()
         self._register()
 
     def _register(self) -> None:
-        self._app.add_handler(CommandHandler("cancel", self._on_cancel))
-        self._app.add_handler(CommandHandler("tasks", self._on_tasks))
-        self._app.add_handler(CommandHandler("memory", self._on_memory))
-        self._app.add_handler(CommandHandler("forget", self._on_forget))
-        self._app.add_handler(CommandHandler("branch", self._on_branch))
-        self._app.add_handler(CommandHandler("opus", self._on_opus))
-        self._app.add_handler(CommandHandler("sonnet", self._on_sonnet))
-        self._app.add_handler(CommandHandler("route", self._on_route))
+        self._app.add_handler(
+            CommandHandler(self._commands.names(), self._on_command)
+        )
         self._app.add_handler(
             CallbackQueryHandler(self._on_callback, pattern=CALLBACK_QUERY_PATTERN)
         )
@@ -553,129 +549,37 @@ class TelegramAdapter(Adapter):
             return None
         return f"{chat.id}:{message.message_thread_id or 0}"
 
-    async def _on_cancel(
+    async def _on_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        thread_key = self._owner_thread(update)
-        if thread_key is None or update.effective_message is None:
-            return
-        stopped = await self._engine.cancel(thread_key)
-        await update.effective_message.reply_text(
-            "Cancelled." if stopped else "Nothing running here."
-        )
-
-    async def _on_tasks(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        if self._owner_thread(update) is None or update.effective_message is None:
-            return
-        tasks = await self._engine.active_tasks()
-        if not tasks:
-            await update.effective_message.reply_text("No active tasks.")
-            return
-        lines = [f"• {t.title or t.thread_key} — {t.status}" for t in tasks]
-        await update.effective_message.reply_text("\n".join(lines))
-
-    async def _on_memory(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """List the owner's stored facts (owner only)."""
-        message = update.effective_message
-        if self._owner_thread(update) is None or message is None:
-            return
-        if self._memory is None:
-            await message.reply_text("Memory isn't enabled.")
-            return
-        facts = self._memory.list_facts(OWNER_NAMESPACE)
-        if not facts:
-            await message.reply_text("No memories yet.")
-            return
-        await message.reply_text("\n".join(f"• {f.title}" for f in facts))
-
-    async def _on_forget(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Forget owner facts matching the command argument (owner only)."""
-        message = update.effective_message
-        if self._owner_thread(update) is None or message is None:
-            return
-        if self._memory is None:
-            await message.reply_text("Memory isn't enabled.")
-            return
-        query = (message.text or "").partition(" ")[2].strip()
-        if not query:
-            await message.reply_text("Usage: /forget <text>")
-            return
-        removed = await self._memory.forget(OWNER_NAMESPACE, query)
-        if not removed:
-            await message.reply_text("Nothing matched.")
-            return
-        await message.reply_text("Forgot: " + ", ".join(f.title for f in removed))
-
-    async def _on_branch(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Promote the casual channel into a tracked thread (owner + casual only).
-
-        Only the General/``:0`` channel carries the lossy self-compacting context worth
-        promoting; a real topic is already tracked, so ``/branch`` there is a no-op
-        reply. The optional argument names the new thread; otherwise a timestamp does.
-        """
+        """Dispatch an owner ``/command`` through the shared registry (#129)."""
         thread_key = self._owner_thread(update)
         message = update.effective_message
         chat = update.effective_chat
         if thread_key is None or message is None or chat is None:
             return
+        raw = (message.text or "")[1:]
+        name, _, arg = raw.partition(" ")
+        name = name.split("@")[0].lower()  # strip /cmd@botname in groups
         # The casual lane is the forum's General topic — the same is_forum AND :0
         # predicate _on_message uses for is_general. A flat DM also keys to :0 but runs
         # as a normal archiving task, so /branch must not treat it as casual.
         is_casual = bool(getattr(chat, "is_forum", False)) and thread_key.endswith(":0")
-        if not is_casual:
-            await message.reply_text("/branch only works in the casual channel.")
-            return
-        title = (message.text or "").partition(" ")[2].strip() or default_branch_title()
-        await self._engine.branch(thread_key, title)
-        await message.reply_text(f'→ Branched into "{title}".')
 
-    async def _on_opus(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Escalate this thread to Opus (owner only) — pre-approved, no card (M11)."""
-        thread_key = self._owner_thread(update)
-        if thread_key is None or update.effective_message is None:
-            return
-        await update.effective_message.reply_text(
-            await self._engine.escalate(thread_key)
+        async def reply(text: str) -> None:
+            await message.reply_text(text)
+
+        await self._commands.dispatch(
+            name,
+            CommandContext(
+                engine=self._engine,
+                memory=self._memory,
+                thread_key=thread_key,
+                arg=arg.strip(),
+                is_casual=is_casual,
+                reply=reply,
+            ),
         )
-
-    async def _on_sonnet(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Revert this thread to the default model (owner only) (M11)."""
-        thread_key = self._owner_thread(update)
-        if thread_key is None or update.effective_message is None:
-            return
-        await update.effective_message.reply_text(
-            await self._engine.revert(thread_key)
-        )
-
-    async def _on_route(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Override this thread's routing category (owner only, #79).
-
-        ``/route <category>`` pins the job category (and respawns the session on that
-        category's target); a bare ``/route`` prints usage.
-        """
-        thread_key = self._owner_thread(update)
-        message = update.effective_message
-        if thread_key is None or message is None:
-            return
-        category = (message.text or "").partition(" ")[2].strip()
-        if not category:
-            await message.reply_text("Usage: /route <category>")
-            return
-        await message.reply_text(await self._engine.route(thread_key, category))
 
     async def _on_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
