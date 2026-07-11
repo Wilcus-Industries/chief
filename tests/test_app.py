@@ -730,6 +730,41 @@ async def test_build_scheduler_binds_to_primary_platform_stack(
     await http.aclose()
 
 
+async def test_build_scheduler_binds_to_cli_stack_on_tokenless_boot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #139: a tokenless boot (no Telegram/Discord) still yields the always-on CLI
+    # stack, and the scheduler can run its loop over the client-plane socket.
+    settings = _settings(
+        owner_telegram_id=None,
+        telegram_bot_token=None,
+        scheduler_enabled=True,
+        primary_platform="cli",
+        primary_thread_key="cli:main",
+    )
+    policy, audit, memory = _shared(settings, session_factory)
+    stacks = app.build_stacks(
+        settings,
+        socket_server=_socket(),
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    assert [s[0].platform for s in stacks] == ["cli"]
+
+    scheduler, http = app.build_scheduler(
+        settings, stacks=stacks, session_factory=session_factory
+    )
+
+    assert scheduler is not None
+    assert scheduler._io is stacks[0][0].io
+    assert scheduler._waker is stacks[0][0]
+    assert scheduler._primary_thread_key == "cli:main"
+    assert http is None
+
+
 async def test_build_scheduler_no_http_without_heartbeat(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

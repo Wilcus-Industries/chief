@@ -6,8 +6,9 @@ come from a ``secrets_dir`` of one-file-per-secret (``~/.config/chief/secrets`` 
 repo-local
 ``./secrets`` — see :func:`chief.app.load_settings`) with an environment fallback.
 Precedence, highest first: init kwargs → environment → ``self_config.yaml`` overlay
-(denylist-filtered) → ``config.yaml`` → secret files. At least one chat platform
-(Telegram and/or Discord) must be fully configured.
+(denylist-filtered) → ``config.yaml`` → secret files. Chat platforms (Telegram,
+Discord) are optional; a chief with no tokens still boots on the always-on
+client-plane socket (the ``cli`` stack).
 """
 
 import fnmatch
@@ -28,6 +29,7 @@ from pydantic_settings import (
     YamlConfigSettingsSource,
 )
 
+from .client_plane import CLI_PLATFORM
 from .gate.blacklist import DEFAULT_SHELL_PATTERNS
 from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
 from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
@@ -219,7 +221,8 @@ class Settings(BaseSettings):
     )
 
     # Non-secret config (config.yaml / env). Each platform's owner id is optional —
-    # configure Telegram, Discord, or both (the after-validator requires at least one).
+    # configure Telegram, Discord, or both, or neither (the always-on client-plane
+    # socket / ``cli`` stack needs no owner id or token).
     # 0 is the "unset" sentinel committed in config.yaml, treated as not configured.
     owner_telegram_id: int | None = None
     owner_discord_id: int | None = None
@@ -441,10 +444,12 @@ class Settings(BaseSettings):
     # Scheduler (M9a), default off (mirror the opt-in subsystem pattern). When enabled,
     # the long-running tick fires reminders, recurring jobs, and self-cron the owner set
     # up. primary_thread_key is the owner inbox they land in and primary_platform picks
-    # which chat stack owns the loop — both required by the after-validator. owner_tz
-    # (above) frames cron + quiet hours. quiet_hours_* ("HH:MM" in owner_tz) defer a
-    # non-urgent fire caught overnight to quiet_hours_end; a None start disables quiet
-    # hours. heartbeat_url is an optional dead-man's-switch GET, pinged every
+    # which stack owns the loop — ``telegram``, ``discord``, or ``cli`` (the always-on
+    # socket; a tokenless chief can run the scheduler there) — both required by the
+    # after-validator. owner_tz (above) frames cron + quiet hours. quiet_hours_*
+    # ("HH:MM" in owner_tz) defer a non-urgent fire caught overnight to
+    # quiet_hours_end; a None start disables quiet hours. heartbeat_url is an
+    # optional dead-man's-switch GET, pinged every
     # heartbeat_interval_seconds; None disables it.
     scheduler_enabled: bool = False
     scheduler_tick_seconds: float = 30.0
@@ -825,7 +830,8 @@ class Settings(BaseSettings):
         """The scheduler needs an inbox on a live platform to deliver into.
 
         A reminder, wakeup, or heartbeat alert with no ``primary_thread_key`` has
-        nowhere to land; and ``primary_platform`` must be a fully configured chat
+        nowhere to land; and ``primary_platform`` must be ``cli`` (always available —
+        the client-plane socket is always-on infrastructure) or a fully configured chat
         platform (owner id + token), since :mod:`chief.app` builds the loop on that one.
         """
         if not self.scheduler_enabled:
@@ -838,6 +844,12 @@ class Settings(BaseSettings):
         configured = {
             "telegram": self.telegram_configured,
             "discord": self.discord_configured,
+            # #139: the client-plane socket is always-on infrastructure (#130) and the
+            # CLI stack is built unconditionally (app.build_cli_stack), so ``cli`` is
+            # always configured — a tokenless chief can run the scheduler, and its
+            # fires land on the socket bus (replayed from the message log when no
+            # client is attached).
+            CLI_PLATFORM: True,
         }
         if not configured.get(self.primary_platform):
             raise ValueError(
