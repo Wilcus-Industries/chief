@@ -42,6 +42,8 @@ ROLE_CHIEF = "chief"  # an outbound message from chief — every platform, one r
 KIND_REPLY = "reply"
 KIND_MILESTONE = "milestone"
 KIND_FILE = "file"
+KIND_CARD = "card"
+KIND_CARD_RESOLVED = "card_resolved"
 
 #: The most-recent window of undelivered frames replayed on attach (#132). A module
 #: constant, not a config knob — right-sized here; #134 can make it configurable.

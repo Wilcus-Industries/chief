@@ -310,6 +310,29 @@ def test_build_stacks_selects_configured_platforms(
     assert platforms(tokenless) == {"cli"}
 
 
+def test_build_stacks_shares_one_approval_registry_across_stacks(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #136: a regression that gave each stack its own ApprovalRegistry would silently
+    # break cross-surface answers — a socket answer for a card raised on telegram would
+    # never find the telegram stack's manager. build_stacks must thread ONE registry.
+    settings = _settings(owner_discord_id=99, discord_bot_token="dc")
+    policy, audit, memory = _shared(settings, session_factory)
+
+    stacks = app.build_stacks(
+        settings,
+        socket_server=_socket(),
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    registries = {id(approvals._registry) for _m, _a, approvals in stacks}
+    assert len(registries) == 1
+    assert None not in {approvals._registry for _m, _a, approvals in stacks}
+
+
 def test_build_stacks_always_appends_cli_stack_bound_to_socket(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -478,14 +501,16 @@ def test_build_discord_stack_wires_budget_when_enabled(
 def test_build_telegram_stack_wraps_engine_io_in_mirror(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # #133: only the engine's TaskIO is wrapped in MirrorTaskIO (so manager.io — and the
-    # scheduler that binds it — mirror onto the socket), while the budget keeps the raw
-    # TelegramTaskIO (cards + budget traffic stay unmirrored). The wiring guard: a
-    # future regression that dropped socket_server would silently disable mirroring.
+    # #133: the engine's TaskIO is wrapped in MirrorTaskIO (so manager.io — and the
+    # scheduler that binds it — mirror onto the socket). #136: the approval manager
+    # now holds that same mirror too (so cards fan out to the socket), while the
+    # budget keeps the raw TelegramTaskIO (budget traffic stays unmirrored). The
+    # wiring guard: a future regression that dropped socket_server would silently
+    # disable mirroring.
     settings = _settings(budget_enabled=True, primary_thread_key="-100:1")
     policy, audit, memory = _shared(settings, session_factory)
 
-    manager, _, _ = app.build_telegram_stack(
+    manager, _, approvals = app.build_telegram_stack(
         settings,
         session_factory=session_factory,
         policy=policy,
@@ -495,6 +520,7 @@ def test_build_telegram_stack_wraps_engine_io_in_mirror(
     )
 
     assert isinstance(manager.io, MirrorTaskIO)
+    assert isinstance(approvals._io, MirrorTaskIO)
     assert isinstance(manager._budget, BudgetGate)
     assert isinstance(manager._budget._io, TelegramTaskIO)  # budget keeps the raw io
 
@@ -884,7 +910,7 @@ async def test_serve_tokenless_boots_socket_and_cleans_up(
         reader, writer = await asyncio.open_unix_connection(str(socket_path))
         hello = json.loads(await asyncio.wait_for(reader.readline(), 5))
         assert hello["type"] == "hello"
-        assert hello["protocol"] == 1
+        assert hello["protocol"] == 2
 
         # #131 full production wiring, tokenless, zero LLM: the always-on CLI stack
         # dispatches a real /tasks command through the real registry over the real DB.

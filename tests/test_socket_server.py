@@ -41,7 +41,7 @@ async def server(tmp_path: Path) -> AsyncIterator[SocketServer]:
 async def test_client_receives_versioned_hello(server: SocketServer) -> None:
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
-        assert await _read_frame(reader) == {"type": "hello", "protocol": 1}
+        assert await _read_frame(reader) == {"type": "hello", "protocol": 2}
     finally:
         writer.close()
         with suppress(OSError):

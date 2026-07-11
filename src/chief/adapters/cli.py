@@ -16,6 +16,11 @@ owner message and outbound chief frame is recorded, and an outbound frame emitte
 no client is attached is logged *held*. On the next connection the adapter's connect
 hook claim-replays those held frames (each marked ``"replay": true``) before live
 traffic resumes — detach-replay, restart-proof because the log is the mechanism.
+
+Cards are answerable (#136): an approval card is a real ``card`` frame with the four
+buttons, and a socket ``answer`` frame resolves it through the shared
+:class:`~chief.gate.approvals.ApprovalRegistry` — which may be *this* stack's manager,
+or a chat stack's, since one registry is shared across every stack.
 """
 
 import asyncio
@@ -25,19 +30,30 @@ import logging
 
 from ..client_plane import (
     CLI_PLATFORM,
+    TYPE_ANSWER,
     TYPE_COMMAND,
     TYPE_REPLY,
     TYPE_USER,
     FrameSender,
     SocketServer,
+    card_frame,
+    card_resolved_frame,
     error_frame,
     file_frame,
     outbound_frame,
     reply_frame,
 )
-from ..gate.approvals import ApprovalCard
+from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..persistence.messages import REPLAY_LIMIT, ROLE_CHIEF, ROLE_OWNER, MessageLog
-from .base import Adapter, BudgetCard, Engine, MemoryReader, ReadyHook, Surface
+from .base import (
+    Adapter,
+    ApprovalResolver,
+    BudgetCard,
+    Engine,
+    MemoryReader,
+    ReadyHook,
+    Surface,
+)
 from .commands import OWNER_COMMANDS, CommandContext, CommandRegistry
 
 logger = logging.getLogger(__name__)
@@ -48,6 +64,10 @@ logger = logging.getLogger(__name__)
 #: FILE_THRESHOLD_FACTOR`` (~4 MB) or on an un-splittable oversized code fence, which
 #: becomes one file frame.
 CLI_LIMIT = 1_000_000
+
+#: ``decided_by`` for a socket answer. The 0600 socket is the auth (#128 local trust),
+#: so every client answer is the owner — one identity, no per-client id.
+DECIDED_BY_CLI = "cli"
 
 
 class CliTaskIO:
@@ -132,24 +152,21 @@ class CliTaskIO:
         logger.debug("cli archive_thread no-op", extra={"thread_key": thread_key})
 
     async def send_card(self, route: str, card: ApprovalCard) -> str:
-        """Post an approval card as a plain reply frame; return its edit ref (#131).
-
-        The approval *buttons* have no wire form until the approval-frame slice, so the
-        card is visible but unanswerable — an unanswered card times out to deny, the
-        safe default. The ref encodes the route so :meth:`edit_card` can find it.
-        """
-        await self._emit(route, reply_frame(route, card.text), text=card.text)
+        """Broadcast an answerable approval card frame; return its edit ref (#136)."""
+        frame = card_frame(route, card.approval_id, card.text)
+        await self._emit(route, frame, text=card.text)
         return f"{route}|{card.approval_id}"
 
     async def edit_card(self, msg_ref: str, text: str) -> None:
-        """Broadcast a card's outcome text to its route (no in-place edit on socket).
+        """Broadcast the card's outcome (no in-place edit on the socket, #136).
 
-        ``rsplit`` (not ``split``): the route is a client-supplied ``thread_key`` that
-        may itself contain ``|``, but the appended ``approval_id`` is numeric, so
-        splitting from the right recovers the exact route.
+        ``rsplit`` (not ``split``): a client-supplied thread_key may contain ``|``, but
+        the appended approval id is numeric, so splitting from the right is exact.
         """
-        route = msg_ref.rsplit("|", 1)[0]
-        await self._emit(route, reply_frame(route, text), text=text)
+        route, _, raw_id = msg_ref.rpartition("|")
+        await self._emit(
+            route, card_resolved_frame(route, int(raw_id), text), text=text
+        )
 
     async def send_budget_card(self, route: str, card: BudgetCard) -> None:
         """Post the budget choice card as a reply frame (visible, unanswerable)."""
@@ -173,6 +190,7 @@ class CliAdapter(Adapter):
         commands: CommandRegistry = OWNER_COMMANDS,
         log: MessageLog | None = None,
         replay_limit: int = REPLAY_LIMIT,
+        approvals: ApprovalResolver | None = None,
     ) -> None:
         self._server = server
         self._engine = engine
@@ -182,6 +200,9 @@ class CliAdapter(Adapter):
         #: detach-replay: the adapter is exactly its #131 self.
         self._log = log
         self._replay_limit = replay_limit
+        #: The shared answer router (#136). ``None`` ⇒ an ``answer`` frame falls through
+        #: to ``unknown_type`` — byte-identical to #131's answer-less behavior.
+        self._approvals = approvals
         self._stopped = asyncio.Event()
         server.set_handler(self._on_frame)
         server.set_connect_hook(self._on_connect)
@@ -236,6 +257,8 @@ class CliAdapter(Adapter):
             return await self._handle_user(frame, sender)
         if ftype == TYPE_COMMAND:
             return await self._handle_command(frame, sender)
+        if ftype == TYPE_ANSWER:
+            return await self._handle_answer(frame, sender)
         return False
 
     async def _handle_user(self, frame: object, sender: FrameSender) -> bool:
@@ -304,6 +327,48 @@ class CliAdapter(Adapter):
             reply=reply,
         )
         await self._commands.dispatch(name, ctx)
+        return True
+
+    async def _handle_answer(self, frame: object, sender: FrameSender) -> bool:
+        """Resolve an approval from the socket, first-answer-wins (#136).
+
+        The registry routes the id to the manager that parked it — which may be a *chat*
+        stack's manager, so a card raised on a Telegram thread is answerable here. The
+        manager's atomic decide is the arbiter: a losing (second) answer returns False
+        and is refused ``already_resolved``, and the winning surface's card is edited to
+        the outcome by the manager itself (through that stack's ApprovalIO).
+        """
+        if self._approvals is None:
+            return False
+        approval_id, raw_action = _get(frame, "approval_id"), _get(frame, "action")
+        if (
+            not isinstance(approval_id, int)
+            or isinstance(approval_id, bool)
+            or not _nonempty_str(raw_action)
+        ):
+            await sender(
+                error_frame(
+                    "invalid_fields",
+                    "answer frame needs an int approval_id and a string action",
+                )
+            )
+            return True
+        try:
+            action = ApprovalAction(raw_action)
+        except ValueError:
+            await sender(
+                error_frame("invalid_fields", f"unknown action: {raw_action!r}")
+            )
+            return True
+        if not await self._approvals.resolve(
+            approval_id, action, decided_by=DECIDED_BY_CLI
+        ):
+            await sender(
+                error_frame(
+                    "already_resolved",
+                    f"approval {approval_id} is unknown or already resolved",
+                )
+            )
         return True
 
 

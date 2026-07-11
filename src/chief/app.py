@@ -45,7 +45,7 @@ from .core.copilot_session import openrouter_provider_config
 from .core.routing import RoutingStore
 from .core.scheduler import Scheduler
 from .core.tasks import TaskIO, TaskManager
-from .gate.approvals import ApprovalManager
+from .gate.approvals import ApprovalManager, ApprovalRegistry
 from .gate.blacklist import Blacklist
 from .gate.policy import PolicyStore
 from .memory.markdown_backend import MarkdownMemory
@@ -625,6 +625,7 @@ def build_telegram_stack(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
     socket_server: SocketServer | None = None,
+    registry: ApprovalRegistry | None = None,
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
@@ -632,27 +633,32 @@ def build_telegram_stack(
     ``ApprovalIO`` (it implements both), so cards post through the same bot. Only called
     when ``settings.telegram_configured`` — the asserts narrow the optional secrets.
 
-    #133: the engine's ``TaskIO`` is wrapped in :class:`MirrorTaskIO`, so every task
-    milestone/reply this stack emits is mirrored onto the client-plane socket + recorded
-    in the message log. Only the engine io is wrapped — the approval manager and budget
-    keep the raw ``TelegramTaskIO`` (cards are #136's slice, budget stays unmirrored).
+    #133: the engine's ``TaskIO`` is wrapped in :class:`MirrorTaskIO`. #136: the
+    approval manager is wired to that same mirror (not the raw platform io), so every
+    task milestone/reply *and* every approval card this stack emits mirrors onto the
+    client-plane socket + the message log. Only the budget keeps the raw
+    ``TelegramTaskIO`` (budget traffic stays unmirrored). ``registry`` defaults to a
+    fresh :class:`ApprovalRegistry` when unset — pass the shared one from
+    :func:`build_stacks` so a socket answer can resolve a card raised on any platform.
     """
     assert settings.telegram_bot_token is not None
     assert settings.owner_telegram_id is not None
+    registry = registry or ApprovalRegistry()
     application = Application.builder().token(settings.telegram_bot_token).build()
     io = TelegramTaskIO(application.bot)
-    approvals = ApprovalManager(
-        session_factory=session_factory,
-        io=io,
-        policy=policy,
-        audit=audit,
-        timeout_seconds=settings.approval_timeout_seconds,
-    )
     mirror = MirrorTaskIO(
         io,
         platform="telegram",
         log=MessageLog(session_factory),
         server=socket_server,
+    )
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=mirror,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=settings.approval_timeout_seconds,
+        registry=registry,
     )
     manager = build_engine(
         settings,
@@ -697,6 +703,7 @@ def build_discord_stack(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
     socket_server: SocketServer | None = None,
+    registry: ApprovalRegistry | None = None,
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
@@ -704,27 +711,30 @@ def build_discord_stack(
     Only called when ``settings.discord_configured``; the asserts narrow the secrets.
 
     #133: like the Telegram stack, the engine's ``TaskIO`` is wrapped in
-    :class:`MirrorTaskIO` so its outbound mirrors onto the socket + the message log; the
-    approval manager and budget keep the raw ``DiscordTaskIO``.
+    :class:`MirrorTaskIO`. #136: the approval manager uses that same mirror (so cards
+    fan out to the socket too); the budget keeps the raw ``DiscordTaskIO``. ``registry``
+    defaults to a fresh :class:`ApprovalRegistry` when unset.
     """
     assert settings.discord_bot_token is not None
     assert settings.owner_discord_id is not None
+    registry = registry or ApprovalRegistry()
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
     io = DiscordTaskIO(client)
-    approvals = ApprovalManager(
-        session_factory=session_factory,
-        io=io,
-        policy=policy,
-        audit=audit,
-        timeout_seconds=settings.approval_timeout_seconds,
-    )
     mirror = MirrorTaskIO(
         io,
         platform="discord",
         log=MessageLog(session_factory),
         server=socket_server,
+    )
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=mirror,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=settings.approval_timeout_seconds,
+        registry=registry,
     )
     manager = build_engine(
         settings,
@@ -770,6 +780,7 @@ def build_cli_stack(
     memory: MemoryStore,
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
+    registry: ApprovalRegistry | None = None,
 ) -> Stack:
     """Build the CLI engine stack bound to the always-on client-plane socket (#131).
 
@@ -788,7 +799,12 @@ def build_cli_stack(
     (#133): the ``CliTaskIO`` is already this stack's broadcaster *and* its recorder, so
     a mirror would only broadcast nothing and log every outbound a second time. One
     outbound, one recorder.
+
+    #136: the adapter is given the shared ``registry`` (defaults to a fresh one) as
+    its ``ApprovalResolver``, so a socket ``answer`` frame resolves through whichever
+    stack's manager parked the approval.
     """
+    registry = registry or ApprovalRegistry()
     message_log = MessageLog(session_factory)
     io = CliTaskIO(socket_server, log=message_log)
     approvals = ApprovalManager(
@@ -797,6 +813,7 @@ def build_cli_stack(
         policy=policy,
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
+        registry=registry,
     )
     manager = build_engine(
         settings,
@@ -812,7 +829,11 @@ def build_cli_stack(
         harness_versioner=harness_versioner,
     )
     adapter = CliAdapter(
-        server=socket_server, engine=manager, memory=memory, log=message_log
+        server=socket_server,
+        engine=manager,
+        memory=memory,
+        log=message_log,
+        approvals=registry,
     )
     return manager, adapter, approvals
 
@@ -834,7 +855,12 @@ def build_stacks(
     socket is always-on infrastructure, #131) and appended last, so even a zero-token
     boot yields exactly one — the CLI — stack. #133: ``socket_server`` threads into
     every stack builder so each stack's outbound is mirrored onto the socket + log.
+
+    #136: one :class:`~chief.gate.approvals.ApprovalRegistry` is created here and passed
+    to every stack — this, not each builder's own default, is what makes a socket
+    ``answer`` resolve a card raised on a *different* platform's stack.
     """
+    registry = ApprovalRegistry()
     stacks: list[Stack] = []
     if settings.telegram_configured:
         stacks.append(
@@ -847,6 +873,7 @@ def build_stacks(
                 routing=routing,
                 harness_versioner=harness_versioner,
                 socket_server=socket_server,
+                registry=registry,
             )
         )
     if settings.discord_configured:
@@ -860,6 +887,7 @@ def build_stacks(
                 routing=routing,
                 harness_versioner=harness_versioner,
                 socket_server=socket_server,
+                registry=registry,
             )
         )
     stacks.append(
@@ -872,6 +900,7 @@ def build_stacks(
             memory=memory,
             routing=routing,
             harness_versioner=harness_versioner,
+            registry=registry,
         )
     )
     return stacks
