@@ -26,6 +26,7 @@ from telegram.ext import Application
 from .adapters.base import Adapter, ReadyHook
 from .adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
+from .adapters.mirror import MirrorTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .client_plane import SocketServer
 from .config import Settings
@@ -622,12 +623,18 @@ def build_telegram_stack(
     memory: MemoryStore,
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
+    socket_server: SocketServer | None = None,
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
     The one ``TelegramTaskIO`` doubles as the engine's ``TaskIO`` and the approval
     ``ApprovalIO`` (it implements both), so cards post through the same bot. Only called
     when ``settings.telegram_configured`` — the asserts narrow the optional secrets.
+
+    #133: the engine's ``TaskIO`` is wrapped in :class:`MirrorTaskIO`, so every task
+    milestone/reply this stack emits is mirrored onto the client-plane socket + recorded
+    in the message log. Only the engine io is wrapped — the approval manager and budget
+    keep the raw ``TelegramTaskIO`` (cards are #136's slice, budget stays unmirrored).
     """
     assert settings.telegram_bot_token is not None
     assert settings.owner_telegram_id is not None
@@ -640,10 +647,16 @@ def build_telegram_stack(
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
     )
+    mirror = MirrorTaskIO(
+        io,
+        platform="telegram",
+        session_factory=session_factory,
+        server=socket_server,
+    )
     manager = build_engine(
         settings,
         platform="telegram",
-        io=io,
+        io=mirror,
         session_factory=session_factory,
         policy=policy,
         approvals=approvals,
@@ -682,11 +695,16 @@ def build_discord_stack(
     memory: MemoryStore,
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
+    socket_server: SocketServer | None = None,
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
     Needs the privileged **message_content** intent (enable it in the Developer Portal).
     Only called when ``settings.discord_configured``; the asserts narrow the secrets.
+
+    #133: like the Telegram stack, the engine's ``TaskIO`` is wrapped in
+    :class:`MirrorTaskIO` so its outbound mirrors onto the socket + the message log; the
+    approval manager and budget keep the raw ``DiscordTaskIO``.
     """
     assert settings.discord_bot_token is not None
     assert settings.owner_discord_id is not None
@@ -701,10 +719,16 @@ def build_discord_stack(
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
     )
+    mirror = MirrorTaskIO(
+        io,
+        platform="discord",
+        session_factory=session_factory,
+        server=socket_server,
+    )
     manager = build_engine(
         settings,
         platform="discord",
-        io=io,
+        io=mirror,
         session_factory=session_factory,
         policy=policy,
         approvals=approvals,
@@ -754,6 +778,11 @@ def build_cli_stack(
     ``ApprovalIO`` (like the chat stacks), so cards broadcast out the same socket as
     replies. ``socket_server`` is constructed by ``serve`` *before* this call so the
     adapter can install its inbound handler before the server is run.
+
+    #133: the engine io is wrapped in :class:`MirrorTaskIO` with ``server=None`` — the
+    inner ``CliTaskIO`` already broadcasts (the socket *is* its delivery), so the mirror
+    adds only the message-log record, never a duplicate frame. The approval manager
+    keeps the raw ``CliTaskIO``.
     """
     io = CliTaskIO(socket_server)
     approvals = ApprovalManager(
@@ -763,10 +792,13 @@ def build_cli_stack(
         audit=audit,
         timeout_seconds=settings.approval_timeout_seconds,
     )
+    mirror = MirrorTaskIO(
+        io, platform="cli", session_factory=session_factory, server=None
+    )
     manager = build_engine(
         settings,
         platform="cli",
-        io=io,
+        io=mirror,
         session_factory=session_factory,
         policy=policy,
         approvals=approvals,
@@ -795,7 +827,8 @@ def build_stacks(
 
     Telegram and Discord are gated on their tokens; the CLI stack is unconditional (the
     socket is always-on infrastructure, #131) and appended last, so even a zero-token
-    boot yields exactly one — the CLI — stack.
+    boot yields exactly one — the CLI — stack. #133: ``socket_server`` threads into
+    every stack builder so each stack's outbound is mirrored onto the socket + log.
     """
     stacks: list[Stack] = []
     if settings.telegram_configured:
@@ -808,6 +841,7 @@ def build_stacks(
                 memory=memory,
                 routing=routing,
                 harness_versioner=harness_versioner,
+                socket_server=socket_server,
             )
         )
     if settings.discord_configured:
@@ -820,6 +854,7 @@ def build_stacks(
                 memory=memory,
                 routing=routing,
                 harness_versioner=harness_versioner,
+                socket_server=socket_server,
             )
         )
     stacks.append(

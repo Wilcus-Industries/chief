@@ -23,7 +23,7 @@ from ..client_plane import (
     SocketServer,
     error_frame,
     file_frame,
-    milestone_frame,
+    outbound_frame,
     reply_frame,
 )
 from ..gate.approvals import ApprovalCard
@@ -38,12 +38,6 @@ logger = logging.getLogger(__name__)
 #: FILE_THRESHOLD_FACTOR`` (~4 MB) or on an un-splittable oversized code fence, which
 #: becomes one file frame.
 CLI_LIMIT = 1_000_000
-
-#: The milestone marker the engine prefixes onto a progress line
-#: (``core.tasks._run_turn``, test-pinned at tasks.py:1729). Detecting it here — rather
-#: than adding a ``send_milestone`` Protocol method — keeps the blast radius to this one
-#: IO (that method would touch TaskIO + _run_turn + every other IO + every fake).
-_MILESTONE_PREFIX = "· "
 
 
 class CliTaskIO:
@@ -64,15 +58,10 @@ class CliTaskIO:
     async def send(self, thread_key: str, text: str) -> None:
         """Broadcast a progress line as a milestone frame, else a reply frame.
 
-        The engine streams milestones through the same ``send`` seam as final replies,
-        distinguished only by the ``· `` prefix; we split them back into the two frame
-        types so a client can render progress and answers differently.
+        :func:`outbound_frame` owns the milestone-vs-reply split (shared with the #133
+        mirror) so the ``· `` prefix is detected in exactly one place.
         """
-        if text.startswith(_MILESTONE_PREFIX):
-            body = text.removeprefix(_MILESTONE_PREFIX)
-            await self._server.broadcast(milestone_frame(thread_key, body))
-        else:
-            await self._server.broadcast(reply_frame(thread_key, text))
+        await self._server.broadcast(outbound_frame(thread_key, text))
 
     async def send_file(
         self,
