@@ -333,6 +333,9 @@ def test_build_stacks_always_appends_cli_stack_bound_to_socket(
     assert manager._message_limit == CLI_LIMIT
     # The adapter installed its handler on the socket in its ctor (construct≠bind).
     assert socket_server._handler is not None
+    # #132: the adapter carries a message log and installed its replay connect hook.
+    assert adapter._log is not None
+    assert socket_server._connect_hook is not None
     assert stacks[-1] is cli  # appended last
 
 
