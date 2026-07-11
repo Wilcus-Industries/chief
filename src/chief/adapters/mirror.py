@@ -9,10 +9,11 @@ table. The mirror tail is fully contained: a broadcast or DB failure is logged, 
 raised, so phone-side delivery is never disturbed. If the inner IO itself raises,
 mirroring is skipped and the exception propagates exactly as today.
 
-Only ``send`` and ``send_file`` are mirrored/logged — the engine's task milestones and
-replies. ``create_thread``/``archive_thread`` and the three card methods are pure
-delegation: approval cards on the socket are #136's slice, budget traffic stays
-unmirrored.
+``send``, ``send_file``, and the approval card methods are mirrored/logged. Cards are
+now mirrored too (#136): ``send_card``/``edit_card`` post to the platform first, then
+broadcast a platform-tagged ``card``/``card_resolved`` frame. ``create_thread`` /
+``archive_thread`` / ``send_budget_card`` stay pure delegation: thread lifecycle isn't
+owner-visible traffic and budget traffic stays unmirrored.
 
 The CLI stack is **not** wrapped: its :class:`~chief.adapters.cli.CliTaskIO` already
 broadcasts (the socket *is* its delivery) and already records each outbound — with the
@@ -26,9 +27,21 @@ without broadcasting.
 import logging
 from typing import Protocol
 
-from ..client_plane import SocketServer, file_frame, outbound_frame
+from ..client_plane import (
+    SocketServer,
+    card_frame,
+    card_resolved_frame,
+    file_frame,
+    outbound_frame,
+)
 from ..gate.approvals import ApprovalCard
-from ..persistence.messages import KIND_FILE, ROLE_CHIEF, MessageLog
+from ..persistence.messages import (
+    KIND_CARD,
+    KIND_CARD_RESOLVED,
+    KIND_FILE,
+    ROLE_CHIEF,
+    MessageLog,
+)
 from .base import BudgetCard
 
 logger = logging.getLogger(__name__)
@@ -78,6 +91,10 @@ class MirrorTaskIO:
         self._log = log
         #: ``None`` when this boot has no client-plane socket — log-only mirroring.
         self._server = server
+        #: msg_ref → (route, approval_id), so ``edit_card`` (which sees only the ref)
+        #: can name the approval in the card_resolved frame (#136). Popped on edit, so
+        #: it stays bounded by the live cards.
+        self._cards: dict[str, tuple[str, int]] = {}
 
     async def send(self, thread_key: str, text: str) -> None:
         """Deliver to the platform, then broadcast + log the milestone/reply (#133)."""
@@ -155,12 +172,41 @@ class MirrorTaskIO:
         await self._inner.archive_thread(thread_key)
 
     async def send_card(self, route: str, card: ApprovalCard) -> str:
-        """Delegate — cards on the socket are #136's slice (no mirroring)."""
-        return await self._inner.send_card(route, card)
+        """Post the card on the platform, then mirror it onto the socket (#136).
+
+        Platform first (the #133 order): the phone card is the primary surface and its
+        ref is the manager's edit handle. The ref → (route, approval_id) memo is what
+        lets :meth:`edit_card` — which sees only the ref — name the approval in the
+        card_resolved frame; it is popped on edit, so it stays bounded by the live
+        cards.
+        """
+        msg_ref = await self._inner.send_card(route, card)
+        self._cards[msg_ref] = (route, card.approval_id)
+        await self._mirror(
+            card_frame(route, card.approval_id, card.text, platform=self._platform),
+            kind=KIND_CARD,
+            text=card.text,
+            filename=None,
+        )
+        return msg_ref
 
     async def edit_card(self, msg_ref: str, text: str) -> None:
-        """Delegate — cards on the socket are #136's slice (no mirroring)."""
+        """Edit the platform card, then mirror the outcome onto the socket (#136).
+
+        An unknown ref (a card posted before a restart, re-armed with no memo) edits the
+        platform and skips the mirror — there is no approval id to name.
+        """
         await self._inner.edit_card(msg_ref, text)
+        known = self._cards.pop(msg_ref, None)
+        if known is None:
+            return
+        route, approval_id = known
+        await self._mirror(
+            card_resolved_frame(route, approval_id, text, platform=self._platform),
+            kind=KIND_CARD_RESOLVED,
+            text=text,
+            filename=None,
+        )
 
     async def send_budget_card(self, route: str, card: BudgetCard) -> None:
         """Delegate — budget traffic stays unmirrored (no mirroring)."""

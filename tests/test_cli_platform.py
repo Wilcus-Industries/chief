@@ -18,27 +18,34 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
+from chief.adapters.base import Attachment
 from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
+from chief.adapters.mirror import MirrorTaskIO
 from chief.client_plane import (
     SocketServer,
+    answer_frame,
     command_frame,
     user_frame,
 )
 from chief.config import Settings
-from chief.core.session import Milestone
+from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import SessionProto, TaskManager
+from chief.gate.approvals import ApprovalAction, ApprovalManager, ApprovalRegistry
+from chief.gate.blacklist import Blacklist
 from chief.gate.policy import PolicyStore
+from chief.gate.types import ToolPermissionContext
 from chief.obs.audit import AuditLog
 from chief.persistence.messages import MessageLog
 from chief.persistence.models import MessageLogEntry
 from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
+from test_broadcast_bus import _RecordingInner
 from test_tasks import FakeSession
 
 Factory = Callable[..., SessionProto]
@@ -680,6 +687,326 @@ async def test_scheduler_reminder_fired_while_detached_replays_on_attach(
         assert frame["thread_key"] == "cli:main"
         assert frame["text"] == "stand up"
         assert frame["replay"] is True
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+# ---- #136: multi-surface approvals — cards + answers over the socket ----------
+
+
+class _GateSession:
+    """A minimal SessionProto that drives the REAL ``can_use_tool`` mid-turn (#136).
+
+    Unlike ``FakeSession`` (a fixed milestones→Final sequence), this session actually
+    calls the captured gate callback with a blacklisted shell command, so the central
+    mechanism — classify → ASK → a real approval card → a real socket answer — runs for
+    real rather than being mocked out.
+    """
+
+    def __init__(self, *, model: str, resume: str | None, can_use_tool: Any) -> None:
+        self.model = model
+        self.resume = resume
+        self.session_id = resume
+        self.last_cost_usd = 0.0
+        self.last_rate_limit_status: str | None = None
+        self.last_served_model: str | None = None
+        self.last_premium_requests: dict[str, int] = {}
+        self._can_use_tool = can_use_tool
+
+    async def run_turn(
+        self, text: str, attachments: Sequence[Attachment] = ()
+    ) -> AsyncIterator[TurnEvent]:
+        result = await self._can_use_tool(
+            "mcp__chief_shell__bash",
+            {"command": "sudo rm -rf /"},
+            ToolPermissionContext(),
+        )
+        self.session_id = f"sess-{text}"
+        self.last_served_model = self.model
+        yield Final(text="proceeded" if result.behavior == "allow" else "blocked")
+
+    async def interrupt(self) -> None: ...
+
+    async def set_model(self, model: str) -> None:
+        self.model = model
+
+    async def aclose(self) -> None: ...
+
+    async def force_close(self) -> None: ...
+
+
+def _gate_factory() -> Factory:
+    def factory(
+        *, model: str, resume: str | None = None, can_use_tool: Any = None, **_: Any
+    ) -> SessionProto:
+        return _GateSession(model=model, resume=resume, can_use_tool=can_use_tool)
+
+    return factory
+
+
+class GateStack(NamedTuple):
+    """A real CLI stack wired for the gate: policy + approvals + audit + blacklist."""
+
+    server: SocketServer
+    registry: ApprovalRegistry
+
+
+@pytest.fixture
+async def gate_cli_stack(
+    tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
+) -> AsyncIterator[GateStack]:
+    """A real SocketServer + CliAdapter + TaskManager wired with a real gate (#136).
+
+    Unlike ``cli_stack``, this manager carries ``policy``/``approvals``/``audit``/
+    ``blacklist`` so ``TaskManager`` actually wires a ``can_use_tool`` into each
+    session (``tasks.py:1140``) — the central mechanism this slice adds.
+    """
+    server, task = await _running_server(str(tmp_path / "gate.sock"))
+    log = MessageLog(session_factory)
+    registry = ApprovalRegistry()
+    audit = AuditLog(str(tmp_path / "audit.jsonl"))
+    policy = PolicyStore(session_factory, audit=audit)
+    await policy.load()
+    io = CliTaskIO(server, log=log)
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=io,
+        policy=policy,
+        audit=audit,
+        registry=registry,
+        timeout_seconds=5.0,
+    )
+    manager = TaskManager(
+        session_factory=session_factory,
+        io=io,
+        owner_model="claude-sonnet-4-6",
+        classifier_model="claude-haiku-4-5",
+        platform="cli",
+        concurrency=3,
+        turn_timeout=1000.0,
+        idle_archive_seconds=1000.0,
+        compaction_idle_seconds=1000.0,
+        message_limit=CLI_LIMIT,
+        session_factory_sdk=_gate_factory(),
+        stop_intent=_no,
+        warrants_task=_no,
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        blacklist=Blacklist.from_config(),
+    )
+    CliAdapter(server=server, engine=manager, log=log, approvals=registry)
+    try:
+        yield GateStack(server, registry)
+    finally:
+        await manager.shutdown()
+        await server.stop()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_answer_approve_once_lets_the_blacklisted_command_proceed(
+    gate_cli_stack: GateStack,
+) -> None:
+    # AC1 (approve): a blacklisted command raises a real card frame carrying its
+    # approval_id, preview text, and the four options; approve_once lets it proceed.
+    reader, writer = await asyncio.open_unix_connection(gate_cli_stack.server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "go")).encode() + b"\n")
+        await writer.drain()
+
+        card = await _read_frame(reader)
+        assert card["type"] == "card"
+        assert card["platform"] == "cli"
+        assert card["text"] == "Run: sudo rm -rf /"
+        assert len(card["options"]) == 4  # type: ignore[arg-type]
+        approval_id = cast(int, card["approval_id"])
+
+        writer.write(
+            json.dumps(answer_frame(approval_id, "approve_once")).encode() + b"\n"
+        )
+        await writer.drain()
+
+        resolved = await _read_frame(reader)
+        assert resolved["type"] == "card_resolved"
+        assert resolved["approval_id"] == approval_id
+
+        reply = await _read_frame(reader)
+        assert reply["type"] == "reply"
+        assert reply["text"] == "proceeded"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_answer_deny_once_blocks_the_command(
+    gate_cli_stack: GateStack,
+) -> None:
+    # AC1 (deny): same card, but deny_once blocks the command.
+    reader, writer = await asyncio.open_unix_connection(gate_cli_stack.server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "go")).encode() + b"\n")
+        await writer.drain()
+
+        card = await _read_frame(reader)
+        approval_id = cast(int, card["approval_id"])
+
+        writer.write(
+            json.dumps(answer_frame(approval_id, "deny_once")).encode() + b"\n"
+        )
+        await writer.drain()
+
+        resolved = await _read_frame(reader)
+        assert resolved["type"] == "card_resolved"
+
+        reply = await _read_frame(reader)
+        assert reply["type"] == "reply"
+        assert reply["text"] == "blocked"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_second_answer_for_a_resolved_approval_is_already_resolved(
+    gate_cli_stack: GateStack,
+) -> None:
+    # AC3: resolve.resolve returns False for a duplicate/unknown id — the socket
+    # surfaces that as an already_resolved error, never a second decide/edit.
+    reader, writer = await asyncio.open_unix_connection(gate_cli_stack.server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "go")).encode() + b"\n")
+        await writer.drain()
+
+        card = await _read_frame(reader)
+        approval_id = cast(int, card["approval_id"])
+        writer.write(
+            json.dumps(answer_frame(approval_id, "approve_once")).encode() + b"\n"
+        )
+        await writer.drain()
+        await _read_frame(reader)  # card_resolved
+        await _read_frame(reader)  # reply
+
+        writer.write(
+            json.dumps(answer_frame(approval_id, "deny_once")).encode() + b"\n"
+        )
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error == {
+            "type": "error",
+            "code": "already_resolved",
+            "message": f"approval {approval_id} is unknown or already resolved",
+        }
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_cross_surface_card_and_answer_resolve_a_foreign_platform_approval(
+    gate_cli_stack: GateStack,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # AC2: a card raised on a *telegram* thread (real ApprovalManager over a real
+    # MirrorTaskIO wrapping a fake platform IO) appears on BOTH the platform IO seam
+    # and — platform-tagged — the socket. Both directions of resolve are exercised: a
+    # socket answer resolving a chat-raised card, and a chat-button-style resolve
+    # (registry.resolve directly) reaching the socket client as card_resolved.
+    server, registry = gate_cli_stack
+    fake_platform_io = _RecordingInner()
+    telegram_audit = AuditLog(str(tmp_path / "telegram-audit.jsonl"))
+    telegram_policy = PolicyStore(session_factory, audit=telegram_audit)
+    await telegram_policy.load()
+    mirror = MirrorTaskIO(
+        fake_platform_io,
+        platform="telegram",
+        log=MessageLog(session_factory),
+        server=server,
+    )
+    telegram_manager = ApprovalManager(
+        session_factory=session_factory,
+        io=mirror,
+        policy=telegram_policy,
+        audit=telegram_audit,
+        registry=registry,
+        timeout_seconds=5.0,
+    )
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+
+        parked = asyncio.create_task(
+            telegram_manager.request(
+                task_id=None,
+                thread_key="telegram:room1",
+                tier="owner",
+                tool_name="Bash",
+                tool_input={"command": "git push"},
+                route="telegram:room1",
+            )
+        )
+        card = await _read_frame(reader)
+        assert card["type"] == "card"
+        assert card["platform"] == "telegram"
+        approval_id = cast(int, card["approval_id"])
+        # The platform IO seam recorded the card too — both surfaces got it.
+        assert fake_platform_io.cards
+        assert fake_platform_io.cards[0][0] == "telegram:room1"
+
+        # (a) forward: a socket answer resolves a card raised by a chat stack.
+        writer.write(
+            json.dumps(answer_frame(approval_id, "approve_once")).encode() + b"\n"
+        )
+        await writer.drain()
+        allowed = await parked
+
+        assert allowed is True
+        resolved = await _read_frame(reader)
+        assert resolved["type"] == "card_resolved"
+        assert resolved["platform"] == "telegram"
+        assert resolved["approval_id"] == approval_id
+        assert "by cli" in fake_platform_io.edits[-1][1]
+
+        # (b) reverse: a chat-button-style resolve (registry.resolve directly) reaches
+        # the socket client as a card_resolved frame naming the decider.
+        parked2 = asyncio.create_task(
+            telegram_manager.request(
+                task_id=None,
+                thread_key="telegram:room1",
+                tier="owner",
+                tool_name="Bash",
+                tool_input={"command": "git status"},
+                route="telegram:room1",
+            )
+        )
+        card2 = await _read_frame(reader)
+        approval_id2 = cast(int, card2["approval_id"])
+
+        won = await registry.resolve(
+            approval_id2, ApprovalAction.APPROVE_ONCE, decided_by="42"
+        )
+        assert won is True
+        assert await parked2 is True
+        resolved2 = await _read_frame(reader)
+        assert resolved2["type"] == "card_resolved"
+        assert "by 42" in str(resolved2["text"])
+
+        # A subsequent socket answer for that same id is refused already_resolved.
+        writer.write(
+            json.dumps(answer_frame(approval_id2, "deny_once")).encode() + b"\n"
+        )
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "already_resolved"
     finally:
         writer.close()
         with suppress(OSError):
