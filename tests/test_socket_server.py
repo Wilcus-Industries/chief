@@ -348,6 +348,75 @@ async def test_raising_handler_gets_internal_error_and_loop_survives(
             await writer.wait_closed()
 
 
+async def test_connect_hook_frames_arrive_after_hello_before_live_traffic(
+    server: SocketServer,
+) -> None:
+    # #132 replay seam: a connect hook runs once per accepted connection, after the
+    # hello and before the connection joins the broadcast set. Frames it sends through
+    # its sender precede any live traffic on that connection.
+    async def hook(sender: FrameSender) -> None:
+        await sender({"type": "reply", "text": "replayed"})
+
+    server.set_connect_hook(hook)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        assert await _read_frame(reader) == {"type": "reply", "text": "replayed"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_client_not_registered_until_connect_hook_completes(
+    server: SocketServer,
+) -> None:
+    # The joining client must not be in the broadcast set while its hook runs — a
+    # broadcast during the hook is never delivered to it (it replays on the next
+    # attach instead), so replay frames can never interleave with live traffic.
+    hook_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hook(sender: FrameSender) -> None:
+        hook_entered.set()
+        await release.wait()
+
+    server.set_connect_hook(hook)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        await asyncio.wait_for(hook_entered.wait(), 5)
+        assert server.has_clients is False
+        await server.broadcast({"type": "reply", "text": "missed"})
+        release.set()
+        # The broadcast never reached the joining client: the next frame is the pong.
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_connect_hook_exception_is_contained(server: SocketServer) -> None:
+    # A raising connect hook must not kill the connection or the daemon.
+    async def hook(sender: FrameSender) -> None:
+        raise RuntimeError("boom")
+
+    server.set_connect_hook(hook)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
 async def test_stale_socket_file_is_replaced(tmp_path: Path) -> None:
     path = tmp_path / "stale.sock"
     path.touch()  # a leftover file from an unclean prior shutdown

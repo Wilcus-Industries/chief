@@ -13,9 +13,10 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
@@ -26,9 +27,18 @@ from chief.client_plane import (
 )
 from chief.core.session import Milestone
 from chief.core.tasks import SessionProto, TaskManager
+from chief.persistence.messages import MessageLog
+from chief.persistence.models import MessageLogEntry
 from test_tasks import FakeSession
 
 Factory = Callable[..., SessionProto]
+
+
+class CliStack(NamedTuple):
+    """What the ``cli_stack`` fixture builds: the running server + its outbound IO."""
+
+    server: SocketServer
+    io: CliTaskIO
 
 
 async def _read_frame(reader: asyncio.StreamReader) -> dict[str, object]:
@@ -89,24 +99,32 @@ async def _running_server(path: str) -> tuple[SocketServer, asyncio.Task[None]]:
 @pytest.fixture
 async def cli_stack(
     tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
-) -> AsyncIterator[Callable[..., Awaitable[SocketServer]]]:
-    """Bring up a real server + CLI stack; the test supplies the fake LLM sessions."""
+) -> AsyncIterator[Callable[..., Awaitable[CliStack]]]:
+    """Bring up a real server + CLI stack; the test supplies the fake LLM sessions.
+
+    The stack shares a real :class:`MessageLog` over the ``session_factory`` fixture, so
+    tests can inspect logged rows / drive detach-replay by querying that same DB.
+    """
     built: list[tuple[SocketServer, asyncio.Task[None], TaskManager]] = []
 
     async def _build(
-        sessions: Sequence[FakeSession], *, message_limit: int = CLI_LIMIT
-    ) -> SocketServer:
+        sessions: Sequence[FakeSession],
+        *,
+        message_limit: int = CLI_LIMIT,
+        replay_limit: int = 100,
+    ) -> CliStack:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
-        io = CliTaskIO(server)
+        log = MessageLog(session_factory)
+        io = CliTaskIO(server, log=log)
         manager = _cli_manager(
             session_factory,
             io,
             factory=_seq_factory(sessions),
             message_limit=message_limit,
         )
-        CliAdapter(server=server, engine=manager)
+        CliAdapter(server=server, engine=manager, log=log, replay_limit=replay_limit)
         built.append((server, task, manager))
-        return server
+        return CliStack(server, io)
 
     try:
         yield _build
@@ -127,7 +145,7 @@ async def test_user_frame_streams_milestones_then_reply(
     # Red anchor: a user frame drives a real owner turn; the client sees the milestone
     # frame, then the reply frame, IN ORDER, each tagged {platform: cli, thread_key}.
     session = FakeSession(model="m", milestones=[Milestone(text="using Bash")])
-    server = await cli_stack([session])
+    server, _io = await cli_stack([session])
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         assert (await _read_frame(reader))["type"] == "hello"
@@ -154,7 +172,7 @@ async def test_user_frame_streams_milestones_then_reply(
 async def test_user_frame_missing_text_gets_invalid_fields(
     cli_stack: Callable[..., Any],
 ) -> None:
-    server = await cli_stack([])
+    server, _io = await cli_stack([])
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         await _read_frame(reader)  # hello
@@ -173,7 +191,7 @@ async def test_command_tasks_replies_no_active_tasks_on_empty_db(
 ) -> None:
     # A real registry dispatch: /tasks over an empty DB → "No active tasks." The reply
     # comes back on the requesting connection (sender), not a broadcast.
-    server = await cli_stack([])
+    server, _io = await cli_stack([])
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         await _read_frame(reader)  # hello
@@ -194,7 +212,7 @@ async def test_unknown_command_gets_unknown_command_error(
 ) -> None:
     # The unknown-command error is produced in the CLI handler — the registry keeps its
     # silent-no-op contract.
-    server = await cli_stack([])
+    server, _io = await cli_stack([])
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         await _read_frame(reader)  # hello
@@ -217,7 +235,7 @@ async def test_two_threads_stay_tagged_and_interleave(
     gate = asyncio.Event()
     session_a = FakeSession(model="m", gate=gate)
     session_b = FakeSession(model="m")
-    server = await cli_stack([session_a, session_b])
+    server, _io = await cli_stack([session_a, session_b])
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         assert (await _read_frame(reader))["type"] == "hello"
@@ -254,7 +272,7 @@ async def test_oversized_reply_streams_a_real_file_frame(
     # send_file → a REAL file frame over the REAL socket, encode() and all. The client
     # base64-decodes the data back to the exact reply bytes.
     session = FakeSession(model="m")
-    server = await cli_stack([session], message_limit=32)  # file threshold 32×4 = 128
+    server, _io = await cli_stack([session], message_limit=32)  # threshold 32×4=128
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
         assert (await _read_frame(reader))["type"] == "hello"
@@ -293,3 +311,221 @@ async def test_create_thread_mints_sequential_cli_keys() -> None:
     first = await io.create_thread(like_thread_key="cli:main", title="x")
     second = await io.create_thread(like_thread_key="cli:main", title="y")
     assert (first, second) == ("cli:t1", "cli:t2")
+
+
+async def _all_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> list[MessageLogEntry]:
+    async with session_factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(MessageLogEntry).order_by(MessageLogEntry.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def _wait_for_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+    predicate: Callable[[MessageLogEntry], bool],
+) -> list[MessageLogEntry]:
+    """Poll the log until at least one row satisfies ``predicate`` (bounded 5s)."""
+
+    async def _poll() -> list[MessageLogEntry]:
+        while True:
+            matched = [r for r in await _all_rows(session_factory) if predicate(r)]
+            if matched:
+                return matched
+            await asyncio.sleep(0.01)
+
+    return await asyncio.wait_for(_poll(), 5)
+
+
+async def test_emit_records_undelivered_when_no_clients(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The outbound recording seam in isolation: with no client attached, a reply is
+    # broadcast to nobody AND logged held (delivered=False) with its wire frame payload.
+    log = MessageLog(session_factory)
+    io = CliTaskIO(SocketServer("/unused"), log=log)
+    await io.send("cli:main", "hi")
+
+    (row,) = await _all_rows(session_factory)
+    assert row.kind == "reply" and row.role == "chief"
+    assert row.delivered is False
+    assert row.payload is not None
+    assert json.loads(row.payload) == {
+        "type": "reply", "platform": "cli", "thread_key": "cli:main", "text": "hi"
+    }
+
+
+async def test_detach_replay_delivers_missed_reply_then_live_traffic(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The issue's central mechanism, end-to-end over a real socket: a turn's reply lands
+    # while the client is detached → it is held → on reattach it replays marked, then a
+    # fresh live turn's reply follows unmarked. Only the LLM is faked.
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    session = FakeSession(model="m", gate=gate, on_start=started.set)
+    server, _io = await cli_stack([session])
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    assert (await _read_frame(reader))["type"] == "hello"
+    writer.write(json.dumps(user_frame("cli:main", "hello")).encode() + b"\n")
+    await writer.drain()
+    await asyncio.wait_for(started.wait(), 5)  # turn is parked mid-flight
+
+    # Detach and wait for the server to reap the connection, so the reply that follows
+    # snapshots delivered=False (there is genuinely no client attached at emit time).
+    writer.close()
+    with suppress(OSError):
+        await writer.wait_closed()
+
+    async def _reaped() -> None:
+        while server.has_clients:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_reaped(), 5)
+
+    gate.set()  # let the turn finish → the reply is emitted with no client attached
+    await _wait_for_rows(
+        session_factory,
+        lambda r: r.kind == "reply" and r.delivered is False,
+    )
+
+    # Reattach: the held reply replays (marked) before any live traffic on the socket.
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        replayed = await _read_frame(reader)
+        assert replayed["type"] == "reply"
+        assert replayed["thread_key"] == "cli:main"
+        assert replayed["text"] == "reply:hello"
+        assert replayed["replay"] is True
+
+        # A fresh live turn on the same connection: its reply arrives UNmarked.
+        writer.write(json.dumps(user_frame("cli:main", "again")).encode() + b"\n")
+        await writer.drain()
+        live = await _read_frame(reader)
+        assert live["type"] == "reply"
+        assert live["text"] == "reply:again"
+        assert "replay" not in live
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_second_reattach_does_not_redeliver(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The claim marks every undelivered row delivered, so once a held reply has replayed
+    # onto one reattach, a second reattach gets nothing queued ahead of live traffic.
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    session = FakeSession(model="m", gate=gate, on_start=started.set)
+    server, _io = await cli_stack([session])
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    assert (await _read_frame(reader))["type"] == "hello"
+    writer.write(json.dumps(user_frame("cli:main", "hello")).encode() + b"\n")
+    await writer.drain()
+    await asyncio.wait_for(started.wait(), 5)
+    writer.close()
+    with suppress(OSError):
+        await writer.wait_closed()
+
+    async def _reaped() -> None:
+        while server.has_clients:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_reaped(), 5)
+    gate.set()
+    await _wait_for_rows(
+        session_factory, lambda r: r.kind == "reply" and r.delivered is False
+    )
+
+    # First reattach consumes the replay.
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    assert (await _read_frame(reader))["type"] == "hello"
+    assert (await _read_frame(reader))["text"] == "reply:hello"
+    writer.close()
+    with suppress(OSError):
+        await writer.wait_closed()
+
+    # Second reattach: nothing held → ping is answered directly, no replay frame first.
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_log_records_both_directions_with_role_surface_timestamps(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # One attached turn end-to-end logs exactly one inbound owner row and one outbound
+    # chief row, each with role/surface/kind and a timestamp.
+    session = FakeSession(model="m")
+    server, _io = await cli_stack([session])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "hello")).encode() + b"\n")
+        await writer.drain()
+        reply = await _read_frame(reader)
+        assert reply["text"] == "reply:hello"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+    rows = await _wait_for_rows(session_factory, lambda r: r.kind == "reply")
+    all_rows = await _all_rows(session_factory)
+    assert len(all_rows) == 2
+    inbound = next(r for r in all_rows if r.role == "owner")
+    outbound = rows[0]
+    assert inbound.kind == "user" and inbound.surface == "dm"
+    assert inbound.delivered is True and inbound.payload is None
+    assert inbound.created_at is not None
+    assert outbound.role == "chief" and outbound.surface == "dm"
+    assert outbound.delivered is True and outbound.payload is not None
+    assert outbound.created_at is not None
+
+
+async def test_replay_window_bounds_reattach(
+    cli_stack: Callable[..., Any],
+) -> None:
+    # replay_limit caps the replayed window to the most-recent N held frames; the claim
+    # still marks the rest delivered, so nothing else queues ahead of live traffic.
+    server, io = await cli_stack([], replay_limit=2)
+    for i in range(3):
+        await io.send("cli:main", f"m{i}")  # no client attached → all held
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        first = await _read_frame(reader)
+        second = await _read_frame(reader)
+        assert [first["text"], second["text"]] == ["m1", "m2"]  # most-recent two
+        assert first["replay"] is True and second["replay"] is True
+        # Nothing else queued: ping is answered directly.
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()

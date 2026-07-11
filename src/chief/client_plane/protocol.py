@@ -24,6 +24,11 @@ server→client frame so a client can demux threads (broadcast-to-all; clients f
   ``data`` field is base64-ascii, so a client must decode it; a client's
   ``open_unix_connection`` read limit must be large enough for the encoded frame.
 
+A server→client frame re-delivered from the #132 message log after a detached period
+carries ``"replay": true``; live frames omit the field. It is additive (the field is
+just added to the stored frame on re-emit), so it does **not** bump ``PROTOCOL_VERSION``
+— an older client that ignores the key still renders the frame correctly.
+
 Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 (parseable JSON but not an object), ``unknown_type`` (missing/unrecognized ``type``),
 ``line_too_long`` (the read stream limit was overrun; the connection then closes),
