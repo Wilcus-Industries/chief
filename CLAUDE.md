@@ -15,6 +15,8 @@ Core runs natively on this machine — no core container. One-time setup: `./ins
 (prereqs, secrets/data scaffold, deps, migrations, `chief` launcher; `--google` /
 `--playwright` also start the MCP sidecars). Run with `chief` or
 `uv run python -m chief.entrypoint`. Sidecars: `docker compose --profile google up -d`.
+Attach the terminal client with `uv run chief-cli` (`--socket` overrides
+`settings.socket_path`); it is only a client, so quitting it leaves the daemon running.
 
 ## Definition of done
 
