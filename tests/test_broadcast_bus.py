@@ -186,6 +186,9 @@ async def test_second_stack_mirrors_onto_two_clients_and_logs(
             ("telegram", "-100:7", message_log.ROLE_ASSISTANT, "milestone"),
             ("telegram", "-100:7", message_log.ROLE_ASSISTANT, "reply"),
         }
+        # Payload-less mirror rows can never replay, so they must never join the
+        # claim set — a future claim_replay(platform="telegram") must find nothing.
+        assert all(r.delivered is True for r in rows)
     finally:
         for w in (w1, w2):
             w.close()
@@ -341,3 +344,4 @@ async def test_send_file_broadcasts_and_logs_without_bytes(
         "a caption",
         "reply.md",
     )
+    assert row.delivered is True  # payload-less: never replayable, never claimable

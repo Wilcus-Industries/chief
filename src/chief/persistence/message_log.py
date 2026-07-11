@@ -42,5 +42,9 @@ async def record(
             kind=kind,
             text=text,
             filename=filename,
+            # Payload-less mirror rows can never replay, so they must never join the
+            # claim set a ``claim_replay`` sweeps (the column default stays False as
+            # the defensive fallback for #132's outbound rows).
+            delivered=True,
         )
     )
