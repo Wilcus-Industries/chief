@@ -5,6 +5,10 @@ turn — is exercised for real: a real :class:`SocketServer`, a real :class:`Cli
 real :class:`CliAdapter`, a real ``TaskManager`` on ``platform="cli"``, and a real
 ``asyncio.open_unix_connection`` client. The ONLY fake is the LLM: ``FakeSession`` from
 ``test_tasks`` stands in for the Copilot session (the established model-client seam).
+
+#139 adds a real :class:`Scheduler` tick over the production ``build_cli_stack`` +
+``build_scheduler`` wiring, delivering a reminder onto the socket (and replaying it on
+attach when detached).
 """
 
 import asyncio
@@ -12,6 +16,7 @@ import base64
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -19,16 +24,21 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief import app
 from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
 from chief.client_plane import (
     SocketServer,
     command_frame,
     user_frame,
 )
+from chief.config import Settings
 from chief.core.session import Milestone
 from chief.core.tasks import SessionProto, TaskManager
+from chief.gate.policy import PolicyStore
+from chief.obs.audit import AuditLog
 from chief.persistence.messages import MessageLog
 from chief.persistence.models import MessageLogEntry
+from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
 from test_tasks import FakeSession
 
 Factory = Callable[..., SessionProto]
@@ -525,6 +535,151 @@ async def test_replay_window_bounds_reattach(
         writer.write(b'{"type":"ping"}\n')
         await writer.drain()
         assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+# ---- #139: a real Scheduler tick over the production build_cli_stack wiring ----
+
+
+class SchedulerStack(NamedTuple):
+    """What the ``scheduler_stack`` fixture builds: the production wiring, unstarted."""
+
+    server: SocketServer
+    stack: Any  # app.Stack: (TaskManager, CliAdapter, ApprovalManager)
+    scheduler: Any  # chief.core.scheduler.Scheduler
+    start: Callable[[], "asyncio.Task[None]"]
+
+
+@pytest.fixture
+async def scheduler_stack(
+    tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
+) -> AsyncIterator[SchedulerStack]:
+    """The real ``build_cli_stack`` + ``build_scheduler`` wiring, tokenless, on ``cli``.
+
+    Mirrors ``cli_stack``'s builder + cleanup shape, but wires the production app
+    builders (#139's central mechanism) instead of hand-assembling a ``TaskManager``.
+    """
+    settings = Settings(
+        owner_telegram_id=None,
+        telegram_bot_token=None,
+        owner_discord_id=None,
+        discord_bot_token=None,
+        scheduler_enabled=True,
+        primary_platform="cli",
+        primary_thread_key="cli:main",
+        scheduler_tick_seconds=0.01,
+        memory_git=False,
+        memory_dir=str(tmp_path / "memory"),
+        audit_log_path=str(tmp_path / "audit.jsonl"),
+    )
+    server, server_task = await _running_server(str(tmp_path / "sched.sock"))
+    audit = AuditLog(settings.audit_log_path)
+    policy = PolicyStore(session_factory, audit=audit)
+    memory = app.build_memory(settings)
+    stack = app.build_cli_stack(
+        settings,
+        socket_server=server,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+    scheduler, http = app.build_scheduler(
+        settings, stacks=[stack], session_factory=session_factory
+    )
+    assert scheduler is not None and http is None
+
+    tick_tasks: list[asyncio.Task[None]] = []
+
+    def _start() -> asyncio.Task[None]:
+        task = asyncio.create_task(scheduler.run())
+        tick_tasks.append(task)
+        return task
+
+    try:
+        yield SchedulerStack(server, stack, scheduler, _start)
+    finally:
+        for task in tick_tasks:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await stack[0].shutdown()  # the TaskManager — kills background consumers first
+        await server.stop()
+        server_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await server_task
+
+
+async def _seed_due_reminder(
+    session_factory: async_sessionmaker[AsyncSession], *, text: str = "stand up"
+) -> None:
+    async with session_factory() as s:
+        await create_schedule(
+            s,
+            kind=KIND_ONCE,
+            spec="x",
+            action=text,
+            action_type=ACTION_MESSAGE,
+            next_run=datetime.now(UTC) - timedelta(seconds=1),  # already due
+            thread_key="cli:main",
+        )
+
+
+async def test_scheduler_tick_delivers_reminder_to_connected_client(
+    scheduler_stack: SchedulerStack,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The issue's central mechanism, end-to-end: a real Schedule row, fired by a real
+    # Scheduler.run() tick over the production build_cli_stack wiring, arrives at a
+    # connected socket client as a tagged reply frame.
+    reader, writer = await asyncio.open_unix_connection(scheduler_stack.server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+
+        await _seed_due_reminder(session_factory)
+        scheduler_stack.start()
+
+        frame = await _read_frame(reader)
+        assert frame == {
+            "type": "reply",
+            "platform": "cli",
+            "thread_key": "cli:main",
+            "text": "stand up",
+        }
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_scheduler_reminder_fired_while_detached_replays_on_attach(
+    scheduler_stack: SchedulerStack,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Same wiring, no client attached when the reminder fires: it is held (the #133
+    # mirror also writes a second, payload-less row for the same send — filter on
+    # payload is not None so we wait for the real frame row, not the mirror's), then
+    # replays marked on the next attach.
+    await _seed_due_reminder(session_factory)
+    scheduler_stack.start()
+
+    await _wait_for_rows(
+        session_factory,
+        lambda r: r.kind == "reply" and r.payload is not None and r.delivered is False,
+    )
+
+    reader, writer = await asyncio.open_unix_connection(scheduler_stack.server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        frame = await _read_frame(reader)
+        assert frame["type"] == "reply"
+        assert frame["platform"] == "cli"
+        assert frame["thread_key"] == "cli:main"
+        assert frame["text"] == "stand up"
+        assert frame["replay"] is True
     finally:
         writer.close()
         with suppress(OSError):
