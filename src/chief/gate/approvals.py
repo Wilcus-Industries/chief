@@ -93,6 +93,10 @@ class _Live:
     route: str
     tool_name: str
     tool_input: dict[str, Any] | None
+    #: Outcome text stashed by `resolve` when it fires before `msg_ref` is set (the
+    #: card frame can reach the client, and be answered, before `send_card` returns —
+    #: see `request`'s post-`send_card` flush). Applied once the ref is known.
+    pending_outcome: str | None = None
 
 
 def _preview(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -195,6 +199,13 @@ class ApprovalManager:
             live.msg_ref = await self._io.send_card(
                 route, ApprovalCard(approval_id=approval_id, text=preview)
             )
+            # A tap may have resolved before `msg_ref` was assignable (the card frame
+            # can reach the client — and be answered — before `send_card` returns);
+            # `resolve` stashes the outcome on `live` in that case. Flush it now that
+            # the ref is known, so the card still gets its card_resolved edit.
+            if live.pending_outcome is not None:
+                await self._io.edit_card(live.msg_ref, live.pending_outcome)
+                live.pending_outcome = None
             # Guarded requested→notified: a tap may have already decided the row
             # while the card was posting; never overwrite a terminal state.
             async with self._sf() as session:
@@ -244,10 +255,14 @@ class ApprovalManager:
             }
         )
         note = await self._persist_rule(action, live) if action.is_always else ""
-        if live is not None and live.msg_ref is not None:
-            await self._io.edit_card(
-                live.msg_ref, _outcome(action, decided_by, note)
-            )
+        if live is not None:
+            outcome = _outcome(action, decided_by, note)
+            if live.msg_ref is not None:
+                await self._io.edit_card(live.msg_ref, outcome)
+            else:
+                # `send_card` hasn't returned yet — stash it; `request` flushes it
+                # once the ref is known (see the comment there).
+                live.pending_outcome = outcome
         return True
 
     async def re_arm(self) -> list[int]:
