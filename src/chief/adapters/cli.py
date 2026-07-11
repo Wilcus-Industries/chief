@@ -10,14 +10,23 @@ through the shared owner :class:`~chief.adapters.commands.CommandRegistry`.
 
 Owner tier only (#128 local trust): the 0600 socket mode *is* the auth, so a CLI turn
 runs the full owner path (:meth:`Engine.dispatch`), never the guest receptionist.
+
+Both sides share a :class:`~chief.persistence.messages.MessageLog` (#132): every inbound
+owner message and outbound chief frame is recorded, and an outbound frame emitted while
+no client is attached is logged *held*. On the next connection the adapter's connect
+hook claim-replays those held frames (each marked ``"replay": true``) before live
+traffic resumes — detach-replay, restart-proof because the log is the mechanism.
 """
 
 import asyncio
 import itertools
+import json
 import logging
 
 from ..client_plane import (
+    CLI_PLATFORM,
     TYPE_COMMAND,
+    TYPE_REPLY,
     TYPE_USER,
     FrameSender,
     SocketServer,
@@ -27,6 +36,7 @@ from ..client_plane import (
     reply_frame,
 )
 from ..gate.approvals import ApprovalCard
+from ..persistence.messages import REPLAY_LIMIT, ROLE_CHIEF, ROLE_OWNER, MessageLog
 from .base import Adapter, BudgetCard, Engine, MemoryReader, ReadyHook, Surface
 from .commands import OWNER_COMMANDS, CommandContext, CommandRegistry
 
@@ -55,11 +65,39 @@ class CliTaskIO:
     clients tagged with its ``thread_key``; a client shows only the threads it wants.
     """
 
-    def __init__(self, server: SocketServer) -> None:
+    def __init__(self, server: SocketServer, *, log: MessageLog | None = None) -> None:
         self._server = server
+        #: The shared message log (#132). ``None`` ⇒ broadcast-only, exactly #131's
+        #: behavior (no held-frame recording, so no detach-replay).
+        self._log = log
         #: Monotonic source for spawned-topic keys (``cli:t1``, ``cli:t2``, …). Unique
         #: per process; the socket has no forum, so a synthetic key is all a topic uses.
         self._thread_ids = itertools.count(1)
+
+    async def _emit(
+        self, thread_key: str, frame: dict[str, object], *, text: str
+    ) -> None:
+        """Broadcast one outbound frame and log it as delivered-or-held (#132).
+
+        ``delivered`` is snapshotted BEFORE the broadcast: broadcast-before-record means
+        a frame racing a new attach can never be double-delivered — worst case it is
+        recorded held (the joining client is not yet in the broadcast set) and defers to
+        that client's next attach. The stored ``payload`` is the whole wire frame, the
+        replay source, so a missed frame re-delivers intact.
+        """
+        delivered = self._server.has_clients  # snapshot before broadcast
+        await self._server.broadcast(frame)
+        if self._log is not None:
+            await self._log.record(
+                platform=CLI_PLATFORM,
+                thread_key=thread_key,
+                role=ROLE_CHIEF,
+                surface=Surface.DM.value,
+                kind=str(frame["type"]),
+                text=text,
+                payload=json.dumps(frame),
+                delivered=delivered,
+            )
 
     async def send(self, thread_key: str, text: str) -> None:
         """Broadcast a progress line as a milestone frame, else a reply frame.
@@ -70,9 +108,9 @@ class CliTaskIO:
         """
         if text.startswith(_MILESTONE_PREFIX):
             body = text.removeprefix(_MILESTONE_PREFIX)
-            await self._server.broadcast(milestone_frame(thread_key, body))
+            await self._emit(thread_key, milestone_frame(thread_key, body), text=body)
         else:
-            await self._server.broadcast(reply_frame(thread_key, text))
+            await self._emit(thread_key, reply_frame(thread_key, text), text=text)
 
     async def send_file(
         self,
@@ -81,8 +119,17 @@ class CliTaskIO:
         data: bytes,
         caption: str | None = None,
     ) -> None:
-        """Broadcast an oversized reply as a base64 file frame (M8 long-reply path)."""
-        await self._server.broadcast(file_frame(thread_key, filename, data, caption))
+        """Broadcast an oversized reply as a base64 file frame (M8 long-reply path).
+
+        The whole base64 payload is stored in the log, so a file missed while detached
+        replays intact (at the cost of fattening the sqlite file — accepted for a
+        single-owner local plane).
+        """
+        await self._emit(
+            thread_key,
+            file_frame(thread_key, filename, data, caption),
+            text=caption or filename,
+        )
 
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         """Mint a synthetic thread key for a spawned topic (the socket has no forum)."""
@@ -99,7 +146,7 @@ class CliTaskIO:
         card is visible but unanswerable — an unanswered card times out to deny, the
         safe default. The ref encodes the route so :meth:`edit_card` can find it.
         """
-        await self._server.broadcast(reply_frame(route, card.text))
+        await self._emit(route, reply_frame(route, card.text), text=card.text)
         return f"{route}|{card.approval_id}"
 
     async def edit_card(self, msg_ref: str, text: str) -> None:
@@ -110,11 +157,11 @@ class CliTaskIO:
         splitting from the right recovers the exact route.
         """
         route = msg_ref.rsplit("|", 1)[0]
-        await self._server.broadcast(reply_frame(route, text))
+        await self._emit(route, reply_frame(route, text), text=text)
 
     async def send_budget_card(self, route: str, card: BudgetCard) -> None:
         """Post the budget choice card as a reply frame (visible, unanswerable)."""
-        await self._server.broadcast(reply_frame(route, card.text))
+        await self._emit(route, reply_frame(route, card.text), text=card.text)
 
 
 class CliAdapter(Adapter):
@@ -132,13 +179,20 @@ class CliAdapter(Adapter):
         engine: Engine,
         memory: MemoryReader | None = None,
         commands: CommandRegistry = OWNER_COMMANDS,
+        log: MessageLog | None = None,
+        replay_limit: int = REPLAY_LIMIT,
     ) -> None:
         self._server = server
         self._engine = engine
         self._memory = memory
         self._commands = commands
+        #: The shared message log (#132). ``None`` ⇒ no inbound recording and no
+        #: detach-replay: the adapter is exactly its #131 self.
+        self._log = log
+        self._replay_limit = replay_limit
         self._stopped = asyncio.Event()
         server.set_handler(self._on_frame)
+        server.set_connect_hook(self._on_connect)
 
     async def run(self, on_ready: ReadyHook | None = None) -> None:
         """Signal readiness, then park until :meth:`stop` (the socket drives I/O)."""
@@ -152,10 +206,27 @@ class CliAdapter(Adapter):
         Clearing the handler closes the shutdown window: without it, a frame arriving
         after ``manager.shutdown()`` but before ``socket_server.stop()`` would dispatch
         into an already-torn-down engine and spawn a zombie session. After this, an
-        inbound frame falls through to the server's ``unknown_type`` (harmless).
+        inbound frame falls through to the server's ``unknown_type`` (harmless). The
+        connect hook is cleared for the same reason: a connection accepted in that same
+        window must not claim-replay against a torn-down log.
         """
         self._server.set_handler(None)
+        self._server.set_connect_hook(None)
         self._stopped.set()
+
+    async def _on_connect(self, sender: FrameSender) -> None:
+        """Replay held frames onto a just-connected client, newest window first (#132).
+
+        Runs inside the server's connect hook — after the hello, before the connection
+        joins the broadcast set — so every replayed frame precedes live traffic. The
+        claim marks all undelivered rows delivered, so a second reattach replays none.
+        """
+        if self._log is None:
+            return
+        for frame in await self._log.claim_replay(
+            platform=CLI_PLATFORM, limit=self._replay_limit
+        ):
+            await sender({**frame, "replay": True})
 
     async def _on_frame(self, frame: object, sender: FrameSender) -> bool:
         """Dispatch one inbound frame; return ``True`` iff this adapter owns its type.
@@ -184,6 +255,11 @@ class CliAdapter(Adapter):
             )
             return True
         assert isinstance(thread_key, str) and isinstance(text, str)
+        if self._log is not None:
+            await self._log.record(
+                platform=CLI_PLATFORM, thread_key=thread_key, role=ROLE_OWNER,
+                surface=Surface.DM.value, kind=TYPE_USER, text=text, delivered=True,
+            )
         await self._engine.dispatch(
             thread_key=thread_key, text=text, surface=Surface.DM
         )
@@ -209,9 +285,23 @@ class CliAdapter(Adapter):
         if name not in self._commands.names():
             await sender(error_frame("unknown_command", f"unknown command: {name!r}"))
             return True
+        if self._log is not None:
+            await self._log.record(
+                platform=CLI_PLATFORM, thread_key=thread_key, role=ROLE_OWNER,
+                surface=Surface.DM.value, kind=TYPE_COMMAND,
+                text=f"/{name} {arg}".strip(), delivered=True,
+            )
 
         async def reply(reply_text: str) -> None:
             await sender(reply_frame(thread_key, reply_text))
+            if self._log is not None:
+                # A command's direct answer goes back to the requester, who is attached
+                # by definition — never replayed, so record delivered with no payload.
+                await self._log.record(
+                    platform=CLI_PLATFORM, thread_key=thread_key, role=ROLE_CHIEF,
+                    surface=Surface.DM.value, kind=TYPE_REPLY, text=reply_text,
+                    payload=None, delivered=True,
+                )
 
         ctx = CommandContext(
             engine=self._engine,

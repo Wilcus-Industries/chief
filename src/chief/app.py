@@ -54,6 +54,7 @@ from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence import usage
 from .persistence.db import create_engine, init_db, session_factory
+from .persistence.messages import MessageLog
 from .tools.browser import mcp as browser_mcp
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
@@ -754,8 +755,13 @@ def build_cli_stack(
     ``ApprovalIO`` (like the chat stacks), so cards broadcast out the same socket as
     replies. ``socket_server`` is constructed by ``serve`` *before* this call so the
     adapter can install its inbound handler before the server is run.
+
+    Both sides share one :class:`MessageLog` (#132): it records both directions and
+    powers detach-replay — a frame emitted while no client is attached is logged held,
+    then replayed by the adapter's connect hook on the next attach.
     """
-    io = CliTaskIO(socket_server)
+    message_log = MessageLog(session_factory)
+    io = CliTaskIO(socket_server, log=message_log)
     approvals = ApprovalManager(
         session_factory=session_factory,
         io=io,
@@ -776,7 +782,9 @@ def build_cli_stack(
         routing=routing,
         harness_versioner=harness_versioner,
     )
-    adapter = CliAdapter(server=socket_server, engine=manager, memory=memory)
+    adapter = CliAdapter(
+        server=socket_server, engine=manager, memory=memory, log=message_log
+    )
     return manager, adapter, approvals
 
 
