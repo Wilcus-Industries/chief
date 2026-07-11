@@ -10,8 +10,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
+from chief.adapters.cli import CLI_LIMIT, CliAdapter
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.adapters.telegram import TelegramAdapter, TelegramTaskIO
+from chief.client_plane import SocketServer
 from chief.config import PolicySeed, Settings
 from chief.core.budget import BudgetGate
 from chief.gate.policy import PolicyStore
@@ -58,6 +60,16 @@ def _shared(
     policy = PolicyStore(session_factory, audit=audit)
     memory = app.build_memory(settings)
     return policy, audit, memory
+
+
+def _socket() -> SocketServer:
+    """A throwaway client-plane socket for ``build_stacks`` (never bound in wiring).
+
+    ``build_stacks`` requires the socket_server the CLI stack binds to (#131); these
+    wiring tests only construct stacks, never run the server, so an unbound instance
+    (construction ≠ bind) is all they need.
+    """
+    return SocketServer("unused.sock")
 
 
 def test_warns_at_boot_when_openrouter_key_missing(
@@ -174,6 +186,7 @@ async def test_classifier_and_monitor_models_read_different_settings(
     policy, audit, memory = _shared(settings, session_factory)
     stacks = app.build_stacks(
         settings,
+        socket_server=_socket(),
         session_factory=session_factory,
         policy=policy,
         audit=audit,
@@ -275,6 +288,7 @@ def test_build_stacks_selects_configured_platforms(
     def platforms(s: Settings) -> set[str]:
         stacks = app.build_stacks(
             s,
+            socket_server=_socket(),
             session_factory=session_factory,
             policy=policy,
             audit=audit,
@@ -282,13 +296,44 @@ def test_build_stacks_selects_configured_platforms(
         )
         return {manager._platform for manager, _adapter, _approvals in stacks}
 
-    assert platforms(settings) == {"telegram", "discord"}
-    assert platforms(_settings()) == {"telegram"}  # discord not configured
+    # The CLI stack is always present (always-on socket, #131); chat platforms gate.
+    assert platforms(settings) == {"telegram", "discord", "cli"}
+    assert platforms(_settings()) == {"telegram", "cli"}  # discord not configured
     discord_only = _settings(
         owner_telegram_id=0, telegram_bot_token=None, owner_discord_id=99,
         discord_bot_token="dc",
     )
-    assert platforms(discord_only) == {"discord"}
+    assert platforms(discord_only) == {"discord", "cli"}
+    # A fully tokenless boot still yields exactly one stack — the CLI.
+    tokenless = _settings(owner_telegram_id=0, telegram_bot_token=None)
+    assert platforms(tokenless) == {"cli"}
+
+
+def test_build_stacks_always_appends_cli_stack_bound_to_socket(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #131: the CLI stack is unconditional, uses CLI_LIMIT, and installs its inbound
+    # handler on the shared socket_server so the plane dispatches from construction.
+    settings = _settings()
+    policy, audit, memory = _shared(settings, session_factory)
+    socket_server = _socket()
+
+    stacks = app.build_stacks(
+        settings,
+        socket_server=socket_server,
+        session_factory=session_factory,
+        policy=policy,
+        audit=audit,
+        memory=memory,
+    )
+
+    (cli,) = [s for s in stacks if s[0].platform == "cli"]
+    manager, adapter, _approvals = cli
+    assert isinstance(adapter, CliAdapter)
+    assert manager._message_limit == CLI_LIMIT
+    # The adapter installed its handler on the socket in its ctor (construct≠bind).
+    assert socket_server._handler is not None
+    assert stacks[-1] is cli  # appended last
 
 
 def test_build_engine_wires_schedule_services_when_enabled(
@@ -612,6 +657,7 @@ async def test_build_scheduler_binds_to_primary_platform_stack(
     policy, audit, memory = _shared(settings, session_factory)
     stacks = app.build_stacks(
         settings,
+        socket_server=_socket(),
         session_factory=session_factory,
         policy=policy,
         audit=audit,
@@ -641,6 +687,7 @@ async def test_build_scheduler_no_http_without_heartbeat(
     policy, audit, memory = _shared(settings, session_factory)
     stacks = app.build_stacks(
         settings,
+        socket_server=_socket(),
         session_factory=session_factory,
         policy=policy,
         audit=audit,
@@ -663,6 +710,7 @@ def test_build_scheduler_none_when_disabled(
     policy, audit, memory = _shared(settings, session_factory)
     stacks = app.build_stacks(
         settings,
+        socket_server=_socket(),
         session_factory=session_factory,
         policy=policy,
         audit=audit,
@@ -752,6 +800,17 @@ async def test_serve_tokenless_boots_socket_and_cleans_up(
         hello = json.loads(await asyncio.wait_for(reader.readline(), 5))
         assert hello["type"] == "hello"
         assert hello["protocol"] == 1
+
+        # #131 full production wiring, tokenless, zero LLM: the always-on CLI stack
+        # dispatches a real /tasks command through the real registry over the real DB.
+        cmd = {"type": "command", "thread_key": "cli:main", "name": "tasks", "arg": ""}
+        writer.write(json.dumps(cmd).encode() + b"\n")
+        await writer.drain()
+        reply = json.loads(await asyncio.wait_for(reader.readline(), 5))
+        assert reply["type"] == "reply"
+        assert reply["thread_key"] == "cli:main"
+        assert reply["text"] == "No active tasks."
+
         writer.close()
         await writer.wait_closed()
     finally:
