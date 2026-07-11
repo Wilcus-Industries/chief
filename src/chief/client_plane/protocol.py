@@ -32,12 +32,26 @@ carries ``"replay": true``; live frames omit the field. It is additive (the fiel
 just added to the stored frame on re-emit), so it does **not** bump ``PROTOCOL_VERSION``
 — an older client that ignores the key still renders the frame correctly.
 
+Approval frames (#136) — a card raised on **any** platform's thread is broadcast to
+every client, not just the surface that raised it:
+
+- ``card`` (server→client): ``{"type": "card", "platform": <str>, "thread_key": <str>,
+  "approval_id": <int>, "text": <str>, "options": [...]}`` — an answerable approval
+  card; ``options`` is :data:`CARD_OPTIONS`, the four buttons in card order.
+- ``card_resolved`` (server→client): ``{"type": "card_resolved", "platform": <str>,
+  "thread_key": <str>, "approval_id": <int>, "text": <str>}`` — the card's outcome.
+- ``answer`` (client→server): ``{"type": "answer", "approval_id": <int>,
+  "action": <str>}`` — a client's decision, ``action`` one of :data:`CARD_OPTIONS`'s
+  action tokens.
+
 Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 (parseable JSON but not an object), ``unknown_type`` (missing/unrecognized ``type``),
 ``line_too_long`` (the read stream limit was overrun; the connection then closes),
 ``invalid_fields`` (a client frame is missing a required field or has a wrong type),
 ``unknown_command`` (a command frame named a command the registry does not carry),
-``internal_error`` (an inbound handler raised — the connection loop survives).
+``already_resolved`` (an ``answer`` named an approval that is unknown or already
+decided), ``internal_error`` (an inbound handler raised — the connection loop
+survives).
 """
 
 import base64
@@ -47,7 +61,7 @@ from typing import Final
 
 #: The wire-protocol version announced in the hello frame. Bump on any incompatible
 #: change to the frame vocabulary so a client can refuse a mismatch.
-PROTOCOL_VERSION: Final[int] = 1
+PROTOCOL_VERSION: Final[int] = 2
 
 #: Frame ``type`` strings. Plain ``Final[str]`` consts, NOT an enum — frames stay plain
 #: dicts and :func:`decode` stays type-agnostic (it never validates the type). One name
@@ -61,6 +75,9 @@ TYPE_COMMAND: Final[str] = "command"
 TYPE_REPLY: Final[str] = "reply"
 TYPE_MILESTONE: Final[str] = "milestone"
 TYPE_FILE: Final[str] = "file"
+TYPE_CARD: Final[str] = "card"
+TYPE_CARD_RESOLVED: Final[str] = "card_resolved"
+TYPE_ANSWER: Final[str] = "answer"
 
 #: The platform tag every CLI session frame carries. The engine filters every query by
 #: ``platform``, so the CLI stack runs as its own platform alongside telegram/discord.
@@ -69,6 +86,15 @@ CLI_PLATFORM: Final[str] = "cli"
 #: The thread key the #132 client opens its default (flat) session on when the owner
 #: does not name a thread. Exported so client and server agree on the one default.
 DEFAULT_THREAD_KEY: Final[str] = "cli:main"
+
+#: The four approval buttons, in card order. Action values are the wire tokens of
+#: chief.gate.approvals.ApprovalAction; a client answers with one of them.
+CARD_OPTIONS: Final[tuple[dict[str, str], ...]] = (
+    {"action": "approve_once", "label": "✅ Approve once"},
+    {"action": "deny_once", "label": "❌ Deny once"},
+    {"action": "always_allow", "label": "⭐ Always allow"},
+    {"action": "always_deny", "label": "🚫 Always deny"},
+)
 
 #: The milestone marker the engine prefixes onto a progress line before it reaches the
 #: ``TaskIO.send`` seam (``core.tasks._run_turn``, test-pinned at tasks.py:1729). The
@@ -157,6 +183,38 @@ def file_frame(
         "data": base64.b64encode(data).decode("ascii"),
         "caption": caption,
     }
+
+
+def card_frame(
+    thread_key: str, approval_id: int, text: str, *, platform: str = CLI_PLATFORM
+) -> dict[str, object]:
+    """A server→client approval card: preview text plus the four answerable options."""
+    return {
+        "type": TYPE_CARD,
+        "platform": platform,
+        "thread_key": thread_key,
+        "approval_id": approval_id,
+        "text": text,
+        "options": [dict(option) for option in CARD_OPTIONS],
+    }
+
+
+def card_resolved_frame(
+    thread_key: str, approval_id: int, text: str, *, platform: str = CLI_PLATFORM
+) -> dict[str, object]:
+    """A server→client card outcome — the resolution and who decided it."""
+    return {
+        "type": TYPE_CARD_RESOLVED,
+        "platform": platform,
+        "thread_key": thread_key,
+        "approval_id": approval_id,
+        "text": text,
+    }
+
+
+def answer_frame(approval_id: int, action: str) -> dict[str, object]:
+    """A client→server approval decision (``action`` is a CARD_OPTIONS action token)."""
+    return {"type": TYPE_ANSWER, "approval_id": approval_id, "action": action}
 
 
 def outbound_frame(

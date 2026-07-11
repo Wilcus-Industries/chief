@@ -103,8 +103,9 @@ class FakeResolver:
 
     async def resolve(
         self, approval_id: int, action: ApprovalAction, *, decided_by: str
-    ) -> None:
+    ) -> bool:
         self.resolved.append((approval_id, action, decided_by))
+        return True
 
 
 def _fact(slug: str, title: str) -> Fact:

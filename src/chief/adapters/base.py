@@ -555,11 +555,16 @@ class Engine(Protocol):
 
 
 class ApprovalResolver(Protocol):
-    """The slice of :class:`~chief.gate.approvals.ApprovalManager` button taps call."""
+    """The slice of the approval machinery a button tap / answer frame calls.
+
+    Satisfied by both :class:`~chief.gate.approvals.ApprovalManager` (chat buttons) and
+    :class:`~chief.gate.approvals.ApprovalRegistry` (the #136 socket answer router).
+    Returns ``False`` when the approval was unknown or already decided.
+    """
 
     async def resolve(
         self, approval_id: int, action: ApprovalAction, *, decided_by: str
-    ) -> None: ...
+    ) -> bool: ...
 
 
 class MemoryReader(Protocol):

@@ -28,6 +28,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.base import BudgetCard
 from chief.adapters.cli import CLI_LIMIT, CliTaskIO
 from chief.adapters.mirror import MirrorTaskIO
 from chief.adapters.telegram import TELEGRAM_LIMIT, TelegramTaskIO
@@ -35,7 +36,7 @@ from chief.client_plane import SocketServer
 from chief.core.session import Milestone
 from chief.core.tasks import SessionProto, TaskManager
 from chief.gate.approvals import ApprovalCard
-from chief.persistence.messages import KIND_FILE, ROLE_CHIEF, MessageLog
+from chief.persistence.messages import KIND_CARD, KIND_FILE, ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from test_tasks import FakeSession
 
@@ -257,6 +258,8 @@ class _RecordingInner:
         self.files: list[tuple[str, str, bytes, str | None]] = []
         self.created: list[tuple[str, str]] = []
         self.cards: list[tuple[str, object]] = []
+        self.edits: list[tuple[str, str]] = []
+        self.budget_cards: list[tuple[str, object]] = []
 
     async def send(self, thread_key: str, text: str) -> None:
         self.sends.append((thread_key, text))
@@ -276,8 +279,11 @@ class _RecordingInner:
         self.cards.append((route, card))
         return f"{route}|ref"
 
-    async def edit_card(self, msg_ref: str, text: str) -> None: ...
-    async def send_budget_card(self, route: str, card: object) -> None: ...
+    async def edit_card(self, msg_ref: str, text: str) -> None:
+        self.edits.append((msg_ref, text))
+
+    async def send_budget_card(self, route: str, card: object) -> None:
+        self.budget_cards.append((route, card))
 
 
 class _RecordingServer:
@@ -290,7 +296,61 @@ class _RecordingServer:
         self.frames.append(dict(frame))
 
 
-async def test_delegation_methods_are_not_mirrored(
+async def test_thread_lifecycle_and_budget_are_not_mirrored(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #136 narrows this: cards now mirror (see the tests below), but thread lifecycle
+    # and budget traffic still don't — neither is owner-visible chat traffic.
+    inner = _RecordingInner()
+    server = _RecordingServer()
+    mirror = MirrorTaskIO(
+        inner,
+        platform="telegram",
+        log=MessageLog(session_factory),
+        server=server,  # type: ignore[arg-type]
+    )
+
+    assert await mirror.create_thread(like_thread_key="k", title="t") == "made:thread"
+    await mirror.archive_thread("-100:1")
+    await mirror.send_budget_card(
+        "-100:1", BudgetCard(cycle="daily", text="budget?")
+    )
+
+    assert server.frames == []  # no broadcast for delegation-only methods
+    assert await _rows(session_factory) == []  # and no log rows
+
+
+async def test_send_card_mirrors_platform_tagged_card_frame_and_logs(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #136 central mechanism: send_card delivers to the platform first (its ref is the
+    # return value), then broadcasts a platform-tagged card frame + records a KIND_CARD
+    # row.
+    inner = _RecordingInner()
+    server = _RecordingServer()
+    mirror = MirrorTaskIO(
+        inner,
+        platform="telegram",
+        log=MessageLog(session_factory),
+        server=server,  # type: ignore[arg-type]
+    )
+    card = ApprovalCard(approval_id=1, text="run it?")
+
+    ref = await mirror.send_card("-100:1", card)
+
+    assert ref == "-100:1|ref"  # the inner (platform) ref, unchanged
+    assert inner.cards == [("-100:1", card)]
+    (frame,) = server.frames
+    assert frame["type"] == "card"
+    assert frame["platform"] == "telegram"
+    assert frame["thread_key"] == "-100:1"
+    assert frame["approval_id"] == 1
+    assert frame["text"] == "run it?"
+    (row,) = await _rows(session_factory)
+    assert (row.platform, row.kind, row.text) == ("telegram", KIND_CARD, "run it?")
+
+
+async def test_edit_card_mirrors_card_resolved_frame_with_same_approval_id(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     inner = _RecordingInner()
@@ -301,13 +361,64 @@ async def test_delegation_methods_are_not_mirrored(
         log=MessageLog(session_factory),
         server=server,  # type: ignore[arg-type]
     )
-
     card = ApprovalCard(approval_id=1, text="run it?")
-    assert await mirror.create_thread(like_thread_key="k", title="t") == "made:thread"
-    assert await mirror.send_card("-100:1", card) == "-100:1|ref"
+    ref = await mirror.send_card("-100:1", card)
+    server.frames.clear()  # only care about the edit's frame now
 
-    assert server.frames == []  # no broadcast for delegation-only methods
-    assert await _rows(session_factory) == []  # and no log rows
+    await mirror.edit_card(ref, "✅ Approved (once) — by 42")
+
+    assert inner.edits == [(ref, "✅ Approved (once) — by 42")]
+    (frame,) = server.frames
+    assert frame["type"] == "card_resolved"
+    assert frame["platform"] == "telegram"
+    assert frame["approval_id"] == 1
+    assert frame["text"] == "✅ Approved (once) — by 42"
+
+
+async def test_edit_card_unknown_ref_still_edits_platform_but_skips_mirror(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A card posted before a restart / re-armed with no memo: the edit still happens on
+    # the platform, but there is no approval id to name on the socket.
+    inner = _RecordingInner()
+    server = _RecordingServer()
+    mirror = MirrorTaskIO(
+        inner,
+        platform="telegram",
+        log=MessageLog(session_factory),
+        server=server,  # type: ignore[arg-type]
+    )
+
+    await mirror.edit_card("unknown-ref", "⌛ Timed out — denied.")
+
+    assert inner.edits == [("unknown-ref", "⌛ Timed out — denied.")]
+    assert server.frames == []
+    assert await _rows(session_factory) == []
+
+
+async def test_card_mirror_broadcast_failure_never_breaks_platform_edit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Containment (per _mirror's blanket except): a raising broadcast must not stop the
+    # platform edit that already happened.
+    class _RaisingServer:
+        async def broadcast(self, frame: dict[str, object]) -> None:
+            raise RuntimeError("socket down")
+
+    inner = _RecordingInner()
+    mirror = MirrorTaskIO(
+        inner,
+        platform="telegram",
+        log=MessageLog(session_factory),
+        server=_RaisingServer(),  # type: ignore[arg-type]
+    )
+    card = ApprovalCard(approval_id=1, text="run it?")
+    ref = await mirror.send_card("-100:1", card)  # must not raise
+
+    await mirror.edit_card(ref, "outcome")  # must not raise
+
+    assert inner.cards == [("-100:1", card)]
+    assert inner.edits == [(ref, "outcome")]
 
 
 async def test_mirror_failure_never_breaks_platform_delivery(

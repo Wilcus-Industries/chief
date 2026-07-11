@@ -8,7 +8,12 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.gate import approvals as appr_mod
-from chief.gate.approvals import ApprovalAction, ApprovalCard, ApprovalManager
+from chief.gate.approvals import (
+    ApprovalAction,
+    ApprovalCard,
+    ApprovalManager,
+    ApprovalRegistry,
+)
 from chief.gate.policy import PolicyStore
 from chief.persistence import approvals as appr_repo
 from chief.persistence import policy as policy_repo
@@ -56,6 +61,7 @@ async def _manager(
     io: FakeIO,
     audit: RecordingAudit,
     timeout: float = 600.0,
+    registry: ApprovalRegistry | None = None,
 ) -> tuple[ApprovalManager, PolicyStore]:
     policy = PolicyStore(session_factory, audit=audit)
     await policy.load()
@@ -65,6 +71,7 @@ async def _manager(
         policy=policy,
         audit=audit,
         timeout_seconds=timeout,
+        registry=registry,
     )
     return manager, policy
 
@@ -99,7 +106,7 @@ async def test_request_approve_once_returns_true(
 
     assert allowed is True
     assert io.cards[0][0] == "-100:5"  # routed in-thread
-    assert io.edits[-1] == (f"ref-{approval_id}", "✅ Approved (once)")
+    assert io.edits[-1] == (f"ref-{approval_id}", "✅ Approved (once) — by 42")
     assert _events(audit, "approval_requested")
     assert _events(audit, "approval_decided")[0]["allowed"] is True
     async with session_factory() as session:
@@ -350,6 +357,10 @@ async def test_tap_during_card_post_is_not_clobbered_by_notified_write(
     assert row is not None
     assert row.state == appr_repo.APPROVED
     assert row.decided_by == "42"
+    # The tap landed before `msg_ref` was assigned (mid-`send_card`), so `resolve`
+    # couldn't edit_card immediately — the stashed outcome must still surface once
+    # `request` gets the ref back, instead of silently dropping the card_resolved edit.
+    assert io.edits == [(f"ref-{approval_id}", "✅ Approved (once) — by 42")]
 
 
 async def test_resolve_in_post_card_pre_future_window_still_wakes(
@@ -409,6 +420,129 @@ async def test_re_arm_registers_pending_and_resolves(
     await manager.resolve(approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42")
 
     assert rearmed == [approval_id]
+    async with session_factory() as session:
+        row = await appr_repo.get(session, approval_id)
+    assert row is not None and row.state == appr_repo.APPROVED
+
+
+# ---- resolve return value + ApprovalRegistry (#136) --------------------------
+
+
+async def test_resolve_returns_true_for_winner_false_for_duplicate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io, audit = FakeIO(), RecordingAudit()
+    manager, _ = await _manager(session_factory, io=io, audit=audit)
+
+    parked = asyncio.create_task(
+        manager.request(
+            task_id=None,
+            thread_key="-100:5",
+            tier="owner",
+            tool_name="Bash",
+            tool_input={"command": "git push"},
+            route="-100:5",
+        )
+    )
+    await _settle(lambda: bool(io.cards))
+    approval_id = io.cards[0][1].approval_id
+    won = await manager.resolve(
+        approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+    )
+    await parked
+    lost = await manager.resolve(
+        approval_id, ApprovalAction.DENY_ONCE, decided_by="99"
+    )
+
+    assert won is True
+    assert lost is False
+
+
+async def test_resolve_returns_false_for_unknown_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io, audit = FakeIO(), RecordingAudit()
+    manager, _ = await _manager(session_factory, io=io, audit=audit)
+
+    assert (
+        await manager.resolve(999_999, ApprovalAction.APPROVE_ONCE, decided_by="42")
+    ) is False
+
+
+async def test_registry_routes_resolve_to_the_owning_manager(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    registry = ApprovalRegistry()
+    io_a, audit_a = FakeIO(), RecordingAudit()
+    io_b, audit_b = FakeIO(), RecordingAudit()
+    manager_a, _ = await _manager(
+        session_factory, io=io_a, audit=audit_a, registry=registry
+    )
+    manager_b, _ = await _manager(
+        session_factory, io=io_b, audit=audit_b, registry=registry
+    )
+
+    parked = asyncio.create_task(
+        manager_a.request(
+            task_id=None,
+            thread_key="-100:5",
+            tier="owner",
+            tool_name="Bash",
+            tool_input={"command": "git push"},
+            route="-100:5",
+        )
+    )
+    await _settle(lambda: bool(io_a.cards))
+    approval_id = io_a.cards[0][1].approval_id
+
+    won = await registry.resolve(
+        approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+    )
+    allowed = await parked
+
+    assert won is True
+    assert allowed is True
+    assert io_a.edits  # manager A's io recorded the outcome
+    assert io_b.edits == []  # manager B never touched — it never parked this id
+
+    # A second call for the same id is refused, and the id was discarded once the
+    # parked request returned (register on request, discard in its `finally`).
+    lost = await registry.resolve(
+        approval_id, ApprovalAction.DENY_ONCE, decided_by="99"
+    )
+    assert lost is False
+
+
+async def test_registry_resolve_unknown_id_returns_false(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    registry = ApprovalRegistry()
+    assert (
+        await registry.resolve(123, ApprovalAction.APPROVE_ONCE, decided_by="42")
+    ) is False
+
+
+async def test_re_arm_registers_pending_row_with_registry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        approval = await appr_repo.create_approval(
+            session, task_id=None, kind="Bash", payload_preview="Run: git push"
+        )
+        await appr_repo.set_state(session, approval, appr_repo.NOTIFIED)
+        approval_id = approval.id
+    registry = ApprovalRegistry()
+    io, audit = FakeIO(), RecordingAudit()
+    manager, _ = await _manager(
+        session_factory, io=io, audit=audit, registry=registry
+    )
+
+    await manager.re_arm()
+    won = await registry.resolve(
+        approval_id, ApprovalAction.APPROVE_ONCE, decided_by="42"
+    )
+
+    assert won is True
     async with session_factory() as session:
         row = await appr_repo.get(session, approval_id)
     assert row is not None and row.state == appr_repo.APPROVED
