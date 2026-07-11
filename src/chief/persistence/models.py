@@ -174,20 +174,24 @@ class MessageLogEntry(Base):
     the undelivered rows on the next attach (restart-proof).
 
     Persistence stays adapter-independent, so ``role`` is a plain string
-    (``messages.ROLE_*`` / ``message_log.ROLE_*``), ``surface`` an adapter ``Surface``
-    value, and ``kind`` a wire frame type — none imported here (same rule as ``tier``).
-    The ``(platform, delivered)`` index keeps the replay claim cheap as the log grows.
+    (``messages.ROLE_*``), ``surface`` an adapter ``Surface`` value, and ``kind`` a wire
+    frame type — none imported here (same rule as ``tier``). The ``(platform,
+    delivered)`` index keeps the replay claim cheap as the log grows.
 
-    Columns split by producer: #132's CLI log fills ``surface`` and ``payload`` (the
-    replay-source wire frame); the #133 broadcast-bus mirror fills ``filename`` for file
-    rows and leaves ``surface``/``payload`` null. All three are nullable so either
-    producer can omit the other's fields.
+    Every row is written by one recorder,
+    :class:`~chief.persistence.messages.MessageLog` — and each outbound message by
+    exactly one caller of it: the CLI stack's ``CliTaskIO`` (#132), the chat stacks'
+    broadcast-bus mirror (#133). So ``role`` has one outbound value (``ROLE_CHIEF``) on
+    every platform, and a message is never logged twice.
 
-    ``delivered`` semantics: outbound rows are ``False`` when no client was attached at
-    emit and ``True`` otherwise; inbound rows and direct command replies are always
-    ``True`` (they reached their destination live and are never replayed). Mirror rows
-    (#133) take the ``False`` default but carry no ``payload``, so a replay claim marks
-    them delivered without re-emitting a frame.
+    Columns split by producer, so all three are nullable: the CLI recorder fills
+    ``surface`` and ``payload`` (the replay-source wire frame); the mirror fills
+    ``filename`` for file rows and leaves ``surface``/``payload`` null.
+
+    ``delivered`` semantics: CLI outbound rows are ``False`` when no client was attached
+    at emit and ``True`` otherwise; inbound rows, direct command replies, and the
+    payload-less mirror rows are always ``True`` (they reached their destination live,
+    or have nothing to re-emit), so a replay claim never touches them.
     """
 
     __tablename__ = "message_log"

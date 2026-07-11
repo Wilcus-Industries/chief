@@ -1,4 +1,4 @@
-"""End-to-end tests for the #133 broadcast bus (mirror every stack's outbound).
+"""End-to-end tests for the #133 broadcast bus (mirror the chat stacks' outbound).
 
 The central mechanism — a *second* platform stack (``platform="telegram"``) streaming a
 real ``TaskManager`` turn onto a live client-plane socket as platform-tagged frames
@@ -8,6 +8,11 @@ while the platform bot still receives its unchanged text — is exercised for re
 clients, and the real ``message_log`` table. The only fakes are the Telegram bot seam
 (``AsyncMock``, as in ``test_telegram``) and the LLM (``FakeSession`` from
 ``test_tasks``).
+
+Each test builds its stack's engine io **exactly as ``app.build_*_stack`` does** — chat
+stacks mirrored over a real :class:`MessageLog`, the CLI stack an unwrapped
+:class:`CliTaskIO` over that same real log — so the one-row-per-outbound guarantee is
+asserted against production wiring, not a lighter test-only construction.
 """
 
 import asyncio
@@ -30,7 +35,7 @@ from chief.client_plane import SocketServer
 from chief.core.session import Milestone
 from chief.core.tasks import SessionProto, TaskManager
 from chief.gate.approvals import ApprovalCard
-from chief.persistence import message_log
+from chief.persistence.messages import KIND_FILE, ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from test_tasks import FakeSession
 
@@ -89,29 +94,27 @@ def _manager(
 async def running_manager(
     tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
 ) -> AsyncIterator[Callable[..., Any]]:
-    """Bring up a real socket + a mirrored engine stack; test supplies the fake LLM."""
+    """Bring up a real socket + an engine stack; test supplies the engine io + fake LLM.
+
+    ``make_io`` receives the live server and the shared real ``MessageLog`` and returns
+    the engine's ``TaskIO`` — the test's chance to reproduce its stack's production
+    wiring (mirrored for chat, bare ``CliTaskIO`` for the CLI).
+    """
     built: list[tuple[SocketServer, asyncio.Task[None], TaskManager]] = []
 
     async def _build(
-        make_inner: Callable[[SocketServer], object],
+        make_io: Callable[[SocketServer, MessageLog], object],
         *,
         platform: str,
         sessions: Sequence[FakeSession],
         message_limit: int,
-        server_for_mirror: bool,
     ) -> tuple[SocketServer, TaskManager]:
         server = SocketServer(str(tmp_path / f"{platform}.sock"))
         task = asyncio.create_task(server.run())
         await asyncio.wait_for(server.started.wait(), 5)
-        io = MirrorTaskIO(
-            make_inner(server),  # type: ignore[arg-type]
-            platform=platform,
-            session_factory=session_factory,
-            server=server if server_for_mirror else None,
-        )
         manager = _manager(
             session_factory,
-            io,
+            make_io(server, MessageLog(session_factory)),
             platform=platform,
             factory=_seq_factory(sessions),
             message_limit=message_limit,
@@ -134,7 +137,9 @@ async def _rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> list[MessageLogEntry]:
     async with session_factory() as session:
-        result = await session.execute(select(MessageLogEntry))
+        result = await session.execute(
+            select(MessageLogEntry).order_by(MessageLogEntry.id)
+        )
         return list(result.scalars().all())
 
 
@@ -148,11 +153,12 @@ async def test_second_stack_mirrors_onto_two_clients_and_logs(
     bot = AsyncMock()
     session = FakeSession(model="m", milestones=[Milestone(text="using Bash")])
     server, manager = await running_manager(
-        lambda _s: TelegramTaskIO(bot),
+        lambda s, log: MirrorTaskIO(
+            TelegramTaskIO(bot), platform="telegram", log=log, server=s
+        ),
         platform="telegram",
         sessions=[session],
         message_limit=TELEGRAM_LIMIT,
-        server_for_mirror=True,
     )
     r1, w1 = await asyncio.open_unix_connection(server.path)
     r2, w2 = await asyncio.open_unix_connection(server.path)
@@ -181,11 +187,16 @@ async def test_second_stack_mirrors_onto_two_clients_and_logs(
         assert "· using Bash" in sent
         assert "reply:hi" in sent
 
+        # Exactly two rows — one per outbound, no duplicates — and both ROLE_CHIEF, the
+        # same outbound role the CLI recorder writes (one role per direction, #134).
         rows = await _rows(session_factory)
-        assert {(r.platform, r.thread_key, r.role, r.kind) for r in rows} == {
-            ("telegram", "-100:7", message_log.ROLE_ASSISTANT, "milestone"),
-            ("telegram", "-100:7", message_log.ROLE_ASSISTANT, "reply"),
-        }
+        assert [(r.platform, r.thread_key, r.role, r.kind) for r in rows] == [
+            ("telegram", "-100:7", ROLE_CHIEF, "milestone"),
+            ("telegram", "-100:7", ROLE_CHIEF, "reply"),
+        ]
+        # Payload-less mirror rows can never replay, so they must never join the
+        # claim set — a future claim_replay(platform="telegram") must find nothing.
+        assert all(r.delivered is True and r.payload is None for r in rows)
     finally:
         for w in (w1, w2):
             w.close()
@@ -193,19 +204,19 @@ async def test_second_stack_mirrors_onto_two_clients_and_logs(
                 await w.wait_closed()
 
 
-async def test_cli_stack_logged_without_frame_duplication(
+async def test_cli_stack_logged_once_without_frame_duplication(
     running_manager: Callable[..., Any],
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # The CLI stack's inner CliTaskIO already broadcasts, so the mirror runs with
-    # server=None: a connected client sees exactly ONE reply frame (no double
-    # broadcast), while the message log still records the cli row.
+    # The CLI stack is NOT mirrored: its CliTaskIO is already the broadcaster and the
+    # recorder, so one outbound yields exactly ONE frame and exactly ONE row. Built the
+    # way app.build_cli_stack builds it — bare CliTaskIO over the real MessageLog — so a
+    # regression that re-wrapped it in MirrorTaskIO would double the row and fail here.
     server, manager = await running_manager(
-        lambda s: CliTaskIO(s),
+        lambda s, log: CliTaskIO(s, log=log),
         platform="cli",
         sessions=[FakeSession(model="m")],
         message_limit=CLI_LIMIT,
-        server_for_mirror=False,
     )
     reader, writer = await asyncio.open_unix_connection(server.path)
     try:
@@ -222,10 +233,16 @@ async def test_cli_stack_logged_without_frame_duplication(
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(reader.readline(), 0.3)
 
-        rows = await _rows(session_factory)
-        assert [(r.platform, r.kind, r.text) for r in rows] == [
-            ("cli", "reply", "reply:hi")
-        ]
+        # One row, and it is #132's replay-shaped row: ROLE_CHIEF (the same outbound
+        # role the mirror writes) with the wire frame kept as its payload.
+        (row,) = await _rows(session_factory)
+        assert (row.platform, row.role, row.kind, row.text) == (
+            "cli",
+            ROLE_CHIEF,
+            "reply",
+            "reply:hi",
+        )
+        assert row.payload is not None and json.loads(row.payload) == reply
     finally:
         writer.close()
         with suppress(OSError):
@@ -281,7 +298,7 @@ async def test_delegation_methods_are_not_mirrored(
     mirror = MirrorTaskIO(
         inner,
         platform="telegram",
-        session_factory=session_factory,
+        log=MessageLog(session_factory),
         server=server,  # type: ignore[arg-type]
     )
 
@@ -305,7 +322,7 @@ async def test_mirror_failure_never_breaks_platform_delivery(
     mirror = MirrorTaskIO(
         inner,
         platform="telegram",
-        session_factory=boom,  # type: ignore[arg-type]
+        log=MessageLog(boom),  # type: ignore[arg-type]
         server=None,
     )
 
@@ -322,7 +339,7 @@ async def test_send_file_broadcasts_and_logs_without_bytes(
     mirror = MirrorTaskIO(
         inner,
         platform="discord",
-        session_factory=session_factory,
+        log=MessageLog(session_factory),
         server=server,  # type: ignore[arg-type]
     )
 
@@ -337,7 +354,8 @@ async def test_send_file_broadcasts_and_logs_without_bytes(
     (row,) = await _rows(session_factory)
     assert (row.platform, row.kind, row.text, row.filename) == (
         "discord",
-        message_log.KIND_FILE,
+        KIND_FILE,
         "a caption",
         "reply.md",
     )
+    assert row.delivered is True  # payload-less: never replayable, never claimable
