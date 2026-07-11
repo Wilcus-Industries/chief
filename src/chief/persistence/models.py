@@ -163,6 +163,28 @@ class UsageMeter(Base):
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 
 
+class MessageLogEntry(Base):
+    """One outbound (later also inbound, #132) message on a thread (#133).
+
+    The #133 broadcast bus records every stack's engine outbound here as it mirrors it
+    onto the socket. Shaped so #132 can extend it for replay: ``role`` and timestamps
+    are present now (``role`` is always ``"assistant"`` for the outbound this issue
+    logs; #132 adds inbound roles), a ``surface`` column is deferred to #132. File rows
+    carry only the filename + caption — the bytes are never persisted.
+    """
+
+    __tablename__ = "message_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str]
+    thread_key: Mapped[str]
+    role: Mapped[str]  # message_log.ROLE_* — "assistant" now; #132 adds inbound roles
+    kind: Mapped[str]  # message_log.KIND_* — "reply" | "milestone" | "file"
+    text: Mapped[str]  # reply/milestone body; the caption ("" if none) for kind="file"
+    filename: Mapped[str | None]  # kind="file" only; bytes are NOT persisted
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class Schedule(Base):
     """A one-off reminder, a recurring job, or a monitor (owned by M9).
 

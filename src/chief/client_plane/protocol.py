@@ -11,8 +11,11 @@ Transport frames (#130):
 - ``ping`` (client→server): ``{"type": "ping"}`` → ``pong`` ``{"type": "pong"}``.
 - ``error`` (server→client): ``{"type": "error", "code": <str>, "message": <str>}``.
 
-CLI session frames (#131), tagged ``platform="cli"`` + ``thread_key`` on every
-server→client frame so a client can demux threads (broadcast-to-all; clients filter):
+Session frames are tagged with their **originating platform** (``cli``, ``telegram``,
+``discord``) + ``thread_key`` on every server→client frame so a client can demux threads
+(broadcast-to-all; clients filter). #131 introduced them for the CLI stack; #133 mirrors
+every stack's engine outbound onto the socket, so a frame's ``platform`` names the stack
+it came from rather than always ``cli``:
 
 - ``user`` (client→server): ``{"type": "user", "thread_key": <str>, "text": <str>}``.
 - ``command`` (client→server): ``{"type": "command", "thread_key": <str>,
@@ -62,6 +65,13 @@ CLI_PLATFORM: Final[str] = "cli"
 #: does not name a thread. Exported so client and server agree on the one default.
 DEFAULT_THREAD_KEY: Final[str] = "cli:main"
 
+#: The milestone marker the engine prefixes onto a progress line before it reaches the
+#: ``TaskIO.send`` seam (``core.tasks._run_turn``, test-pinned at tasks.py:1729). The
+#: engine streams milestones and final replies through the same ``send`` call,
+#: distinguished only by this prefix; :func:`outbound_frame` splits them back into the
+#: two frame types so every stack — CLI and the #133 mirror — shares one split.
+MILESTONE_PREFIX: Final[str] = "· "
+
 
 class FrameError(Exception):
     """A frame could not be decoded. ``code`` is the wire error code to send back."""
@@ -96,28 +106,37 @@ def command_frame(thread_key: str, name: str, arg: str = "") -> dict[str, object
     return {"type": TYPE_COMMAND, "thread_key": thread_key, "name": name, "arg": arg}
 
 
-def reply_frame(thread_key: str, text: str) -> dict[str, object]:
-    """A server→client final answer block, tagged ``platform="cli"`` + thread (#131)."""
+def reply_frame(
+    thread_key: str, text: str, *, platform: str = CLI_PLATFORM
+) -> dict[str, object]:
+    """A server→client final answer block, tagged ``platform`` + thread (#131, #133)."""
     return {
         "type": TYPE_REPLY,
-        "platform": CLI_PLATFORM,
+        "platform": platform,
         "thread_key": thread_key,
         "text": text,
     }
 
 
-def milestone_frame(thread_key: str, text: str) -> dict[str, object]:
+def milestone_frame(
+    thread_key: str, text: str, *, platform: str = CLI_PLATFORM
+) -> dict[str, object]:
     """A server→client progress line (no ``· `` prefix — the type is the marker)."""
     return {
         "type": TYPE_MILESTONE,
-        "platform": CLI_PLATFORM,
+        "platform": platform,
         "thread_key": thread_key,
         "text": text,
     }
 
 
 def file_frame(
-    thread_key: str, filename: str, data: bytes, caption: str | None = None
+    thread_key: str,
+    filename: str,
+    data: bytes,
+    caption: str | None = None,
+    *,
+    platform: str = CLI_PLATFORM,
 ) -> dict[str, object]:
     """A server→client attachment: ``data`` bytes base64-ascii encoded (#131).
 
@@ -127,12 +146,28 @@ def file_frame(
     """
     return {
         "type": TYPE_FILE,
-        "platform": CLI_PLATFORM,
+        "platform": platform,
         "thread_key": thread_key,
         "filename": filename,
         "data": base64.b64encode(data).decode("ascii"),
         "caption": caption,
     }
+
+
+def outbound_frame(
+    thread_key: str, text: str, *, platform: str = CLI_PLATFORM
+) -> dict[str, object]:
+    """Split one engine ``send`` into a milestone or reply frame by its ``· `` prefix.
+
+    The engine streams milestones through the same ``TaskIO.send`` seam as final
+    replies, distinguished only by :data:`MILESTONE_PREFIX`; this recovers the two frame
+    types so a client can render progress and answers differently. Shared by the CLI IO
+    and the #133 mirror so the split lives in exactly one place.
+    """
+    if text.startswith(MILESTONE_PREFIX):
+        body = text.removeprefix(MILESTONE_PREFIX)
+        return milestone_frame(thread_key, body, platform=platform)
+    return reply_frame(thread_key, text, platform=platform)
 
 
 def encode(frame: Mapping[str, object]) -> bytes:
