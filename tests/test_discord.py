@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import AdmissionCard, Attachment, BudgetCard, Surface
+from chief.adapters.commands import CommandContext, CommandRegistry, owner_registry
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.gate.approvals import ApprovalAction, ApprovalCard
 from chief.memory.store import Fact
@@ -167,6 +168,7 @@ def _adapter(
     guest_rate: int = 10,
     group_chat_enabled: bool = False,
     owner_home_guild_id: int | None = None,
+    commands: CommandRegistry | None = None,
 ) -> DiscordAdapter:
     return DiscordAdapter(
         client=cast(discord.Client, _client()),
@@ -183,6 +185,7 @@ def _adapter(
         guest_rate=guest_rate,
         group_chat_enabled=group_chat_enabled,
         owner_home_guild_id=owner_home_guild_id,
+        commands=commands,
     )
 
 
@@ -1082,6 +1085,27 @@ async def test_route_without_argument_prints_usage(
 
     assert engine.routed == []  # no category → nothing routed
     channel.send.assert_awaited_once_with("Usage: /route <category>")
+
+
+async def test_registry_new_command_served_discord(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A command registered once on the shared registry is served with no
+    Discord-side change (#129)."""
+    registry = owner_registry()
+
+    async def _pong(ctx: CommandContext) -> None:
+        await ctx.reply("pong")
+
+    registry.register("ping", _pong)
+    adapter = _adapter(session_factory, FakeEngine(), commands=registry)
+    channel = _thread(100, 5)
+
+    await adapter.on_message(
+        _message(user_id=OWNER_ID, content="/ping", channel=channel)
+    )
+
+    channel.send.assert_awaited_once_with("pong")
 
 
 # ---- DiscordTaskIO -----------------------------------------------------------

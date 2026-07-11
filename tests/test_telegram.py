@@ -17,6 +17,7 @@ from chief.adapters.base import (
     Surface,
     parse_callback,
 )
+from chief.adapters.commands import CommandContext, CommandRegistry, owner_registry
 from chief.adapters.telegram import (
     CALLBACK_QUERY_PATTERN,
     TelegramAdapter,
@@ -176,6 +177,7 @@ def _adapter(
     guest_global_rate: int = 60,
     group_chat_enabled: bool = False,
     owner_home_chat_id: int | None = None,
+    commands: CommandRegistry | None = None,
 ) -> TelegramAdapter:
     app = cast(
         Application,  # type: ignore[type-arg]
@@ -199,6 +201,7 @@ def _adapter(
         guest_global_rate=guest_global_rate,
         group_chat_enabled=group_chat_enabled,
         owner_home_chat_id=owner_home_chat_id,
+        commands=commands,
     )
 
 
@@ -801,7 +804,7 @@ async def test_cancel_owner_calls_engine_and_replies(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/cancel", thread_id=5)
 
-    await adapter._on_cancel(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.cancelled == ["-100:5"]
     update.effective_message.reply_text.assert_awaited_once_with("Cancelled.")  # type: ignore[union-attr]
@@ -814,7 +817,7 @@ async def test_cancel_nothing_running_replies(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/cancel", thread_id=5)
 
-    await adapter._on_cancel(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
         "Nothing running here."
@@ -828,7 +831,7 @@ async def test_cancel_ignores_guest(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=7, text="/cancel", thread_id=5)
 
-    await adapter._on_cancel(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.cancelled == []
     update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
@@ -845,7 +848,7 @@ async def test_tasks_lists_active(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/tasks", thread_id=0)
 
-    await adapter._on_tasks(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
         "• big job — running"
@@ -859,7 +862,7 @@ async def test_tasks_empty(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/tasks", thread_id=0)
 
-    await adapter._on_tasks(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with("No active tasks.")  # type: ignore[union-attr]
 
@@ -871,7 +874,7 @@ async def test_memory_lists_owner_facts(
     adapter = _adapter(session_factory, FakeEngine(), memory=memory)
     update = _fake_update(user_id=OWNER_ID, text="/memory", thread_id=0)
 
-    await adapter._on_memory(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
         "• Prefers mornings"
@@ -884,7 +887,7 @@ async def test_memory_empty(
     adapter = _adapter(session_factory, FakeEngine(), memory=FakeMemory())
     update = _fake_update(user_id=OWNER_ID, text="/memory", thread_id=0)
 
-    await adapter._on_memory(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with("No memories yet.")  # type: ignore[union-attr]
 
@@ -896,7 +899,7 @@ async def test_memory_ignores_guest(
     adapter = _adapter(session_factory, FakeEngine(), memory=memory)
     update = _fake_update(user_id=7, text="/memory", thread_id=0)
 
-    await adapter._on_memory(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
 
@@ -908,7 +911,7 @@ async def test_forget_removes_matching_fact(
     adapter = _adapter(session_factory, FakeEngine(), memory=memory)
     update = _fake_update(user_id=OWNER_ID, text="/forget mornings", thread_id=0)
 
-    await adapter._on_forget(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert memory.forgot == [("owner", "mornings")]
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -923,7 +926,7 @@ async def test_forget_no_argument_shows_usage(
     adapter = _adapter(session_factory, FakeEngine(), memory=memory)
     update = _fake_update(user_id=OWNER_ID, text="/forget", thread_id=0)
 
-    await adapter._on_forget(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert memory.forgot == []
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -938,7 +941,7 @@ async def test_forget_no_match(
     adapter = _adapter(session_factory, FakeEngine(), memory=memory)
     update = _fake_update(user_id=OWNER_ID, text="/forget nonsense", thread_id=0)
 
-    await adapter._on_forget(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     update.effective_message.reply_text.assert_awaited_once_with("Nothing matched.")  # type: ignore[union-attr]
 
@@ -955,7 +958,7 @@ async def test_branch_owner_casual_uses_default_title(
         user_id=OWNER_ID, text="/branch", thread_id=0, is_forum=True
     )
 
-    await adapter._on_branch(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert len(engine.branched) == 1
     thread_key, title = engine.branched[0]
@@ -975,7 +978,7 @@ async def test_branch_owner_casual_uses_argument_title(
         user_id=OWNER_ID, text="/branch Trip planning", thread_id=0, is_forum=True
     )
 
-    await adapter._on_branch(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.branched == [("-100:0", "Trip planning")]
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -992,7 +995,7 @@ async def test_branch_rejected_in_task_thread(
         user_id=OWNER_ID, text="/branch", thread_id=5, is_forum=True
     )
 
-    await adapter._on_branch(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.branched == []  # a tracked topic is already full-memory
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1012,7 +1015,7 @@ async def test_branch_rejected_in_flat_dm(
         user_id=OWNER_ID, text="/branch", thread_id=0, is_forum=False
     )
 
-    await adapter._on_branch(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.branched == []
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1027,7 +1030,7 @@ async def test_branch_ignores_guest(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=7, text="/branch", thread_id=0)
 
-    await adapter._on_branch(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.branched == []
     update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
@@ -1043,7 +1046,7 @@ async def test_opus_owner_escalates_and_replies(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/opus", thread_id=5)
 
-    await adapter._on_opus(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.escalated == ["-100:5"]
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1058,7 +1061,7 @@ async def test_sonnet_owner_reverts_and_replies(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/sonnet", thread_id=5)
 
-    await adapter._on_sonnet(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.reverted == ["-100:5"]
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1073,7 +1076,7 @@ async def test_opus_ignores_guest(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=7, text="/opus", thread_id=5)
 
-    await adapter._on_opus(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.escalated == []  # a guest can never reach Opus
     update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
@@ -1086,7 +1089,7 @@ async def test_route_owner_overrides_category_and_replies(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/route code", thread_id=5)
 
-    await adapter._on_route(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.routed == [("-100:5", "code")]
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1101,7 +1104,7 @@ async def test_route_without_argument_prints_usage(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=OWNER_ID, text="/route", thread_id=5)
 
-    await adapter._on_route(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.routed == []  # no category → nothing routed
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
@@ -1116,10 +1119,29 @@ async def test_route_ignores_guest(
     adapter = _adapter(session_factory, engine)
     update = _fake_update(user_id=7, text="/route code", thread_id=5)
 
-    await adapter._on_route(update, _CTX)
+    await adapter._on_command(update, _CTX)
 
     assert engine.routed == []  # a guest can never re-route a thread
     update.effective_message.reply_text.assert_not_awaited()  # type: ignore[union-attr]
+
+
+async def test_registry_new_command_served_telegram(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A command registered once on the shared registry is served with no
+    Telegram-side change (#129)."""
+    registry = owner_registry()
+
+    async def _pong(ctx: CommandContext) -> None:
+        await ctx.reply("pong")
+
+    registry.register("ping", _pong)
+    adapter = _adapter(session_factory, FakeEngine(), commands=registry)
+    update = _fake_update(user_id=OWNER_ID, text="/ping", thread_id=5)
+
+    await adapter._on_command(update, _CTX)
+
+    update.effective_message.reply_text.assert_awaited_once_with("pong")  # type: ignore[union-attr]
 
 
 # ---- TelegramTaskIO ----------------------------------------------------------
