@@ -186,8 +186,8 @@ class MessageLogEntry(Base):
     ``delivered`` semantics: outbound rows are ``False`` when no client was attached at
     emit and ``True`` otherwise; inbound rows and direct command replies are always
     ``True`` (they reached their destination live and are never replayed). Mirror rows
-    (#133) take the ``False`` default but carry no ``payload``, so a replay claim marks
-    them delivered without re-emitting a frame.
+    (#133) carry no ``payload`` — nothing to re-emit — so they are recorded
+    ``delivered=True`` and a replay claim never touches them.
     """
 
     __tablename__ = "message_log"
