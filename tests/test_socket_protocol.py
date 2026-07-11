@@ -1,19 +1,26 @@
-"""Wire-protocol vocabulary for the client-plane socket (#130, #131)."""
+"""Wire-protocol vocabulary for the client-plane socket (#130, #131, #136)."""
 
 import base64
 
 import pytest
 
 from chief.client_plane import (
+    CARD_OPTIONS,
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
     PROTOCOL_VERSION,
+    TYPE_ANSWER,
+    TYPE_CARD,
+    TYPE_CARD_RESOLVED,
     TYPE_COMMAND,
     TYPE_FILE,
     TYPE_MILESTONE,
     TYPE_REPLY,
     TYPE_USER,
     FrameError,
+    answer_frame,
+    card_frame,
+    card_resolved_frame,
     command_frame,
     decode,
     encode,
@@ -25,11 +32,12 @@ from chief.client_plane import (
     reply_frame,
     user_frame,
 )
+from chief.gate.approvals import ApprovalAction
 
 
 def test_hello_frame_carries_the_protocol_version() -> None:
-    assert PROTOCOL_VERSION == 1
-    assert hello_frame() == {"type": "hello", "protocol": 1}
+    assert PROTOCOL_VERSION == 2
+    assert hello_frame() == {"type": "hello", "protocol": 2}
 
 
 def test_pong_frame_shape() -> None:
@@ -72,6 +80,11 @@ def test_type_consts_match_wire_values() -> None:
     # The consts ARE the wire strings — a client and server agree on them by name.
     assert (TYPE_USER, TYPE_COMMAND) == ("user", "command")
     assert (TYPE_REPLY, TYPE_MILESTONE, TYPE_FILE) == ("reply", "milestone", "file")
+    assert (TYPE_CARD, TYPE_CARD_RESOLVED, TYPE_ANSWER) == (
+        "card",
+        "card_resolved",
+        "answer",
+    )
     assert CLI_PLATFORM == "cli"
     assert DEFAULT_THREAD_KEY == "cli:main"
 
@@ -128,6 +141,59 @@ def test_file_frame_caption_defaults_to_none() -> None:
     assert file_frame("cli:main", "r.md", b"x")["caption"] is None
 
 
+def test_card_frame_shape_and_default_platform() -> None:
+    frame = card_frame("cli:main", 7, "Run: sudo rm -rf /")
+    assert frame == {
+        "type": "card",
+        "platform": "cli",
+        "thread_key": "cli:main",
+        "approval_id": 7,
+        "text": "Run: sudo rm -rf /",
+        "options": [dict(o) for o in CARD_OPTIONS],
+    }
+
+
+def test_card_frame_carries_an_explicit_platform() -> None:
+    frame = card_frame("-100:1", 9, "run it?", platform="telegram")
+    assert frame["platform"] == "telegram"
+    assert frame["approval_id"] == 9
+
+
+def test_card_resolved_frame_shape() -> None:
+    frame = card_resolved_frame("cli:main", 7, "✅ Approved (once) — by cli")
+    assert frame == {
+        "type": "card_resolved",
+        "platform": "cli",
+        "thread_key": "cli:main",
+        "approval_id": 7,
+        "text": "✅ Approved (once) — by cli",
+    }
+    assert card_resolved_frame("t", 1, "x", platform="discord")["platform"] == (
+        "discord"
+    )
+
+
+def test_answer_frame_shape() -> None:
+    assert answer_frame(7, "approve_once") == {
+        "type": "answer",
+        "approval_id": 7,
+        "action": "approve_once",
+    }
+
+
+def test_card_options_round_trip_through_encode_decode() -> None:
+    frame = card_frame("cli:main", 1, "text")
+    assert decode(encode(frame)) == frame
+
+
+def test_card_options_action_tokens_match_approval_action_drift_guard() -> None:
+    # CARD_OPTIONS deliberately duplicates chief.gate.approvals.ApprovalAction rather
+    # than importing it (protocol.py must stay importable with no sqlalchemy) — this
+    # guard pins the two vocabularies together so they can't silently drift apart.
+    assert {o["action"] for o in CARD_OPTIONS} == {a.value for a in ApprovalAction}
+    assert len(CARD_OPTIONS) == 4
+
+
 def test_cli_frames_survive_encode_decode() -> None:
     for frame in (
         user_frame("cli:main", "hi"),
@@ -135,5 +201,8 @@ def test_cli_frames_survive_encode_decode() -> None:
         reply_frame("cli:main", "answer"),
         milestone_frame("cli:main", "step"),
         file_frame("cli:main", "r.md", b"bytes", caption="c"),
+        card_frame("cli:main", 3, "run it?"),
+        card_resolved_frame("cli:main", 3, "approved"),
+        answer_frame(3, "approve_once"),
     ):
         assert decode(encode(frame)) == frame

@@ -8,10 +8,14 @@ adapter installs one); the #132 client imports only the protocol vocabulary.
 """
 
 from .protocol import (
+    CARD_OPTIONS,
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
     MILESTONE_PREFIX,
     PROTOCOL_VERSION,
+    TYPE_ANSWER,
+    TYPE_CARD,
+    TYPE_CARD_RESOLVED,
     TYPE_COMMAND,
     TYPE_ERROR,
     TYPE_FILE,
@@ -22,6 +26,9 @@ from .protocol import (
     TYPE_REPLY,
     TYPE_USER,
     FrameError,
+    answer_frame,
+    card_frame,
+    card_resolved_frame,
     command_frame,
     decode,
     encode,
@@ -37,10 +44,14 @@ from .protocol import (
 from .server import ConnectHook, FrameHandler, FrameSender, SocketServer
 
 __all__ = [
+    "CARD_OPTIONS",
     "CLI_PLATFORM",
     "DEFAULT_THREAD_KEY",
     "MILESTONE_PREFIX",
     "PROTOCOL_VERSION",
+    "TYPE_ANSWER",
+    "TYPE_CARD",
+    "TYPE_CARD_RESOLVED",
     "TYPE_COMMAND",
     "TYPE_ERROR",
     "TYPE_FILE",
@@ -55,6 +66,9 @@ __all__ = [
     "FrameHandler",
     "FrameSender",
     "SocketServer",
+    "answer_frame",
+    "card_frame",
+    "card_resolved_frame",
     "command_frame",
     "decode",
     "encode",

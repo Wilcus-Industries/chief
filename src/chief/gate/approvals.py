@@ -121,6 +121,11 @@ _VERB = {
 }
 
 
+def _outcome(action: ApprovalAction, decided_by: str, note: str) -> str:
+    """The card's post-decision text: verb, any rule note, and who decided (#136)."""
+    return f"{_VERB[action]}{note} — by {decided_by}"
+
+
 class ApprovalManager:
     """Owns parked approvals and resolves them on a button tap or timeout."""
 
@@ -132,6 +137,7 @@ class ApprovalManager:
         policy: PolicyStore,
         audit: _Audit,
         timeout_seconds: float = 600.0,
+        registry: "ApprovalRegistry | None" = None,
     ) -> None:
         self._sf = session_factory
         self._io = io
@@ -139,6 +145,8 @@ class ApprovalManager:
         self._audit = audit
         self._timeout = timeout_seconds
         self._live: dict[int, _Live] = {}
+        #: ``None`` ⇒ no socket routing (current chat-only behavior, #136).
+        self._registry = registry
 
     async def request(
         self,
@@ -171,6 +179,8 @@ class ApprovalManager:
             tool_input=tool_input,
         )
         self._live[approval_id] = live
+        if self._registry is not None:
+            self._registry.register(approval_id, self)
         try:
             self._audit.log(
                 {
@@ -194,16 +204,19 @@ class ApprovalManager:
             return await self._expire(approval_id)
         finally:
             self._live.pop(approval_id, None)
+            if self._registry is not None:
+                self._registry.discard(approval_id)
 
     async def resolve(
         self, approval_id: int, action: ApprovalAction, *, decided_by: str
-    ) -> None:
+    ) -> bool:
         """Apply a button tap: atomically decide, (maybe) write a rule, audit, edit.
 
         The decision is a single ``UPDATE … WHERE state IN (pending)``; only the writer
         that flips the row proceeds, so concurrent taps (or a tap racing the timeout)
         can't double-decide, double-audit, or persist a rule against a row that another
-        tap denied. A losing/duplicate tap is a silent no-op (idempotent).
+        tap denied. A losing/duplicate tap returns ``False`` (idempotent, silent) — the
+        socket surfaces that as ``already_resolved`` (#136); chat adapters ignore it.
         """
         async with self._sf() as session:
             won = await try_decide(
@@ -213,7 +226,7 @@ class ApprovalManager:
                 decided_by=decided_by,
             )
         if not won:
-            return  # unknown or already decided — the atomic UPDATE settled the race
+            return False  # unknown or already decided — the atomic UPDATE settled it
 
         live = self._live.get(approval_id)
         # Decision is durably committed: wake the parked turn and audit before the
@@ -232,7 +245,10 @@ class ApprovalManager:
         )
         note = await self._persist_rule(action, live) if action.is_always else ""
         if live is not None and live.msg_ref is not None:
-            await self._io.edit_card(live.msg_ref, _VERB[action] + note)
+            await self._io.edit_card(
+                live.msg_ref, _outcome(action, decided_by, note)
+            )
+        return True
 
     async def re_arm(self) -> list[int]:
         """Re-register pending approvals on boot so a late tap still records a decision.
@@ -255,6 +271,8 @@ class ApprovalManager:
                     tool_input=None,
                 ),
             )
+            if self._registry is not None:
+                self._registry.register(row.id, self)
         return [row.id for row in rows]
 
     async def _persist_rule(
@@ -283,3 +301,31 @@ class ApprovalManager:
             if live is not None and live.msg_ref is not None:
                 await self._io.edit_card(live.msg_ref, "⌛ Timed out — denied.")
         return False
+
+
+class ApprovalRegistry:
+    """Which manager parked a given approval — the cross-stack answer router (#136).
+
+    One registry is shared by every stack, so an ``answer`` frame arriving on the
+    client-plane socket resolves through the *owning* stack's manager (the one holding
+    the parked future), not whichever manager happens to see the frame. Resolve-once
+    arbitration itself stays in :meth:`ApprovalManager.resolve` (the atomic decide).
+    """
+
+    def __init__(self) -> None:
+        self._owners: dict[int, ApprovalManager] = {}
+
+    def register(self, approval_id: int, manager: "ApprovalManager") -> None:
+        self._owners[approval_id] = manager
+
+    def discard(self, approval_id: int) -> None:
+        self._owners.pop(approval_id, None)
+
+    async def resolve(
+        self, approval_id: int, action: ApprovalAction, *, decided_by: str
+    ) -> bool:
+        """Route a decision to the owning manager; ``False`` if unknown or decided."""
+        manager = self._owners.get(approval_id)
+        if manager is None:
+            return False
+        return await manager.resolve(approval_id, action, decided_by=decided_by)
