@@ -164,7 +164,7 @@ class UsageMeter(Base):
 
 
 class MessageLogEntry(Base):
-    """One logged message on a thread — both directions of every stack (#132).
+    """One logged message on a thread — both directions of every stack (#132, #133).
 
     The per-thread message log and future dashboard read model (#128): every inbound
     owner message and every outbound chief frame lands one row, so a client that
@@ -174,13 +174,20 @@ class MessageLogEntry(Base):
     the undelivered rows on the next attach (restart-proof).
 
     Persistence stays adapter-independent, so ``role`` is a plain string
-    (``messages.ROLE_*``), ``surface`` an adapter ``Surface`` value, and ``kind`` a wire
-    frame type — none imported here (same rule as ``tier``). The
-    ``(platform, delivered)`` index keeps the replay claim cheap as the log grows.
+    (``messages.ROLE_*`` / ``message_log.ROLE_*``), ``surface`` an adapter ``Surface``
+    value, and ``kind`` a wire frame type — none imported here (same rule as ``tier``).
+    The ``(platform, delivered)`` index keeps the replay claim cheap as the log grows.
+
+    Columns split by producer: #132's CLI log fills ``surface`` and ``payload`` (the
+    replay-source wire frame); the #133 broadcast-bus mirror fills ``filename`` for file
+    rows and leaves ``surface``/``payload`` null. All three are nullable so either
+    producer can omit the other's fields.
 
     ``delivered`` semantics: outbound rows are ``False`` when no client was attached at
     emit and ``True`` otherwise; inbound rows and direct command replies are always
-    ``True`` (they reached their destination live and are never replayed).
+    ``True`` (they reached their destination live and are never replayed). Mirror rows
+    (#133) take the ``False`` default but carry no ``payload``, so a replay claim marks
+    them delivered without re-emitting a frame.
     """
 
     __tablename__ = "message_log"
@@ -191,11 +198,12 @@ class MessageLogEntry(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     platform: Mapped[str]
     thread_key: Mapped[str]
-    role: Mapped[str]  # messages.ROLE_* ("owner" | "chief")
-    surface: Mapped[str]  # adapters Surface value, e.g. "dm"
+    role: Mapped[str]  # ROLE_* — "owner"/"chief" (#132) or "assistant" (#133 mirror)
+    surface: Mapped[str | None]  # adapters Surface value (#132); None for mirror rows
     kind: Mapped[str]  # wire frame type: user/command/reply/milestone/file
-    text: Mapped[str]
+    text: Mapped[str]  # reply/milestone body; the caption ("" if none) for kind="file"
     payload: Mapped[str | None]  # outbound wire-frame JSON (replay src); None inbound
+    filename: Mapped[str | None]  # kind="file" only; bytes are NOT persisted
     delivered: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 

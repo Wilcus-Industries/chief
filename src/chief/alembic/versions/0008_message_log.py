@@ -1,11 +1,13 @@
-"""Add the per-thread message_log table for detach-replay (#132).
+"""Add the message_log table — both directions of every stack, with detach-replay.
 
-The CLI stack (and, later, every stack) logs both directions of its traffic into
+The CLI stack (#132) and, via the #133 broadcast bus, every stack log traffic into
 ``message_log``: inbound owner messages and outbound chief frames. An outbound row's
 ``delivered`` snapshots whether a client was attached at emit time, so a client that
 reattaches after a detached period replays the undelivered rows (the log is the
-held-message mechanism — no separate outbox). The ``(platform, delivered)`` index keeps
-that replay claim cheap.
+held-message mechanism — no separate outbox); the ``(platform, delivered)`` index keeps
+that replay claim cheap. #133 mirror rows add the outbound ``filename`` (file rows carry
+only the filename + caption — the attachment bytes are never persisted) and leave the
+#132-only ``surface``/``payload`` columns null.
 
 Revision ID: 0008
 Revises:     0007
@@ -30,10 +32,11 @@ def upgrade() -> None:
         sa.Column("platform", sa.String, nullable=False),
         sa.Column("thread_key", sa.String, nullable=False),
         sa.Column("role", sa.String, nullable=False),
-        sa.Column("surface", sa.String, nullable=False),
+        sa.Column("surface", sa.String, nullable=True),
         sa.Column("kind", sa.String, nullable=False),
         sa.Column("text", sa.String, nullable=False),
         sa.Column("payload", sa.String, nullable=True),
+        sa.Column("filename", sa.String, nullable=True),
         sa.Column("delivered", sa.Boolean, nullable=False),
         sa.Column("created_at", sa.DateTime, nullable=False),
     )
