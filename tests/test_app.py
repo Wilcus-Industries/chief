@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
-from chief.adapters.cli import CLI_LIMIT, CliAdapter
+from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
 from chief.adapters.discord import DiscordAdapter, DiscordTaskIO
 from chief.adapters.mirror import MirrorTaskIO
 from chief.adapters.telegram import TelegramAdapter, TelegramTaskIO
@@ -499,11 +499,12 @@ def test_build_telegram_stack_wraps_engine_io_in_mirror(
     assert isinstance(manager._budget._io, TelegramTaskIO)  # budget keeps the raw io
 
 
-def test_build_cli_stack_wraps_engine_io_in_mirror(
+def test_build_cli_stack_does_not_wrap_engine_io_in_mirror(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # #133: the CLI engine io is a MirrorTaskIO too — its inner CliTaskIO already
-    # broadcasts, so the mirror (server=None) adds only the message-log record.
+    # #133: the CLI engine io is the bare CliTaskIO — it is already this stack's
+    # broadcaster AND its recorder (with #132's payload + delivered snapshot), so
+    # wrapping it in a mirror would log every CLI outbound twice. One outbound, one row.
     settings = _settings()
     policy, audit, memory = _shared(settings, session_factory)
 
@@ -516,7 +517,8 @@ def test_build_cli_stack_wraps_engine_io_in_mirror(
         memory=memory,
     )
 
-    assert isinstance(manager.io, MirrorTaskIO)
+    assert isinstance(manager.io, CliTaskIO)
+    assert not isinstance(manager.io, MirrorTaskIO)
 
 
 def test_build_engine_no_budget_when_disabled(
