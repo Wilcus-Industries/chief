@@ -48,6 +48,8 @@ from ..client_plane import (
     TYPE_INJECT,
     TYPE_LIST_THREADS,
     TYPE_REPLY,
+    TYPE_SKILLS,
+    TYPE_STATUS,
     TYPE_SWITCH,
     TYPE_USER,
     FrameSender,
@@ -59,8 +61,11 @@ from ..client_plane import (
     file_frame,
     outbound_frame,
     reply_frame,
+    skills_list_frame,
+    status_snapshot_frame,
     threads_frame,
 )
+from ..core.budget import BudgetGate
 from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..persistence.messages import (
     BACKFILL_LIMIT,
@@ -70,6 +75,7 @@ from ..persistence.messages import (
     MessageLog,
 )
 from ..persistence.models import Task
+from ..persistence.schedules import list_enabled
 from ..persistence.tasks import get_task, list_active
 from .base import (
     Adapter,
@@ -91,6 +97,9 @@ logger = logging.getLogger(__name__)
 #: FILE_THRESHOLD_FACTOR`` (~4 MB) or on an un-splittable oversized code fence, which
 #: becomes one file frame.
 CLI_LIMIT = 1_000_000
+
+#: The top-N upcoming fires shown in a ``/status`` snapshot (#138).
+STATUS_SCHEDULE_LIMIT = 5
 
 #: ``decided_by`` for a socket answer. The 0600 socket is the auth (#128 local trust),
 #: so every client answer is the owner — one identity, no per-client id.
@@ -249,6 +258,7 @@ class CliAdapter(Adapter):
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         backfill_limit: int = BACKFILL_LIMIT,
         foreign: dict[str, ForeignPlatform] | None = None,
+        budget: BudgetGate | None = None,
     ) -> None:
         self._server = server
         self._engine = engine
@@ -275,6 +285,9 @@ class CliAdapter(Adapter):
         #: "simplify" this to `foreign or {}`, which would silently swap out an
         #: intentionally-empty-then-later-populated caller dict.
         self._foreign: dict[str, ForeignPlatform] = {} if foreign is None else foreign
+        #: The shared budget gate (#138). ``None`` ⇒ a ``/status`` snapshot's ``budget``
+        #: is always ``[]`` (budgeting off, matching how the rest of the app treats it).
+        self._budget = budget
         self._stopped = asyncio.Event()
         server.set_handler(self._on_frame)
         server.set_connect_hook(self._on_connect)
@@ -337,6 +350,10 @@ class CliAdapter(Adapter):
             return await self._handle_switch(frame, sender)
         if ftype == TYPE_INJECT:
             return await self._handle_inject(frame, sender)
+        if ftype == TYPE_STATUS:
+            return await self._handle_status(sender)
+        if ftype == TYPE_SKILLS:
+            return await self._handle_skills(sender)
         return False
 
     async def _handle_user(self, frame: object, sender: FrameSender) -> bool:
@@ -606,6 +623,53 @@ class CliAdapter(Adapter):
         await target.engine.dispatch(
             thread_key=thread_key, text=text, surface=surface
         )
+        return True
+
+    async def _handle_status(self, sender: FrameSender) -> bool:
+        """Answer a real point-in-time snapshot: tasks, models, budget, schedules.
+
+        Central mechanism (#138): every field is read off live engine/persistence
+        state — the tasks table (every platform, like ``_handle_list_threads``), the
+        shared ``BudgetGate`` (``None`` when budgeting is off), and the schedules
+        table — never a hardcoded view.
+        """
+        if self._session_factory is None:
+            return False
+        async with self._session_factory() as session:
+            tasks = await list_active(session)
+            schedules = await list_enabled(session)
+        budget = await self._budget.snapshot() if self._budget is not None else []
+        await sender(
+            status_snapshot_frame(
+                tasks=[
+                    {
+                        "platform": t.platform, "thread_key": t.thread_key,
+                        "title": t.title, "status": t.status, "model": t.model,
+                    }
+                    for t in tasks
+                ],
+                budget=[
+                    {
+                        "currency": b.currency, "spent": b.spent,
+                        "cap": b.cap, "mode": b.mode,
+                    }
+                    for b in budget
+                ],
+                schedules=[
+                    {
+                        "id": s.id, "kind": s.kind, "spec": s.spec,
+                        "action_type": s.action_type, "thread_key": s.thread_key,
+                        "next_run": s.next_run.isoformat() if s.next_run else None,
+                    }
+                    for s in schedules[:STATUS_SCHEDULE_LIMIT]
+                ],
+            )
+        )
+        return True
+
+    async def _handle_skills(self, sender: FrameSender) -> bool:
+        """Answer the owner session's composed skill set (#138)."""
+        await sender(skills_list_frame(await self._engine.composed_skills()))
         return True
 
 

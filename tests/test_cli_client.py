@@ -16,6 +16,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from textual.widgets import Static
 
 from chief.adapters.commands import OWNER_COMMANDS
 from chief.cli.app import AWAY_FOOTER, AWAY_HEADER, ChiefCliApp, Line
@@ -23,14 +24,22 @@ from chief.cli.connection import SocketConnection
 from chief.client_plane import (
     PROTOCOL_VERSION,
     answer_frame,
+    backfill_frame,
     card_frame,
     command_frame,
     decode,
     encode,
     error_frame,
     hello_frame,
+    list_threads_frame,
     milestone_frame,
     reply_frame,
+    skills_frame,
+    skills_list_frame,
+    status_frame,
+    status_snapshot_frame,
+    switch_frame,
+    threads_frame,
     user_frame,
 )
 
@@ -200,8 +209,10 @@ async def test_new_switches_thread_and_clears_transcript(
     app: ChiefCliApp, peer: ScriptedPeer
 ) -> None:
     async with app.run_test() as pilot:
-        await pilot.press(*"one", "enter")
+        # on_mount sends one status_frame() request (#138) before any keystroke.
         await _settle(app, lambda: len(peer.received) == 1)
+        await pilot.press(*"one", "enter")
+        await _settle(app, lambda: len(peer.received) == 2)
         await pilot.press(*"/new", "enter")
 
         def _new_thread_announced() -> bool:
@@ -210,8 +221,8 @@ async def test_new_switches_thread_and_clears_transcript(
         await _settle(app, _new_thread_announced)
         assert app.transcript[0].text.startswith("new thread:")
         await pilot.press(*"two", "enter")
-        await _settle(app, lambda: len(peer.received) == 2)
-        second = peer.received[1]
+        await _settle(app, lambda: len(peer.received) == 3)
+        second = peer.received[2]
         assert second == user_frame(str(second["thread_key"]), "two")
         assert second["thread_key"] != "cli:main"
         assert str(second["thread_key"]).startswith("cli:")
@@ -261,6 +272,10 @@ async def test_other_platform_and_thread_frames_filtered_but_cards_shown(
         assert "telegram reply" not in blob
         assert "other thread reply" not in blob
         assert "cross-platform card" in blob
+        # #138: a background thread's traffic is never silently invisible — each of
+        # the two off-pane replies leaves a one-line notice instead of vanishing.
+        assert "telegram" in blob and "cli:main" in blob
+        assert "cli:other" in blob
 
 
 async def test_malformed_frame_does_not_kill_pump(
@@ -292,3 +307,259 @@ async def test_unknown_command_forwarded_then_error_rendered(
         assert any(
             line.style == "red" and line.text.startswith("!") for line in app.transcript
         )
+
+
+# ---- #138: /tasks, /switch, /status, /skills ---------------------------------------
+
+
+async def test_tasks_lists_threads_across_platforms(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        assert peer.received[-1] == list_threads_frame()
+
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "cli", "thread_key": "cli:main",
+                        "title": None, "status": "open",
+                    },
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(
+            app, lambda: any("cli:main" in line.text for line in app.transcript)
+        )
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "cli:main" in blob
+        assert "-100:5" in blob
+
+
+async def test_switch_flips_pane_and_renders_backfill(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app._last_threads))
+
+        await pilot.press(*"/switch 1", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        assert peer.received[-1] == switch_frame("telegram", "-100:5")
+
+        await peer.push(
+            backfill_frame(
+                "telegram",
+                "-100:5",
+                [
+                    {
+                        "role": "owner", "kind": "user", "text": "hi",
+                        "filename": None, "created_at": "2026-01-01T00:00:00",
+                    },
+                    {
+                        "role": "chief", "kind": "reply", "text": "hello",
+                        "filename": None, "created_at": "2026-01-01T00:00:01",
+                    },
+                ],
+            )
+        )
+        await _settle(app, lambda: any("hello" in line.text for line in app.transcript))
+        assert app._active_platform == "telegram"
+        assert app._thread_key == "-100:5"
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "> hi" in blob
+        assert "hello" in blob
+
+        await peer.push(reply_frame("-100:5", "live reply", platform="telegram"))
+        await _settle(
+            app, lambda: any("live reply" in line.text for line in app.transcript)
+        )
+        live_line = next(
+            line for line in app.transcript if "live reply" in line.text
+        )
+        assert live_line.text == "(telegram) live reply"
+
+
+async def test_foreign_pane_blocks_user_message_input(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """After /switch onto a foreign-platform thread, typed text must not be sent as a
+    ``user`` frame — that would dispatch through the ``platform=cli`` engine under the
+    foreign ``thread_key``, spawning a spurious cli task (#138 finding).
+    """
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app._last_threads))
+
+        await pilot.press(*"/switch 1", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        await peer.push(backfill_frame("telegram", "-100:5", []))
+        await _settle(app, lambda: app._active_platform == "telegram")
+
+        n = len(peer.received)
+        await pilot.press(*"hello", "enter")
+        await _settle(
+            app, lambda: any(line.style == "red" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "read-only pane" in line.text
+            for line in app.transcript
+        )
+        assert len(peer.received) == n
+        assert not any(f.get("type") == "user" for f in peer.received)
+
+
+async def test_foreign_pane_blocks_forwarded_owner_command(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """A forwarded slash command (not one of the client-only ones) must also be
+    refused while a foreign-platform pane is active (#138 finding).
+    """
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app._last_threads))
+
+        await pilot.press(*"/switch 1", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        await peer.push(backfill_frame("telegram", "-100:5", []))
+        await _settle(app, lambda: app._active_platform == "telegram")
+
+        n = len(peer.received)
+        await pilot.press(*"/bogus", "enter")
+        await _settle(
+            app, lambda: any(line.style == "red" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "read-only pane" in line.text
+            for line in app.transcript
+        )
+        assert len(peer.received) == n
+        assert not any(f.get("type") == "command" for f in peer.received)
+
+
+async def test_switch_out_of_range_is_rejected(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/switch 99", "enter")
+        await _settle(
+            app, lambda: any(line.style == "red" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "usage" in line.text for line in app.transcript
+        )
+        assert not any(
+            isinstance(f, dict) and f.get("type") == "switch" for f in peer.received
+        )
+
+
+async def test_background_thread_traffic_shows_one_line_notice(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test():
+        await peer.push(reply_frame("cli:other", "bg reply"))
+        await _settle(
+            app, lambda: any("cli:other" in line.text for line in app.transcript)
+        )
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "cli:other" in blob
+        assert "bg reply" not in blob
+
+
+async def test_status_renders_snapshot_and_updates_statusbar(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        # on_mount already sent one status frame; wait for it so the count below
+        # isolates the frame the /status keypress itself sends (#138 finding — a
+        # status frame is content-identical every time, so ``received[-1] ==
+        # status_frame()`` is satisfied by the mount-time frame alone).
+        await _settle(app, lambda: bool(peer.received))
+        n = len(peer.received)
+
+        await pilot.press(*"/status", "enter")
+        await _settle(app, lambda: len(peer.received) == n + 1)
+        assert peer.received[-1] == status_frame()
+
+        await peer.push(
+            status_snapshot_frame(
+                tasks=[
+                    {
+                        "platform": "cli", "thread_key": "cli:main", "title": None,
+                        "status": "open", "model": "claude-sonnet-4-6",
+                    },
+                ],
+                budget=[
+                    {
+                        "currency": "premium_requests", "spent": 10.0,
+                        "cap": 200.0, "mode": "normal",
+                    },
+                ],
+                schedules=[],
+            )
+        )
+        await _settle(
+            app,
+            lambda: any(
+                "claude-sonnet-4-6" in line.text for line in app.transcript
+            ),
+        )
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "claude-sonnet-4-6" in blob
+        statusbar_text = str(app.query_one("#statusbar", Static).render())
+        assert "claude-sonnet-4-6" in statusbar_text
+        assert "10/200" in statusbar_text
+
+
+async def test_skills_lists_composed_set(app: ChiefCliApp, peer: ScriptedPeer) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/skills", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "skills")
+        assert peer.received[-1] == skills_frame()
+
+        await peer.push(skills_list_frame(["setup-morning-brief", "docx"]))
+        await _settle(
+            app, lambda: any("docx" in line.text for line in app.transcript)
+        )
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "setup-morning-brief" in blob
+        assert "docx" in blob
