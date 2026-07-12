@@ -62,6 +62,13 @@ class Task(Base):
     active_account: Mapped[str | None]
     #: Per-task ``/route`` category override (#79). None = auto-classify at spawn.
     route_category: Mapped[str | None]
+    #: The thread's real ``adapters.base.Surface`` value (home/dm/group, #135), set once
+    #: at creation from the live dispatch/observe call that first opened it. ``None``
+    #: for a task predating this column, or one created off a path that never had a
+    #: real surface to record — callers MUST treat that as "unproven", never assume DM
+    #: (a cross-stack inject onto a rebuilt GROUP task otherwise leaks approval cards
+    #: into the shared room — see ``adapters.cli._handle_inject``).
+    surface: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
 

@@ -48,6 +48,7 @@ from chief.obs.audit import AuditLog
 from chief.persistence.messages import ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
+from chief.persistence.tasks import get_or_create_task
 from test_broadcast_bus import _RecordingInner
 from test_tasks import FakeSession, wait_for_task_open
 
@@ -1563,6 +1564,165 @@ async def test_inject_records_owner_row_for_backfill(
                 m["text"]: m for m in backfill["messages"]  # type: ignore[attr-defined]
             }
             assert rows["inject me"]["role"] == "owner"
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_inject_rejects_a_guest_tier_thread(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Review fix (#135): the sole (platform, thread_key) row can be a guest's — inject
+    # must not trust it and hand the guest's thread the owner tool surface.
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([], foreign=foreign)
+    inner = _RecordingInner()
+    tg_manager, _inner = _mirror_manager(
+        session_factory, server, inner, factory=_seq_factory([FakeSession(model="m")])
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            await tg_manager.dispatch_guest(
+                thread_key="-100:9", text="hi", surface=Surface.DM
+            )
+            seeded = await _read_frame(reader)  # the mirrored guest receptionist reply
+            assert seeded["platform"] == "telegram"
+            await wait_for_task_open(
+                session_factory, platform="telegram", thread_key="-100:9"
+            )
+            sends_before = len(inner.sends)
+            foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+
+            writer.write(
+                json.dumps(inject_frame("telegram", "-100:9", "inject me")).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            error = await _read_frame(reader)
+            assert error["type"] == "error" and error["code"] == "unknown_thread"
+            # No echo, no dispatch — the guest thread never sees another turn.
+            assert len(inner.sends) == sends_before
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_inject_rejects_a_thread_with_no_proven_surface(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Review fix (#135): a task predating the ``surface`` column (or any row created
+    # off a path that never recorded one) must fail closed, not be assumed DM.
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([], foreign=foreign)
+    inner = _RecordingInner()
+    tg_manager, _inner = _mirror_manager(
+        session_factory, server, inner, factory=_seq_factory([])
+    )
+    async with session_factory() as session:
+        await get_or_create_task(
+            session, platform="telegram", thread_key="-100:legacy", tier="owner"
+        )
+    foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+            writer.write(
+                json.dumps(
+                    inject_frame("telegram", "-100:legacy", "inject me")
+                ).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            error = await _read_frame(reader)
+            assert error["type"] == "error" and error["code"] == "unknown_surface"
+            assert inner.sends == []
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_inject_uses_the_threads_real_surface_for_a_rebuilt_group_thread(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Review fix (#135): dispatch/MessageLog.record used to hardcode surface=DM, so a
+    # GROUP task rebuilt after eviction (restart/idle-archive — no live _RunningTask)
+    # lost its group semantics (context drain, DM'd approval cards). The buffered
+    # ambient line only reaches the turn if the real GROUP branch runs — proof the
+    # thread's actual surface, not a hardcoded DM, drove this dispatch.
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([], foreign=foreign)
+    inner = _RecordingInner()
+    inject_session = FakeSession(model="m")
+    tg_manager, _inner = _mirror_manager(
+        session_factory,
+        server,
+        inner,
+        factory=_seq_factory([FakeSession(model="m"), inject_session]),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            await tg_manager.dispatch(
+                thread_key="-100:5:grp", text="hi", surface=Surface.GROUP
+            )
+            seeded = await _read_frame(reader)
+            assert seeded["platform"] == "telegram"
+            await wait_for_task_open(
+                session_factory, platform="telegram", thread_key="-100:5:grp"
+            )
+
+            # Evict the running task — simulates the restart/idle-archive precondition
+            # the review finding calls out, so the next turn has to rebuild it fresh.
+            await tg_manager._stop_task(tg_manager._tasks["-100:5:grp"])
+            await tg_manager.observe(
+                thread_key="-100:5:grp", text="ambient hi", sender_name="bob"
+            )
+
+            foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+            writer.write(
+                json.dumps(
+                    inject_frame("telegram", "-100:5:grp", "inject me")
+                ).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            reply = await _read_frame(reader)
+            turn = inject_session.queries[-1]
+            assert str(reply["text"]) == f"reply:{turn}"
+            assert "bob: ambient hi" in turn
+            assert turn.endswith("inject me")
+
+            async with session_factory() as session:
+                rows = (
+                    (
+                        await session.execute(
+                            select(MessageLogEntry).where(
+                                MessageLogEntry.text == "inject me"
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert any(r.surface == "group" for r in rows)
         finally:
             writer.close()
             with suppress(OSError):

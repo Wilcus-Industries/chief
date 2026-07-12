@@ -69,6 +69,7 @@ from ..persistence.messages import (
     ROLE_OWNER,
     MessageLog,
 )
+from ..persistence.models import Task
 from ..persistence.tasks import get_task, list_active
 from .base import (
     Adapter,
@@ -523,16 +524,23 @@ class CliAdapter(Adapter):
 
         Validates the thread exists first (the same ``get_task`` lookup and
         ``unknown_thread`` error ``_handle_switch`` uses — a nonexistent thread never
-        echoes and never dispatches). Then: log the turn ``ROLE_OWNER`` (so a later
-        switch/backfill of this thread shows it), echo it onto the foreign
-        platform's RAW io marked via-CLI, and dispatch it on that platform's own
-        ``Engine`` — the exact ``TaskManager.dispatch`` a native turn uses, so
+        echoes and never dispatches), then that it's an **owner** thread — a guest's
+        thread never gets the owner tool surface just because it's the only row on
+        ``(platform, thread_key)`` (a review fix: this used to trust any tier and
+        ``dispatch`` defaults ``tier="owner"``). Then: log the turn ``ROLE_OWNER`` (so
+        a later switch/backfill of this thread shows it) tagged with the thread's real
+        ``Surface`` — never a hardcoded DM, which would post a rebuilt GROUP task's
+        approval cards into the shared room (``_approval_route``) — echo it onto the
+        foreign platform's RAW io marked via-CLI, and dispatch it on that platform's
+        own ``Engine`` — the exact ``TaskManager.dispatch`` a native turn uses, so
         steering, cancel, and budget gating are the platform's native ones, not a
-        parallel path. The reply then flows out through that stack's normal
-        (mirrored) ``TaskIO``: platform first, socket second — unchanged by this
-        method. An empty/unset ``foreign`` map does NOT short-circuit here (unlike
-        ``session_factory is None``): every platform name then simply misses the
-        lookup below and answers ``unknown_platform``, per the wire contract — only
+        parallel path. A thread whose surface can't be proven (predates the ``surface``
+        column, or holds a value ``Surface`` can't parse) fails closed with
+        ``unknown_surface`` rather than guessing. The reply then flows out through that
+        stack's normal (mirrored) ``TaskIO``: platform first, socket second — unchanged
+        by this method. An empty/unset ``foreign`` map does NOT short-circuit here
+        (unlike ``session_factory is None``): every platform name then simply misses
+        the lookup below and answers ``unknown_platform``, per the wire contract — only
         a wholly unwired ``session_factory`` (this build never turns on cross-stack
         drive at all) falls through to ``unknown_type``.
         """
@@ -573,14 +581,30 @@ class CliAdapter(Adapter):
                 )
             )
             return True
+        if task.tier != "owner":
+            await sender(
+                error_frame(
+                    "unknown_thread", f"no owner thread {thread_key!r} on {platform!r}"
+                )
+            )
+            return True
+        surface = _task_surface(task)
+        if surface is None:
+            await sender(
+                error_frame(
+                    "unknown_surface",
+                    f"thread {thread_key!r} on {platform!r} has no proven surface",
+                )
+            )
+            return True
         if self._log is not None:
             await self._log.record(
                 platform=platform, thread_key=thread_key, role=ROLE_OWNER,
-                surface=Surface.DM.value, kind=TYPE_INJECT, text=text, delivered=True,
+                surface=surface.value, kind=TYPE_INJECT, text=text, delivered=True,
             )
         await target.io.send(thread_key, INJECT_ECHO_PREFIX + text)
         await target.engine.dispatch(
-            thread_key=thread_key, text=text, surface=Surface.DM
+            thread_key=thread_key, text=text, surface=surface
         )
         return True
 
@@ -595,3 +619,18 @@ def _get(frame: object, field: str, default: object = None) -> object:
 def _nonempty_str(value: object) -> bool:
     """True for a non-empty ``str`` — the shape every required client field must be."""
     return isinstance(value, str) and bool(value)
+
+
+def _task_surface(task: Task) -> Surface | None:
+    """Return ``task``'s real surface, or ``None`` if it can't be proven (#135).
+
+    A task predating the ``surface`` column, or holding a value ``Surface`` can't
+    parse, is "unproven" — callers must fail closed rather than assume DM, which
+    would leak a rebuilt GROUP task's approval cards into the shared room.
+    """
+    if task.surface is None:
+        return None
+    try:
+        return Surface(task.surface)
+    except ValueError:
+        return None

@@ -668,7 +668,11 @@ class TaskManager:
                     pass
         async with self._session_factory() as session:
             db = await get_or_create_task(
-                session, platform=self._platform, thread_key=thread_key, tier=tier
+                session,
+                platform=self._platform,
+                thread_key=thread_key,
+                tier=tier,
+                surface=surface.value,
             )
             db_id, resume, persisted_model = db.id, db.sdk_session_id, db.model
         # Read the thread's active account (if any) for credential injection
