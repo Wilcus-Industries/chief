@@ -15,9 +15,7 @@ second reattach re-delivers nothing.
 recorder — the CLI stack's :class:`~chief.adapters.cli.CliTaskIO` (which owns the
 payload + ``delivered`` snapshot replay needs), the chat stacks' mirror — so the log
 never doubles a message. All of them use ``ROLE_CHIEF``: one outbound role across every
-platform, so a reader (#134) selects on one value. :meth:`MessageLog.history` is that
-reader: it renders a thread's recent window straight off the row columns, not the
-replay-only ``payload``, so payload-less mirror rows still surface (#134).
+platform, so a reader (#134) selects on one value.
 
 Roles and kinds are plain-string constants (persistence stays adapter-independent, same
 rule as ``tier`` in :mod:`chief.persistence.models`), so no enum or wire-protocol module
@@ -50,9 +48,6 @@ KIND_CARD_RESOLVED = "card_resolved"
 #: The most-recent window of undelivered frames replayed on attach (#132). A module
 #: constant, not a config knob — right-sized here; #134 can make it configurable.
 REPLAY_LIMIT = 100
-
-#: The most-recent window of a thread's messages returned as backfill on switch (#134).
-BACKFILL_LIMIT = 50
 
 
 class MessageLog:
@@ -141,36 +136,3 @@ class MessageLog:
                     if isinstance(frame, dict):
                         frames.append(frame)
                 return frames
-
-    async def history(
-        self, *, platform: str, thread_key: str, limit: int = BACKFILL_LIMIT
-    ) -> list[dict[str, object]]:
-        """Return the most-recent ``limit`` logged messages for one thread, in order.
-
-        The #134 backfill source: rendered from the row's **columns**, not its stored
-        ``payload`` — the chat stacks' mirror rows (#133) and every inbound row have no
-        payload, so a payload-based read would be empty for exactly the foreign threads
-        a switch backfills. Rows come back oldest-first (id order); file rows carry
-        their ``filename`` but never their bytes (never persisted).
-        """
-        async with self._session_factory() as session:
-            stmt = (
-                select(MessageLogEntry)
-                .where(
-                    MessageLogEntry.platform == platform,
-                    MessageLogEntry.thread_key == thread_key,
-                )
-                .order_by(MessageLogEntry.id.desc())
-                .limit(limit)
-            )
-            rows = (await session.execute(stmt)).scalars().all()
-        return [
-            {
-                "role": row.role,
-                "kind": row.kind,
-                "text": row.text,
-                "filename": row.filename,
-                "created_at": row.created_at.isoformat(),
-            }
-            for row in reversed(rows)
-        ]

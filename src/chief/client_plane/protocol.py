@@ -32,22 +32,6 @@ carries ``"replay": true``; live frames omit the field. It is additive (the fiel
 just added to the stored frame on re-emit), so it does **not** bump ``PROTOCOL_VERSION``
 — an older client that ignores the key still renders the frame correctly.
 
-Navigation frames (#134) — the active thread is client-side state, so these carry no
-per-connection subscription; the server stays broadcast-to-all and a client filters:
-
-- ``list_threads`` (client→server): ``{"type": "list_threads"}`` — asks for every
-  platform's live threads.
-- ``threads`` (server→client): ``{"type": "threads", "threads": [...]}`` — one entry
-  per non-terminal task across every platform (``platform``, ``thread_key``, ``title``,
-  ``status``).
-- ``switch`` (client→server): ``{"type": "switch", "platform": <str>,
-  "thread_key": <str>}`` — a stateless request for one thread's recent history; the
-  server validates the thread exists and answers, it does not remember the switch.
-- ``backfill`` (server→client): ``{"type": "backfill", "platform": <str>,
-  "thread_key": <str>, "messages": [...]}`` — a bounded recent window from the #132
-  log, marked distinct from live traffic by its own frame type (not a flag on an
-  existing frame). File rows in ``messages`` carry ``filename`` but never bytes.
-
 Approval frames (#136) — a card raised on **any** platform's thread is broadcast to
 every client, not just the surface that raised it:
 
@@ -66,14 +50,13 @@ Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 ``invalid_fields`` (a client frame is missing a required field or has a wrong type),
 ``unknown_command`` (a command frame named a command the registry does not carry),
 ``already_resolved`` (an ``answer`` named an approval that is unknown or already
-decided), ``unknown_thread`` (a ``switch`` named a ``(platform, thread_key)`` with no
-task row), ``internal_error`` (an inbound handler raised — the connection loop
+decided), ``internal_error`` (an inbound handler raised — the connection loop
 survives).
 """
 
 import base64
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Final
 
 #: The wire-protocol version announced in the hello frame. Bump on any incompatible
@@ -95,10 +78,6 @@ TYPE_FILE: Final[str] = "file"
 TYPE_CARD: Final[str] = "card"
 TYPE_CARD_RESOLVED: Final[str] = "card_resolved"
 TYPE_ANSWER: Final[str] = "answer"
-TYPE_LIST_THREADS: Final[str] = "list_threads"
-TYPE_THREADS: Final[str] = "threads"
-TYPE_SWITCH: Final[str] = "switch"
-TYPE_BACKFILL: Final[str] = "backfill"
 
 #: The platform tag every CLI session frame carries. The engine filters every query by
 #: ``platform``, so the CLI stack runs as its own platform alongside telegram/discord.
@@ -236,33 +215,6 @@ def card_resolved_frame(
 def answer_frame(approval_id: int, action: str) -> dict[str, object]:
     """A client→server approval decision (``action`` is a CARD_OPTIONS action token)."""
     return {"type": TYPE_ANSWER, "approval_id": approval_id, "action": action}
-
-
-def list_threads_frame() -> dict[str, object]:
-    """A client→server request for every platform's live threads (#134)."""
-    return {"type": TYPE_LIST_THREADS}
-
-
-def switch_frame(platform: str, thread_key: str) -> dict[str, object]:
-    """A client→server switch onto ``(platform, thread_key)`` — asks for backfill."""
-    return {"type": TYPE_SWITCH, "platform": platform, "thread_key": thread_key}
-
-
-def threads_frame(threads: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """A server→client thread list: one entry per non-terminal task (#134)."""
-    return {"type": TYPE_THREADS, "threads": [dict(t) for t in threads]}
-
-
-def backfill_frame(
-    platform: str, thread_key: str, messages: Sequence[Mapping[str, object]]
-) -> dict[str, object]:
-    """A server→client bounded recent-history batch for one thread (#134)."""
-    return {
-        "type": TYPE_BACKFILL,
-        "platform": platform,
-        "thread_key": thread_key,
-        "messages": [dict(m) for m in messages],
-    }
 
 
 def outbound_frame(
