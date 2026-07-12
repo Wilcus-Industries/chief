@@ -397,6 +397,85 @@ async def test_switch_flips_pane_and_renders_backfill(
         assert live_line.text == "(telegram) live reply"
 
 
+async def test_foreign_pane_blocks_user_message_input(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """After /switch onto a foreign-platform thread, typed text must not be sent as a
+    ``user`` frame — that would dispatch through the ``platform=cli`` engine under the
+    foreign ``thread_key``, spawning a spurious cli task (#138 finding).
+    """
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app._last_threads))
+
+        await pilot.press(*"/switch 1", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        await peer.push(backfill_frame("telegram", "-100:5", []))
+        await _settle(app, lambda: app._active_platform == "telegram")
+
+        n = len(peer.received)
+        await pilot.press(*"hello", "enter")
+        await _settle(
+            app, lambda: any(line.style == "red" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "read-only pane" in line.text
+            for line in app.transcript
+        )
+        assert len(peer.received) == n
+        assert not any(f.get("type") == "user" for f in peer.received)
+
+
+async def test_foreign_pane_blocks_forwarded_owner_command(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """A forwarded slash command (not one of the client-only ones) must also be
+    refused while a foreign-platform pane is active (#138 finding).
+    """
+    async with app.run_test() as pilot:
+        await pilot.press(*"/tasks", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app._last_threads))
+
+        await pilot.press(*"/switch 1", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        await peer.push(backfill_frame("telegram", "-100:5", []))
+        await _settle(app, lambda: app._active_platform == "telegram")
+
+        n = len(peer.received)
+        await pilot.press(*"/bogus", "enter")
+        await _settle(
+            app, lambda: any(line.style == "red" for line in app.transcript)
+        )
+        assert any(
+            line.style == "red" and "read-only pane" in line.text
+            for line in app.transcript
+        )
+        assert len(peer.received) == n
+        assert not any(f.get("type") == "command" for f in peer.received)
+
+
 async def test_switch_out_of_range_is_rejected(
     app: ChiefCliApp, peer: ScriptedPeer
 ) -> None:
@@ -430,8 +509,15 @@ async def test_status_renders_snapshot_and_updates_statusbar(
     app: ChiefCliApp, peer: ScriptedPeer
 ) -> None:
     async with app.run_test() as pilot:
+        # on_mount already sent one status frame; wait for it so the count below
+        # isolates the frame the /status keypress itself sends (#138 finding — a
+        # status frame is content-identical every time, so ``received[-1] ==
+        # status_frame()`` is satisfied by the mount-time frame alone).
+        await _settle(app, lambda: bool(peer.received))
+        n = len(peer.received)
+
         await pilot.press(*"/status", "enter")
-        await _settle(app, lambda: peer.received[-1].get("type") == "status")
+        await _settle(app, lambda: len(peer.received) == n + 1)
         assert peer.received[-1] == status_frame()
 
         await peer.push(

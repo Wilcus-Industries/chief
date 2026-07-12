@@ -50,6 +50,11 @@ AWAY_FOOTER = "── caught up ──"
 #: Slash commands this client handles itself, never forwarded to the daemon.
 CLIENT_COMMANDS = ("/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills")
 
+#: Shown when the owner tries to send input into a foreign-platform pane (#138
+#: finding) — that would dispatch through the ``platform=cli`` engine under the
+#: foreign thread_key, spawning a spurious cli task the owner never sees answered.
+READ_ONLY_PANE_MESSAGE = "read-only pane — /new or /switch back to a cli thread"
+
 
 def _format_backfill_line(m: dict[str, object]) -> str:
     """Render one #132 history row the way a switched-to pane replays it (#138)."""
@@ -331,6 +336,9 @@ class ChiefCliApp(App[None]):
         if text.startswith("/"):
             await self._handle_slash(text)
             return
+        if self._active_platform != CLI_PLATFORM:
+            self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
+            return
         self._write(f"> {text}", "bold")
         await self._conn.send(user_frame(self._thread_key, text))
 
@@ -372,6 +380,9 @@ class ChiefCliApp(App[None]):
             return
         if name == "skills":
             await self._conn.send(skills_frame())
+            return
+        if self._active_platform != CLI_PLATFORM:
+            self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
             return
         await self._conn.send(command_frame(self._thread_key, name, arg))
 
