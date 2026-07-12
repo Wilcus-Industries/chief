@@ -1,11 +1,46 @@
 """Schema creation and the contact + task repositories."""
 
-from sqlalchemy import Connection, inspect
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Connection, inspect, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.persistence import contacts as contact_repo
 from chief.persistence import tasks as task_repo
 from chief.persistence.contacts import get_or_create_contact
+from chief.persistence.models import MessageLogEntry
+
+
+async def test_concurrent_sessions_do_not_share_a_transaction(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two sessions open at once must isolate — production's contract (NullPool).
+
+    The #134 defect this pins: a pooled fixture that hands every concurrent session
+    the SAME dbapi connection puts them in ONE transaction, so a bystander's close()
+    (pool reset_on_return='rollback') discards another session's in-flight write.
+    That is what silently reverted ``claim_replay``'s delivered=True and re-delivered
+    an already-replayed message on the second reattach.
+    """
+    async with session_factory() as writer:
+        writer.add(
+            MessageLogEntry(
+                platform="cli",
+                thread_key="cli:main",
+                role="chief",
+                kind="reply",
+                text="hi",
+            )
+        )
+        await writer.flush()  # in-flight, NOT committed
+
+        async with session_factory() as bystander:
+            unseen = (await bystander.execute(select(MessageLogEntry))).scalars().all()
+            assert unseen == []  # a separate transaction cannot see uncommitted work
+
+        await writer.commit()
+
+    async with session_factory() as reader:
+        rows = (await reader.execute(select(MessageLogEntry))).scalars().all()
+    assert len(rows) == 1  # the bystander's close() must not have rolled it back
 
 
 async def test_full_schema_is_created(db_session: AsyncSession) -> None:

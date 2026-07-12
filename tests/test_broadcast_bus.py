@@ -136,6 +136,32 @@ async def running_manager(
 
 async def _rows(
     session_factory: async_sessionmaker[AsyncSession],
+    *,
+    expect: int | None = None,
+) -> list[MessageLogEntry]:
+    """Read the log rows; with ``expect``, wait (bounded) until that many have landed.
+
+    The mirror broadcasts a frame *before* it records the row, so a caller that syncs on
+    the socket frame is strictly ahead of the write. ``expect`` names the number of rows
+    the mirror owes it, so the read waits for the mirror's own tail rather than the
+    engine's. (Assertions of *absence* pass no ``expect`` — there is nothing to wait
+    for.)
+    """
+    if expect is None:
+        return await _read_rows(session_factory)
+
+    async def _poll() -> list[MessageLogEntry]:
+        while True:
+            rows = await _read_rows(session_factory)
+            if len(rows) >= expect:
+                return rows
+            await asyncio.sleep(0.01)
+
+    return await asyncio.wait_for(_poll(), 5)
+
+
+async def _read_rows(
+    session_factory: async_sessionmaker[AsyncSession],
 ) -> list[MessageLogEntry]:
     async with session_factory() as session:
         result = await session.execute(
@@ -190,7 +216,7 @@ async def test_second_stack_mirrors_onto_two_clients_and_logs(
 
         # Exactly two rows — one per outbound, no duplicates — and both ROLE_CHIEF, the
         # same outbound role the CLI recorder writes (one role per direction, #134).
-        rows = await _rows(session_factory)
+        rows = await _rows(session_factory, expect=2)
         assert [(r.platform, r.thread_key, r.role, r.kind) for r in rows] == [
             ("telegram", "-100:7", ROLE_CHIEF, "milestone"),
             ("telegram", "-100:7", ROLE_CHIEF, "reply"),
@@ -236,7 +262,7 @@ async def test_cli_stack_logged_once_without_frame_duplication(
 
         # One row, and it is #132's replay-shaped row: ROLE_CHIEF (the same outbound
         # role the mirror writes) with the wire frame kept as its payload.
-        (row,) = await _rows(session_factory)
+        (row,) = await _rows(session_factory, expect=1)
         assert (row.platform, row.role, row.kind, row.text) == (
             "cli",
             ROLE_CHIEF,
@@ -346,7 +372,7 @@ async def test_send_card_mirrors_platform_tagged_card_frame_and_logs(
     assert frame["thread_key"] == "-100:1"
     assert frame["approval_id"] == 1
     assert frame["text"] == "run it?"
-    (row,) = await _rows(session_factory)
+    (row,) = await _rows(session_factory, expect=1)
     assert (row.platform, row.kind, row.text) == ("telegram", KIND_CARD, "run it?")
 
 
@@ -462,7 +488,7 @@ async def test_send_file_broadcasts_and_logs_without_bytes(
     assert frame["platform"] == "discord"
     assert base64.b64decode(str(frame["data"])) == b"payload"
 
-    (row,) = await _rows(session_factory)
+    (row,) = await _rows(session_factory, expect=1)
     assert (row.platform, row.kind, row.text, row.filename) == (
         "discord",
         KIND_FILE,
