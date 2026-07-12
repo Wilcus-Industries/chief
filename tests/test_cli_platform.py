@@ -616,6 +616,49 @@ async def test_second_reattach_does_not_redeliver(
             await writer.wait_closed()
 
 
+async def test_wedged_client_replay_does_not_freeze_emit_or_attach(
+    cli_stack: Callable[..., Any],
+) -> None:
+    # The barrier must never be held across client backpressure. The connect hook's
+    # claim-replay runs INSIDE the delivery barrier; if it drained there, a client that
+    # stopped reading (a Ctrl-Z'd terminal) would park that drain with the barrier held
+    # and freeze EVERY emit, mirror and attach in the daemon until it died. A wedged
+    # client must stall only its own connection.
+    server, io = await cli_stack([])
+
+    # Held while detached, and far past what the socket can absorb without a reader:
+    # ~4 MB of base64 vs a 64 KB transport high-water mark and ~0.5 MB of kernel +
+    # client buffers. The replay write therefore CANNOT flush — a drain on it parks.
+    await io.send_file("cli:main", "big.bin", b"x" * 3_000_000)
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        # Read one byte of the replay and then stop reading: the byte proves the hook is
+        # mid-send inside the barrier (nothing else follows the hello), and stopping is
+        # what wedges the connection. No sleep, no poll — the byte IS the sync point.
+        assert await asyncio.wait_for(reader.read(1), 5)
+
+        # The daemon must stay live. Pre-fix both of these hang on the wedged client's
+        # drain: the emit blocks on the barrier, and so does the new connection's hook.
+        await asyncio.wait_for(io.send("cli:main", "live"), 5)
+
+        other_reader, other_writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(other_reader))["type"] == "hello"
+            other_writer.write(b'{"type":"ping"}\n')
+            await other_writer.drain()
+            assert await _read_frame(other_reader) == {"type": "pong"}
+        finally:
+            other_writer.close()
+            with suppress(OSError):
+                await other_writer.wait_closed()
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
 async def test_log_records_both_directions_with_role_surface_timestamps(
     cli_stack: Callable[..., Any],
     session_factory: async_sessionmaker[AsyncSession],
@@ -1231,10 +1274,12 @@ async def test_switch_backfills_foreign_thread_then_live_frames_follow(
             reply = await _read_frame(reader)
             assert reply["type"] == "reply"
 
-            # NO wait for the rows here. The mirror records each frame inside the
-            # delivery barrier, and this switch reads the log under that same barrier —
-            # so a frame the client has already seen is necessarily already committed.
-            # If this is ever short, the barrier is broken; do not paper it over.
+            # NO wait for the rows here — not because reading a frame proves its row is
+            # committed (it does not: the mirror broadcasts, THEN records, both inside
+            # the barrier), but because the reader is itself a barrier party. The switch
+            # takes the barrier to read the log, so it queues behind any mirror record
+            # still in flight. If this is ever short, the barrier is broken; do not
+            # paper it over.
             writer.write(
                 json.dumps(switch_frame("telegram", "-100:5")).encode() + b"\n"
             )
@@ -1281,9 +1326,16 @@ async def test_backfill_is_bounded_and_distinct_from_live(
         await writer.drain()
         assert (await _read_frame(reader))["text"] == "reply:hi"
 
-        # NO wait for the reply's row. CliTaskIO records it inside the delivery barrier
-        # before the client can observe the frame, so it already has a lower id than the
-        # rows appended below — the ordering the bound is asserted against.
+        # NO wait for the reply's row — take the barrier instead. Reading the frame does
+        # NOT prove its row is committed: CliTaskIO broadcasts the bytes and only then
+        # awaits record(), both inside the barrier, so the client can see the reply
+        # while the row is still in flight. The barrier orders its *parties*, and these
+        # seeding records are not one — so become one. Acquiring it here can only
+        # succeed once the emit has released it, i.e. once record() has committed, which
+        # is what puts the reply's id below the six rows the bound is asserted against.
+        async with server.delivery_lock:
+            pass
+
         for i in range(6):
             await log.record(
                 platform="cli", thread_key="cli:main", role=ROLE_CHIEF,

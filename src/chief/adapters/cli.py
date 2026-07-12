@@ -3,7 +3,8 @@
 A third engine stack alongside Telegram and Discord, but its "platform" is the always-on
 unix socket (:mod:`chief.client_plane`), not a chat network. :class:`CliTaskIO` turns
 engine output into outbound frames (milestone / reply / file), broadcast to every client
-tagged by ``thread_key`` (clients filter — forward-compatible with #134 subscriptions).
+and tagged by ``thread_key`` — the *client* filters on that tag, and #134 kept it that
+way: the server holds no per-connection subscription (see the navigation note below).
 :class:`CliAdapter` owns the inbound side: it installs itself as the socket's frame
 handler and routes ``user`` frames into ``engine.dispatch`` and ``command`` frames
 through the shared owner :class:`~chief.adapters.commands.CommandRegistry`.
