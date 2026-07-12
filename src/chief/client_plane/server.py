@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 #: Writes one frame to a single connection (the one that sent the inbound frame). A
 #: handler uses it for a direct reply — a command's answer, a validation error — while
-#: turn output fans out to every client via :meth:`SocketServer.broadcast`.
+#: turn output fans out to every client via :meth:`SocketServer.broadcast`. It **writes
+#: without draining**; the server flushes once, after the hook or handler returns. See
+#: :func:`_frame_sender`.
 FrameSender = Callable[[Mapping[str, object]], Awaitable[None]]
 
 #: An inbound-frame application: ``(frame, sender) -> handled``. Returns ``True`` when
@@ -58,6 +60,33 @@ ConnectHook = Callable[[FrameSender], Awaitable[None]]
 #: Socket file mode: owner read/write only. The socket is a local-control surface, so no
 #: group/other access — mirrors the db_path fence class (config.SELF_CONFIG_DENYLIST).
 _SOCKET_MODE = 0o600
+
+
+def _frame_sender(writer: asyncio.StreamWriter) -> FrameSender:
+    """Build one connection's :data:`FrameSender`: write the frame, never ``drain`` it.
+
+    **Draining under :attr:`SocketServer.delivery_lock` is forbidden**, and this is
+    where that is enforced. Both senders built here can run inside the barrier (the
+    connect hook's claim-replay, and the switch backfill via ``_handle_switch``), and
+    both can push megabytes: a replayed ``file`` frame is multi-MB base64, far past the
+    transport's ~64 KB high-water mark. A client that has stopped reading — a Ctrl-Z'd
+    terminal — would park such a ``drain()`` indefinitely, and parked *under the
+    barrier* that one client freezes every emit, every chat-stack mirror and every other
+    attach in the daemon until it dies. :meth:`SocketServer.broadcast` skips draining
+    for the same reason; keep the two consistent and never reintroduce a drain here.
+
+    Deferring the flush costs no ordering. Frames are queued on the stream in call
+    order, and ``drain()`` only *waits* for that queue to shrink — it can neither
+    reorder nor overtake — so replay-before-live and backfill-before-live still hold
+    once the caller drains after releasing the barrier. Backpressure is not dropped,
+    just moved: the server flushes when the hook or handler returns, which stalls only
+    that connection.
+    """
+
+    async def sender(frame: Mapping[str, object]) -> None:
+        writer.write(encode(frame))
+
+    return sender
 
 
 class SocketServer:
@@ -88,7 +117,9 @@ class SocketServer:
         #: frame goes out live). The switch backfill (#134) and the chat mirror (#133)
         #: take it too, so their log reads/writes cannot straddle a broadcast either.
         #: Lock order — always ``delivery_lock`` → ``MessageLog._lock``, never the
-        #: reverse, so the two cannot deadlock.
+        #: reverse, so the two cannot deadlock. Nothing may block on *client
+        #: backpressure* while holding it: a party that drains here hands one unread
+        #: socket the power to freeze every other party (see :func:`_frame_sender`).
         self.delivery_lock = asyncio.Lock()
         #: Live client writers, for outbound push (#131). Registered/discarded in
         #: :meth:`_handle` alongside the handler task; :meth:`broadcast` snapshots it.
@@ -142,9 +173,15 @@ class SocketServer:
         detaching, and its handler's ``readline`` hits EOF and discards it in the
         ``_handle`` finally. (A CPython ``StreamWriter.write`` to a broken transport
         does not raise synchronously — it schedules ``connection_lost`` — so the
-        ``OSError`` guard is belt-and-braces, not the reaper.) Unbounded write buffers
-        are bounded in practice by the local-trust 0600 socket and small frames; #134
-        subscriptions are the structural fix, and the async signature is kept for it.
+        ``OSError`` guard is belt-and-braces, not the reaper.) Not draining is also what
+        keeps a wedged client's backpressure out of the delivery barrier, which an emit
+        holds across this call — see :func:`_frame_sender`.
+
+        Nothing bounds a stalled client's write buffer today: #134 shipped stateless,
+        so there is no per-connection subscription to filter it down, and the buffer is
+        held in check only by the local-trust 0600 socket and small frames. A per-client
+        outbound queue with a slow-client drop is the structural fix if one is ever
+        needed; the async signature is kept for it.
         """
         wire = encode(frame)
         for writer in list(self._clients):
@@ -212,16 +249,17 @@ class SocketServer:
             # re-delivery. See :attr:`delivery_lock`.
             async with self.delivery_lock:
                 if self._connect_hook is not None:
-
-                    async def sender(reply: Mapping[str, object]) -> None:
-                        writer.write(encode(reply))
-                        await writer.drain()
-
                     try:
-                        await self._connect_hook(sender)
+                        await self._connect_hook(_frame_sender(writer))
                     except Exception:
                         logger.exception("client-plane connect hook raised")
                 self._clients.add(writer)  # register for outbound broadcast (#131)
+            # Flush the replay only now the barrier is released — draining under it
+            # would let one client that stopped reading freeze the whole daemon (see
+            # :func:`_frame_sender`). The replay bytes are already queued ahead of any
+            # live frame a broadcast can write here, and this wait cannot reorder them,
+            # so the replay-before-live contract survives the deferral.
+            await writer.drain()
             while True:
                 try:
                     line = await reader.readline()
@@ -264,12 +302,14 @@ class SocketServer:
             await writer.drain()
             return
         if self._handler is not None:
-            async def sender(reply: Mapping[str, object]) -> None:
-                writer.write(encode(reply))
-                await writer.drain()
-
             try:
-                if await self._handler(frame, sender):
+                if await self._handler(frame, _frame_sender(writer)):
+                    # Flush what the handler wrote. Deferred to here on purpose: a
+                    # ``switch`` writes its backfill inside the delivery barrier, and
+                    # draining there would freeze the daemon (see
+                    # :func:`_frame_sender`). The handler has released the barrier by
+                    # the time it returns.
+                    await writer.drain()
                     return
             except Exception:
                 logger.exception("client-plane frame handler raised")
