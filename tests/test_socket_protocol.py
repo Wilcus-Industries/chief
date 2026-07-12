@@ -19,7 +19,6 @@ from chief.client_plane import (
     TYPE_USER,
     FrameError,
     answer_frame,
-    backfill_frame,
     card_frame,
     card_resolved_frame,
     command_frame,
@@ -28,12 +27,9 @@ from chief.client_plane import (
     error_frame,
     file_frame,
     hello_frame,
-    list_threads_frame,
     milestone_frame,
     pong_frame,
     reply_frame,
-    switch_frame,
-    threads_frame,
     user_frame,
 )
 from chief.gate.approvals import ApprovalAction
@@ -210,45 +206,3 @@ def test_cli_frames_survive_encode_decode() -> None:
         answer_frame(3, "approve_once"),
     ):
         assert decode(encode(frame)) == frame
-
-
-def test_list_threads_frame_shape() -> None:
-    assert list_threads_frame() == {"type": "list_threads"}
-
-
-def test_switch_frame_shape() -> None:
-    assert switch_frame("telegram", "-100:5") == {
-        "type": "switch",
-        "platform": "telegram",
-        "thread_key": "-100:5",
-    }
-
-
-def test_threads_frame_copies_entries_so_later_mutation_is_isolated() -> None:
-    entries = [{"platform": "cli", "thread_key": "cli:main"}]
-    frame = threads_frame(entries)
-    assert frame == {"type": "threads", "threads": entries}
-
-    entries[0]["platform"] = "mutated"
-    entries.append({"platform": "telegram", "thread_key": "-100:5"})
-
-    assert frame["threads"] == [{"platform": "cli", "thread_key": "cli:main"}]
-
-
-def test_backfill_frame_shape_and_round_trip() -> None:
-    messages = [
-        {"role": "chief", "kind": "reply", "text": "hi", "filename": None},
-    ]
-    frame = backfill_frame("telegram", "-100:5", messages)
-    assert frame == {
-        "type": "backfill",
-        "platform": "telegram",
-        "thread_key": "-100:5",
-        "messages": messages,
-    }
-    assert decode(encode(frame)) == frame
-
-
-def test_protocol_version_unchanged_by_navigation_frames() -> None:
-    # #134's frames are additive — no version bump.
-    assert PROTOCOL_VERSION == 2
