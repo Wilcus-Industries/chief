@@ -5,7 +5,10 @@
 then broadcasts a platform-tagged frame onto the client-plane socket
 (:mod:`chief.client_plane`) and records the message in the ``message_log`` table through
 the shared :class:`~chief.persistence.messages.MessageLog` — the one recorder over that
-table. The mirror tail is fully contained: a broadcast or DB failure is logged, never
+table. That broadcast-and-record pair is held under the client plane's delivery barrier
+(:attr:`~chief.client_plane.SocketServer.delivery_lock`, #134), so a switch backfill
+reading this thread's history can never catch a frame mid-flight: broadcast but not yet
+logged. The mirror tail is fully contained: a broadcast or DB failure is logged, never
 raised, so phone-side delivery is never disturbed. If the inner IO itself raises,
 mirroring is skipped and the exception propagates exactly as today.
 
@@ -136,6 +139,13 @@ class MirrorTaskIO:
     ) -> None:
         """Broadcast ``frame`` (when a server is set) and record the row (#133).
 
+        The broadcast and the record are one critical section under the client plane's
+        delivery barrier (#134), for the same reason the CLI emit is: a client that
+        switches to this thread reads the log for its backfill, and that read also takes
+        the barrier — so it can never observe a frame that has been broadcast but whose
+        row is still uncommitted, which would hand it a short backfill and drop a
+        message from its history.
+
         The row is ``ROLE_CHIEF`` — the same outbound role the CLI recorder writes, so
         the read model (#134) sees one role per direction across every platform. It
         carries no ``payload``: a chat message's delivery already happened on the chat
@@ -148,18 +158,31 @@ class MirrorTaskIO:
         platform delivery that already happened before this call.
         """
         try:
-            if self._server is not None:
+            if self._server is None:
+                await self._record(frame, kind=kind, text=text, filename=filename)
+                return
+            async with self._server.delivery_lock:
                 await self._server.broadcast(frame)
-            await self._log.record(
-                platform=self._platform,
-                thread_key=str(frame["thread_key"]),
-                role=ROLE_CHIEF,
-                kind=kind,
-                text=text,
-                filename=filename,
-            )
+                await self._record(frame, kind=kind, text=text, filename=filename)
         except Exception:
             logger.exception("mirror failed for %s frame", kind)
+
+    async def _record(
+        self,
+        frame: dict[str, object],
+        *,
+        kind: str,
+        text: str,
+        filename: str | None,
+    ) -> None:
+        await self._log.record(
+            platform=self._platform,
+            thread_key=str(frame["thread_key"]),
+            role=ROLE_CHIEF,
+            kind=kind,
+            text=text,
+            filename=filename,
+        )
 
     async def create_thread(self, *, like_thread_key: str, title: str) -> str:
         """Delegate — no mirroring (thread lifecycle is not owner-visible traffic)."""

@@ -8,8 +8,16 @@ the chat stacks' broadcast-bus mirror (#133) — lands one
 mechanism. An outbound row snapshots ``delivered`` from whether a client was attached at
 emit time; :meth:`MessageLog.claim_replay` on the next attach fetches the undelivered
 rows, marks them all delivered in one transaction, and returns the most-recent window of
-decoded wire frames in id order. That single claim under a lock is what guarantees a
-second reattach re-delivers nothing.
+decoded wire frames in id order.
+
+Exactly-once delivery rests on **two** locks, not one. This module owns the inner one:
+:attr:`MessageLog._lock` makes the claim a single transaction, so two attaches racing
+each other cannot both sweep the same rows. That alone is not enough — it says nothing
+about a row that has been *broadcast* but not yet *recorded*, which a claim would simply
+not see. The outer one, the client plane's delivery barrier
+(:attr:`~chief.client_plane.SocketServer.delivery_lock`, #134), closes that window by
+serializing emit against attach. Lock order is always ``delivery_lock`` →
+``MessageLog._lock``; nothing takes them the other way round, so they cannot deadlock.
 
 **One writer per outbound message.** A stack's outbound is recorded by exactly one
 recorder — the CLI stack's :class:`~chief.adapters.cli.CliTaskIO` (which owns the

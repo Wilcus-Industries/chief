@@ -129,9 +129,12 @@ async def cli_stack(
         *,
         message_limit: int = CLI_LIMIT,
         replay_limit: int = 100,
+        log: MessageLog | None = None,
     ) -> CliStack:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
-        log = MessageLog(session_factory)
+        # One log for BOTH sides, as production wires it — a test may pass its own
+        # (e.g. _GatedLog) to drive the emit/attach interleave.
+        log = log or MessageLog(session_factory)
         io = CliTaskIO(server, log=log)
         manager = _cli_manager(
             session_factory,
@@ -438,6 +441,83 @@ async def test_detach_replay_delivers_missed_reply_then_live_traffic(
             await writer.wait_closed()
 
 
+class _GatedLog(MessageLog):
+    """A :class:`MessageLog` whose ``record`` parks until a gate opens (#134 harness).
+
+    Holds an emit *inside* its unrecorded window — broadcast already done, row not yet
+    committed — so a test can attach a client at exactly that instant. That interleave
+    is the emit/attach race itself, not a simulation of it: everything else (server,
+    adapter, claim, DB) is real.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        gate: asyncio.Event,
+    ) -> None:
+        super().__init__(session_factory)
+        self._gate = gate
+        #: Set once an emit is parked mid-record — the cue that the window is open.
+        self.entered = asyncio.Event()
+
+    async def record(self, **kwargs: Any) -> None:
+        self.entered.set()
+        await self._gate.wait()
+        await super().record(**kwargs)
+
+
+async def test_attach_racing_an_unrecorded_emit_replays_exactly_once(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # D1, the emit/attach ordering hole: an emit snapshots has_clients=False, broadcasts
+    # to nobody, then yields inside record(). A client attaching in THAT window used to
+    # claim-replay (finding nothing, because the row is not committed yet) and then join
+    # the broadcast set — so the frame reached neither this client (never broadcast to)
+    # nor a later one without being a re-delivery. The delivery barrier makes the two
+    # orders mutually exclusive: the claim cannot run until the row is committed.
+    gate = asyncio.Event()
+    log = _GatedLog(session_factory, gate=gate)
+    server, io = await cli_stack([], log=log)
+
+    emit = asyncio.create_task(io.send("cli:main", "held"))
+    await asyncio.wait_for(log.entered.wait(), 5)  # broadcast done, row NOT committed
+
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        # The connect hook's claim is now blocked on the barrier. Let the emit finish:
+        # it commits the held row, THEN releases — so the claim must see it.
+        gate.set()
+        await emit
+
+        replayed = await _read_frame(reader)
+        assert replayed["text"] == "held"
+        assert replayed["replay"] is True  # held, then replayed — not delivered live
+
+        # Exactly once: the claim marked it delivered, so nothing is queued again.
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+    # And a second attach re-delivers nothing — the durable proof it was claimed once.
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(b'{"type":"ping"}\n')
+        await writer.drain()
+        assert await _read_frame(reader) == {"type": "pong"}
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
 async def test_second_reattach_does_not_redeliver(
     cli_stack: Callable[..., Any],
     session_factory: async_sessionmaker[AsyncSession],
@@ -475,6 +555,12 @@ async def test_second_reattach_does_not_redeliver(
     writer.close()
     with suppress(OSError):
         await writer.wait_closed()
+
+    # D2 guard: the claim commits delivered=True BEFORE it sends, so having read the
+    # replay above proves the update is committed — it must also be DURABLE. A session
+    # that shared this one's transaction could roll it back, reviving the row as
+    # undelivered; that is precisely what re-delivered the reply on the next attach.
+    assert all(row.delivered for row in await _all_rows(session_factory))
 
     # Second reattach: nothing held → ping is answered directly, no replay frame first.
     reader, writer = await asyncio.open_unix_connection(server.path)
