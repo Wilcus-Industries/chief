@@ -14,6 +14,7 @@ import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual.widgets import Static
@@ -31,6 +32,7 @@ from chief.client_plane import (
     encode,
     error_frame,
     hello_frame,
+    inject_frame,
     list_threads_frame,
     milestone_frame,
     reply_frame,
@@ -435,6 +437,80 @@ async def test_foreign_pane_blocks_user_message_input(
         )
         assert len(peer.received) == n
         assert not any(f.get("type") == "user" for f in peer.received)
+
+
+async def _switch_onto_telegram(
+    app: ChiefCliApp, peer: ScriptedPeer, pilot: Any
+) -> None:
+    """Drive the client onto a foreign (telegram) pane via /tasks + /switch."""
+    await pilot.press(*"/tasks", "enter")
+    await _settle(app, lambda: peer.received[-1].get("type") == "list_threads")
+    await peer.push(
+        threads_frame(
+            [
+                {
+                    "platform": "telegram", "thread_key": "-100:5",
+                    "title": "chat", "status": "open",
+                },
+            ]
+        )
+    )
+    await _settle(app, lambda: bool(app._last_threads))
+    await pilot.press(*"/switch 1", "enter")
+    await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+    await peer.push(backfill_frame("telegram", "-100:5", []))
+    await _settle(app, lambda: app._active_platform == "telegram")
+
+
+async def test_drive_sends_an_inject_frame_for_the_foreign_pane(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """``/drive`` is the owner's only way to reach #135's cross-stack drive: it runs the
+    text as a real owner turn on the *foreign* thread the pane is switched onto, so the
+    answer lands in that platform's real chat. Without it the inject frame ships with no
+    client that can send one, and the read-only pane (#138) has no escape hatch.
+    """
+    async with app.run_test() as pilot:
+        await _switch_onto_telegram(app, peer, pilot)
+
+        await pilot.press(*"/drive buy milk", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "inject")
+
+        assert peer.received[-1] == inject_frame("telegram", "-100:5", "buy milk")
+        # The pane stays foreign and read-only — a drive is one turn, not an attach.
+        assert app._active_platform == "telegram"
+        assert app._thread_key == "-100:5"
+        # The owner sees what they sent, marked as having gone out via the CLI.
+        assert any("buy milk" in line.text for line in app.transcript)
+
+
+async def test_drive_on_a_cli_pane_is_rejected(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """On the client's own pane a drive is meaningless — that is what typing is. Sending
+    an inject for a ``cli`` thread would ask the daemon to drive its own stack.
+    """
+    async with app.run_test() as pilot:
+        n = len(peer.received)
+        await pilot.press(*"/drive hello", "enter")
+        await _settle(app, lambda: any(line.style == "red" for line in app.transcript))
+
+        assert not any(f.get("type") == "inject" for f in peer.received)
+        assert len(peer.received) == n
+
+
+async def test_drive_without_text_is_rejected(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await _switch_onto_telegram(app, peer, pilot)
+
+        n = len(peer.received)
+        await pilot.press(*"/drive", "enter")
+        await _settle(app, lambda: any(line.style == "red" for line in app.transcript))
+
+        assert not any(f.get("type") == "inject" for f in peer.received)
+        assert len(peer.received) == n
 
 
 async def test_foreign_pane_blocks_forwarded_owner_command(
