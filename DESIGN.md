@@ -6,9 +6,11 @@ screens for its boss. Runs on the GitHub Copilot SDK (#88 retired the original C
 Agent SDK / Max-subscription harness — see the host-native rework and PRD #72 below).
 
 Status: **v1 built and shipped** — every milestone (S0 → M13) is done and running
-host-native, then **reworked host-native (2026-07)**, see the next section. What follows
-is the design of record for the working system, not a forward plan; the old phased
-build order is kept at the end purely as a historical ledger.
+host-native, then **reworked host-native (2026-07)**, and since then extended by
+**PRD #128, the client plane** (a terminal client over an always-on local unix socket —
+see "Client plane" below). What follows is the design of record for the working system,
+not a forward plan; the old phased build order is kept at the end purely as a historical
+ledger.
 
 ## Host-native rework (2026-07)
 
@@ -59,9 +61,11 @@ manages its own harness (issue #103).
 - **Config self-edits are lazy and fenced.** A `self_config.yaml` overlay merges above
   the YAML settings source at boot, default-allow **except a hard denylist**
   (`blacklist_*`, `never_seed`/`approved_seed`, `screening_*`, every `*_enabled` flag,
-  owner ids, secrets/tokens, `db_path`, MCP urls, thread keys). A guard test forces every
-  new `Settings` field to be denied or explicitly tagged merge-safe. Applies at next
-  restart; no card.
+  owner ids, secrets/tokens, `db_path`, `socket_path`, `primary_platform`, MCP urls,
+  thread keys). `socket_path` and `primary_platform` are the same fence class as
+  `db_path`: repointing the control socket relocates a privileged local-control surface.
+  A guard test forces every new `Settings` field to be denied or explicitly tagged
+  merge-safe. Applies at next restart; no card.
 - **Source self-edits ship via an owner-approved restart card** (follow-on work), gated
   on the project done-check with a known-good tag and auto-revert.
 
@@ -115,14 +119,14 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Topic | Decision |
 |---|---|
 | Access model | One owner per platform; all others are guests (receptionist mode) |
-| Platforms | Adapter abstraction; **Telegram first**, Discord next |
+| Platforms | Adapter abstraction; Telegram, Discord, and **`cli`** — the client plane's terminal client, a first-class platform with no bot token (#128) |
 | Sessions | Task = thread/topic (TG forum topics; Discord threads); guests flat (DM/mention) |
 | Owner capabilities | Google MCPs, web search/fetch, file workspace, scoped shell |
 | Guest capabilities | Take a message, check availability, request a booking (only) |
 | Guest bookings | Require owner approval before landing on the calendar |
 | Email | Gmail is a **tool only** for now — not a chat channel |
 | Permission gate | One gate, tier-split (host-native): **owner default-allow** — NEVER deny · APPROVED allow · blacklist ASK · else allow; **guest default-ask** unchanged |
-| Approval routing | In task topic for owner work; **Front Desk** topic for guest-originated |
+| Approval routing | In task topic for owner work; **Front Desk** topic for guest-originated. Since #136 an owner card is *also* broadcast to every attached CLI client, and the first surface to answer wins — the loser gets `already_resolved` |
 | Approval buttons | Approve/Deny once + Always-allow/deny (self-curating allowlist) |
 | Models | Owner: Sonnet default, Opus on demand. Guests: Sonnet, never Opus |
 | Model routing (#79) | Opt-in per-category routing (#72): a task's message is auto-classified into a job category (writing/code/reasoning/research/general) on the cheap classifier — never through the table — and the category's persisted `{target_class, model}` target (`copilot` quota `auto` / `openrouter` BYOK) picks the session's model + provider. `/route <category>` overrides a thread (respawns, since a provider can't change live); config `routing_surface_defaults` pin a category per surface |
@@ -134,10 +138,10 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Guest rate limits | Per-guest cap + global guest budget (protect Max limits) |
 | Shell | Host-native (2026-07): persistent per-task shells on the owner's machine, full env; blacklist-gated (was: sandbox container) |
 | Audit | Log every tool call, approval decision, memory write |
-| Persistence | One sqlite (tasks/contacts/approvals/policy/limits) + md memory + JSONL transcripts/audit |
+| Persistence | One sqlite (tasks/contacts/approvals/policy/limits/**message_log**) + md memory + JSONL transcripts/audit |
 | Restart | Interrupted tasks: notify + ask before resuming. Approvals survive restart |
 | Transcripts | Keep, auto-prune after 90 days; memory written directly by chief persists |
-| Transport / ingress | Telegram long-polling; outbound-only, no public HTTP ingress |
+| Transport / ingress | Telegram long-polling; outbound-only, no public **network** ingress. The one listener is local: a `0600` unix-domain socket (the client plane, #128) — filesystem perms are its whole auth story |
 | MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP on `127.0.0.1:<port>`) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
 | Deploy | Local install (host-native): `install.sh` + `chief` launcher; CI keeps done-check + smoke test, no VPS deploy |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
@@ -173,7 +177,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Failures | Auto-retry transient w/ backoff, then report; keep recoverable |
 | Discord owner | Private server, channel threads = tasks (mirrors Telegram) |
 | Addressing | Persona-driven from `Soul.md`/`User.md`; "<Owner>'s assistant" to guests |
-| Notif routing | Task pings in-thread; standalone proactive → configurable primary platform |
+| Notif routing | Task pings in-thread; standalone proactive → configurable primary platform. `primary_platform` may be **`cli`** (#139): a chief with no bot token at all still runs, and a fire raised while no client is attached waits in the message log and replays on the next attach |
 | Guest waiting | "I'll get back to you" + async DM follow-up; no tentative holds |
 | Auth expiry | Detect, pause affected work, ping owner with exact re-auth step |
 | General topic | Casual chat; spawn a task topic only when work warrants it |
@@ -399,7 +403,11 @@ The triggering tool call blocks on a future; the task sits in `waiting(approval)
 concurrency slot held). Every decision is written to the audit log.
 
 **Routing — in-context + Front Desk:**
-- Owner-task approvals appear **in that task's topic**, next to the work.
+- Owner-task approvals appear **in that task's topic**, next to the work — *and*, since
+  #136, on every attached CLI client, wherever the card was raised. The **first surface to
+  answer wins**; a second answer gets `already_resolved`. So an approval raised by a
+  Telegram task can be cleared from the terminal, and the Telegram card is edited to show
+  the outcome.
 - **Guest-originated** approvals (e.g. a booking request) land in a dedicated **Front Desk**
   topic in the owner's group — guests have no owner topic, and it keeps all
   acting-on-behalf-of-strangers triage in one place.
@@ -490,8 +498,13 @@ full encrypted volume).
   (Email?) ─┘        ▲               │        │                      ├─ Google Drive
                      │               │   Command policy              ├─ Gmail
               approve/deny ◀─────────┘   + approval flow             └─ Google Calendar
-                                         │
-                                  Session store (sqlite)  + File workspace
+                     │                   │
+                     │            Session store (sqlite)  + File workspace
+                     │                   │
+  chief-cli ═══▶ unix socket (0600) ═════╡  client plane (#128)
+  (terminal)     JSONL frames            │  · every stack's outbound mirrored here
+                     ▲                   │  · message log = detach-replay + backfill
+                     └───────────────────┘  · /drive: run a turn on a foreign thread
 ```
 
 - **Chat adapters** — one per platform behind a shared interface. Normalize inbound DMs,
@@ -500,6 +513,9 @@ full encrypted volume).
   persona), MCP connections, sessions, and the command-policy gate.
 - **Session store** — conversation continuity + persisted auth tokens.
 - **MCP servers** — Google Workspace tools (owner-scoped).
+- **Client plane** — an always-on local socket the owner attaches a terminal client to.
+  It is both a *fourth adapter* (`cli` tasks run on the same engine) and a *mirror* of
+  every other stack's outbound traffic. See its own section below.
 
 ## Data model & persistence (draft)
 
@@ -509,7 +525,15 @@ memory; **JSONL** for transcripts (SDK) and the audit log. Secrets never in the 
 **sqlite tables (proposed):**
 
 - `tasks` — id, platform, `thread_key`, tier (owner/guest), subject_id, `status`
-  (running/waiting/open/done/failed/cancelled), model, title, `sdk_session_id`, timestamps.
+  (running/waiting/open/done/failed/cancelled), model, title, `sdk_session_id`,
+  `surface`, timestamps. `surface` (home/dm/group, #135) is the thread's real surface,
+  written by the first dispatch that knows it and never rewritten after — a cross-stack
+  drive onto a rebuilt GROUP task must not be mistaken for a DM, or its approval cards
+  leak into a shared room. `NULL` means **unproven, not "assume DM"**; every reader
+  fails closed on it, and #151 backfills it on the next real turn.
+- `message_log` — every outbound frame on the `cli` platform, with `delivered` snapshotted
+  at emit time. Doubles as the detach-replay buffer and the thread-switch backfill window;
+  see "Client plane".
 - `contacts` — platform, user_id, display_name, **admitted** (notify-on-first-contact
   state), namespace, first_seen. Drives admission + memory namespacing.
 - `approvals` — id, task_id, kind (shell/booking/email/…), payload preview, state
@@ -532,6 +556,72 @@ on boot).
 **Transcript retention:** keep transcripts, **auto-prune after 90 days**. Distilled memory
 (markdown) persists regardless, so old facts survive even after their source transcript is
 gone.
+
+## Client plane (PRD #128 — the terminal client)
+
+chief is always on, but until #128 you could only reach it from a chat app. The client
+plane adds a **local control surface**: an always-on unix-domain socket the owner attaches
+a terminal client to (`chief-cli`), from which chief is fully drivable — including when
+there is no bot token at all.
+
+**Transport.** A `0600` unix socket at `socket_path` (default `data/chief.sock`).
+Filesystem permissions *are* the auth model: anyone who can open the socket is the owner,
+which is exactly true on a single-user machine and is why the path is denylisted from
+self-config (below). No network listener, so the "no public ingress" rule is intact.
+The wire is **LF-delimited JSON**, one object per line, versioned by a `hello` frame
+(`PROTOCOL_VERSION`); an unknown frame type is an error, never a silent drop.
+
+**`cli` is a real platform, not a viewer.** A CLI thread is a task like any other — same
+engine, same gate, same owner tier. Two consequences fall out:
+
+- **Every stack's outbound is mirrored onto the socket** (#133). A Telegram reply is both
+  sent to Telegram and broadcast to attached clients, so the terminal shows the whole
+  agent, not just its own conversation.
+- **`primary_platform` may be `cli`** (#139) — a **tokenless** chief. It boots, schedules,
+  and answers with no Telegram or Discord credentials anywhere.
+
+**The message log is the outbox.** There is no separate held-message store: one
+`message_log` table records every outbound frame, with `delivered` snapshotted from
+whether a client was attached at emit time. It serves two readers:
+
+- **Detach-replay** (#132) — on attach, the client claims every undelivered frame in one
+  transaction and gets it back marked `replay: true`; the TUI bands the run so missed
+  history is distinguishable from live traffic at a glance. Detaching mid-task is
+  therefore safe: the work continues, and the output waits.
+- **Backfill** (#137) — switching the pane onto another thread serves a bounded window of
+  its history, so a thread you have never attached to still opens with context.
+
+**The delivery barrier** (#134) is the plane's one hard invariant. Emit-and-log and
+attach-and-claim are serialized under `SocketServer.delivery_lock` (lock order:
+`delivery_lock` → `MessageLog._lock`), so a frame cannot be broadcast-but-unlogged at the
+instant a client attaches — which would deliver it twice, or never. The barrier is
+*write-only*: **nothing may `drain()` while holding it**, because one non-reading client
+would then freeze every emit, mirror, and attach daemon-wide. Writes happen under the
+lock; flushes happen after it releases.
+
+**Approvals are multi-surface** (#136). A card raised on *any* platform is broadcast to
+*every* attached client, and the **first surface to answer wins** — the loser gets
+`already_resolved`, and the winning decision flows back through the raising stack's own
+`ApprovalIO` to edit its card. The socket has no in-place edit, so the terminal learns the
+outcome as a `card_resolved` frame rather than a mutation.
+
+**Cross-stack drive** (#135, `/drive`). The owner can switch the pane onto a *foreign*
+thread (`/tasks`, `/switch <n>`) and run a real turn on it: the daemon echoes the text into
+that platform's real chat marked via-CLI, dispatches on that platform's engine, and the
+answer arrives where the conversation lives — on the phone. This is the sharpest edge in
+the plane, because a turn injected onto the *wrong* surface leaks that task's approval
+cards into a shared room. So it **fails closed** on `Task.surface`: an unproven (`NULL`)
+surface is refused with `unknown_surface`, never guessed. The foreign pane is otherwise
+**read-only** (#138) — typing into it would dispatch a `cli`-platform turn under a foreign
+thread key and spawn a phantom task — so `/drive` is the single sanctioned way to act on
+another platform's thread.
+
+**The client** (`chief-cli`, #137/#138) is a Textual TUI and a thin one: it renders frames
+and sends frames, holding no state the daemon cannot rebuild. Quitting it leaves the daemon
+running. It owns a handful of commands itself — `/help`, `/new`, `/quit`, `/tasks`,
+`/switch`, `/status`, `/skills`, `/drive` — and forwards every other slash command to the
+same platform-neutral `OWNER_COMMANDS` registry (#129) that Telegram and Discord bind, so a
+command works identically on all three.
 
 ## Config & secrets (draft)
 
@@ -676,7 +766,8 @@ owner approves via review/merge, never self-deployed" rule — see Self-manageme
 
 ## Channels, media & onboarding (draft)
 
-**Surfaces** (one bot token per platform, sender classified per message):
+**Surfaces** (one bot token per chat platform, sender classified per message; the `cli`
+surface is **tokenless** — authenticated by the `0600` socket, always the owner):
 
 - **Owner** — private supergroup (topics = tasks); also recognized as owner anywhere.
 - **Guest** — 1:1 DM **and** `@mention` in shared group chats. Tier is decided by the
@@ -786,6 +877,15 @@ chief/
       base.py                # Adapter iface, Message type + tier classification, TaskIO
       telegram.py            # long-poll; supergroup topics + DM + group-mention; TaskIO impl
       discord.py             # gateway; channel threads = tasks; TaskIO + ApprovalIO impl
+      cli.py                 # the client plane's adapter: CliTaskIO + CliAdapter (inject/switch)
+      commands.py            # OWNER_COMMANDS — one registry, bound by all three platforms
+    client_plane/            # the local control surface (#128)
+      protocol.py            # the wire contract: JSONL frames, versions, error codes
+      server.py              # SocketServer: 0600 unix socket, broadcast, delivery barrier
+    cli/                     # the terminal client (`chief-cli`) — a thin frame renderer
+      main.py                # entrypoint (--socket override)
+      connection.py          # SocketConnection: connect, send, pump
+      app.py                 # ChiefCliApp: the Textual TUI, panes, /drive, replay bands
     core/
       session.py             # session Protocol + TaskSession (NO_REPLY sentinel)
       copilot_session.py     # persistent Copilot SDK session per task (resume/stream)
@@ -811,13 +911,15 @@ chief/
     skills/                  # registry + setup_morning_brief/
     usage/budget.py          # own-share accounting + citizenship backoff
     persistence/             # sqlite (tasks/contacts/approvals/policy/limits/schedules)
+      messages.py            # MessageLog: record / claim_replay / history (the cli outbox)
     obs/                     # logging / audit / uptime heartbeat
   tests/
 ```
 
 ## Message lifecycle (one message, end to end)
 
-1. **Adapter** receives an update (long-poll). Classify **sender → tier**; resolve
+1. **Adapter** receives an update — a long-poll on the chat platforms, or an inbound frame
+   on the client plane's socket read loop (`cli`). Classify **sender → tier**; resolve
    `thread_key → task` (or General/casual). Apply block/mute, admission (notify-on-first-
    contact), and rate limits.
 2. **Core** gets/creates the task's SDK session, built with the **tier-scoped toolset** and
@@ -827,8 +929,10 @@ chief/
    allowed calls execute (MCP / host shell / workspace), and **tool results are untrusted
    data** (screened for injection when they arrive from the web/browser).
    Milestones post on tool events; **usage is metered per call** against the budget.
-4. **Reply** streams back, smart-split / as files. All surfaces stay silent until the
-   reply streams back.
+4. **Reply** streams back, smart-split / as files — and is **mirrored onto the client
+   plane** (#133), so an attached terminal sees the reply whichever platform it was for.
+   If no client is attached it is logged undelivered and replays on the next attach. All
+   surfaces stay silent until the reply streams back.
 5. **Memory writes** happen in-session whenever chief judges something worth keeping (auto-
    notify on save). **Idle ~1 hr →** mark done + **auto-archive** the thread (reopens on
    next message).
@@ -889,7 +993,9 @@ See reworked "Usage budgeting" — and the guest-billing fork it raises.
 
 ## Build ledger (historical — every milestone below is DONE)
 
-**All of S0 → M13 shipped and run in production host-native.** This section is not a
+**All of S0 → M13 shipped and run in production host-native**, and **PRD #128 (the client
+plane) shipped after them** — see its entry at the end of this ledger, and the "Client
+plane" section above for the design of record. This section is not a
 forward plan; it is the record of what each milestone delivered, kept for provenance.
 Milestones later reworked by the host-native pass (2026-07) or otherwise superseded are
 marked inline — read those as "was built this way, now works differently," not as pending
@@ -1133,3 +1239,47 @@ the code was disposable and is now superseded by M0/M1 (the real `src/chief/` pa
   | secret `VPS_USER` | SSH user (must have Docker access) |
   | secret `VPS_SSH_KEY` | Private key (OpenSSH) — public half in `~/.ssh/authorized_keys` on the VPS |
   | variable `DEPLOY_DIR` | Absolute path of the clone on the VPS; **doubles as the activation switch** — the job is skipped while it's unset (the `secrets` context isn't available in a job-level `if:`, so the guard checks `DEPLOY_DIR` instead) |
+
+## PRD #128 — client plane (post-M13, 2026-07)
+
+The last thing chief was missing: a way to reach it that isn't a chat app. Shipped as
+slices #129–#140 on top of M13. The design of record is the **"Client plane"** section
+above; this is the provenance.
+
+- **#129 command registry** — one platform-neutral `OWNER_COMMANDS`, bound by Telegram,
+  Discord and the CLI, so a command behaves identically on all three.
+- **#130 socket + protocol** — the `0600` unix socket and the versioned JSONL wire
+  contract (`client_plane/`).
+- **#131 `cli` as a platform** — `CliAdapter` + `CliTaskIO`; a CLI thread is a real task on
+  the same engine, same gate, owner tier.
+- **#132 message log + detach-replay** — the log *is* the outbox; undelivered frames are
+  claimed on attach and returned marked `replay`.
+- **#133 outbound mirror** — every stack's replies are broadcast onto the socket, so the
+  terminal sees the whole agent.
+- **#134 the delivery barrier** — emit-and-log serialized against attach-and-claim
+  (`delivery_lock`), the plane's exactly-once invariant. **Never `drain()` under the lock**;
+  one non-reading client would otherwise freeze the daemon.
+- **#135 cross-stack drive** — the `inject` frame: run an owner turn on a *foreign*
+  platform's thread. Fails closed on an unproven `Task.surface` rather than risk leaking a
+  task's approval cards into a group room.
+- **#136 multi-surface approvals** — a card is broadcast everywhere; first answer wins.
+- **#137 the terminal client** — `chief-cli`, a Textual TUI; thread backfill on switch.
+- **#138 TUI polish** — thread switcher, `/status`, `/skills`, and a **read-only**
+  foreign-platform pane (typing into one would spawn a phantom `cli` task).
+- **#139 tokenless boot** — `primary_platform: cli`; chief runs with no bot token at all.
+- **#140 the e2e gate** — the whole mechanism verified live, no fakes: a real Copilot turn
+  through the real socket (committed as `tests/test_cli_live.py`, gated
+  `CHIEF_COPILOT_LIVE=1`), a live approval answered from the terminal, a detach/reattach
+  replay, and a real cross-stack drive onto Telegram observed on the phone.
+
+Two defects the gate itself surfaced, both fixed as part of it:
+
+- **#151** — `Task.surface` was written only at row creation, so every pre-migration row
+  (and every row opened by `/route`, `/branch`, Opus escalation, or the account service)
+  stayed `NULL` forever and answered `unknown_surface` to every drive. Cross-stack drive
+  shipped **dead on any live DB**. Now backfilled on the first dispatch that knows the real
+  surface; a *proven* surface is still never rewritten.
+- **`/drive`** — #135 shipped the `inject` frame, the daemon handler, and full protocol
+  tests, but **no client could send one**: `inject_frame` was constructed only in tests, and
+  #138's read-only pane closed the one affordance that might have reached it. The feature
+  was unreachable from the shipped product until `/drive` (#140) gave it a client path.
