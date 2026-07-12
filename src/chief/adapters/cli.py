@@ -37,6 +37,7 @@ import asyncio
 import itertools
 import json
 import logging
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,6 +45,7 @@ from ..client_plane import (
     CLI_PLATFORM,
     TYPE_ANSWER,
     TYPE_COMMAND,
+    TYPE_INJECT,
     TYPE_LIST_THREADS,
     TYPE_REPLY,
     TYPE_SWITCH,
@@ -78,6 +80,7 @@ from .base import (
     Surface,
 )
 from .commands import OWNER_COMMANDS, CommandContext, CommandRegistry
+from .mirror import PlatformIO
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,26 @@ CLI_LIMIT = 1_000_000
 #: ``decided_by`` for a socket answer. The 0600 socket is the auth (#128 local trust),
 #: so every client answer is the owner — one identity, no per-client id.
 DECIDED_BY_CLI = "cli"
+
+#: Marks an injected turn's echo on a foreign platform as owner-authored via the CLI
+#: (#135) — distinguishes it in the chat from a native message or a chief reply.
+INJECT_ECHO_PREFIX = "📤 via CLI: "
+
+
+@dataclass(frozen=True)
+class ForeignPlatform:
+    """One cross-stack drive target (#135): a foreign platform's real ``Engine`` to
+    dispatch the injected turn through, plus its RAW (unmirrored) IO to echo the
+    owner's text into the chat first. ``io`` is deliberately raw, not the #133
+    mirror: the echo is owner-authored, not a chief reply — mirroring it would log
+    it ``ROLE_CHIEF`` and mislabel the history (the same reason budget cards stay
+    unmirrored). The resulting reply is NOT sent through here — ``engine.dispatch``
+    runs the turn on the platform's own (mirrored) stack, so it flows out to the
+    platform AND the socket exactly like a native turn.
+    """
+
+    engine: Engine
+    io: PlatformIO
 
 
 class CliTaskIO:
@@ -224,6 +247,7 @@ class CliAdapter(Adapter):
         approvals: ApprovalResolver | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         backfill_limit: int = BACKFILL_LIMIT,
+        foreign: dict[str, ForeignPlatform] | None = None,
     ) -> None:
         self._server = server
         self._engine = engine
@@ -241,6 +265,15 @@ class CliAdapter(Adapter):
         #: same escape hatch as ``log=None`` / ``approvals=None``.
         self._session_factory = session_factory
         self._backfill_limit = backfill_limit
+        #: Foreign-platform drive targets (#135), keyed by platform name — never
+        #: contains "cli" (that's just a ``user`` frame). ``None``/empty ⇒ every
+        #: ``inject`` falls through to ``unknown_platform``, the same escape-hatch
+        #: pattern as ``log=None`` / ``session_factory=None`` elsewhere. Stores the
+        #: CALLER'S dict object (not a copy) — `build_stacks` builds it once, before
+        #: this constructor runs, so production never mutates it after; do not
+        #: "simplify" this to `foreign or {}`, which would silently swap out an
+        #: intentionally-empty-then-later-populated caller dict.
+        self._foreign: dict[str, ForeignPlatform] = {} if foreign is None else foreign
         self._stopped = asyncio.Event()
         server.set_handler(self._on_frame)
         server.set_connect_hook(self._on_connect)
@@ -301,6 +334,8 @@ class CliAdapter(Adapter):
             return await self._handle_list_threads(sender)
         if ftype == TYPE_SWITCH:
             return await self._handle_switch(frame, sender)
+        if ftype == TYPE_INJECT:
+            return await self._handle_inject(frame, sender)
         return False
 
     async def _handle_user(self, frame: object, sender: FrameSender) -> bool:
@@ -481,6 +516,72 @@ class CliAdapter(Adapter):
                 platform=platform, thread_key=thread_key, limit=self._backfill_limit
             )
             await sender(backfill_frame(platform, thread_key, messages))
+        return True
+
+    async def _handle_inject(self, frame: object, sender: FrameSender) -> bool:
+        """Cross-stack drive (#135): run an injected owner turn on a foreign platform.
+
+        Validates the thread exists first (the same ``get_task`` lookup and
+        ``unknown_thread`` error ``_handle_switch`` uses — a nonexistent thread never
+        echoes and never dispatches). Then: log the turn ``ROLE_OWNER`` (so a later
+        switch/backfill of this thread shows it), echo it onto the foreign
+        platform's RAW io marked via-CLI, and dispatch it on that platform's own
+        ``Engine`` — the exact ``TaskManager.dispatch`` a native turn uses, so
+        steering, cancel, and budget gating are the platform's native ones, not a
+        parallel path. The reply then flows out through that stack's normal
+        (mirrored) ``TaskIO``: platform first, socket second — unchanged by this
+        method. An empty/unset ``foreign`` map does NOT short-circuit here (unlike
+        ``session_factory is None``): every platform name then simply misses the
+        lookup below and answers ``unknown_platform``, per the wire contract — only
+        a wholly unwired ``session_factory`` (this build never turns on cross-stack
+        drive at all) falls through to ``unknown_type``.
+        """
+        if self._session_factory is None:
+            return False
+        platform, thread_key, text = (
+            _get(frame, "platform"), _get(frame, "thread_key"), _get(frame, "text")
+        )
+        if (
+            not _nonempty_str(platform)
+            or not _nonempty_str(thread_key)
+            or not _nonempty_str(text)
+        ):
+            await sender(
+                error_frame(
+                    "invalid_fields",
+                    "inject frame needs platform, thread_key, and text",
+                )
+            )
+            return True
+        assert isinstance(platform, str)
+        assert isinstance(thread_key, str)
+        assert isinstance(text, str)
+        target = self._foreign.get(platform)
+        if target is None:
+            await sender(
+                error_frame(
+                    "unknown_platform", f"no foreign stack for platform {platform!r}"
+                )
+            )
+            return True
+        async with self._session_factory() as session:
+            task = await get_task(session, platform=platform, thread_key=thread_key)
+        if task is None:
+            await sender(
+                error_frame(
+                    "unknown_thread", f"no thread {thread_key!r} on {platform!r}"
+                )
+            )
+            return True
+        if self._log is not None:
+            await self._log.record(
+                platform=platform, thread_key=thread_key, role=ROLE_OWNER,
+                surface=Surface.DM.value, kind=TYPE_INJECT, text=text, delivered=True,
+            )
+        await target.io.send(thread_key, INJECT_ECHO_PREFIX + text)
+        await target.engine.dispatch(
+            thread_key=thread_key, text=text, surface=Surface.DM
+        )
         return True
 
 

@@ -26,12 +26,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief import app
 from chief.adapters.base import Attachment, Surface
-from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
+from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO, ForeignPlatform
 from chief.adapters.mirror import MirrorTaskIO
 from chief.client_plane import (
     SocketServer,
     answer_frame,
     command_frame,
+    inject_frame,
     list_threads_frame,
     switch_frame,
     user_frame,
@@ -168,6 +169,7 @@ async def cli_stack(
         replay_limit: int = 100,
         backfill_limit: int = 50,
         log: MessageLog | None = None,
+        foreign: dict[str, ForeignPlatform] | None = None,
     ) -> CliStack:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
         # One log for BOTH sides, as production wires it — a test may pass its own
@@ -183,6 +185,7 @@ async def cli_stack(
         CliAdapter(
             server=server, engine=manager, log=log, replay_limit=replay_limit,
             session_factory=session_factory, backfill_limit=backfill_limit,
+            foreign=foreign,
         )
         built.append((server, task, manager))
         return CliStack(server, io)
@@ -1384,3 +1387,185 @@ async def test_switch_missing_fields_gets_invalid_fields(
         writer.close()
         with suppress(OSError):
             await writer.wait_closed()
+
+
+# Cross-stack drive (#135): _handle_inject calls the exact same TaskManager.dispatch
+# that every native turn uses (see _mirror_manager) — so the central mechanism is a
+# real Engine.dispatch, not a wrapper, and steering/cancel/budget gating (AC #3) are
+# inherited structurally from the existing dispatch test matrix (test_tasks.py)
+# rather than re-tested here.
+
+
+async def test_inject_dispatches_owner_turn_on_foreign_platform_with_echo(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([FakeSession(model="m")], foreign=foreign)
+    inner = _RecordingInner()
+    tg_manager, _inner = _mirror_manager(
+        session_factory,
+        server,
+        inner,
+        factory=_seq_factory([FakeSession(model="m"), FakeSession(model="m")]),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            # Seed the thread with one native turn so the task row exists.
+            await tg_manager.dispatch(
+                thread_key="-100:5", text="hi", surface=Surface.DM
+            )
+            seeded = await _read_frame(reader)  # the mirrored native reply
+            assert seeded["platform"] == "telegram"
+            await wait_for_task_open(
+                session_factory, platform="telegram", thread_key="-100:5"
+            )
+
+            # Only now wire the foreign target — relies on the __init__ is-None
+            # check (not `foreign or {}`) so the CliAdapter's dict reference stays
+            # live even though it was empty at construction time.
+            foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+
+            writer.write(
+                json.dumps(inject_frame("telegram", "-100:5", "inject me")).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            reply = await _read_frame(reader)
+            assert reply == {
+                "type": "reply",
+                "platform": "telegram",
+                "thread_key": "-100:5",
+                "text": "reply:inject me",
+            }
+            # inner.sends[-1] is the reply's own delivery through the mirror (the
+            # normal outbound path); [-2] is the echo this handler wrote directly.
+            assert inner.sends[-2] == ("-100:5", "📤 via CLI: inject me")
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_inject_to_unknown_thread_errors_with_no_dispatch(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([], foreign=foreign)
+    inner = _RecordingInner()
+    tg_manager, _inner = _mirror_manager(
+        session_factory, server, inner, factory=_seq_factory([])
+    )
+    foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+            writer.write(
+                json.dumps(inject_frame("telegram", "nope", "hi")).encode() + b"\n"
+            )
+            await writer.drain()
+            error = await _read_frame(reader)
+            assert error["type"] == "error" and error["code"] == "unknown_thread"
+            assert inner.sends == []
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()
+
+
+async def test_inject_unknown_platform_errors(cli_stack: Callable[..., Any]) -> None:
+    server, _io = await cli_stack([], foreign={})
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(
+            json.dumps(inject_frame("telegram", "anything", "hi")).encode() + b"\n"
+        )
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "unknown_platform"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_inject_missing_fields_gets_invalid_fields(
+    cli_stack: Callable[..., Any],
+) -> None:
+    foreign: dict[str, ForeignPlatform] = {"telegram": cast(Any, object())}
+    server, _io = await cli_stack([], foreign=foreign)
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(b'{"type":"inject","platform":"telegram"}\n')
+        await writer.drain()
+        error = await _read_frame(reader)
+        assert error["type"] == "error" and error["code"] == "invalid_fields"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_inject_records_owner_row_for_backfill(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    foreign: dict[str, ForeignPlatform] = {}
+    server, _io = await cli_stack([], foreign=foreign)
+    inner = _RecordingInner()
+    tg_manager, _inner = _mirror_manager(
+        session_factory,
+        server,
+        inner,
+        factory=_seq_factory([FakeSession(model="m"), FakeSession(model="m")]),
+    )
+    try:
+        reader, writer = await asyncio.open_unix_connection(server.path)
+        try:
+            assert (await _read_frame(reader))["type"] == "hello"
+
+            await tg_manager.dispatch(
+                thread_key="-100:5", text="hi", surface=Surface.DM
+            )
+            seeded = await _read_frame(reader)
+            assert seeded["platform"] == "telegram"
+            await wait_for_task_open(
+                session_factory, platform="telegram", thread_key="-100:5"
+            )
+            foreign["telegram"] = ForeignPlatform(engine=tg_manager, io=inner)
+
+            writer.write(
+                json.dumps(inject_frame("telegram", "-100:5", "inject me")).encode()
+                + b"\n"
+            )
+            await writer.drain()
+            reply = await _read_frame(reader)
+            assert reply["text"] == "reply:inject me"
+
+            writer.write(
+                json.dumps(switch_frame("telegram", "-100:5")).encode() + b"\n"
+            )
+            await writer.drain()
+            backfill = await _read_frame(reader)
+            assert backfill["type"] == "backfill"
+            rows = {
+                m["text"]: m for m in backfill["messages"]  # type: ignore[attr-defined]
+            }
+            assert rows["inject me"]["role"] == "owner"
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+    finally:
+        await tg_manager.shutdown()

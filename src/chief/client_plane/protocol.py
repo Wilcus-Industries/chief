@@ -48,6 +48,17 @@ per-connection subscription; the server stays broadcast-to-all and a client filt
   log, marked distinct from live traffic by its own frame type (not a flag on an
   existing frame). File rows in ``messages`` carry ``filename`` but never bytes.
 
+Cross-stack drive frames (#135) — an owner turn injected onto a FOREIGN platform's
+existing thread, never this connection's own:
+
+- ``inject`` (client→server): ``{"type": "inject", "platform": <str>,
+  "thread_key": <str>, "text": <str>}`` — run ``text`` as a real owner turn on
+  ``(platform, thread_key)``. The server validates the thread exists (same as
+  ``switch``), echoes ``text`` onto that platform's real chat (marked via-CLI) so the
+  phone-side history stays complete, then dispatches the turn on that platform's own
+  engine — the reply flows out through that platform's normal (mirrored) ``TaskIO``
+  exactly like a native turn.
+
 Approval frames (#136) — a card raised on **any** platform's thread is broadcast to
 every client, not just the surface that raised it:
 
@@ -66,9 +77,10 @@ Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 ``invalid_fields`` (a client frame is missing a required field or has a wrong type),
 ``unknown_command`` (a command frame named a command the registry does not carry),
 ``already_resolved`` (an ``answer`` named an approval that is unknown or already
-decided), ``unknown_thread`` (a ``switch`` named a ``(platform, thread_key)`` with no
-task row), ``internal_error`` (an inbound handler raised — the connection loop
-survives).
+decided), ``unknown_thread`` (a ``switch``/``inject`` named a ``(platform,
+thread_key)`` with no task row), ``unknown_platform`` (an ``inject`` named a platform
+with no wired foreign stack, #135), ``internal_error`` (an inbound handler raised —
+the connection loop survives).
 """
 
 import base64
@@ -99,6 +111,7 @@ TYPE_LIST_THREADS: Final[str] = "list_threads"
 TYPE_THREADS: Final[str] = "threads"
 TYPE_SWITCH: Final[str] = "switch"
 TYPE_BACKFILL: Final[str] = "backfill"
+TYPE_INJECT: Final[str] = "inject"
 
 #: The platform tag every CLI session frame carries. The engine filters every query by
 #: ``platform``, so the CLI stack runs as its own platform alongside telegram/discord.
@@ -262,6 +275,22 @@ def backfill_frame(
         "platform": platform,
         "thread_key": thread_key,
         "messages": [dict(m) for m in messages],
+    }
+
+
+def inject_frame(platform: str, thread_key: str, text: str) -> dict[str, object]:
+    """A client→server cross-stack drive request (#135): run ``text`` as a real
+    owner turn on ``(platform, thread_key)`` — a FOREIGN platform's existing thread,
+    never this connection's own. The server echoes ``text`` onto that platform's
+    real chat (marked via-CLI) before dispatching, so the phone-side history stays
+    complete; the reply then flows out through that platform's normal (mirrored)
+    ``TaskIO`` exactly like a native turn.
+    """
+    return {
+        "type": TYPE_INJECT,
+        "platform": platform,
+        "thread_key": thread_key,
+        "text": text,
     }
 
 

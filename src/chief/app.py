@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from telegram.ext import Application
 
 from .adapters.base import Adapter, ReadyHook
-from .adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO
+from .adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO, ForeignPlatform
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
 from .adapters.mirror import MirrorTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
@@ -626,6 +626,7 @@ def build_telegram_stack(
     harness_versioner: Versioner | None = None,
     socket_server: SocketServer | None = None,
     registry: ApprovalRegistry | None = None,
+    foreign_out: dict[str, ForeignPlatform] | None = None,
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
@@ -640,6 +641,10 @@ def build_telegram_stack(
     ``TelegramTaskIO`` (budget traffic stays unmirrored). ``registry`` defaults to a
     fresh :class:`ApprovalRegistry` when unset — pass the shared one from
     :func:`build_stacks` so a socket answer can resolve a card raised on any platform.
+
+    #135: ``foreign_out``, when given, is populated with this stack's
+    :class:`ForeignPlatform` (the real engine + the RAW ``TelegramTaskIO``) so the CLI
+    stack's cross-stack drive can target this platform.
     """
     assert settings.telegram_bot_token is not None
     assert settings.owner_telegram_id is not None
@@ -690,6 +695,8 @@ def build_telegram_stack(
         group_chat_enabled=settings.group_chat_enabled,
         owner_home_chat_id=settings.owner_home_chat_id,
     )
+    if foreign_out is not None:
+        foreign_out["telegram"] = ForeignPlatform(engine=manager, io=io)
     return manager, adapter, approvals
 
 
@@ -704,6 +711,7 @@ def build_discord_stack(
     harness_versioner: Versioner | None = None,
     socket_server: SocketServer | None = None,
     registry: ApprovalRegistry | None = None,
+    foreign_out: dict[str, ForeignPlatform] | None = None,
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
@@ -714,6 +722,10 @@ def build_discord_stack(
     :class:`MirrorTaskIO`. #136: the approval manager uses that same mirror (so cards
     fan out to the socket too); the budget keeps the raw ``DiscordTaskIO``. ``registry``
     defaults to a fresh :class:`ApprovalRegistry` when unset.
+
+    #135: ``foreign_out``, when given, is populated with this stack's
+    :class:`ForeignPlatform` (the real engine + the RAW ``DiscordTaskIO``) for the CLI
+    stack's cross-stack drive.
     """
     assert settings.discord_bot_token is not None
     assert settings.owner_discord_id is not None
@@ -767,6 +779,8 @@ def build_discord_stack(
         group_chat_enabled=settings.group_chat_enabled,
         owner_home_guild_id=settings.owner_home_guild_id,
     )
+    if foreign_out is not None:
+        foreign_out["discord"] = ForeignPlatform(engine=manager, io=io)
     return manager, adapter, approvals
 
 
@@ -781,6 +795,7 @@ def build_cli_stack(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
     registry: ApprovalRegistry | None = None,
+    foreign: dict[str, ForeignPlatform] | None = None,
 ) -> Stack:
     """Build the CLI engine stack bound to the always-on client-plane socket (#131).
 
@@ -806,6 +821,10 @@ def build_cli_stack(
 
     #134: the adapter reads the tasks table directly (``session_factory``) for the
     cross-platform thread list and the shared log for switch backfill.
+
+    #135: ``foreign``, when given, is the fully-populated platform→\
+    :class:`ForeignPlatform` map :func:`build_stacks` built before this call, so an
+    ``inject`` frame can drive a foreign platform's own engine.
     """
     registry = registry or ApprovalRegistry()
     message_log = MessageLog(session_factory)
@@ -838,6 +857,7 @@ def build_cli_stack(
         log=message_log,
         approvals=registry,
         session_factory=session_factory,
+        foreign=foreign,
     )
     return manager, adapter, approvals
 
@@ -863,8 +883,14 @@ def build_stacks(
     #136: one :class:`~chief.gate.approvals.ApprovalRegistry` is created here and passed
     to every stack — this, not each builder's own default, is what makes a socket
     ``answer`` resolve a card raised on a *different* platform's stack.
+
+    #135: a ``foreign`` map is built here and populated by the telegram/discord
+    builders' ``foreign_out`` before the CLI stack is built (last), so the CLI
+    stack's cross-stack drive can already see every configured foreign platform the
+    moment its ``CliAdapter`` is constructed — no mutate-after-construct dependency.
     """
     registry = ApprovalRegistry()
+    foreign: dict[str, ForeignPlatform] = {}
     stacks: list[Stack] = []
     if settings.telegram_configured:
         stacks.append(
@@ -878,6 +904,7 @@ def build_stacks(
                 harness_versioner=harness_versioner,
                 socket_server=socket_server,
                 registry=registry,
+                foreign_out=foreign,
             )
         )
     if settings.discord_configured:
@@ -892,6 +919,7 @@ def build_stacks(
                 harness_versioner=harness_versioner,
                 socket_server=socket_server,
                 registry=registry,
+                foreign_out=foreign,
             )
         )
     stacks.append(
@@ -905,6 +933,7 @@ def build_stacks(
             routing=routing,
             harness_versioner=harness_versioner,
             registry=registry,
+            foreign=foreign,
         )
     )
     return stacks
