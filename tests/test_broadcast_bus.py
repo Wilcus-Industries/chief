@@ -313,10 +313,16 @@ class _RecordingInner:
 
 
 class _RecordingServer:
-    """A SocketServer stand-in that records broadcast frames (no real socket)."""
+    """A SocketServer stand-in that records broadcast frames (no real socket).
+
+    Carries a real ``delivery_lock``: the mirror takes the delivery barrier around its
+    broadcast+record (#134), so the stand-in must offer the same seam as the real server
+    or it would be testing a laxer contract than production runs.
+    """
 
     def __init__(self) -> None:
         self.frames: list[dict[str, object]] = []
+        self.delivery_lock = asyncio.Lock()
 
     async def broadcast(self, frame: dict[str, object]) -> None:
         self.frames.append(dict(frame))

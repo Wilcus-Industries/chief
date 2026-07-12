@@ -8,6 +8,13 @@ task manager, so the socket is unconditional infrastructure that stays up even o
 zero-platform boot. The CLI adapter (#131) injects an application via
 :meth:`set_handler` (inbound dispatch) and pushes engine output out via
 :meth:`broadcast`.
+
+It owns one piece of cross-cutting state: :attr:`SocketServer.delivery_lock`, the
+**delivery barrier** (#134). Attaching a client and emitting a frame both touch "is
+anyone listening?" and "what is held in the log?", and those two answers must agree or
+a frame is lost or delivered twice. The barrier is what makes them agree; every party
+on both sides of that question (the CLI IO's emit, the mirror's, the connect hook's
+claim, the switch backfill's read) takes it. See :attr:`SocketServer.delivery_lock`.
 """
 
 import asyncio
@@ -70,6 +77,19 @@ class SocketServer:
         self._closing = False
         self._server: asyncio.Server | None = None
         self._handlers: set[asyncio.Task[None]] = set()
+        #: The delivery barrier (#134). Serializes "emit" against "attach" so that the
+        #: invariant holds: **a frame that has been broadcast is already committed to
+        #: the message log before any other party can claim or read the log.** An emit
+        #: (snapshot :attr:`has_clients` → broadcast → record) and an attach (claim the
+        #: held rows → join :attr:`_clients`) each run wholly inside it, so there are
+        #: only two interleavings and both deliver exactly once: emit-first records the
+        #: frame held *before* the joiner can claim (so the claim replays it), and
+        #: attach-first joins the broadcast set *before* the emit's snapshot (so the
+        #: frame goes out live). The switch backfill (#134) and the chat mirror (#133)
+        #: take it too, so their log reads/writes cannot straddle a broadcast either.
+        #: Lock order — always ``delivery_lock`` → ``MessageLog._lock``, never the
+        #: reverse, so the two cannot deadlock.
+        self.delivery_lock = asyncio.Lock()
         #: Live client writers, for outbound push (#131). Registered/discarded in
         #: :meth:`_handle` alongside the handler task; :meth:`broadcast` snapshots it.
         self._clients: set[asyncio.StreamWriter] = set()
@@ -84,8 +104,11 @@ class SocketServer:
     def has_clients(self) -> bool:
         """True iff at least one live (not-closing) client is attached (#132).
 
-        The #132 CLI IO snapshots this *before* a broadcast to decide whether an
-        outbound frame is delivered live or logged held for the next attach.
+        The CLI IO snapshots this *before* a broadcast to decide whether an outbound
+        frame is delivered live or logged held for the next attach. That snapshot is
+        only meaningful under :attr:`delivery_lock` (#134): an attach joins the client
+        set inside the barrier, so reading this outside it can see a client that has
+        not yet claim-replayed, or miss one that is about to.
         """
         return any(not w.is_closing() for w in self._clients)
 
@@ -179,21 +202,26 @@ class SocketServer:
         try:
             writer.write(encode(hello_frame()))
             await writer.drain()
-            # Register for broadcast only AFTER the hello and the connect hook: this is
-            # what guarantees the hook's replay frames precede any live traffic on this
-            # connection. A broadcast racing the hook is either delivered to other live
-            # clients or logged held for the next attach — never interleaved here.
-            if self._connect_hook is not None:
+            # Claim-replay and joining the broadcast set are ONE critical section under
+            # the delivery barrier (#134). Registering only after the hook is what makes
+            # the hook's replay frames precede live traffic on this connection; holding
+            # the barrier across both is what makes the claim and a racing emit agree on
+            # what is held. Without it an emit could broadcast (to a set this writer has
+            # not joined) and still be mid-``record``, so the claim would find nothing —
+            # the frame reaching neither this client nor a later one except as a
+            # re-delivery. See :attr:`delivery_lock`.
+            async with self.delivery_lock:
+                if self._connect_hook is not None:
 
-                async def sender(reply: Mapping[str, object]) -> None:
-                    writer.write(encode(reply))
-                    await writer.drain()
+                    async def sender(reply: Mapping[str, object]) -> None:
+                        writer.write(encode(reply))
+                        await writer.drain()
 
-                try:
-                    await self._connect_hook(sender)
-                except Exception:
-                    logger.exception("client-plane connect hook raised")
-            self._clients.add(writer)  # register for outbound broadcast (#131)
+                    try:
+                        await self._connect_hook(sender)
+                    except Exception:
+                        logger.exception("client-plane connect hook raised")
+                self._clients.add(writer)  # register for outbound broadcast (#131)
             while True:
                 try:
                     line = await reader.readline()

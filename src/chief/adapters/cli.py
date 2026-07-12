@@ -93,25 +93,33 @@ class CliTaskIO:
     ) -> None:
         """Broadcast one outbound frame and log it as delivered-or-held (#132).
 
-        ``delivered`` is snapshotted BEFORE the broadcast: broadcast-before-record means
-        a frame racing a new attach can never be double-delivered — worst case it is
-        recorded held (the joining client is not yet in the broadcast set) and defers to
-        that client's next attach. The stored ``payload`` is the whole wire frame, the
-        replay source, so a missed frame re-delivers intact.
+        The whole snapshot → broadcast → record sequence runs inside the client plane's
+        delivery barrier (#134), which is what makes ``delivered`` true to what actually
+        happened. The snapshot and the broadcast are cheap and synchronous, but
+        ``record`` awaits real DB I/O; an attach landing in *that* window would claim
+        the held rows before this one is committed, find nothing, and join the broadcast
+        set too late to have received the frame. Under the barrier that window does not
+        exist: either this emit commits the held row before the attach can claim (so the
+        claim replays it), or the attach joins ``_clients`` before this snapshot (so the
+        frame goes out live). Exactly one, never both, never neither.
+
+        The stored ``payload`` is the whole wire frame — the replay source — so a frame
+        missed while detached re-delivers intact.
         """
-        delivered = self._server.has_clients  # snapshot before broadcast
-        await self._server.broadcast(frame)
-        if self._log is not None:
-            await self._log.record(
-                platform=CLI_PLATFORM,
-                thread_key=thread_key,
-                role=ROLE_CHIEF,
-                surface=Surface.DM.value,
-                kind=str(frame["type"]),
-                text=text,
-                payload=json.dumps(frame),
-                delivered=delivered,
-            )
+        async with self._server.delivery_lock:
+            delivered = self._server.has_clients  # snapshot before broadcast
+            await self._server.broadcast(frame)
+            if self._log is not None:
+                await self._log.record(
+                    platform=CLI_PLATFORM,
+                    thread_key=thread_key,
+                    role=ROLE_CHIEF,
+                    surface=Surface.DM.value,
+                    kind=str(frame["type"]),
+                    text=text,
+                    payload=json.dumps(frame),
+                    delivered=delivered,
+                )
 
     async def send(self, thread_key: str, text: str) -> None:
         """Broadcast a progress line as a milestone frame, else a reply frame.
