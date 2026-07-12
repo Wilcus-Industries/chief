@@ -165,6 +165,74 @@ async def test_get_or_create_task_inserts_and_is_idempotent(
     assert first.title == "ship"
 
 
+async def test_get_or_create_task_backfills_a_null_surface(
+    db_session: AsyncSession,
+) -> None:
+    """A row opened without a surface (legacy, /route, branch, Opus escalation) is
+    healed by the first dispatch that knows the real one (#151)."""
+    legacy = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:51", tier="owner"
+    )
+    assert legacy.surface is None
+
+    healed = await task_repo.get_or_create_task(
+        db_session,
+        platform="telegram",
+        thread_key="-100:51",
+        tier="owner",
+        surface="group",
+    )
+
+    assert healed.id == legacy.id
+    reloaded = await task_repo.get_task(
+        db_session, platform="telegram", thread_key="-100:51"
+    )
+    assert reloaded is not None
+    assert reloaded.surface == "group"
+
+
+async def test_get_or_create_task_never_overwrites_a_proven_surface(
+    db_session: AsyncSession,
+) -> None:
+    """Once a surface is proven, no later call may change it — a rewrite to ``dm`` on a
+    GROUP task is exactly the approval-card leak #135 closed."""
+    await task_repo.get_or_create_task(
+        db_session,
+        platform="telegram",
+        thread_key="-100:52",
+        tier="owner",
+        surface="group",
+    )
+
+    await task_repo.get_or_create_task(
+        db_session,
+        platform="telegram",
+        thread_key="-100:52",
+        tier="owner",
+        surface="dm",
+    )
+
+    reloaded = await task_repo.get_task(
+        db_session, platform="telegram", thread_key="-100:52"
+    )
+    assert reloaded is not None
+    assert reloaded.surface == "group"
+
+
+async def test_get_or_create_task_leaves_surface_null_when_unproven(
+    db_session: AsyncSession,
+) -> None:
+    """A surface-less call on a surface-less row must not invent one."""
+    await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:53", tier="owner"
+    )
+    again = await task_repo.get_or_create_task(
+        db_session, platform="telegram", thread_key="-100:53", tier="owner"
+    )
+
+    assert again.surface is None
+
+
 async def test_set_status_and_session_id_persist(db_session: AsyncSession) -> None:
     task = await task_repo.get_or_create_task(
         db_session, platform="telegram", thread_key="-100:6", tier="owner"

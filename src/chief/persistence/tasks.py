@@ -43,12 +43,21 @@ async def get_or_create_task(
 ) -> Task:
     """Return the task for ``(platform, thread_key)`` or create it (status ``OPEN``).
 
-    ``surface`` is only stored on creation (#135) — an existing row keeps whatever
-    surface it was first created with, since a given ``(platform, thread_key)`` never
-    changes surface once opened.
+    A surface, once proven, is never rewritten (#135) — a given ``(platform,
+    thread_key)`` does not change surface once opened, and rewriting a GROUP task to
+    ``dm`` would leak approval cards into the shared room. But a row whose surface is
+    still ``None`` is *unproven*, not group-safe: legacy rows predating the column, and
+    rows first opened off a path that never had a surface to record (``/route``,
+    ``/branch``, Opus escalation, the Google account service), would otherwise stay NULL
+    forever and answer ``unknown_surface`` to every cross-stack inject. Backfill those
+    from the first caller that does know the real surface — the live dispatch (#151).
     """
     existing = await get_task(session, platform=platform, thread_key=thread_key)
     if existing is not None:
+        if existing.surface is None and surface is not None:
+            existing.surface = surface
+            await session.commit()
+            await session.refresh(existing)
         return existing
 
     task = Task(
