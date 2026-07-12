@@ -23,6 +23,7 @@ from chief.core.subagents import (
     SubagentSpec,
     build_custom_agents,
     chief_skill_directories,
+    chief_skill_names,
     load_subagent_specs,
     resolve_subagent_model,
     scaffold_default_subagents,
@@ -416,6 +417,19 @@ def test_chief_skill_directories_skips_malformed_alongside_valid(
 def test_chief_skill_directories_absent_dir_returns_empty(tmp_path: Path) -> None:
     # AC6: an absent directory yields [] so the caller adds nothing extra.
     assert chief_skill_directories(tmp_path / "does-not-exist") == []
+
+
+# --- chief-authored skill name listing (#138 /skills) --------------------------------
+
+
+def test_chief_skill_names_returns_names_for_curated_dirs(tmp_path: Path) -> None:
+    _write_skill_md(tmp_path / "foo" / "SKILL.md", name="foo")
+
+    assert chief_skill_names(tmp_path) == ["foo"]
+
+
+def test_chief_skill_names_absent_dir_returns_empty(tmp_path: Path) -> None:
+    assert chief_skill_names(tmp_path / "does-not-exist") == []
 
 
 # --- scaffolding DEFAULT_SUBAGENTS to disk (#108, part of #103) ---------------------

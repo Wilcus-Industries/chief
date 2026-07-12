@@ -59,6 +59,21 @@ existing thread, never this connection's own:
   engine — the reply flows out through that platform's normal (mirrored) ``TaskIO``
   exactly like a native turn.
 
+Status/skills frames (#138) — a point-in-time snapshot and a per-engine listing, both
+request/response like ``switch``/``backfill``:
+
+- ``status`` (client→server): ``{"type": "status"}`` — request a point-in-time
+  snapshot.
+- ``status_snapshot`` (server→client): ``{"type": "status_snapshot", "tasks": [...],
+  "budget": [...], "schedules": [...]}`` — ``tasks`` is every non-terminal task across
+  every platform (``platform``, ``thread_key``, ``title``, ``status``, ``model``);
+  ``budget`` is one entry per currency (``currency``, ``spent``, ``cap``, ``mode``);
+  ``schedules`` is the next few upcoming fires (``id``, ``kind``, ``spec``,
+  ``action_type``, ``thread_key``, ``next_run``).
+- ``skills`` (client→server): ``{"type": "skills"}`` — request the owner session's
+  composed skill set.
+- ``skills_list`` (server→client): ``{"type": "skills_list", "skills": [...]}``.
+
 Approval frames (#136) — a card raised on **any** platform's thread is broadcast to
 every client, not just the surface that raised it:
 
@@ -112,6 +127,10 @@ TYPE_THREADS: Final[str] = "threads"
 TYPE_SWITCH: Final[str] = "switch"
 TYPE_BACKFILL: Final[str] = "backfill"
 TYPE_INJECT: Final[str] = "inject"
+TYPE_STATUS: Final[str] = "status"
+TYPE_STATUS_SNAPSHOT: Final[str] = "status_snapshot"
+TYPE_SKILLS: Final[str] = "skills"
+TYPE_SKILLS_LIST: Final[str] = "skills_list"
 
 #: The platform tag every CLI session frame carries. The engine filters every query by
 #: ``platform``, so the CLI stack runs as its own platform alongside telegram/discord.
@@ -292,6 +311,36 @@ def inject_frame(platform: str, thread_key: str, text: str) -> dict[str, object]
         "thread_key": thread_key,
         "text": text,
     }
+
+
+def status_frame() -> dict[str, object]:
+    """A client→server request for a point-in-time engine/persistence snapshot."""
+    return {"type": TYPE_STATUS}
+
+
+def status_snapshot_frame(
+    *,
+    tasks: Sequence[Mapping[str, object]],
+    budget: Sequence[Mapping[str, object]],
+    schedules: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """A server→client status snapshot: cross-platform tasks, budget, schedules."""
+    return {
+        "type": TYPE_STATUS_SNAPSHOT,
+        "tasks": [dict(t) for t in tasks],
+        "budget": [dict(b) for b in budget],
+        "schedules": [dict(s) for s in schedules],
+    }
+
+
+def skills_frame() -> dict[str, object]:
+    """A client→server request for the owner session's composed skill set (#138)."""
+    return {"type": TYPE_SKILLS}
+
+
+def skills_list_frame(skills: Sequence[str]) -> dict[str, object]:
+    """A server→client composed-skill listing (#138)."""
+    return {"type": TYPE_SKILLS_LIST, "skills": list(skills)}
 
 
 def outbound_frame(

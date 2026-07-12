@@ -34,10 +34,18 @@ from chief.client_plane import (
     command_frame,
     inject_frame,
     list_threads_frame,
+    skills_frame,
+    status_frame,
     switch_frame,
     user_frame,
 )
 from chief.config import Settings
+from chief.core.budget import (
+    ACCUM_MAX,
+    ACTION_PAUSE,
+    BudgetGate,
+    CurrencyPolicy,
+)
 from chief.core.session import Final, Milestone, TurnEvent
 from chief.core.tasks import SessionProto, TaskManager
 from chief.gate.approvals import ApprovalAction, ApprovalManager, ApprovalRegistry
@@ -45,6 +53,7 @@ from chief.gate.blacklist import Blacklist
 from chief.gate.policy import PolicyStore
 from chief.gate.types import ToolPermissionContext
 from chief.obs.audit import AuditLog
+from chief.persistence import usage
 from chief.persistence.messages import ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
@@ -91,6 +100,10 @@ def _cli_manager(
     *,
     factory: Factory,
     message_limit: int = CLI_LIMIT,
+    skills_enabled: bool = False,
+    skills_plugin_path: str | None = None,
+    default_skills: tuple[str, ...] = (),
+    chief_skills_dir: str | None = None,
 ) -> TaskManager:
     """A real ``platform="cli"`` engine over the CLI IO, LLM stubbed by ``factory``."""
     return TaskManager(
@@ -107,6 +120,10 @@ def _cli_manager(
         session_factory_sdk=factory,
         stop_intent=_no,
         warrants_task=_no,
+        skills_enabled=skills_enabled,
+        skills_plugin_path=skills_plugin_path,
+        default_skills=default_skills,
+        chief_skills_dir=chief_skills_dir,
     )
 
 
@@ -171,6 +188,11 @@ async def cli_stack(
         backfill_limit: int = 50,
         log: MessageLog | None = None,
         foreign: dict[str, ForeignPlatform] | None = None,
+        budget: BudgetGate | None = None,
+        skills_enabled: bool = False,
+        skills_plugin_path: str | None = None,
+        default_skills: tuple[str, ...] = (),
+        chief_skills_dir: str | None = None,
     ) -> CliStack:
         server, task = await _running_server(str(tmp_path / "cli.sock"))
         # One log for BOTH sides, as production wires it — a test may pass its own
@@ -182,11 +204,16 @@ async def cli_stack(
             io,
             factory=_seq_factory(sessions),
             message_limit=message_limit,
+            skills_enabled=skills_enabled,
+            skills_plugin_path=skills_plugin_path,
+            default_skills=default_skills,
+            chief_skills_dir=chief_skills_dir,
         )
         CliAdapter(
             server=server, engine=manager, log=log, replay_limit=replay_limit,
             session_factory=session_factory, backfill_limit=backfill_limit,
             foreign=foreign,
+            budget=budget,
         )
         built.append((server, task, manager))
         return CliStack(server, io)
@@ -1729,3 +1756,143 @@ async def test_inject_uses_the_threads_real_surface_for_a_rebuilt_group_thread(
                 await writer.wait_closed()
     finally:
         await tg_manager.shutdown()
+
+
+# ---- #138: /status + /skills ------------------------------------------------------
+
+
+class _FakeBudgetIO:
+    """Minimal ``BudgetIO`` stub — the ``/status`` test only needs ``record`` to work
+    against a real ``BudgetGate``."""
+
+    async def send(self, thread_key: str, text: str) -> None:
+        pass
+
+    async def send_budget_card(self, route: str, card: Any) -> None:
+        pass
+
+
+def _budget_gate(session_factory: async_sessionmaker[AsyncSession]) -> BudgetGate:
+    return BudgetGate(
+        session_factory=session_factory,
+        io=_FakeBudgetIO(),
+        owner_inbox="owner-inbox",
+        policies={
+            usage.PREMIUM_REQUESTS: CurrencyPolicy(
+                cap=200.0,
+                warn_fractions=(0.75, 0.90),
+                exhaust_fraction=1.0,
+                accumulation=ACCUM_MAX,
+                action=ACTION_PAUSE,
+            ),
+        },
+        owner_tz="UTC",
+        anchor_day=1,
+        now=lambda: datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
+    )
+
+
+async def test_status_returns_real_tasks_budget_and_schedules(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    budget = _budget_gate(session_factory)
+    server, _io = await cli_stack([FakeSession(model="m")], budget=budget)
+    await budget.record(usage.PREMIUM_REQUESTS, 50.0)
+    async with session_factory() as session:
+        await create_schedule(
+            session,
+            kind=KIND_ONCE,
+            spec="2026-07-01T00:00:00+00:00",
+            action="ping",
+            action_type=ACTION_MESSAGE,
+            next_run=datetime(2026, 7, 1, tzinfo=UTC),
+            thread_key="cli:main",
+        )
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "hi")).encode() + b"\n")
+        await writer.drain()
+        assert (await _read_frame(reader))["text"] == "reply:hi"
+        await wait_for_task_open(
+            session_factory, platform="cli", thread_key="cli:main"
+        )
+
+        writer.write(json.dumps(status_frame()).encode() + b"\n")
+        await writer.drain()
+        frame = await _read_frame(reader)
+        assert frame["type"] == "status_snapshot"
+        tasks = {(t["platform"], t["thread_key"]): t for t in frame["tasks"]}  # type: ignore[attr-defined]
+        assert ("cli", "cli:main") in tasks
+
+        budget_entries = {b["currency"]: b for b in frame["budget"]}  # type: ignore[attr-defined]
+        assert budget_entries[usage.PREMIUM_REQUESTS]["spent"] == 50.0
+        assert budget_entries[usage.PREMIUM_REQUESTS]["cap"] == 200.0
+
+        schedules = frame["schedules"]
+        assert len(schedules) == 1  # type: ignore[arg-type]
+        assert schedules[0]["action_type"] == ACTION_MESSAGE  # type: ignore[index]
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_status_with_nothing_configured_returns_empty_lists(
+    cli_stack: Callable[..., Any],
+) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(status_frame()).encode() + b"\n")
+        await writer.drain()
+        frame = await _read_frame(reader)
+        assert frame["type"] == "status_snapshot"
+        assert frame["budget"] == []
+        assert frame["schedules"] == []
+        assert frame["tasks"] == []
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_skills_returns_composed_skill_names(
+    cli_stack: Callable[..., Any],
+) -> None:
+    server, _io = await cli_stack(
+        [],
+        skills_enabled=True,
+        skills_plugin_path="vendor/chief-skills",
+        default_skills=("setup-morning-brief",),
+    )
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(skills_frame()).encode() + b"\n")
+        await writer.drain()
+        frame = await _read_frame(reader)
+        assert frame["type"] == "skills_list"
+        assert "setup-morning-brief" in frame["skills"]  # type: ignore[operator]
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_skills_empty_when_disabled(cli_stack: Callable[..., Any]) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(skills_frame()).encode() + b"\n")
+        await writer.drain()
+        frame = await _read_frame(reader)
+        assert frame["type"] == "skills_list"
+        assert frame["skills"] == []
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()

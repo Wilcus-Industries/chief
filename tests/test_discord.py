@@ -77,6 +77,9 @@ class FakeEngine:
     async def active_tasks(self) -> list[Task]:
         return self._active
 
+    async def composed_skills(self) -> list[str]:
+        return []
+
     async def branch(self, thread_key: str, title: str) -> str:
         self.branched.append((thread_key, title))
         return f"{thread_key.split(':')[0]}:88"
