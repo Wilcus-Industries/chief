@@ -326,6 +326,39 @@ async def _until(pred: Callable[[], bool], timeout: float = 1.0) -> None:
     raise AssertionError("condition not met in time")
 
 
+async def wait_for_task_open(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    platform: str,
+    thread_key: str,
+    timeout: float = 5.0,
+) -> None:
+    """Poll until ``(platform, thread_key)``'s task row is *committed* back to OPEN.
+
+    The turn's tail runs strictly after the reply reaches the IO: ``_emit_final`` →
+    ``_record_spend`` → ``_set_status(OPEN)`` (``core/tasks.py``). So a test that syncs
+    on the reply — or on a broadcast frame — and then reads the task row, the budget, or
+    the usage table is reading *ahead* of the writes it asserts on. A committed OPEN is
+    the last of those writes, which makes it the one honest "this turn is fully done"
+    signal.
+
+    This is engine bookkeeping, not the #134 delivery race: it waits for a state
+    transition the engine really does make asynchronously, rather than papering over a
+    lost message. (Sessions used to share one StaticPool connection, so these reads saw
+    the turn's *uncommitted* work and appeared to pass — see ``tests/conftest.py``.)
+    """
+
+    async def _poll() -> None:
+        while True:
+            async with session_factory() as session:
+                task = await get_task(session, platform=platform, thread_key=thread_key)
+            if task is not None and task.status == OPEN:
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_poll(), timeout)
+
+
 async def test_turn_replies_inline_without_ack(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -646,7 +679,9 @@ async def test_owner_per_block_whitespace_block_is_dropped(
     assert "" not in block_sends
     assert "\n" not in block_sends
     assert "  " not in block_sends
-    # The turn must not be marked FAILED.
+    # The turn must not be marked FAILED. Sync on the committed status flip: it lands
+    # after the send this test waited on, so reading the row now would race the tail.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == OPEN
@@ -932,6 +967,8 @@ async def test_reopen_after_idle_resumes_session(
     # persisted id, ending OPEN (the idle DONE must not clobber the new turn).
     await mgr.dispatch(thread_key="-100:5", text="again")
     await _until(lambda: ("-100:5", "reply:again") in io.sends)
+    # OPEN is committed in the tail, after the reply this just waited on.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
 
     assert len(sessions) == 2
     assert sessions[1].resume == "sess-hi"
@@ -978,11 +1015,12 @@ async def test_reopen_awaits_inflight_teardown(
     release.set()
     await reopen  # teardown drains, the task reopens, the new turn is enqueued
     rt2 = mgr._tasks["-100:5"]
-    # The reopened turn commits OPEN, then arms a fresh idle timer. Sync on that arm: an
-    # in-memory edge landing after the OPEN commit. Polling the row instead would share
-    # the StaticPool connection with the turn's write and could roll it back, stranding
-    # the row at the prior RUNNING.
-    await _until(lambda: rt2.idle_handle is not None)
+    # The reopened turn commits OPEN, then arms a fresh idle timer — the last edge of a
+    # clean turn, so it is the one signal that the whole tail has landed. (Polling the
+    # row for OPEN would return instantly here: dispatch reopens it before the turn
+    # runs.) The timeout is generous because the per-test sqlite *file* is slower than
+    # the old in-memory db, and this waits on a real turn.
+    await _until(lambda: rt2.idle_handle is not None, timeout=5.0)
 
     assert len(sessions) == 2  # one fresh session, no duplicate teardown
     assert sessions[1].resume == "sess-hi"  # resumed from the persisted id
@@ -1093,6 +1131,8 @@ async def test_watchdog_times_out_wedged_turn_and_recovers(
     # Same thread recovers: a follow-up turn on the reset session replies (FAILED→OPEN).
     await mgr.dispatch(thread_key="-100:1", text="retry")
     await _until(lambda: ("-100:1", "reply:retry") in io.sends)
+    # OPEN is committed in the tail, after the reply this just waited on.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:1")
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:1")
     assert db is not None and db.status == OPEN
@@ -2477,6 +2517,9 @@ async def test_clean_copilot_turn_records_premium_requests(
 
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    # Spend is metered in the turn tail, after the reply — sync on the tail's
+    # last write.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
 
     assert budget.recorded == [(usage.PREMIUM_REQUESTS, 3.0)]
     assert budget.rate_limited == []
@@ -2493,6 +2536,9 @@ async def test_rate_limit_rejection_notes_budget(
 
     await mgr.dispatch(thread_key="-100:5", text="hi")
     await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    # Spend is metered in the turn tail, after the reply — sync on the tail's
+    # last write.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
 
     # A hard rejection is treated like exhaustion of that turn's currency — pause + ask.
     assert budget.recorded == [(usage.PREMIUM_REQUESTS, 5.0)]
@@ -2741,6 +2787,9 @@ async def test_openrouter_turn_records_dollars(
 
     await mgr.dispatch(thread_key="-100:5", text="fix this bug")
     await _until(lambda: ("-100:5", "reply:fix this bug") in io.sends)
+    # Spend is metered in the turn tail, after the reply — sync on the tail's
+    # last write.
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
 
     # Dollars, not premium: the BYOK provider marks the turn as openrouter (#84).
     assert budget.recorded == [(usage.OPENROUTER_DOLLARS, 2.5)]
