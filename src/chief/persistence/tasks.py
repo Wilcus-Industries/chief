@@ -39,8 +39,14 @@ async def get_or_create_task(
     tier: str,
     title: str | None = None,
     model: str | None = None,
+    surface: str | None = None,
 ) -> Task:
-    """Return the task for ``(platform, thread_key)`` or create it (status ``OPEN``)."""
+    """Return the task for ``(platform, thread_key)`` or create it (status ``OPEN``).
+
+    ``surface`` is only stored on creation (#135) — an existing row keeps whatever
+    surface it was first created with, since a given ``(platform, thread_key)`` never
+    changes surface once opened.
+    """
     existing = await get_task(session, platform=platform, thread_key=thread_key)
     if existing is not None:
         return existing
@@ -52,6 +58,7 @@ async def get_or_create_task(
         status=OPEN,
         title=title,
         model=model,
+        surface=surface,
     )
     session.add(task)
     await session.commit()
