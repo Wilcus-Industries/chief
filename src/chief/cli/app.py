@@ -34,6 +34,7 @@ from ..client_plane import (
     TYPE_THREADS,
     answer_frame,
     command_frame,
+    inject_frame,
     list_threads_frame,
     skills_frame,
     status_frame,
@@ -48,12 +49,17 @@ AWAY_HEADER = "── while you were away ──"
 AWAY_FOOTER = "── caught up ──"
 
 #: Slash commands this client handles itself, never forwarded to the daemon.
-CLIENT_COMMANDS = ("/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills")
+CLIENT_COMMANDS = (
+    "/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills", "/drive",
+)
 
 #: Shown when the owner tries to send input into a foreign-platform pane (#138
 #: finding) — that would dispatch through the ``platform=cli`` engine under the
 #: foreign thread_key, spawning a spurious cli task the owner never sees answered.
-READ_ONLY_PANE_MESSAGE = "read-only pane — /new or /switch back to a cli thread"
+#: ``/drive`` is the sanctioned way to act on such a pane (#135's cross-stack drive).
+READ_ONLY_PANE_MESSAGE = (
+    "read-only pane — /drive <text> to run a turn there, or /new to come back"
+)
 
 
 def _format_backfill_line(m: dict[str, object]) -> str:
@@ -381,10 +387,37 @@ class ChiefCliApp(App[None]):
         if name == "skills":
             await self._conn.send(skills_frame())
             return
+        if name == "drive":
+            await self._cmd_drive(arg)
+            return
         if self._active_platform != CLI_PLATFORM:
             self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
             return
         await self._conn.send(command_frame(self._thread_key, name, arg))
+
+    async def _cmd_drive(self, text: str) -> None:
+        """Cross-stack drive (#135): run ``text`` as a real owner turn on the *foreign*
+        thread this pane is switched onto.
+
+        The daemon echoes it into that platform's real chat marked as via-CLI and
+        dispatches on that platform's engine, so the answer arrives where the
+        conversation lives — on the phone, not here. The pane stays read-only: a drive
+        is one turn, not an attach. This is the only client path to an ``inject`` frame;
+        without it #135 ships with nothing able to send one.
+        """
+        if self._active_platform == CLI_PLATFORM:
+            self._write(
+                "! /drive acts on another platform's thread — /tasks, then /switch <n>",
+                "red",
+            )
+            return
+        if not text:
+            self._write("! usage: /drive <text>", "red")
+            return
+        self._write(f"> [via CLI → {self._active_platform}] {text}", "bold")
+        await self._conn.send(
+            inject_frame(self._active_platform, self._thread_key, text)
+        )
 
     async def _cmd_switch(self, arg: str) -> None:
         if not arg.isdigit() or not self._last_threads:
