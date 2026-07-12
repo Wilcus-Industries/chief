@@ -44,3 +44,13 @@ workflow; this file covers how code is written.
   cases) — not just success.
 - **Structure:** Arrange-Act-Assert. Mock external dependencies (network, filesystem,
   services) so tests are fast and deterministic.
+- **The `session_factory` fixture gives each test its own sqlite *file*** on the
+  production engine (NullPool). Do not "optimize" it back to StaticPool / `:memory:`:
+  a pooled fixture shares ONE connection — and so one transaction — across concurrent
+  sessions, letting a session read another's uncommitted rows and roll back another's
+  write on close. That masked a real concurrency bug all the way into main (#134).
+- **Sync on the write you assert, not on a proxy for it.** A turn commits its tail
+  (spend, task status) *after* the reply reaches the IO, so waiting on the reply and
+  then reading the DB is a race. Wait for the committed state (`wait_for_task_open`).
+  Never paper over a race with a bare `sleep` — if a poll is load-bearing for
+  correctness rather than for observing an async write, fix the code instead.

@@ -57,6 +57,9 @@ KIND_CARD_RESOLVED = "card_resolved"
 #: constant, not a config knob — right-sized here; #134 can make it configurable.
 REPLAY_LIMIT = 100
 
+#: The most-recent window of a thread's messages returned as backfill on switch (#134).
+BACKFILL_LIMIT = 50
+
 
 class MessageLog:
     """Record both directions of a thread's traffic and replay held frames (#132)."""
@@ -144,3 +147,41 @@ class MessageLog:
                     if isinstance(frame, dict):
                         frames.append(frame)
                 return frames
+
+    async def history(
+        self, *, platform: str, thread_key: str, limit: int = BACKFILL_LIMIT
+    ) -> list[dict[str, object]]:
+        """Return the most-recent ``limit`` logged messages for one thread, in order.
+
+        The #134 backfill source: rendered from the row's **columns**, not its stored
+        ``payload`` — the chat stacks' mirror rows (#133) and every inbound row have no
+        payload, so a payload-based read would be empty for exactly the foreign threads
+        a switch backfills. Rows come back oldest-first (id order); file rows carry
+        their ``filename`` but never their bytes (never persisted).
+
+        Read-only, and takes no lock of its own: its caller
+        (:meth:`~chief.adapters.cli.CliAdapter._handle_switch`) holds the client plane's
+        delivery barrier across this read and the send, so the window it returns cannot
+        miss a frame that has already been broadcast to the switching client.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(MessageLogEntry)
+                .where(
+                    MessageLogEntry.platform == platform,
+                    MessageLogEntry.thread_key == thread_key,
+                )
+                .order_by(MessageLogEntry.id.desc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+        return [
+            {
+                "role": row.role,
+                "kind": row.kind,
+                "text": row.text,
+                "filename": row.filename,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in reversed(rows)
+        ]
