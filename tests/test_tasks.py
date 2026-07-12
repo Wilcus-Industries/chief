@@ -2142,6 +2142,46 @@ async def test_guest_session_never_gets_chief_skill_directories(
     await mgr.shutdown()
 
 
+# ---- composed_skills (#138 /skills) --------------------------------------------
+
+
+async def test_composed_skills_returns_curated_and_authored_names(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    _write_skill_md(tmp_path / "morning-note" / "SKILL.md", name="morning-note")
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory({}),
+        subagents_enabled=False,
+        skills=True,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    names = await mgr.composed_skills()
+
+    assert "docx" in names
+    assert "claude-api" in names
+    assert "morning-note" in names
+    await mgr.shutdown()
+
+
+async def test_composed_skills_empty_when_disabled(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    mgr = await _subagents_manager(
+        session_factory,
+        FakeIO(),
+        factory=_capture_factory({}),
+        subagents_enabled=False,
+        skills=False,
+        chief_skills_dir=str(tmp_path),
+    )
+
+    assert await mgr.composed_skills() == []
+    await mgr.shutdown()
+
+
 async def test_guest_gets_no_calendar_or_web_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

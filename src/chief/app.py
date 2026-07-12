@@ -818,6 +818,7 @@ def build_cli_stack(
         timeout_seconds=settings.approval_timeout_seconds,
         registry=registry,
     )
+    budget_gate = build_budget(settings, io=io, session_factory=session_factory)
     manager = build_engine(
         settings,
         platform="cli",
@@ -827,7 +828,7 @@ def build_cli_stack(
         approvals=approvals,
         audit=audit,
         memory=memory,
-        budget=build_budget(settings, io=io, session_factory=session_factory),
+        budget=budget_gate,
         routing=routing,
         harness_versioner=harness_versioner,
     )
@@ -838,6 +839,7 @@ def build_cli_stack(
         log=message_log,
         approvals=registry,
         session_factory=session_factory,
+        budget=budget_gate,
     )
     return manager, adapter, approvals
 

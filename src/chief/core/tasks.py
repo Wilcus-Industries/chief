@@ -114,6 +114,7 @@ from .session import SessionProto as SessionProto
 from .subagents import (
     build_custom_agents,
     chief_skill_directories,
+    chief_skill_names,
     load_subagent_specs,
     scaffold_default_subagents,
     skill_directories_for,
@@ -620,6 +621,21 @@ class TaskManager:
         """Non-terminal tasks, for the ``/tasks`` listing."""
         async with self._session_factory() as session:
             return await list_active(session, platform=self._platform)
+
+    async def composed_skills(self) -> list[str]:
+        """The owner session's composed skill set: curated + chief-authored names.
+
+        Mirrors ``_wire_owner_session``'s ``skills_on`` gate exactly (#138) — no
+        plugin-manifest re-parse needed, since the vendored names already ARE
+        ``self._default_skills``.
+        """
+        skills_on = self._skills_enabled and self._skills_plugin_path is not None
+        if not skills_on:
+            return []
+        names = list(self._default_skills)
+        if self._chief_skills_dir is not None:
+            names += chief_skill_names(self._chief_skills_dir)
+        return names
 
     async def recover(self) -> None:
         """Ping the owner about tasks left mid-flight by a restart (no auto-resume)."""

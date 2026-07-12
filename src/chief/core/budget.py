@@ -87,6 +87,16 @@ class CurrencyPolicy:
     action: str  # ACTION_PAUSE | ACTION_DOWNGRADE
 
 
+@dataclass(frozen=True)
+class CurrencySnapshot:
+    """One currency's cycle spend for the ``/status`` view (#138)."""
+
+    currency: str
+    spent: float
+    cap: float
+    mode: str
+
+
 class BudgetIO(Protocol):
     """The slice of the platform IO the budget gate delivers to (owner inbox only)."""
 
@@ -204,6 +214,26 @@ class BudgetGate:
         async with self._session_factory() as session:
             row = await usage.get_row(session, self._cycle(), currency)
             return row.mode if row is not None else usage.MODE_NORMAL
+
+    async def snapshot(self) -> list[CurrencySnapshot]:
+        """Every configured currency's cycle spend, cap, and mode (#138 ``/status``).
+
+        Read-only — never inserts a row; an unspent currency reports ``spent=0.0`` and
+        ``mode=MODE_NORMAL`` straight from the policy.
+        """
+        cycle = self._cycle()
+        out: list[CurrencySnapshot] = []
+        async with self._session_factory() as session:
+            for currency, policy in self._policies.items():
+                row = await usage.get_row(session, cycle, currency)
+                spent = row.amount if row is not None else 0.0
+                mode = row.mode if row is not None else usage.MODE_NORMAL
+                out.append(
+                    CurrencySnapshot(
+                        currency=currency, spent=spent, cap=policy.cap, mode=mode
+                    )
+                )
+        return out
 
     async def _accumulate(
         self,

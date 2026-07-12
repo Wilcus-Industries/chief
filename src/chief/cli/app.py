@@ -7,19 +7,20 @@ there via :meth:`_write`, so tests never have to introspect the ``RichLog`` widg
 """
 
 from collections import deque
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 from uuid import uuid4
 
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.widgets import Footer, Header, Input, RichLog, Static
 
 from ..adapters.commands import OWNER_COMMANDS
 from ..client_plane import (
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
     PROTOCOL_VERSION,
+    TYPE_BACKFILL,
     TYPE_CARD,
     TYPE_CARD_RESOLVED,
     TYPE_ERROR,
@@ -28,8 +29,15 @@ from ..client_plane import (
     TYPE_MILESTONE,
     TYPE_PONG,
     TYPE_REPLY,
+    TYPE_SKILLS_LIST,
+    TYPE_STATUS_SNAPSHOT,
+    TYPE_THREADS,
     answer_frame,
     command_frame,
+    list_threads_frame,
+    skills_frame,
+    status_frame,
+    switch_frame,
     user_frame,
 )
 from .connection import SocketConnection
@@ -40,7 +48,18 @@ AWAY_HEADER = "── while you were away ──"
 AWAY_FOOTER = "── caught up ──"
 
 #: Slash commands this client handles itself, never forwarded to the daemon.
-CLIENT_COMMANDS = ("/help", "/new", "/quit")
+CLIENT_COMMANDS = ("/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills")
+
+
+def _format_backfill_line(m: dict[str, object]) -> str:
+    """Render one #132 history row the way a switched-to pane replays it (#138)."""
+    if m.get("role") == "owner":
+        return f"> {m.get('text', '')}"
+    if m.get("kind") == "milestone":
+        return f"· {m.get('text', '')}"
+    if m.get("kind") == "file":
+        return f"[file] {m.get('filename')}"
+    return str(m.get("text", ""))
 
 
 class Line(NamedTuple):
@@ -53,7 +72,11 @@ class Line(NamedTuple):
 class ChiefCliApp(App[None]):
     """The terminal client of the client plane (#137)."""
 
-    CSS = "#transcript { height: 1fr; } #prompt { dock: bottom; }"
+    CSS = (
+        "#transcript { height: 1fr; } "
+        "#statusbar { dock: bottom; height: 1; } "
+        "#prompt { dock: bottom; }"
+    )
     TITLE = "chief"
 
     def __init__(
@@ -62,6 +85,11 @@ class ChiefCliApp(App[None]):
         super().__init__()
         self._conn = connection
         self._thread_key = thread_key
+        #: The active pane's platform (#138 ``/switch``) — ``self._thread_key`` becomes
+        #: that thread's key regardless of which platform it came from.
+        self._active_platform: str = CLI_PLATFORM
+        #: The most recent ``/tasks`` listing, so ``/switch <n>`` can resolve an index.
+        self._last_threads: list[dict[str, object]] = []
         #: Every rendered line, in order — the test seam.
         self.transcript: list[Line] = []
         #: Unanswered approval ids, oldest first (FIFO — one prompt at a time).
@@ -71,12 +99,14 @@ class ChiefCliApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         yield RichLog(id="transcript", wrap=True, markup=False)
+        yield Static(id="statusbar")
         yield Input(placeholder="message chief — /help", id="prompt")
         yield Footer()
 
     async def on_mount(self) -> None:
         self.query_one(Input).focus()
         self.run_worker(self._pump(), exclusive=True)
+        await self._conn.send(status_frame())
 
     async def _pump(self) -> None:
         async for frame in self._conn.frames():
@@ -108,7 +138,27 @@ class ChiefCliApp(App[None]):
         if ftype == TYPE_ERROR:
             self._write(f"! {frame.get('code')}: {frame.get('message')}", "red")
             return
-        if not self._visible(frame):
+        if ftype == TYPE_THREADS:
+            self._render_threads(frame)
+            return
+        if ftype == TYPE_STATUS_SNAPSHOT:
+            self._render_status(frame)
+            return
+        if ftype == TYPE_SKILLS_LIST:
+            self._render_skills(frame)
+            return
+        if ftype == TYPE_BACKFILL:
+            self._render_backfill(frame)
+            return
+
+        scope = self._scope(frame)
+        if scope == "hidden":
+            return
+        if scope == "notice":
+            self._write(
+                f"🔔 activity in ({frame.get('platform')}) {frame.get('thread_key')}",
+                "dim",
+            )
             return
 
         replay = bool(frame.get("replay"))
@@ -147,23 +197,105 @@ class ChiefCliApp(App[None]):
                 self._end_card_prompt()
                 self._prompt_card()
 
-    def _visible(self, frame: dict[str, object]) -> bool:
-        """True iff this frame belongs on this client's transcript.
-
-        A card/card_resolved is broadcast to every platform (#136 — any client may
-        answer any approval), so it is always visible. Everything else is only ours if
-        it came off the CLI platform, and then only for our thread key — unless it is a
-        replay, where every missed CLI frame belongs in the away section regardless of
-        which thread raised it.
+    def _scope(self, frame: dict[str, object]) -> str:
+        """Where a live frame lands: full render, a one-line background notice, or
+        nowhere (#138). Cards are always full (any client may answer any approval,
+        #136); a CLI-platform replay is always full regardless of active thread (missed
+        history bands together, #132); everything else is full only when it matches the
+        active ``(platform, thread_key)`` pane — otherwise it's a background notice so a
+        busy background thread is never silently invisible.
         """
         ftype = frame.get("type")
-        if ftype == TYPE_CARD or ftype == TYPE_CARD_RESOLVED:
-            return True
-        if frame.get("platform") != CLI_PLATFORM:
-            return False
-        if bool(frame.get("replay")):
-            return True
-        return frame.get("thread_key") == self._thread_key
+        if ftype in (TYPE_CARD, TYPE_CARD_RESOLVED):
+            return "full"
+        if bool(frame.get("replay")) and frame.get("platform") == CLI_PLATFORM:
+            return "full"
+        if (
+            frame.get("platform") == self._active_platform
+            and frame.get("thread_key") == self._thread_key
+        ):
+            return "full"
+        if ftype in (TYPE_REPLY, TYPE_MILESTONE, TYPE_FILE):
+            return "notice"
+        return "hidden"
+
+    def _render_threads(self, frame: dict[str, object]) -> None:
+        threads = cast(list[dict[str, object]], frame.get("threads", []))
+        self._last_threads = list(threads)
+        if not threads:
+            self._write("no active threads", "dim")
+            return
+        for i, t in enumerate(threads, start=1):
+            self._write(
+                f"{i}. ({t['platform']}) {t['thread_key']} — "
+                f"{t.get('title') or t['thread_key']} [{t['status']}]"
+            )
+
+    def _render_backfill(self, frame: dict[str, object]) -> None:
+        self._active_platform = str(frame["platform"])
+        self._thread_key = str(frame["thread_key"])
+        self.query_one("#transcript", RichLog).clear()
+        self.transcript.clear()
+        self._write(
+            f"── switched to ({self._active_platform}) {self._thread_key} ──", "dim"
+        )
+        messages = cast(list[dict[str, object]], frame.get("messages", []))
+        for m in messages:
+            self._write(
+                _format_backfill_line(m), "dim" if m.get("kind") == "milestone" else ""
+            )
+
+    def _render_status(self, frame: dict[str, object]) -> None:
+        tasks = cast(list[dict[str, object]], frame.get("tasks", []))
+        budget = cast(list[dict[str, object]], frame.get("budget", []))
+        schedules = cast(list[dict[str, object]], frame.get("schedules", []))
+        self._write("── status ──", "bold")
+        if not tasks:
+            self._write("no active tasks", "dim")
+        for t in tasks:
+            model = t.get("model") or "default"
+            self._write(
+                f"• ({t['platform']}) {t['thread_key']} — {t['status']} [{model}]"
+            )
+        for b in budget:
+            self._write(
+                f"spend: {b['currency']} {b['spent']:.2f}/{b['cap']:.2f} ({b['mode']})",
+                "dim",
+            )
+        if schedules:
+            self._write("upcoming:", "dim")
+            for s in schedules:
+                self._write(
+                    f"  {s['next_run']} — {s['kind']} {s['action_type']}", "dim"
+                )
+        self._update_statusbar(frame)
+
+    def _update_statusbar(self, frame: dict[str, object]) -> None:
+        tasks = cast(list[dict[str, object]], frame.get("tasks", []))
+        budget = cast(list[dict[str, object]], frame.get("budget", []))
+        mine = next(
+            (
+                t
+                for t in tasks
+                if t.get("platform") == self._active_platform
+                and t.get("thread_key") == self._thread_key
+            ),
+            None,
+        )
+        model = (mine.get("model") if mine else None) or "default"
+        spend = ", ".join(
+            f"{b['currency']}={b['spent']:.0f}/{b['cap']:.0f}" for b in budget
+        ) or "—"
+        self.query_one("#statusbar", Static).update(
+            f"model: {model} | spend: {spend} | active tasks: {len(tasks)}"
+        )
+
+    def _render_skills(self, frame: dict[str, object]) -> None:
+        skills = cast(list[Any], frame.get("skills", []))
+        if not skills:
+            self._write("no skills composed", "dim")
+            return
+        self._write("skills: " + ", ".join(str(s) for s in skills))
 
     def _prompt_card(self) -> None:
         if not self._pending:
@@ -209,11 +341,17 @@ class ChiefCliApp(App[None]):
             self._write("! empty command", "red")
             return
         if name == "help":
-            owner_names = ", ".join("/" + n for n in OWNER_COMMANDS.names())
+            forwarded = [
+                n for n in OWNER_COMMANDS.names() if f"/{n}" not in CLIENT_COMMANDS
+            ]
             self._write(", ".join(CLIENT_COMMANDS) + " — client commands", "dim")
-            self._write(owner_names + " — forwarded to the daemon", "dim")
+            self._write(
+                ", ".join("/" + n for n in forwarded) + " — forwarded to the daemon",
+                "dim",
+            )
             return
         if name == "new":
+            self._active_platform = CLI_PLATFORM
             self._thread_key = f"cli:{uuid4().hex[:8]}"
             self.query_one("#transcript", RichLog).clear()
             self.transcript.clear()
@@ -223,4 +361,27 @@ class ChiefCliApp(App[None]):
             await self._conn.close()
             self.exit()
             return
+        if name == "tasks":
+            await self._conn.send(list_threads_frame())
+            return
+        if name == "switch":
+            await self._cmd_switch(arg)
+            return
+        if name == "status":
+            await self._conn.send(status_frame())
+            return
+        if name == "skills":
+            await self._conn.send(skills_frame())
+            return
         await self._conn.send(command_frame(self._thread_key, name, arg))
+
+    async def _cmd_switch(self, arg: str) -> None:
+        if not arg.isdigit() or not self._last_threads:
+            self._write("! usage: /switch <n> — run /tasks first", "red")
+            return
+        idx = int(arg) - 1
+        if not (0 <= idx < len(self._last_threads)):
+            self._write(f"! no thread #{arg} — run /tasks", "red")
+            return
+        t = self._last_threads[idx]
+        await self._conn.send(switch_frame(str(t["platform"]), str(t["thread_key"])))

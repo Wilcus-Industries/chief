@@ -19,6 +19,7 @@ from chief.core.budget import (
     EFFECT_DOWNGRADE,
     BudgetGate,
     CurrencyPolicy,
+    CurrencySnapshot,
     cycle_key,
     premium_request_total,
 )
@@ -255,6 +256,32 @@ async def test_mode_defaults_normal_with_no_row(
 ) -> None:
     gate = _gate(session_factory, io)
     assert await gate.mode(usage.PREMIUM_REQUESTS) == usage.MODE_NORMAL
+
+
+# ---- snapshot (#138 /status) ----------------------------------------------
+
+
+async def test_snapshot_reports_cap_spend_and_mode(
+    session_factory: async_sessionmaker[AsyncSession], io: FakeBudgetIO
+) -> None:
+    gate = _gate(session_factory, io, premium_cap=200.0, dollar_cap=100.0)
+    await gate.record(usage.PREMIUM_REQUESTS, 50.0)
+
+    snapshot = await gate.snapshot()
+
+    by_currency = {s.currency: s for s in snapshot}
+    assert by_currency[usage.PREMIUM_REQUESTS] == CurrencySnapshot(
+        currency=usage.PREMIUM_REQUESTS,
+        spent=50.0,
+        cap=200.0,
+        mode=usage.MODE_NORMAL,
+    )
+    assert by_currency[usage.OPENROUTER_DOLLARS] == CurrencySnapshot(
+        currency=usage.OPENROUTER_DOLLARS,
+        spent=0.0,
+        cap=100.0,
+        mode=usage.MODE_NORMAL,
+    )
 
 
 async def test_concurrent_premium_records_card_only_once(

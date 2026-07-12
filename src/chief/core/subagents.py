@@ -273,6 +273,21 @@ def chief_skill_directories(directory: str | Path) -> list[str]:
     return directories
 
 
+def chief_skill_names(directory: str | Path) -> list[str]:
+    """Names of every chief-authored skill under ``directory`` (#138 ``/skills``).
+
+    Companion to :func:`chief_skill_directories`: same leaf-dir discovery (parent roots
+    and malformed files skipped the same way), reduced to just the ``name:`` each
+    SKILL.md declares.
+    """
+    names: list[str] = []
+    for skill_dir in chief_skill_directories(directory):
+        name = _skill_md_name(Path(skill_dir) / "SKILL.md")
+        if name is not None:
+            names.append(name)
+    return names
+
+
 def _spec_to_md(spec: SubagentSpec) -> str:
     """Serialise a spec to the exact on-disk shape :func:`_parse_subagent_md` reads:
     YAML frontmatter (``category``, ``description``, optional ``skills``) + prompt body.
