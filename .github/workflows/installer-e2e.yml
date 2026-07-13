@@ -1,0 +1,62 @@
+# Opt-in end-to-end run of the real one-liner (#154). Manually dispatched — it is
+# slow (a full clean-machine install) and not part of the merge gate.
+#
+# Central mechanism, never simulated: the actual `curl | bash` bootstrap executes
+# inside a fresh Debian container (the "clean machine" constraint), pointed at
+# THIS checkout via CHIEF_REPO_URL so the run tests the commit under review, not
+# old main. Assertions: the daemon boots, the web UI answers, and the wizard-set
+# owner credential logs in. The autostart service is skipped (no systemd inside
+# the container — the systemd/launchd paths are unit-tested, and launchd gets the
+# live Mac mini run); the first-chat round-trip needs live model credentials and
+# is covered by the keyed runs, not here.
+name: Installer E2E (opt-in)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-one-liner:
+    name: Fresh-Debian one-liner → web UI answering
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # actions/checkout leaves a detached HEAD; give the container's clone a
+      # real branch to resolve as origin/HEAD.
+      - name: Pin a branch for the container clone
+        run: git checkout -B e2e-under-test
+
+      - name: Run the real one-liner in a clean Debian container
+        run: |
+          docker run --rm -v "$PWD:/src:ro" \
+            -e CHIEF_REPO_URL=file:///src \
+            -e CHIEF_OWNER_PASSWORD=e2e-owner-pass1 \
+            debian:bookworm bash -euo pipefail -c '
+              apt-get update -qq
+              apt-get install -y -qq curl ca-certificates >/dev/null
+              # The README flow, byte for byte (repo URL redirected to /src).
+              curl -fsSL file:///src/bootstrap.sh \
+                | bash -s -- --no-service --non-interactive
+              export PATH="$HOME/.local/bin:$PATH"
+              chief status
+              cd "$HOME/.local/share/chief"
+
+              echo "--- web UI serves the login page ---"
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8130/login)
+              test "$code" = 200
+
+              echo "--- wizard-set credential logs in ---"
+              code=$(curl -s -o /dev/null -w "%{http_code}" -c /tmp/jar \
+                --data-urlencode "password=e2e-owner-pass1" \
+                http://127.0.0.1:8130/login)
+              test "$code" = 303
+
+              echo "--- authenticated chat page renders ---"
+              curl -sf -b /tmp/jar http://127.0.0.1:8130/chat | grep -qi chat
+
+              echo "PASS: one-liner → daemon up → web UI chatting surface live"
+            '

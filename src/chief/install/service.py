@@ -35,9 +35,16 @@ Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
 
 def _default_runner(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(
-        list(argv), capture_output=True, text=True, check=False
-    )
+    try:
+        return subprocess.run(
+            list(argv), capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        # A missing tool (no systemctl in a container, say) reads as a failed
+        # command, so callers surface one clear error instead of a traceback.
+        return subprocess.CompletedProcess(
+            list(argv), 127, stdout="", stderr=f"{argv[0]}: command not found"
+        )
 
 
 def default_path_env(launcher: Path) -> str:

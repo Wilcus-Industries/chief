@@ -11,10 +11,15 @@ this. Only add a rule here when it differs from, or isn't covered by, the global
 
 ## Run story (host-native)
 
-Core runs natively on this machine — no core container. One-time setup: `./install.sh`
-(prereqs, secrets/data scaffold, deps, migrations, `chief` launcher; `--google` /
-`--playwright` also start the MCP sidecars). Run with `chief` or
-`uv run python -m chief.entrypoint`. Sidecars: `docker compose --profile google up -d`.
+Core runs natively on this machine — no core container. Fresh-machine setup is the
+one-liner (`bootstrap.sh` → `install.sh`, README.md); from a clone, `./install.sh`
+does prereqs, scaffold, deps, migrations, the first-run wizard (web password + model
+auth — no platform tokens), the `chief` launcher, and the autostart service
+(`--google` / `--playwright` add the MCP sidecars; `--no-service` / `--no-launch` /
+`--non-interactive` for automation; re-runs are idempotent). Run in the foreground
+with `chief run` or `uv run python -m chief.entrypoint`; lifecycle via
+`chief start|stop|status|update|uninstall` — releases are git tags, and `update`
+pins to the newest. Sidecars: `docker compose --profile google up -d`.
 Attach the terminal client with `uv run chief-cli` (`--socket` overrides
 `settings.socket_path`); it is only a client, so quitting it leaves the daemon running.
 The web UI (#153) serves in-process at `http://127.0.0.1:8130` by default (`web_*`

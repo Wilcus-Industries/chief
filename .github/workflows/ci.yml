@@ -32,6 +32,11 @@ jobs:
       - name: mypy
         run: uv run mypy .
 
+      # Cheap static gate on the installer scripts (#154); the full run is the
+      # opt-in installer-e2e workflow.
+      - name: shellcheck installer scripts
+        run: shellcheck bootstrap.sh install.sh
+
   # Host-native smoke test. Core no longer ships as a container (it runs natively
   # via the `chief` launcher / `python -m chief.entrypoint`), so the smoke test
   # asserts the two boot invariants directly on the runner:

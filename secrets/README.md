@@ -60,7 +60,7 @@ chmod 0600 secrets/discord_bot_token \
 | `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 | `openrouter_api_key` | OpenRouter API key (optional — see "OpenRouter BYOK" below) |
 | `brave_search_api_key` | Brave Search API key (optional — see "Web search" below) |
-| `web_password` | scrypt hash of the web UI owner password — **written by chief** (first-visit `/setup` or the installer prompt), never hand-made (#153) |
+| `web_password` | scrypt hash of the web UI owner password — **written by chief** (first-visit `/setup` or the installer wizard, #154), never hand-made (#153) |
 | `web_sessions.json` | SHA-256 digests of live web sessions — **written by chief**; deleting it (or changing the password) logs every browser out |
 
 ## Chat platforms (Telegram and/or Discord)
@@ -94,7 +94,9 @@ Intents in the Developer Portal, or Discord delivers empty message content.
 
 Get a key from <https://openrouter.ai/settings/keys>. It is **optional**: leave the file
 absent and the behaviours above degrade as described. It is a separate credential from
-the Copilot login — see "Not here: the agent token" above.
+the Copilot login — see "Not here: the agent token" above. The installer wizard (#154)
+and the web settings page both validate and write this file for you — no hand-editing
+needed.
 
 ## Web search (issue #81, part of #72)
 
