@@ -175,10 +175,20 @@ async def test_card_raised_on_a_chat_platform_is_answerable_from_the_browser(
                 route="telegram:room1",
             )
         )
+        # A foreign thread's card reaches every page, but scoped: this cli:main
+        # page gets a pointer to the owning thread, not answer buttons.
         event, data = await sse.next_event()
         assert event == "approvals"
-        assert "telegram" in data
-        approval_id = _card_id(data)
+        assert "card-elsewhere" in data
+        assert "platform=telegram" in data and "telegram%3Aroom1" in data
+
+        # On the owning thread's own page the card renders in full — follow the
+        # pointer and answer from there.
+        page = await gate_stack.client.get(
+            "/approvals?platform=telegram&thread_key=telegram:room1"
+        )
+        approval_id = _card_id(page.text)
+        assert "approve_once" in page.text
 
         resp = await gate_stack.client.post(
             f"/approvals/{approval_id}", data={"action": "approve_once"}
