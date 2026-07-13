@@ -8,6 +8,7 @@ at this exact seam (argv + stdin in, ``ScriptResult`` out).
 """
 
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 from chief.tools.apple.runner import (
@@ -84,7 +85,7 @@ class _RecordingRunner(ScriptRunner):
         self.calls: list[tuple[tuple[str, ...], bytes | None]] = []
 
     async def run(
-        self, argv: list[str] | tuple[str, ...], *, stdin: bytes | None = None
+        self, argv: Sequence[str], *, stdin: bytes | None = None
     ) -> ScriptResult:
         self.calls.append((tuple(argv), stdin))
         return ScriptResult("", "", 0)

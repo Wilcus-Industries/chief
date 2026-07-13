@@ -15,6 +15,7 @@ import fnmatch
 import logging
 import os
 import re
+import sys
 from datetime import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,13 @@ from pydantic_settings import (
 
 from .client_plane import CLI_PLATFORM
 from .gate.blacklist import DEFAULT_SHELL_PATTERNS
+from .tools.apple.calendar import (
+    MUTATING_TOOL_NAMES as _APPLE_CALENDAR_WRITE_TOOLS,
+)
+from .tools.apple.messages import READ_TOOL_NAMES as _APPLE_MESSAGES_READ_TOOLS
+from .tools.apple.shortcuts import (
+    MUTATING_TOOL_NAMES as _APPLE_SHORTCUTS_MUTATING_TOOLS,
+)
 from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
 from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
 from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
@@ -57,6 +65,12 @@ logger = logging.getLogger("chief.config")
 #: own routing table, so under the owner default-allow gate a bare registration would
 #: run un-carded — each mutating edit must ASK. Its read-only ``list_routing`` is left
 #: off (it ALLOWs freely). The gate is this tool's security boundary.
+#: The Apple family's gated shapes (#155) are seeded too: ``run_shortcut`` is the
+#: escape hatch to anything the owner has automated (it can send, delete, or reach
+#: other people), so each shape's first run must ASK until approved into the APPROVED
+#: list; the Apple Calendar ``create_event`` matches the Google calendar write
+#: posture. The family's reads and owner-local creates (reminders, notes, clipboard,
+#: …) ALLOW freely.
 _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     _GMAIL_WRITE_TOOLS
     + _CALENDAR_WRITE_TOOLS
@@ -64,6 +78,8 @@ _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     + _SHEETS_WRITE_TOOLS
     + (_WEB_FETCH_TOOL,)
     + _ROUTING_ADMIN_TOOLS
+    + _APPLE_CALENDAR_WRITE_TOOLS
+    + _APPLE_SHORTCUTS_MUTATING_TOOLS
 )
 
 #: Where chief writes its own behavioral overlay (#107, part of #103). Kept as a
@@ -96,6 +112,9 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     # Repointing the control socket relocates a privileged local-control surface —
     # same fence class as db_path (an overlay must not move where chief listens).
     "socket_path",
+    # Repointing which database the Messages read tools open is an endpoint move —
+    # the same fence class as *_mcp_url (#155). apple_enabled is caught by *_enabled.
+    "apple_messages_db_path",
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
@@ -156,6 +175,8 @@ MERGE_SAFE: frozenset[str] = frozenset(
         "workspace_dir",
         "shell_timeout_seconds",
         "shell_output_limit",
+        "apple_script_timeout_seconds",
+        "apple_output_limit",
         "web_fetch_timeout_seconds",
         "web_fetch_max_bytes",
         "web_search_count",
@@ -357,7 +378,9 @@ class Settings(BaseSettings):
         "mcp__gmail_chief__gmail_search_messages",
         "mcp__gmail_chief__gmail_list_drafts",
         "mcp__drive__ReadDriveFile",
-    )
+        # Apple Messages history reads (#155): message text arrives from other
+        # people, the same untrusted channel class as Gmail bodies.
+    ) + _APPLE_MESSAGES_READ_TOOLS
 
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
     # tier-isolated session (take-a-message + calendar free/busy + owner-approved
@@ -409,8 +432,24 @@ class Settings(BaseSettings):
     playwright_mcp_url: str = "http://127.0.0.1:3000/mcp"
     # Host directory bind-mounted into mcp-playwright at /screenshots. Core reads
     # screenshot files from here to deliver them via send_file after
-    # browser_take_screenshot runs.
+    # browser_take_screenshot runs. The Apple screenshot tool (#155) writes its
+    # captures here too, so every screenshot lands in one place.
     playwright_screenshots_dir: str = "data/screenshots"
+
+    # Apple ecosystem tools (#155), owner-only, darwin-gated. Unlike the other opt-in
+    # subsystems, apple_enabled defaults ON: the family is auto-detected — effective
+    # only when chief boots on macOS (see the apple_configured property), inert on
+    # Linux regardless, and force-off with apple_enabled: false. At boot,
+    # per-capability TCC permission probes (chief.tools.apple.doctor) decide which
+    # app-area services actually register; the permissions doctor always registers on
+    # a Mac. apple_script_timeout_seconds bounds one osascript/shortcuts/sqlite3
+    # child process; apple_output_limit caps its captured output;
+    # apple_messages_db_path is the Messages store the read-only history tools open
+    # (needs Full Disk Access).
+    apple_enabled: bool = True
+    apple_script_timeout_seconds: float = 30.0
+    apple_output_limit: int = 200_000
+    apple_messages_db_path: str = "~/Library/Messages/chat.db"
 
     # Host shell + file workspace (M7, host-native rework), owner-only.
     # shell_enabled wires the in-process bash tool that runs a persistent per-task
@@ -602,6 +641,7 @@ class Settings(BaseSettings):
         "chief_skills_dir",
         "harness_dir",
         "self_config_path",
+        "apple_messages_db_path",
     )
     @classmethod
     def _expand_user_paths(cls, value: str) -> str:
@@ -756,6 +796,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("apple_script_timeout_seconds", "apple_output_limit")
+    @classmethod
+    def _validate_apple_bounds(cls, value: float) -> float:
+        """The Apple runner's timeout and output cap must be positive — a zero or
+        negative bound would kill every child process (or drop all output)."""
+        if value <= 0:
+            raise ValueError(
+                f"apple runner bounds must be > 0, got {value!r}"
+            )
+        return value
+
     @field_validator("group_context_max_messages")
     @classmethod
     def _validate_group_buffer_cap(cls, value: int) -> int:
@@ -786,6 +837,16 @@ class Settings(BaseSettings):
     def discord_configured(self) -> bool:
         """True iff both the Discord owner id and bot token are set (non-empty)."""
         return bool(self.owner_discord_id) and bool(self.discord_bot_token)
+
+    @property
+    def apple_configured(self) -> bool:
+        """True iff the Apple tool family should exist: enabled AND on macOS (#155).
+
+        The cross-field check pairs the flag with the platform the process actually
+        runs on — a Mac boot grows the family with zero config, a Linux boot is
+        silently inert regardless, and ``apple_enabled: false`` is the force-off.
+        """
+        return self.apple_enabled and sys.platform == "darwin"
 
     @model_validator(mode="after")
     def _require_front_desk_for_guests(self) -> "Settings":
