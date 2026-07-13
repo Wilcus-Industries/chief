@@ -266,6 +266,124 @@ def files_page_body(
     )
 
 
+class HealthRow(Protocol):
+    """What :func:`health_page_body` needs from one checklist item."""
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def ok(self) -> bool | None: ...
+    @property
+    def detail(self) -> str: ...
+
+
+def health_page_body(items: Iterable[HealthRow]) -> str:
+    """The pluggable checklist, one row per item: verdict mark, name, detail."""
+    rows = "".join(
+        "<tr>"
+        f"<td>{_mark(item.ok)}</td>"
+        f"<td>{_esc(item.name)}</td>"
+        f'<td class="note">{_esc(item.detail)}</td>'
+        "</tr>"
+        for item in items
+    )
+    return f"<h1>Health</h1><table>{rows}</table>"
+
+
+def _mark(ok: bool | None) -> str:
+    if ok is None:
+        return "·"
+    return '<span class="ok">✔</span>' if ok else '<span class="bad">✘</span>'
+
+
+def _platform_section(name: str, key: str, connected: bool) -> str:
+    if connected:
+        return (
+            f'<div class="panel"><h2>{_esc(name)}</h2>'
+            '<p><span class="ok">✔ Connected</span>'
+            ' <span class="note">(restart applies changes)</span></p>'
+            f'<form method="post" action="/settings/platform/{key}">'
+            '<input type="hidden" name="action" value="disconnect">'
+            '<button class="danger">Disconnect</button></form></div>'
+        )
+    return (
+        f'<div class="panel"><h2>{_esc(name)}</h2>'
+        '<p class="note">Not connected.</p>'
+        f'<form class="stack" method="post" action="/settings/platform/{key}">'
+        f'<input type="text" name="token" placeholder="{_esc(name)} bot token">'
+        '<input type="text" name="owner_id" placeholder="Your numeric user id"'
+        ' inputmode="numeric">'
+        "<button>Validate &amp; connect</button></form></div>"
+    )
+
+
+def settings_page_body(
+    *,
+    telegram_connected: bool,
+    discord_connected: bool,
+    openrouter_connected: bool,
+    current: Mapping[str, object],
+    error: str | None = None,
+) -> str:
+    """The curated settings forms — never a general config editor."""
+    banner = f'<p class="error">{_esc(error)}</p>' if error else ""
+    openrouter = (
+        '<div class="panel"><h2>OpenRouter</h2>'
+        + (
+            '<p><span class="ok">✔ Key saved</span></p>'
+            '<form method="post" action="/settings/openrouter">'
+            '<input type="hidden" name="action" value="disconnect">'
+            '<button class="danger">Remove key</button></form>'
+            if openrouter_connected
+            else '<p class="note">Powers model routing, the cheap classifiers, and'
+            " injection screening.</p>"
+            '<form class="stack" method="post" action="/settings/openrouter">'
+            '<input type="text" name="api_key" placeholder="OpenRouter API key">'
+            "<button>Validate &amp; save</button></form>"
+        )
+        + "</div>"
+    )
+    lan_on = bool(current.get("web_lan_enabled"))
+    model = str(current.get("owner_model_default") or "")
+    start = str(current.get("quiet_hours_start") or "")
+    end = str(current.get("quiet_hours_end") or "")
+    return (
+        "<h1>Settings</h1>"
+        '<p class="note">Changes apply on the next daemon restart.</p>'
+        + banner
+        + _platform_section("Telegram", "telegram", telegram_connected)
+        + _platform_section("Discord", "discord", discord_connected)
+        + openrouter
+        + '<div class="panel"><h2>Model</h2>'
+        '<form class="stack" method="post" action="/settings/model">'
+        f'<input type="text" name="owner_model_default" value="{_esc(model)}">'
+        "<button>Save default model</button></form></div>"
+        + '<div class="panel"><h2>Web access</h2>'
+        '<form class="stack" method="post" action="/settings/web">'
+        "<label><input type=\"checkbox\" name=\"lan\""
+        f"{' checked' if lan_on else ''}> Serve on the LAN (all interfaces)"
+        "</label><button>Save</button></form></div>"
+        + '<div class="panel"><h2>Quiet hours</h2>'
+        '<form class="stack" method="post" action="/settings/quiet-hours">'
+        f'<input type="text" name="start" value="{_esc(start)}"'
+        ' placeholder="Start (HH:MM, empty = off)">'
+        f'<input type="text" name="end" value="{_esc(end)}"'
+        ' placeholder="End (HH:MM)">'
+        "<button>Save quiet hours</button></form></div>"
+        + '<div class="panel"><h2>Password</h2>'
+        '<p class="note">Changing it logs every browser out (including old'
+        " sessions everywhere).</p>"
+        '<form class="stack" method="post" action="/settings/password">'
+        '<input type="password" name="current" placeholder="Current password"'
+        ' autocomplete="current-password">'
+        '<input type="password" name="password" placeholder="New password"'
+        ' autocomplete="new-password">'
+        '<input type="password" name="confirm" placeholder="Confirm new password"'
+        ' autocomplete="new-password">'
+        "<button>Change password</button></form></div>"
+    )
+
+
 def _thread_query(platform: str, thread_key: str) -> str:
     """URL-encoded ``platform``/``thread_key`` pair, HTML-escaped for attributes."""
     return _esc(urlencode({"platform": platform, "thread_key": thread_key}))

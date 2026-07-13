@@ -40,6 +40,7 @@ from ..client_plane import (
     TYPE_MILESTONE,
     TYPE_REPLY,
 )
+from ..config import parse_hhmm
 from . import render
 from .auth import SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
 from .bridge import BridgeError, SocketBridge
@@ -49,6 +50,8 @@ from .files import (
     ForbiddenPathError,
     UnknownAreaError,
 )
+from .health import HealthCheck
+from .settings_io import PLATFORM_FIELDS, SettingsPanel
 
 #: Minimum password length enforced on /setup and the change-password form.
 MIN_PASSWORD_LENGTH = 8
@@ -71,6 +74,10 @@ class WebDeps:
     bridge: SocketBridge | None = None
     #: The exposed file roots (workspace + screenshots). ``None`` hides the surface.
     files: FileAreas | None = None
+    #: The curated settings write targets. ``None`` hides the settings forms.
+    settings_panel: SettingsPanel | None = None
+    #: The health page's pluggable checklist (append to extend the page).
+    health: tuple[HealthCheck, ...] | list[HealthCheck] = ()
 
 
 def _session_token(scope: Scope) -> str | None:
@@ -355,20 +362,27 @@ def build_web_app(deps: WebDeps) -> Starlette:
     async def files_upload(request: Request) -> Response:
         if deps.files is None:
             return PlainTextResponse("file access not configured", status_code=503)
-        form = await request.form()
-        area = str(form.get("area") or UPLOAD_AREA)
-        if area != UPLOAD_AREA:
-            # Uploads land in the agent workspace ONLY — screenshots stay read-only.
-            return PlainTextResponse(
-                "uploads go to the workspace only", status_code=400
-            )
-        upload = form.get("file")
-        if not isinstance(upload, UploadFile):
-            return PlainTextResponse("a file is required", status_code=400)
-        try:
-            deps.files.save_upload(upload.filename or "upload", await upload.read())
-        except UnknownAreaError:
-            return PlainTextResponse("workspace is not configured", status_code=400)
+        # The context manager closes the spooled temp file the parser created —
+        # without it the upload's buffer lingers until GC.
+        async with request.form() as form:
+            area = str(form.get("area") or UPLOAD_AREA)
+            if area != UPLOAD_AREA:
+                # Uploads land in the agent workspace ONLY — screenshots stay
+                # read-only.
+                return PlainTextResponse(
+                    "uploads go to the workspace only", status_code=400
+                )
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                return PlainTextResponse("a file is required", status_code=400)
+            try:
+                deps.files.save_upload(
+                    upload.filename or "upload", await upload.read()
+                )
+            except UnknownAreaError:
+                return PlainTextResponse(
+                    "workspace is not configured", status_code=400
+                )
         return RedirectResponse(f"/files?area={UPLOAD_AREA}", status_code=303)
 
     async def files_download(request: Request) -> Response:
@@ -415,6 +429,163 @@ def build_web_app(deps: WebDeps) -> Starlette:
         ]
         return HTMLResponse(render.approvals_html(remaining))
 
+    def _settings_page_html(error: str | None = None) -> str:
+        panel = deps.settings_panel
+        assert panel is not None
+        secrets = panel.secrets
+        # Display the freshest written values (the config file), falling back to
+        # the boot snapshot for keys the owner never edited.
+        stored = panel.config.read()
+
+        def current(key: str) -> object:
+            return stored.get(key, getattr(panel.settings, key))
+
+        body = render.settings_page_body(
+            telegram_connected=secrets.exists("telegram_bot_token"),
+            discord_connected=secrets.exists("discord_bot_token"),
+            openrouter_connected=secrets.exists("openrouter_api_key"),
+            current={
+                key: current(key)
+                for key in (
+                    "owner_model_default",
+                    "web_lan_enabled",
+                    "quiet_hours_start",
+                    "quiet_hours_end",
+                )
+            },
+            error=error,
+        )
+        return render.page("Settings", body, active="/settings")
+
+    async def settings_page(request: Request) -> Response:
+        if deps.settings_panel is None:
+            body = '<h1>Settings</h1><p class="note">Settings are not wired.</p>'
+            return HTMLResponse(render.page("Settings", body, active="/settings"))
+        return HTMLResponse(_settings_page_html())
+
+    async def settings_platform(request: Request) -> Response:
+        if deps.settings_panel is None:
+            return PlainTextResponse("settings not wired", status_code=503)
+        panel = deps.settings_panel
+        platform = request.path_params["platform"]
+        fields = PLATFORM_FIELDS.get(platform)
+        if fields is None:
+            return PlainTextResponse("no such platform", status_code=404)
+        token_file, owner_id_key = fields
+        form = await request.form()
+        if form.get("action") == "disconnect":
+            panel.secrets.delete(token_file)
+            # 0 is the committed "unset" sentinel for owner ids (config.yaml).
+            panel.config.update({owner_id_key: 0})
+            return RedirectResponse("/settings", status_code=303)
+        token = str(form.get("token") or "").strip()
+        raw_owner_id = str(form.get("owner_id") or "").strip()
+        if not token:
+            return HTMLResponse(
+                _settings_page_html("A bot token is required."), status_code=400
+            )
+        if not raw_owner_id.isdigit() or int(raw_owner_id) <= 0:
+            return HTMLResponse(
+                _settings_page_html("The owner id must be a positive number."),
+                status_code=400,
+            )
+        error = await panel.validators[platform](token)
+        if error is not None:
+            return HTMLResponse(_settings_page_html(error), status_code=400)
+        panel.secrets.write(token_file, token)
+        panel.config.update({owner_id_key: int(raw_owner_id)})
+        return RedirectResponse("/settings", status_code=303)
+
+    async def settings_openrouter(request: Request) -> Response:
+        if deps.settings_panel is None:
+            return PlainTextResponse("settings not wired", status_code=503)
+        panel = deps.settings_panel
+        form = await request.form()
+        if form.get("action") == "disconnect":
+            panel.secrets.delete("openrouter_api_key")
+            return RedirectResponse("/settings", status_code=303)
+        key = str(form.get("api_key") or "").strip()
+        if not key:
+            return HTMLResponse(
+                _settings_page_html("An API key is required."), status_code=400
+            )
+        error = await panel.validators["openrouter"](key)
+        if error is not None:
+            return HTMLResponse(_settings_page_html(error), status_code=400)
+        panel.secrets.write("openrouter_api_key", key)
+        return RedirectResponse("/settings", status_code=303)
+
+    async def settings_model(request: Request) -> Response:
+        if deps.settings_panel is None:
+            return PlainTextResponse("settings not wired", status_code=503)
+        model = (await _form_str(request, "owner_model_default")).strip()
+        if not model:
+            return HTMLResponse(
+                _settings_page_html("A model id is required."), status_code=400
+            )
+        deps.settings_panel.config.update({"owner_model_default": model})
+        return RedirectResponse("/settings", status_code=303)
+
+    async def settings_web(request: Request) -> Response:
+        if deps.settings_panel is None:
+            return PlainTextResponse("settings not wired", status_code=503)
+        form = await request.form()
+        lan = form.get("lan") is not None  # unchecked checkboxes are absent
+        deps.settings_panel.config.update({"web_lan_enabled": lan})
+        return RedirectResponse("/settings", status_code=303)
+
+    async def settings_quiet_hours(request: Request) -> Response:
+        if deps.settings_panel is None:
+            return PlainTextResponse("settings not wired", status_code=503)
+        form = await request.form()
+        start = str(form.get("start") or "").strip()
+        end = str(form.get("end") or "").strip()
+        if start and parse_hhmm(start) is None:
+            return HTMLResponse(
+                _settings_page_html("Quiet-hours start must be 24-hour HH:MM."),
+                status_code=400,
+            )
+        if not end or parse_hhmm(end) is None:
+            return HTMLResponse(
+                _settings_page_html("Quiet-hours end must be 24-hour HH:MM."),
+                status_code=400,
+            )
+        deps.settings_panel.config.update(
+            {"quiet_hours_start": start or None, "quiet_hours_end": end}
+        )
+        return RedirectResponse("/settings", status_code=303)
+
+    async def settings_password(request: Request) -> Response:
+        form = await request.form()
+        current = str(form.get("current") or "")
+        password = str(form.get("password") or "")
+        confirm = str(form.get("confirm") or "")
+        error: str | None = None
+        if not deps.auth.verify(current):
+            error = "The current password is wrong."
+        elif len(password) < MIN_PASSWORD_LENGTH:
+            error = (
+                f"The new password needs at least {MIN_PASSWORD_LENGTH} characters."
+            )
+        elif password != confirm:
+            error = "The new passwords do not match."
+        if error is not None:
+            if deps.settings_panel is not None:
+                return HTMLResponse(_settings_page_html(error), status_code=400)
+            return PlainTextResponse(error, status_code=400)
+        deps.auth.set_password(password)  # revokes every session, everywhere
+        response = RedirectResponse("/settings", status_code=303)
+        # Keep THIS browser logged in: mint a fresh session under the new
+        # credential — every other cookie in the world is now dead.
+        _set_session_cookie(response, deps.auth.issue_session())
+        return response
+
+    async def health_page(request: Request) -> Response:
+        items = [await check() for check in deps.health]
+        return HTMLResponse(
+            render.page("Health", render.health_page_body(items), active="/health")
+        )
+
     async def events(request: Request) -> Response:
         if deps.bridge is None:
             return PlainTextResponse("chat plane not connected", status_code=503)
@@ -458,6 +629,14 @@ def build_web_app(deps: WebDeps) -> Starlette:
         Route("/files/download", files_download, methods=["GET"]),
         Route("/approvals", approvals_partial, methods=["GET"]),
         Route("/approvals/{approval_id:int}", approvals_answer, methods=["POST"]),
+        Route("/settings", settings_page, methods=["GET"]),
+        Route("/settings/platform/{platform}", settings_platform, methods=["POST"]),
+        Route("/settings/openrouter", settings_openrouter, methods=["POST"]),
+        Route("/settings/model", settings_model, methods=["POST"]),
+        Route("/settings/web", settings_web, methods=["POST"]),
+        Route("/settings/quiet-hours", settings_quiet_hours, methods=["POST"]),
+        Route("/settings/password", settings_password, methods=["POST"]),
+        Route("/health", health_page, methods=["GET"]),
         Route("/events", events, methods=["GET"]),
         Mount("/static", StaticFiles(directory=_STATIC_DIR), name="static"),
     ]

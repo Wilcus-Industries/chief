@@ -15,7 +15,13 @@ from .app import WebDeps, build_web_app
 from .auth import WebAuth
 from .bridge import SocketBridge
 from .files import FileAreas
+from .health import build_health_checks
 from .server import WebServer
+from .settings_io import OwnerConfig, SecretsStore, SettingsPanel
+
+#: The owner config file the curated settings forms write. Relative on purpose —
+#: resolved against the process cwd, exactly how pydantic-settings finds it.
+OWNER_CONFIG_PATH = Path("config.yaml")
 
 
 @dataclass
@@ -36,7 +42,12 @@ class WebStack:
         await self.bridge.stop()
 
 
-def build_web_stack(settings: Settings, *, secrets_dir: Path) -> WebStack:
+def build_web_stack(
+    settings: Settings,
+    *,
+    secrets_dir: Path,
+    config_path: Path = OWNER_CONFIG_PATH,
+) -> WebStack:
     """Build the production web stack; pure construction, no I/O until ``run``."""
     auth = WebAuth(secrets_dir)
     bridge = SocketBridge(settings.socket_path)
@@ -51,6 +62,19 @@ def build_web_stack(settings: Settings, *, secrets_dir: Path) -> WebStack:
             else None
         ),
     )
-    app = build_web_app(WebDeps(auth=auth, bridge=bridge, files=files))
+    panel = SettingsPanel(
+        secrets=SecretsStore(secrets_dir),
+        config=OwnerConfig(config_path),
+        settings=settings,
+    )
+    app = build_web_app(
+        WebDeps(
+            auth=auth,
+            bridge=bridge,
+            files=files,
+            settings_panel=panel,
+            health=tuple(build_health_checks(settings)),
+        )
+    )
     server = WebServer(app, host=settings.web_host, port=settings.web_port)
     return WebStack(server=server, bridge=bridge)

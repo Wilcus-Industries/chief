@@ -126,6 +126,19 @@ def _overlay_denied(key: str) -> bool:
     return any(fnmatch.fnmatchcase(key, pat) for pat in SELF_CONFIG_DENYLIST)
 
 
+def parse_hhmm(value: str) -> time | None:
+    """Parse a 24-hour ``"HH:MM"`` wall clock, or ``None`` when malformed.
+
+    Shared by the quiet-hours boot validator below and the web settings form
+    (#153), so the two can never drift on what counts as a valid bound.
+    """
+    try:
+        hour, minute = value.split(":")
+        return time(int(hour), int(minute))
+    except (ValueError, TypeError):
+        return None
+
+
 #: Review-time allow-list: the explicit complement of ``SELF_CONFIG_DENYLIST`` over
 #: ``Settings.model_fields`` (#109). Every ``Settings`` field must be either denied
 #: by ``SELF_CONFIG_DENYLIST`` or listed here as merge-safe — the guard test
@@ -725,13 +738,8 @@ class Settings(BaseSettings):
         """
         if value is None:
             return None
-        try:
-            hour, minute = value.split(":")
-            time(int(hour), int(minute))
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f"quiet hours must be 24-hour HH:MM, got {value!r}"
-            ) from exc
+        if parse_hhmm(value) is None:
+            raise ValueError(f"quiet hours must be 24-hour HH:MM, got {value!r}")
         return value
 
     @field_validator("budget_warn_fractions")

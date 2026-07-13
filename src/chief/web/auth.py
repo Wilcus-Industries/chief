@@ -21,6 +21,8 @@ import secrets
 from pathlib import Path
 from typing import Final
 
+from .settings_io import write_owner_only
+
 logger = logging.getLogger(__name__)
 
 #: One-file-per-secret names, following the secrets-dir convention
@@ -42,9 +44,6 @@ _SCRYPT_R: Final[int] = 8
 _SCRYPT_P: Final[int] = 1
 _SALT_BYTES: Final[int] = 16
 _KEY_BYTES: Final[int] = 32
-
-#: Owner read/write only — the same fence class as every other secrets-dir file.
-_SECRET_MODE: Final[int] = 0o600
 
 
 def hash_password(password: str) -> str:
@@ -113,8 +112,7 @@ class WebAuth:
 
     def set_password(self, password: str) -> None:
         """Write the hashed credential and revoke every existing session."""
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._write_secret(self._password_file, hash_password(password))
+        write_owner_only(self._password_file, hash_password(password))
         self.revoke_all()
 
     def verify(self, password: str) -> bool:
@@ -170,13 +168,4 @@ class WebAuth:
         return [t for t in tokens if isinstance(t, str)]
 
     def _store_digests(self, digests: list[str]) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        self._write_secret(self._sessions_file, json.dumps({"tokens": digests}))
-
-    @staticmethod
-    def _write_secret(path: Path, content: str) -> None:
-        # touch-then-chmod-then-write: never leave secret bytes in a window where
-        # the file carries the default (group/other-readable) mode.
-        path.touch(mode=_SECRET_MODE, exist_ok=True)
-        path.chmod(_SECRET_MODE)
-        path.write_text(content)
+        write_owner_only(self._sessions_file, json.dumps({"tokens": digests}))
