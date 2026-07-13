@@ -836,6 +836,26 @@ card:
 - **File workspace** — scratch dir (Read/Write/Edit) at `data/workspace`; host-native:
   writes anywhere are allowed, the workspace is just the suggested scratch area +
   shell cwd. Opt-in (`workspace_enabled`).
+- **Apple ecosystem** (#155) — owner-only, **auto-detected and self-gating**: on a
+  macOS boot (`apple_enabled` defaults ON; force-off available) per-capability TCC
+  permission probes decide which app areas register; on Linux none of it exists.
+  Subprocess-first — one in-process server per app area drives the OS automation
+  layer (fixed JXA via `osascript`, the Shortcuts CLI, the sqlite3 CLI) through the
+  `chief.tools.apple.runner.ScriptRunner` seam; no PyObjC. Areas: Reminders
+  (create/list/complete), Notes (create/search/read), Contacts lookup, Apple
+  Calendar (create/list events), Shortcuts (list/run), system control (clipboard,
+  notifications, screenshots), and **read-only** Messages history (the read layer
+  the iMessage adapter PRD builds on; sending lives there, not here). Gated shapes:
+  `run_shortcut` + Apple Calendar `create_event` are blacklist-seeded (ASK);
+  Messages reads are screened (other people's text). The **permissions doctor**
+  (`check_apple_health`) probes each grant, reports per-capability health **as
+  data** (the #153 web health page consumes `AppleToolFamily.check_health`), and
+  carries the exact System Settings walk-through per missing grant; capabilities
+  degrade individually and register at the next boot. Supported macOS floor:
+  **macOS 14 (Sonoma)** — older releases differ in TCC behavior, scripting
+  dictionaries, and the sqlite3 `-json` mode; the env-gated live suite
+  (`CHIEF_APPLE_LIVE=1`, on the Mac mini rig) is the canary for Apple changing any
+  of those.
 - **Memory, scheduler/monitors** — owner-tier management tools.
 
 **Guest toolset (v1):** take-a-message, check-availability (free/busy only), request-booking.
