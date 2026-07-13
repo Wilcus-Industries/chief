@@ -12,3 +12,8 @@ in-process pattern), plus the permissions doctor
 (:mod:`chief.tools.apple.doctor`) that maps macOS TCC grants to a per-capability
 health checklist with exact System Settings walk-throughs.
 """
+
+from .family import AppleService, AppleToolFamily
+from .runner import ScriptRunner
+
+__all__ = ["AppleService", "AppleToolFamily", "ScriptRunner"]
