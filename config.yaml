@@ -54,6 +54,8 @@ routing_enabled: false
 # a reverse proxy for anything beyond that). Auth is one owner password, set on first
 # visit (/setup) or by the installer; it lives hashed in the secrets dir
 # (web_password) with revocable browser sessions beside it (web_sessions.json).
+# The web Settings page writes back into THIS file (curated scalar keys only,
+# comments preserved) and into the secrets dir for tokens; edits apply on restart.
 web_enabled: true
 web_port: 8130
 web_lan_enabled: false
