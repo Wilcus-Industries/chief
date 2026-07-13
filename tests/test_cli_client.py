@@ -23,6 +23,7 @@ from chief.adapters.commands import OWNER_COMMANDS
 from chief.cli.app import (
     AWAY_FOOTER,
     AWAY_HEADER,
+    HIDDEN_FORWARDED,
     OWNER_STYLE,
     ChiefCliApp,
     Line,
@@ -262,6 +263,8 @@ async def test_help_lists_client_and_owner_commands(
         await _settle(app, lambda: len(app.transcript) >= 2)
         blob = "\n".join(line.text for line in app.transcript)
         for name in OWNER_COMMANDS.names():
+            if name in HIDDEN_FORWARDED:
+                continue
             assert f"/{name}" in blob
         assert "/new" in blob
         assert "/quit" in blob
@@ -747,36 +750,19 @@ async def test_bare_switch_opens_a_thread_picker(
         assert app.dropdown_options == []
 
 
-async def test_bare_cancel_offers_only_cli_threads(
+async def test_cancel_is_hidden_from_completion_and_help(
     app: ChiefCliApp, peer: ScriptedPeer
 ) -> None:
-    """``/cancel`` pickers over cli threads only — a ``command`` frame dispatches on
-    the cli engine, so cancelling a foreign platform's thread there is a no-op."""
+    """ctrl+c is this client's cancel — the daemon command is neither completed nor
+    listed here (other platforms keep /cancel)."""
     async with app.run_test() as pilot:
-        await pilot.press(*"/cancel", "enter")
-        await _settle(app, lambda: bool(peer.received) and
-                      peer.received[-1].get("type") == "list_threads")
-
-        await peer.push(
-            threads_frame(
-                [
-                    {
-                        "platform": "telegram", "thread_key": "-100:5",
-                        "title": "chat", "status": "open",
-                    },
-                    {
-                        "platform": "cli", "thread_key": "cli:main",
-                        "title": None, "status": "open",
-                    },
-                ]
-            )
-        )
-        await _settle(app, lambda: len(app.dropdown_options) == 1)
-        assert "cli:main" in app.dropdown_options[0]
-
-        await pilot.press("enter")
-        await _settle(app, lambda: peer.received[-1].get("type") == "command")
-        assert peer.received[-1] == command_frame("cli:main", "cancel", "")
+        await pilot.press(*"/c")
+        assert "/cancel" not in app.dropdown_options
+        await pilot.press("escape", "backspace", "backspace")
+        await pilot.press(*"/help", "enter")
+        await _settle(app, lambda: len(app.transcript) >= 2)
+        blob = "\n".join(line.text for line in app.transcript)
+        assert "/cancel" not in blob
 
 
 async def test_picker_escape_sends_nothing(
@@ -802,30 +788,6 @@ async def test_picker_escape_sends_nothing(
         await pilot.press("escape")
         assert app.dropdown_options == []
         assert len(peer.received) == n
-
-
-async def test_cancel_picker_with_no_cli_threads_says_so(
-    app: ChiefCliApp, peer: ScriptedPeer
-) -> None:
-    async with app.run_test() as pilot:
-        await pilot.press(*"/cancel", "enter")
-        await _settle(app, lambda: bool(peer.received) and
-                      peer.received[-1].get("type") == "list_threads")
-        await peer.push(
-            threads_frame(
-                [
-                    {
-                        "platform": "telegram", "thread_key": "-100:5",
-                        "title": "chat", "status": "open",
-                    },
-                ]
-            )
-        )
-        await _settle(
-            app,
-            lambda: any("nothing to cancel" in line.text for line in app.transcript),
-        )
-        assert app.dropdown_options == []
 
 
 # ---- owner vs agent lines are visually distinct --------------------------------------
