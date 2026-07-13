@@ -28,6 +28,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..client_plane import (
+    CARD_OPTIONS,
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
     TYPE_CARD,
@@ -323,6 +324,35 @@ def build_web_app(deps: WebDeps) -> Starlette:
             status_code=303,
         )
 
+    async def approvals_partial(request: Request) -> Response:
+        if deps.bridge is None:
+            return HTMLResponse("")
+        return HTMLResponse(render.approvals_html(deps.bridge.pending_cards()))
+
+    async def approvals_answer(request: Request) -> Response:
+        if deps.bridge is None:
+            return PlainTextResponse("chat plane not connected", status_code=503)
+        approval_id = int(request.path_params["approval_id"])
+        action = await _form_str(request, "action")
+        if action not in {option["action"] for option in CARD_OPTIONS}:
+            return PlainTextResponse(f"unknown action {action!r}", status_code=400)
+        if approval_id not in deps.bridge.cards:
+            # The bridge's card ledger is authoritative: a resolved (or never-seen)
+            # id means someone already decided — first answer wins, everywhere.
+            return PlainTextResponse(
+                f"approval {approval_id} is unknown or already resolved",
+                status_code=409,
+            )
+        await deps.bridge.answer(approval_id, action)
+        # Optimistic render: drop the just-answered card now; the authoritative
+        # card_resolved broadcast re-renders the block for every other page.
+        remaining = [
+            card
+            for card in deps.bridge.pending_cards()
+            if card.get("approval_id") != approval_id
+        ]
+        return HTMLResponse(render.approvals_html(remaining))
+
     async def events(request: Request) -> Response:
         if deps.bridge is None:
             return PlainTextResponse("chat plane not connected", status_code=503)
@@ -361,6 +391,8 @@ def build_web_app(deps: WebDeps) -> Starlette:
         Route("/chat/send", chat_send, methods=["POST"]),
         Route("/chat/cancel", chat_cancel, methods=["POST"]),
         Route("/chat/new", chat_new, methods=["GET"]),
+        Route("/approvals", approvals_partial, methods=["GET"]),
+        Route("/approvals/{approval_id:int}", approvals_answer, methods=["POST"]),
         Route("/events", events, methods=["GET"]),
         Mount("/static", StaticFiles(directory=_STATIC_DIR), name="static"),
     ]
