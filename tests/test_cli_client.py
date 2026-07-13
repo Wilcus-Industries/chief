@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Footer, Static
+from textual.widgets import Footer, RichLog, Static
 
 from chief.adapters.commands import OWNER_COMMANDS
 from chief.cli.app import (
@@ -943,3 +943,39 @@ async def test_bottom_widgets_do_not_overlap(app: ChiefCliApp) -> None:
 
         # The input keeps its full box — a cut-off prompt is the bug this pins.
         assert boxes["prompt"].height == 3
+
+
+# --- A sent line must be fully visible at the bottom, whatever the terminal width -----
+#
+# ``RichLog``'s ``min_width`` (default 78) is a floor on the render width that overrides
+# ``wrap``: on a viewport narrower than 78 columns a line longer than the viewport was
+# laid out at 78 and overflowed horizontally, so the tail — a just-sent ``> …`` echo at
+# the end of a long convo included — was clipped off the right edge instead of wrapping.
+
+
+async def test_submitted_line_is_not_clipped_on_a_narrow_terminal(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test(size=(64, 20)) as pilot:
+        for i in range(40):
+            await peer.push(reply_frame("cli:main", f"history line {i}"))
+        await _settle(
+            app,
+            lambda: sum(
+                1 for line in app.transcript if line.text.startswith("history line")
+            )
+            >= 40,
+        )
+        message = (
+            "please summarize the meeting notes and email the recap to the team now"
+        )
+        await pilot.press(*message, "enter")
+        await _settle(
+            app, lambda: any(line.text == f"> {message}" for line in app.transcript)
+        )
+
+        transcript = app.query_one("#transcript", RichLog)
+        # The line wraps to the viewport instead of overflowing off the right edge …
+        assert transcript.max_scroll_x == 0
+        # … and it is scrolled fully into view at the bottom.
+        assert transcript.is_vertical_scroll_end

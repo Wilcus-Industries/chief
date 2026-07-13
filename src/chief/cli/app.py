@@ -162,7 +162,12 @@ class ChiefCliApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield RichLog(id="transcript", wrap=True, markup=False)
+        # ``min_width`` (default 78) is a floor on the render width that overrides
+        # ``wrap``: without lowering it, a line longer than a sub-78-column viewport is
+        # laid out at 78 and overflows horizontally — the tail (a just-sent ``> …``
+        # echo included) is clipped off the right edge instead of wrapping. Floor it at
+        # 1 so ``wrap`` actually wraps to the visible width.
+        yield RichLog(id="transcript", wrap=True, markup=False, min_width=1)
         yield Static(id="statusbar")
         yield OptionList(id="dropdown")
         yield PromptInput(placeholder="message chief — /help", id="prompt")
