@@ -15,8 +15,10 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.datastructures import UploadFile
 from starlette.requests import Request
 from starlette.responses import (
+    FileResponse,
     HTMLResponse,
     PlainTextResponse,
     RedirectResponse,
@@ -41,6 +43,12 @@ from ..client_plane import (
 from . import render
 from .auth import SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
 from .bridge import BridgeError, SocketBridge
+from .files import (
+    UPLOAD_AREA,
+    FileAreas,
+    ForbiddenPathError,
+    UnknownAreaError,
+)
 
 #: Minimum password length enforced on /setup and the change-password form.
 MIN_PASSWORD_LENGTH = 8
@@ -61,6 +69,8 @@ class WebDeps:
     #: The client-plane attachment. ``None`` only when the socket is unreachable —
     #: the chat surface then renders a "not connected" note instead of crashing.
     bridge: SocketBridge | None = None
+    #: The exposed file roots (workspace + screenshots). ``None`` hides the surface.
+    files: FileAreas | None = None
 
 
 def _session_token(scope: Scope) -> str | None:
@@ -324,6 +334,58 @@ def build_web_app(deps: WebDeps) -> Starlette:
             status_code=303,
         )
 
+    async def files_page(request: Request) -> Response:
+        if deps.files is None:
+            body = '<h1>Files</h1><p class="note">File access is not configured.</p>'
+            return HTMLResponse(render.page("Files", body, active="/files"))
+        areas = deps.files.names()
+        area = request.query_params.get("area") or (areas[0] if areas else "")
+        try:
+            entries = deps.files.list(area)
+        except UnknownAreaError:
+            return PlainTextResponse("no such file area", status_code=404)
+        body = render.files_page_body(
+            areas=areas,
+            active=area,
+            entries=entries,
+            uploads_enabled=UPLOAD_AREA in areas,
+        )
+        return HTMLResponse(render.page("Files", body, active="/files"))
+
+    async def files_upload(request: Request) -> Response:
+        if deps.files is None:
+            return PlainTextResponse("file access not configured", status_code=503)
+        form = await request.form()
+        area = str(form.get("area") or UPLOAD_AREA)
+        if area != UPLOAD_AREA:
+            # Uploads land in the agent workspace ONLY — screenshots stay read-only.
+            return PlainTextResponse(
+                "uploads go to the workspace only", status_code=400
+            )
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            return PlainTextResponse("a file is required", status_code=400)
+        try:
+            deps.files.save_upload(upload.filename or "upload", await upload.read())
+        except UnknownAreaError:
+            return PlainTextResponse("workspace is not configured", status_code=400)
+        return RedirectResponse(f"/files?area={UPLOAD_AREA}", status_code=303)
+
+    async def files_download(request: Request) -> Response:
+        if deps.files is None:
+            return PlainTextResponse("file access not configured", status_code=503)
+        area = request.query_params.get("area") or ""
+        relative = request.query_params.get("path") or ""
+        try:
+            path = deps.files.open_path(area, relative)
+        except (UnknownAreaError, ForbiddenPathError):
+            # One opaque 404 for every miss: an outside probe learns nothing about
+            # which paths exist beyond the fence.
+            return PlainTextResponse("not found", status_code=404)
+        return FileResponse(
+            path, filename=path.name, content_disposition_type="attachment"
+        )
+
     async def approvals_partial(request: Request) -> Response:
         if deps.bridge is None:
             return HTMLResponse("")
@@ -391,6 +453,9 @@ def build_web_app(deps: WebDeps) -> Starlette:
         Route("/chat/send", chat_send, methods=["POST"]),
         Route("/chat/cancel", chat_cancel, methods=["POST"]),
         Route("/chat/new", chat_new, methods=["GET"]),
+        Route("/files", files_page, methods=["GET"]),
+        Route("/files/upload", files_upload, methods=["POST"]),
+        Route("/files/download", files_download, methods=["GET"]),
         Route("/approvals", approvals_partial, methods=["GET"]),
         Route("/approvals/{approval_id:int}", approvals_answer, methods=["POST"]),
         Route("/events", events, methods=["GET"]),

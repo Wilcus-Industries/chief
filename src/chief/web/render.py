@@ -8,7 +8,20 @@ swaps in via htmx or SSE. Every interpolated value passes :func:`html.escape`.
 
 import html
 from collections.abc import Iterable, Mapping
+from datetime import datetime
+from typing import Protocol
 from urllib.parse import urlencode
+
+
+class FileRow(Protocol):
+    """What :func:`files_page_body` needs from a listed file (read-only)."""
+
+    @property
+    def path(self) -> str: ...
+    @property
+    def size(self) -> int: ...
+    @property
+    def modified(self) -> float: ...
 
 #: Nav entries: (href, label). The active one is highlighted by :func:`page`.
 _NAV: tuple[tuple[str, str], ...] = (
@@ -199,6 +212,58 @@ def approvals_html(cards: Iterable[Mapping[str, object]]) -> str:
     """The pending-approvals block (swapped whole on every card event)."""
     rendered = "".join(card_html(c) for c in cards)
     return rendered or ""
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"  # pragma: no cover — unreachable
+
+
+def files_page_body(
+    *,
+    areas: Iterable[str],
+    active: str,
+    entries: Iterable[FileRow],
+    uploads_enabled: bool,
+) -> str:
+    """The files surface: area tabs, an upload form, and the listing table."""
+    tabs = "".join(
+        f'<a href="/files?area={_esc(a)}"'
+        f'{" class=\"active\"" if a == active else ""}>{_esc(a)}</a>'
+        for a in areas
+    )
+    upload = (
+        '<form class="stack" method="post" action="/files/upload"'
+        ' enctype="multipart/form-data">'
+        '<input type="file" name="file" required>'
+        "<button>Upload to workspace</button></form>"
+        if uploads_enabled and active == "workspace"
+        else ""
+    )
+    rows = "".join(
+        f'<tr><td><a href="/files/download?'
+        f"{_esc(urlencode({'area': active, 'path': e.path}))}\">"
+        f"{_esc(e.path)}</a></td>"
+        f"<td>{_human_size(e.size)}</td>"
+        f"<td>{datetime.fromtimestamp(e.modified).strftime('%Y-%m-%d %H:%M')}</td>"
+        "</tr>"
+        for e in entries
+    )
+    table = (
+        "<table><tr><th>File</th><th>Size</th><th>Modified</th></tr>"
+        f"{rows}</table>"
+        if rows
+        else '<p class="note">No files here yet.</p>'
+    )
+    return (
+        "<h1>Files</h1>"
+        f'<div class="threads">{tabs}</div>'
+        f"{upload}{table}"
+    )
 
 
 def _thread_query(platform: str, thread_key: str) -> str:

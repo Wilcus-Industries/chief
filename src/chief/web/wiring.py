@@ -14,6 +14,7 @@ from ..config import Settings
 from .app import WebDeps, build_web_app
 from .auth import WebAuth
 from .bridge import SocketBridge
+from .files import FileAreas
 from .server import WebServer
 
 
@@ -39,6 +40,17 @@ def build_web_stack(settings: Settings, *, secrets_dir: Path) -> WebStack:
     """Build the production web stack; pure construction, no I/O until ``run``."""
     auth = WebAuth(secrets_dir)
     bridge = SocketBridge(settings.socket_path)
-    app = build_web_app(WebDeps(auth=auth, bridge=bridge))
+    # The workspace area is always exposed (day-one uploads need somewhere to land,
+    # and workspace_dir is always configured); screenshots only exist alongside the
+    # playwright sidecar that produces them.
+    files = FileAreas(
+        workspace=Path(settings.workspace_dir),
+        screenshots=(
+            Path(settings.playwright_screenshots_dir)
+            if settings.playwright_enabled
+            else None
+        ),
+    )
+    app = build_web_app(WebDeps(auth=auth, bridge=bridge, files=files))
     server = WebServer(app, host=settings.web_host, port=settings.web_port)
     return WebStack(server=server, bridge=bridge)
