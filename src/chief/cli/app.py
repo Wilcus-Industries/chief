@@ -54,13 +54,13 @@ AWAY_FOOTER = "── caught up ──"
 OWNER_STYLE = "bold cyan"
 
 #: Slash commands this client handles itself, never forwarded to the daemon.
-#: ``/cancel`` is client-handled too: bare, it opens a picker over cli threads and
-#: sends the ``command`` frame under the *picked* thread_key (the daemon's cancel
-#: acts on the frame's thread_key, so no daemon change is needed).
 CLIENT_COMMANDS = (
     "/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills", "/drive",
-    "/cancel",
 )
+
+#: Daemon commands the CLI neither completes nor lists in /help — ctrl+c is this
+#: client's cancel (other platforms keep the slash command).
+HIDDEN_FORWARDED = ("cancel",)
 
 #: Shown when the owner tries to send input into a foreign-platform pane (#138
 #: finding) — that would dispatch through the ``platform=cli`` engine under the
@@ -142,7 +142,9 @@ class ChiefCliApp(App[None]):
         #: Every completable command, client-handled first — the same union /help
         #: prints.
         self._all_commands: list[str] = list(CLIENT_COMMANDS) + [
-            f"/{n}" for n in OWNER_COMMANDS.names() if f"/{n}" not in CLIENT_COMMANDS
+            f"/{n}"
+            for n in OWNER_COMMANDS.names()
+            if f"/{n}" not in CLIENT_COMMANDS and n not in HIDDEN_FORWARDED
         ]
         #: What the dropdown is doing: ``None`` (hidden), ``"command"`` (autocomplete)
         #: or a picker name (``"switch"``/``"cancel"``).
@@ -437,26 +439,17 @@ class ChiefCliApp(App[None]):
             return True
         if key == "tab":
             return True  # a picker has nothing to complete into the input
-        mode, thread = self._dropdown_mode, self._picker_threads[idx]
+        thread = self._picker_threads[idx]
         self._hide_dropdown()
-        if mode == "switch":
-            await self._conn.send(
-                switch_frame(str(thread["platform"]), str(thread["thread_key"]))
-            )
-        else:  # cancel
-            await self._conn.send(command_frame(str(thread["thread_key"]), "cancel"))
+        await self._conn.send(
+            switch_frame(str(thread["platform"]), str(thread["thread_key"]))
+        )
         return True
 
     def _show_picker(self, mode: str, threads: list[dict[str, object]]) -> None:
-        """Offer ``threads`` as a menu. ``/cancel`` sees cli threads only — a
-        ``command`` frame dispatches on the cli engine, so cancelling a foreign
-        platform's thread through it is a no-op."""
-        if mode == "cancel":
-            threads = [t for t in threads if t.get("platform") == CLI_PLATFORM]
+        """Offer ``threads`` as a menu (currently only /switch pickers exist)."""
         if not threads:
-            self._write(
-                "nothing to cancel" if mode == "cancel" else "no active threads", "dim"
-            )
+            self._write("no active threads", "dim")
             return
         self._show_dropdown(
             mode,
@@ -544,7 +537,9 @@ class ChiefCliApp(App[None]):
             return
         if name == "help":
             forwarded = [
-                n for n in OWNER_COMMANDS.names() if f"/{n}" not in CLIENT_COMMANDS
+                n
+                for n in OWNER_COMMANDS.names()
+                if f"/{n}" not in CLIENT_COMMANDS and n not in HIDDEN_FORWARDED
             ]
             self._write(", ".join(CLIENT_COMMANDS) + " — client commands", "dim")
             self._write(
@@ -577,12 +572,6 @@ class ChiefCliApp(App[None]):
             return
         if name == "drive":
             await self._cmd_drive(arg)
-            return
-        if name == "cancel":
-            # Client-handled: always a picker (the frame carries the picked
-            # thread_key, which is what the daemon's cancel acts on).
-            self._picker_pending = "cancel"
-            await self._conn.send(list_threads_frame())
             return
         if self._active_platform != CLI_PLATFORM:
             self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
