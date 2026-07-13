@@ -74,6 +74,7 @@ from ..persistence.tasks import (
     set_session_id,
     set_status,
     set_task_model,
+    set_title,
 )
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
@@ -148,6 +149,11 @@ SONNET_CONFIRM = "↩️ Back to Sonnet 4.6 for this thread."
 ROUTE_CONFIRM = "🧭 Routing this thread as “{category}” → {target_class}:{model}."
 ROUTING_DISABLED = "Model routing isn't enabled."
 UNKNOWN_CATEGORY = "Unknown category “{category}”. Known: {known}."
+#: Owner-facing replies for the session-management commands (``/close``, ``/rename``).
+CLOSE_CONFIRM = "✅ Closed this thread — it's archived now."
+NOTHING_TO_CLOSE = "Nothing to close here."
+RENAME_CONFIRM = "✏️ Renamed this thread to “{title}”."
+NOTHING_TO_RENAME = "No task here to rename."
 #: Read-only file tools chief gets at M4. ``classify()`` has no ``file_path`` check, so
 #: owner reads are unconfined — not fenced to the memory dir. Containment is the
 #: approval blacklist, untrusted-content screening, and the audit log, not a path check
@@ -616,6 +622,50 @@ class TaskManager:
         await self._stop_task(task)
         await self._set_status(task, CANCELLED)
         return True
+
+    async def close(self, thread_key: str) -> str:
+        """Finish ``thread_key`` now (``/close``): mark it DONE and archive it.
+
+        The owner-initiated twin of :meth:`_idle_then_archive` — same DONE + archive
+        outcome, without waiting out the idle timer. Mirrors :meth:`cancel`'s teardown
+        for a live task (interrupt a generating turn, stop timers/consumer, close the
+        session); a task with no live session just flips its row. Either way the next
+        message on the thread reopens it (resume), exactly like an idle archive.
+        """
+        task = self._tasks.get(thread_key)
+        if task is None:
+            async with self._session_factory() as session:
+                db = await get_task(
+                    session, platform=self._platform, thread_key=thread_key
+                )
+                if db is None or db.status in TERMINAL:
+                    return NOTHING_TO_CLOSE
+                await set_status(session, db, DONE)
+            await self._io.archive_thread(thread_key)
+            return CLOSE_CONFIRM
+        task.cancelled = True
+        if task.generating:
+            await task.session.interrupt()
+        await self._stop_task(task)
+        await self._set_status(task, DONE)
+        await self._io.archive_thread(thread_key)
+        return CLOSE_CONFIRM
+
+    async def rename(self, thread_key: str, title: str) -> str:
+        """Retitle ``thread_key``'s task row (``/rename <title>``).
+
+        The title is display state — ``/tasks`` listings, the client plane's thread
+        pickers, restart pings — so a DB write is the whole job; nothing live needs
+        repointing.
+        """
+        async with self._session_factory() as session:
+            db = await get_task(
+                session, platform=self._platform, thread_key=thread_key
+            )
+            if db is None:
+                return NOTHING_TO_RENAME
+            await set_title(session, db, title)
+        return RENAME_CONFIRM.format(title=title)
 
     async def active_tasks(self) -> list[Task]:
         """Non-terminal tasks, for the ``/tasks`` listing."""

@@ -47,7 +47,13 @@ from chief.core.budget import (
     CurrencyPolicy,
 )
 from chief.core.session import Final, Milestone, TurnEvent
-from chief.core.tasks import SessionProto, TaskManager
+from chief.core.tasks import (
+    CLOSE_CONFIRM,
+    NOTHING_TO_CLOSE,
+    RENAME_CONFIRM,
+    SessionProto,
+    TaskManager,
+)
 from chief.gate.approvals import ApprovalAction, ApprovalManager, ApprovalRegistry
 from chief.gate.blacklist import Blacklist
 from chief.gate.policy import PolicyStore
@@ -57,7 +63,7 @@ from chief.persistence import usage
 from chief.persistence.messages import ROLE_CHIEF, MessageLog
 from chief.persistence.models import MessageLogEntry
 from chief.persistence.schedules import ACTION_MESSAGE, KIND_ONCE, create_schedule
-from chief.persistence.tasks import get_or_create_task
+from chief.persistence.tasks import DONE, get_or_create_task, get_task
 from test_broadcast_bus import _RecordingInner
 from test_tasks import FakeSession, wait_for_task_open
 
@@ -312,6 +318,117 @@ async def test_unknown_command_gets_unknown_command_error(
         await writer.drain()
         error = await _read_frame(reader)
         assert error["type"] == "error" and error["code"] == "unknown_command"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_close_command_marks_the_thread_done(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Session management over the wire: a real turn opens the task, then a
+    # forwarded /close finishes it — status flips DONE, so it drops out of /tasks.
+    session = FakeSession(model="m")
+    server, _io = await cli_stack([session])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(json.dumps(user_frame("cli:main", "start")).encode() + b"\n")
+        await writer.drain()
+        assert (await _read_frame(reader))["text"] == "reply:start"
+        await wait_for_task_open(
+            session_factory, platform="cli", thread_key="cli:main"
+        )
+
+        writer.write(json.dumps(command_frame("cli:main", "close")).encode() + b"\n")
+        await writer.drain()
+        closed = await _read_frame(reader)
+        assert closed["type"] == "reply"
+        assert closed["text"] == CLOSE_CONFIRM
+
+        async with session_factory() as db_session:
+            task = await get_task(
+                db_session, platform="cli", thread_key="cli:main"
+            )
+        assert task is not None and task.status == DONE
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_close_with_no_task_replies_nothing_to_close(
+    cli_stack: Callable[..., Any],
+) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(json.dumps(command_frame("cli:main", "close")).encode() + b"\n")
+        await writer.drain()
+        reply = await _read_frame(reader)
+        assert reply["type"] == "reply"
+        assert reply["text"] == NOTHING_TO_CLOSE
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_rename_command_retitles_the_thread_in_listings(
+    cli_stack: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    session = FakeSession(model="m")
+    server, _io = await cli_stack([session])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(json.dumps(user_frame("cli:main", "start")).encode() + b"\n")
+        await writer.drain()
+        assert (await _read_frame(reader))["text"] == "reply:start"
+        await wait_for_task_open(
+            session_factory, platform="cli", thread_key="cli:main"
+        )
+
+        writer.write(
+            json.dumps(
+                command_frame("cli:main", "rename", "Trip planning")
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        reply = await _read_frame(reader)
+        assert reply["type"] == "reply"
+        assert reply["text"] == RENAME_CONFIRM.format(title="Trip planning")
+
+        # The new title is what /tasks now lists — management is visible.
+        writer.write(json.dumps(list_threads_frame()).encode() + b"\n")
+        await writer.drain()
+        threads = await _read_frame(reader)
+        assert threads["type"] == "threads"
+        titles = [t["title"] for t in cast(list[dict[str, Any]], threads["threads"])]
+        assert "Trip planning" in titles
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_rename_without_argument_prints_usage(
+    cli_stack: Callable[..., Any],
+) -> None:
+    server, _io = await cli_stack([])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        await _read_frame(reader)  # hello
+        writer.write(json.dumps(command_frame("cli:main", "rename")).encode() + b"\n")
+        await writer.drain()
+        reply = await _read_frame(reader)
+        assert reply["type"] == "reply"
+        assert reply["text"] == "Usage: /rename <title>"
     finally:
         writer.close()
         with suppress(OSError):

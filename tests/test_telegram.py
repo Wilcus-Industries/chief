@@ -52,6 +52,8 @@ class FakeEngine:
         self.escalated: list[str] = []
         self.reverted: list[str] = []
         self.routed: list[tuple[str, str]] = []
+        self.closed: list[str] = []
+        self.renamed: list[tuple[str, str]] = []
         self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
@@ -110,6 +112,14 @@ class FakeEngine:
     async def route(self, thread_key: str, category: str) -> str:
         self.routed.append((thread_key, category))
         return f"🧭 Routing this thread as “{category}”."
+
+    async def close(self, thread_key: str) -> str:
+        self.closed.append(thread_key)
+        return "Closed."
+
+    async def rename(self, thread_key: str, title: str) -> str:
+        self.renamed.append((thread_key, title))
+        return f"Renamed to “{title}”."
 
     async def downgrade_live_sessions(self) -> None:
         self.downgraded += 1
@@ -1004,6 +1014,57 @@ async def test_branch_rejected_in_task_thread(
     assert engine.branched == []  # a tracked topic is already full-memory
     update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
         "/branch only works in the casual channel."
+    )
+
+
+async def test_close_forwards_to_the_engine(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/close", thread_id=5, is_forum=True
+    )
+
+    await adapter._on_command(update, _CTX)
+
+    assert engine.closed == ["-100:5"]
+    update.effective_message.reply_text.assert_awaited_once_with("Closed.")  # type: ignore[union-attr]
+
+
+async def test_close_rejected_in_casual_channel(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The casual ``:0`` lane deliberately never archives (it self-compacts) — /close
+    # must not become the back door around that.
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/close", thread_id=0, is_forum=True
+    )
+
+    await adapter._on_command(update, _CTX)
+
+    assert engine.closed == []
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "The casual channel stays open — /close only works in a task thread."
+    )
+
+
+async def test_rename_forwards_to_the_engine(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    engine = FakeEngine()
+    adapter = _adapter(session_factory, engine)
+    update = _fake_update(
+        user_id=OWNER_ID, text="/rename Trip planning", thread_id=5, is_forum=True
+    )
+
+    await adapter._on_command(update, _CTX)
+
+    assert engine.renamed == [("-100:5", "Trip planning")]
+    update.effective_message.reply_text.assert_awaited_once_with(  # type: ignore[union-attr]
+        "Renamed to “Trip planning”."
     )
 
 

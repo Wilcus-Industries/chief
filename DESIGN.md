@@ -618,18 +618,28 @@ another platform's thread.
 
 **The client** (`chief-cli`, #137/#138) is a Textual TUI and a thin one: it renders frames
 and sends frames, holding no state the daemon cannot rebuild. Quitting it leaves the daemon
-running. It owns a handful of commands itself — `/help`, `/new`, `/quit`, `/tasks`,
-`/switch`, `/status`, `/skills`, `/drive` — and forwards every other slash command to the
-same platform-neutral `OWNER_COMMANDS` registry (#129) that Telegram and Discord bind, so a
+running. It owns a handful of commands itself — `/help`, `/new`, `/clear`, `/quit`,
+`/tasks`, `/switch`, `/status`, `/skills`, `/drive` — and forwards every other slash
+command to the same platform-neutral `OWNER_COMMANDS` registry (#129) that Telegram and
+Discord bind, so a
 command works identically on all three. A dropdown above the prompt autocompletes command
 names as the owner types (Tab completes, Enter accepts-and-submits, Esc dismisses), and a
 command submitted bare where an argument was needed offers a picker instead of a usage
 error — `/switch` with no index fetches fresh threads and menus them. `/cancel` is the one
 forwarded command the CLI hides (from completion and `/help`): **ctrl+c** is that client's
 cancel — one press cancels the active thread's running turn, a second consecutive press
-clears the chat — while other platforms keep the slash command. Owner-authored lines
-render in their own color with a blank separator above, so the owner's messages and the
-agent's are tellable apart at a glance.
+clears the chat — while other platforms keep the slash command. `/clear` performs that
+same local blank on demand (the daemon's message log keeps the history). Owner-authored
+lines render in their own color with a blank separator above, so the owner's messages and
+the agent's are tellable apart at a glance.
+
+**Thread management is daemon-side, not client-side.** `/close` finishes the active
+thread now — the owner-initiated twin of the idle archive: status `done`, thread
+archived, session torn down, and the next message reopens it — and `/rename <title>`
+retitles the task row that `/tasks`, the pickers, and restart pings display. Both are
+registry commands (#129), not wire frames: they ride the existing `command` frame from
+the terminal and work identically from Telegram and Discord, where `/close` additionally
+refuses the casual `:0` channel (it self-compacts and deliberately never archives).
 
 ## Config & secrets (draft)
 

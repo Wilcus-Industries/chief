@@ -911,6 +911,81 @@ async def test_ctrl_c_on_a_foreign_pane_sends_no_cancel(
         assert len(peer.received) == n
 
 
+# ---- /clear + session management (/close, /rename) ----------------------------------
+#
+# /clear is client-only: the same local blank the second ctrl+c performs, without the
+# cancel side effect. /close and /rename are daemon registry commands, so the client
+# just forwards them for the active thread — and completes them like any other.
+
+
+async def test_clear_command_clears_the_chat_locally(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await _settle(app, lambda: bool(peer.received))  # mount-time status frame
+        await peer.push(reply_frame("cli:main", "old chatter"))
+        await _settle(
+            app, lambda: any("old chatter" in line.text for line in app.transcript)
+        )
+        n = len(peer.received)
+        await pilot.press(*"/clear", "enter")
+        await _settle(app, lambda: app.transcript == [])
+        assert len(peer.received) == n  # local only — nothing forwarded
+
+
+async def test_clear_works_on_a_read_only_foreign_pane(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """The read-only guard blocks *forwarded* input; a local clear must still work."""
+    async with app.run_test() as pilot:
+        await _switch_onto_telegram(app, peer, pilot)
+        n = len(peer.received)
+        await pilot.press(*"/clear", "enter")
+        await _settle(app, lambda: app.transcript == [])
+        assert len(peer.received) == n
+
+
+async def test_clear_close_and_rename_are_completable(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/c")
+        assert "/clear" in app.dropdown_options
+        assert "/close" in app.dropdown_options
+        assert "/cancel" not in app.dropdown_options
+        await pilot.press("escape", "backspace", "backspace")
+        await pilot.press(*"/r")
+        assert "/rename" in app.dropdown_options
+
+
+async def test_close_forwards_to_the_daemon_for_the_active_thread(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/close", "enter")
+        await _settle(
+            app,
+            lambda: bool(peer.received)
+            and peer.received[-1].get("type") == "command",
+        )
+        assert peer.received[-1] == command_frame("cli:main", "close", "")
+
+
+async def test_rename_forwards_its_argument(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/rename Trip planning", "enter")
+        await _settle(
+            app,
+            lambda: bool(peer.received)
+            and peer.received[-1].get("type") == "command",
+        )
+        assert peer.received[-1] == command_frame(
+            "cli:main", "rename", "Trip planning"
+        )
+
+
 # --- The bottom edge is shared, so nothing may overlap it (#140 live-boot defect) -----
 #
 # Textual OVERLAYS widgets docked to the same edge, it does not stack them. With

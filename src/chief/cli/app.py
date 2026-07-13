@@ -55,7 +55,8 @@ OWNER_STYLE = "bold cyan"
 
 #: Slash commands this client handles itself, never forwarded to the daemon.
 CLIENT_COMMANDS = (
-    "/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills", "/drive",
+    "/help", "/new", "/clear", "/quit", "/tasks", "/switch", "/status", "/skills",
+    "/drive",
 )
 
 #: Daemon commands the CLI neither completes nor lists in /help — ctrl+c is this
@@ -193,6 +194,15 @@ class ChiefCliApp(App[None]):
         self.transcript.append(Line(style, text))
         self.query_one("#transcript", RichLog).write(Text(text, style=style))
 
+    def _clear_chat(self) -> None:
+        """Blank the local view only — the daemon's message log keeps the history.
+
+        Shared by ``/clear``, ``/new``, the double-ctrl+c clear and a ``/switch``
+        backfill, so "clear the pane" happens in exactly one place.
+        """
+        self.query_one("#transcript", RichLog).clear()
+        self.transcript.clear()
+
     def _render(self, frame: dict[str, object]) -> None:
         ftype = frame.get("type")
         if ftype == TYPE_HELLO:
@@ -308,8 +318,7 @@ class ChiefCliApp(App[None]):
     def _render_backfill(self, frame: dict[str, object]) -> None:
         self._active_platform = str(frame["platform"])
         self._thread_key = str(frame["thread_key"])
-        self.query_one("#transcript", RichLog).clear()
-        self.transcript.clear()
+        self._clear_chat()
         self._write(
             f"── switched to ({self._active_platform}) {self._thread_key} ──", "dim"
         )
@@ -490,8 +499,7 @@ class ChiefCliApp(App[None]):
         """
         if self._ctrl_c_armed:
             self._ctrl_c_armed = False
-            self.query_one("#transcript", RichLog).clear()
-            self.transcript.clear()
+            self._clear_chat()
             return
         self._ctrl_c_armed = True
         if self._active_platform == CLI_PLATFORM:
@@ -555,9 +563,11 @@ class ChiefCliApp(App[None]):
         if name == "new":
             self._active_platform = CLI_PLATFORM
             self._thread_key = f"cli:{uuid4().hex[:8]}"
-            self.query_one("#transcript", RichLog).clear()
-            self.transcript.clear()
+            self._clear_chat()
             self._write(f"new thread: {self._thread_key}", "dim")
+            return
+        if name == "clear":
+            self._clear_chat()
             return
         if name == "quit":
             await self._conn.close()
