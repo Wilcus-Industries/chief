@@ -143,7 +143,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Transcripts | Keep, auto-prune after 90 days; memory written directly by chief persists |
 | Transport / ingress | Telegram long-polling; outbound-only, no public **network** ingress. The one listener is local: a `0600` unix-domain socket (the client plane, #128) — filesystem perms are its whole auth story |
 | MCP servers | chief's **own FastMCP** servers, one container per service (streamable-HTTP on `127.0.0.1:<port>`) — per-connection transport sidesteps the vendored nspady "Server already initialized" collision |
-| Deploy | Local install (host-native): `install.sh` + `chief` launcher; CI keeps done-check + smoke test, no VPS deploy |
+| Deploy | Local install (host-native): one-line `bootstrap.sh` → `install.sh` (wizard, launcher, autostart service — #154) pinned to tagged releases; CI keeps done-check + smoke test + shellcheck, no VPS deploy |
 | Logging / uptime | JSON to stdout; external dead-man's-switch heartbeat |
 | Backup | VPS auto-backups + memory git repo pushed to private remote |
 | Auth | GitHub Copilot SDK via the `copilot` CLI's own login (`~/.copilot/config.json`, auto-refreshing); `openrouter_api_key` (optional) powers the cheap classifiers + screening and BYOK routing. #88 dropped the Claude `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` path |
@@ -683,11 +683,21 @@ One machine — the owner's. **Outbound-only** (no public HTTP ingress); Telegra
 **Google OAuth:** run the consent dance **once locally**
 (`python -m chief.tools.google.auth`) — the token lands in `secrets/google_tokens/`.
 
-**Install = `install.sh`** — checks prerequisites (git, uv, docker+compose), scaffolds
-`data/` + `secrets/`, `uv sync`, runs migrations, optionally
-`docker compose --profile google --profile playwright up -d --build`, and installs the
-`chief` launcher to `~/.local/bin`. **No prod:** CI runs the done-check + a host smoke
-test (migrate-before-app + compose validity); the VPS deploy job is gone.
+**Install = the one-liner (#154):** `bootstrap.sh` (curl|bash) installs prerequisites
+(brew-first on macOS, apt on Debian-family; docker guided, not aborted on), clones to
+`~/.local/share/chief` at the **latest tagged release**, and hands off to `install.sh` —
+prereq checks, scaffold of `data/` + `secrets/`, `uv sync`, migrations, the first-run
+wizard (owner password → web credential, model auth = Copilot login or validated
+OpenRouter key; **no platform bot tokens** — the web UI is the day-one channel),
+optionally `docker compose --profile google --profile playwright up -d --build`, the
+`chief` launcher in `~/.local/bin`, and an **autostart service by default** (launchd
+agent / systemd user unit, `--no-service` to opt out), then launch: health wait +
+browser open. Post-install lifecycle: `chief start|stop|status|update|uninstall`
+(`update` jumps to the newest tag, migrates, restarts the service; releases are git
+tags). **No prod:** CI runs the done-check + a host smoke test (migrate-before-app +
+compose validity) + shellcheck on the installer scripts; the opt-in `installer-e2e`
+workflow runs the real one-liner in a clean Debian container; the VPS deploy job is
+gone.
 
 ## Ops & observability (draft)
 
@@ -886,7 +896,8 @@ permission gate, command-policy safe-matching, the scheduler/monitors, and tier 
 chief/
   config.yaml                # non-secret config
   docker-compose.yml         # MCP sidecars only (host-native core)
-  install.sh                 # local install: prereqs, scaffold, deps, migrations, launcher
+  bootstrap.sh               # curl|bash one-liner: prereqs, clone at latest tag, → install.sh (#154)
+  install.sh                 # local install: prereqs, scaffold, deps, migrations, wizard, launcher, service
   BOOTSTRAP.md               # agent-followed setup runbook
   src/chief/
     config.py                # pydantic-settings
