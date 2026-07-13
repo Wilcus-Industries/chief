@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import Footer, Static
 
 from chief.adapters.commands import OWNER_COMMANDS
 from chief.cli.app import AWAY_FOOTER, AWAY_HEADER, ChiefCliApp, Line
@@ -639,3 +639,37 @@ async def test_skills_lists_composed_set(app: ChiefCliApp, peer: ScriptedPeer) -
         blob = "\n".join(line.text for line in app.transcript)
         assert "setup-morning-brief" in blob
         assert "docx" in blob
+
+
+# --- The bottom edge is shared, so nothing may overlap it (#140 live-boot defect) -----
+#
+# Textual OVERLAYS widgets docked to the same edge, it does not stack them. With
+# #statusbar, #prompt and Textual's own bottom-docked Footer all claiming the bottom,
+# they landed on the same row: the input's last row was painted over by the statusbar
+# and the footer, so the input bar rendered visibly cut off. Only the Footer docks now;
+# the statusbar and prompt sit in normal flow above it and the transcript (1fr) absorbs
+# the slack.
+
+
+async def test_bottom_widgets_do_not_overlap(app: ChiefCliApp) -> None:
+    async with app.run_test(size=(80, 24)):
+        boxes = {
+            name: app.query_one(f"#{name}").region
+            for name in ("transcript", "statusbar", "prompt")
+        }
+        boxes["footer"] = app.query_one(Footer).region
+
+        # Every widget is on screen, and no two of them share a row.
+        for name, region in boxes.items():
+            assert region.height > 0, f"{name} collapsed"
+            assert region.y + region.height <= 24, f"{name} runs off the bottom"
+
+        ordered = sorted(boxes.items(), key=lambda kv: kv[1].y)
+        for (lo_name, lo), (hi_name, hi) in zip(ordered, ordered[1:], strict=False):
+            assert lo.y + lo.height <= hi.y, (
+                f"{lo_name} overlaps {hi_name}: "
+                f"{lo_name} ends at {lo.y + lo.height}, {hi_name} starts at {hi.y}"
+            )
+
+        # The input keeps its full box — a cut-off prompt is the bug this pins.
+        assert boxes["prompt"].height == 3

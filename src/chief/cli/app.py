@@ -83,10 +83,15 @@ class Line(NamedTuple):
 class ChiefCliApp(App[None]):
     """The terminal client of the client plane (#137)."""
 
+    #: Textual OVERLAYS widgets docked to the same edge — it does not stack them.
+    #: Docking both #statusbar and #prompt put them on the bottom row alongside
+    #: Footer (which docks itself), painting over the input's last row so the bar
+    #: rendered cut off. Let Footer own the bottom edge alone; the statusbar and
+    #: prompt sit in normal flow above it, and the transcript (1fr) takes the slack.
     CSS = (
         "#transcript { height: 1fr; } "
-        "#statusbar { dock: bottom; height: 1; } "
-        "#prompt { dock: bottom; }"
+        "#statusbar { height: 1; } "
+        "#prompt { height: 3; }"
     )
     TITLE = "chief"
 
