@@ -621,7 +621,15 @@ and sends frames, holding no state the daemon cannot rebuild. Quitting it leaves
 running. It owns a handful of commands itself — `/help`, `/new`, `/quit`, `/tasks`,
 `/switch`, `/status`, `/skills`, `/drive` — and forwards every other slash command to the
 same platform-neutral `OWNER_COMMANDS` registry (#129) that Telegram and Discord bind, so a
-command works identically on all three.
+command works identically on all three. A dropdown above the prompt autocompletes command
+names as the owner types (Tab completes, Enter accepts-and-submits, Esc dismisses), and a
+command submitted bare where an argument was needed offers a picker instead of a usage
+error — `/switch` with no index fetches fresh threads and menus them. `/cancel` is the one
+forwarded command the CLI hides (from completion and `/help`): **ctrl+c** is that client's
+cancel — one press cancels the active thread's running turn, a second consecutive press
+clears the chat — while other platforms keep the slash command. Owner-authored lines
+render in their own color with a blank separator above, so the owner's messages and the
+agent's are tellable apart at a glance.
 
 ## Config & secrets (draft)
 
