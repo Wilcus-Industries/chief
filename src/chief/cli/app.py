@@ -49,6 +49,10 @@ from .connection import SocketConnection
 AWAY_HEADER = "── while you were away ──"
 AWAY_FOOTER = "── caught up ──"
 
+#: Owner-authored lines get their own color (and a blank separator above, written at
+#: the call sites) so the owner's messages and the agent's are tellable at a glance.
+OWNER_STYLE = "bold cyan"
+
 #: Slash commands this client handles itself, never forwarded to the daemon.
 #: ``/cancel`` is client-handled too: bare, it opens a picker over cli threads and
 #: sends the ``command`` frame under the *picked* thread_key (the daemon's cancel
@@ -304,6 +308,9 @@ class ChiefCliApp(App[None]):
         )
         messages = cast(list[dict[str, object]], frame.get("messages", []))
         for m in messages:
+            if m.get("role") == "owner":
+                self._write_owner(_format_backfill_line(m))
+                continue
             self._write(
                 _format_backfill_line(m), "dim" if m.get("kind") == "milestone" else ""
             )
@@ -520,8 +527,14 @@ class ChiefCliApp(App[None]):
         if self._active_platform != CLI_PLATFORM:
             self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
             return
-        self._write(f"> {text}", "bold")
+        self._write_owner(f"> {text}")
         await self._conn.send(user_frame(self._thread_key, text))
+
+    def _write_owner(self, text: str) -> None:
+        """An owner-authored line: blank separator above, then the owner color."""
+        if self.transcript:
+            self._write("")
+        self._write(text, OWNER_STYLE)
 
     async def _handle_slash(self, text: str) -> None:
         name, _, arg = text[1:].partition(" ")
@@ -595,7 +608,7 @@ class ChiefCliApp(App[None]):
         if not text:
             self._write("! usage: /drive <text>", "red")
             return
-        self._write(f"> [via CLI → {self._active_platform}] {text}", "bold")
+        self._write_owner(f"> [via CLI → {self._active_platform}] {text}")
         await self._conn.send(
             inject_frame(self._active_platform, self._thread_key, text)
         )
