@@ -45,6 +45,17 @@ logger = logging.getLogger("chief.gate.approvals")
 #: not in tasks.py, so tasks can import it without a cycle (tasks → approvals already).
 OPUS_ESCALATION_KIND = "OpusEscalation"
 
+#: Pseudo-tool kind for a draft-first outbound message (#156, iMessage). Like the Opus
+#: card it rides the request/resolve machinery without being a tool call: the card
+#: holds the drafted text (``tool_input`` = ``{"to", "text"}``), approve sends it,
+#: deny kills it. It never writes a tool-policy rule — "always allow" a specific
+#: draft's text is meaningless, and the per-conversation delegation *mode* is the
+#: owner's real always-lever.
+DRAFT_SEND_KIND = "DraftSend"
+
+#: Pseudo-kinds that must never persist a tool-policy rule on an Always-* tap.
+_NO_POLICY_KINDS = (OPUS_ESCALATION_KIND, DRAFT_SEND_KIND)
+
 
 class ApprovalAction(Enum):
     """A button on the approval card. Its value doubles as the callback token."""
@@ -108,6 +119,12 @@ def _preview(tool_name: str, tool_input: dict[str, Any]) -> str:
             if reason
             else "Switch to Opus 4.8 for this task?"
         )
+    if tool_name == DRAFT_SEND_KIND:
+        to = str(tool_input.get("to", "")).strip()
+        text = str(tool_input.get("text", "")).strip()
+        if len(text) > 500:
+            text = text[:497] + "…"
+        return f"Draft to {to}:\n\n{text}"
     if tool_name in COMMAND_TOOLS:
         command = str(tool_input.get("command", "")).strip()
         return f"Run: {command}"
@@ -295,8 +312,8 @@ class ApprovalManager:
     ) -> str:
         if live is None or live.tool_input is None:
             return " (rule not saved — context lost)"
-        if live.tool_name == OPUS_ESCALATION_KIND:
-            return ""  # a model switch isn't a tool — never write a tool-policy rule
+        if live.tool_name in _NO_POLICY_KINDS:
+            return ""  # a pseudo-kind isn't a tool — never write a tool-policy rule
         if action is ApprovalAction.ALWAYS_ALLOW:
             ok = await self._policy.add_allow(live.tool_name, live.tool_input)
         else:

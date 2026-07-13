@@ -507,10 +507,15 @@ class Attachment:
 
 @dataclass(frozen=True)
 class Message:
-    """A normalized inbound message from any platform."""
+    """A normalized inbound message from any platform.
+
+    ``sender_id`` is the platform's native sender key — numeric on Telegram and
+    Discord, a string handle (phone/email) on iMessage; consumers always compare
+    via ``str(sender_id)`` (the contact repo's ``user_id``).
+    """
 
     platform: str
-    sender_id: int
+    sender_id: int | str
     text: str
     thread_key: str
     tier: Tier

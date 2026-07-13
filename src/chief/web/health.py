@@ -74,6 +74,16 @@ def build_health_checks(settings: Settings) -> list[HealthCheck]:
         _platform_item("telegram adapter", settings.telegram_configured),
         _platform_item("discord adapter", settings.discord_configured),
         _static(
+            "imessage adapter",
+            settings.imessage_configured if settings.imessage_configured else None,
+            (
+                "enabled (dedicated Apple ID; poller state below)"
+                if settings.imessage_configured
+                else "not configured — needs macOS, apple_enabled, and "
+                "imessage_enabled with owner handles"
+            ),
+        ),
+        _static(
             "scheduler",
             True if settings.scheduler_enabled else None,
             (

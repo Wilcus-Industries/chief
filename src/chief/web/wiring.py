@@ -7,15 +7,18 @@ mirror the adapter lifecycle, so ``chief.app.serve`` gathers it exactly like the
 adapters, the scheduler, and the socket server.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from ..config import Settings
-from .app import WebDeps, build_web_app
+from .app import IMessagePanel, WebDeps, build_web_app
 from .auth import WebAuth
 from .bridge import SocketBridge
 from .files import FileAreas
-from .health import build_health_checks
+from .health import HealthCheck, build_health_checks
 from .server import WebServer
 from .settings_io import OwnerConfig, SecretsStore, SettingsPanel
 
@@ -47,8 +50,16 @@ def build_web_stack(
     *,
     secrets_dir: Path,
     config_path: Path = OWNER_CONFIG_PATH,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    extra_health: Sequence[HealthCheck] = (),
 ) -> WebStack:
-    """Build the production web stack; pure construction, no I/O until ``run``."""
+    """Build the production web stack; pure construction, no I/O until ``run``.
+
+    ``session_factory`` powers the iMessage whitelist panel (#156) — DB-backed,
+    unlike the file-backed curated settings; absent (or with the adapter off) the
+    panel is hidden. ``extra_health`` appends live checks the caller owns (the
+    iMessage poller state) onto the settings-derived checklist.
+    """
     auth = WebAuth(secrets_dir)
     bridge = SocketBridge(settings.socket_path)
     # The workspace area is always exposed (day-one uploads need somewhere to land,
@@ -67,13 +78,19 @@ def build_web_stack(
         config=OwnerConfig(config_path),
         settings=settings,
     )
+    imessage = (
+        IMessagePanel(session_factory=session_factory)
+        if session_factory is not None and settings.imessage_enabled
+        else None
+    )
     app = build_web_app(
         WebDeps(
             auth=auth,
             bridge=bridge,
             files=files,
             settings_panel=panel,
-            health=tuple(build_health_checks(settings)),
+            imessage=imessage,
+            health=tuple(build_health_checks(settings)) + tuple(extra_health),
         )
     )
     server = WebServer(app, host=settings.web_host, port=settings.web_port)
