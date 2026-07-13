@@ -9,6 +9,7 @@ runtime. This is the twin of ``tests/test_session.py`` (the claude-agent-sdk map
 
 import asyncio
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -397,6 +398,71 @@ async def test_no_provider_defaults_to_none() -> None:
 
     assert client.create_kwargs is not None
     assert client.create_kwargs["provider"] is None
+
+
+# --- Directories cross into the SDK absolute, always (#140 live-boot defect) ----------
+#
+# The SDK rejects a relative directory outright ("Directory path must be absolute:
+# data/memory") and kills the turn at session.create. chief's own defaults are relative
+# (memory_dir="data/memory", chief_skills_dir="data/harness/skills"), and under compose
+# they happened to be absolute (/app/...), so a host-native boot was the first thing to
+# hit it. Resolve at this boundary — the one place every caller funnels through.
+
+
+async def test_relative_cwd_reaches_the_sdk_absolute() -> None:
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto", cwd="data/memory")
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["working_directory"] == os.path.abspath("data/memory")
+    assert os.path.isabs(client.create_kwargs["working_directory"])
+
+
+async def test_relative_skill_directories_reach_the_sdk_absolute() -> None:
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(
+        model="auto", skill_directories=["data/harness/skills/writing"]
+    )
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["skill_directories"] == [
+        os.path.abspath("data/harness/skills/writing")
+    ]
+
+
+async def test_relative_cwd_reaches_the_sdk_absolute_on_resume() -> None:
+    # Resume takes a second code path into the SDK — it needs the same guarantee.
+    backend, client, _session = _backend_with(
+        [_msg("resumed"), SessionIdleData()], session_id="sess-9"
+    )
+    task = backend.create_session(model="auto", resume="sess-9", cwd="data/memory")
+
+    [event async for event in task.run_turn("continue")]
+
+    assert client.resume_args is not None
+    assert client.resume_args[1]["working_directory"] == os.path.abspath("data/memory")
+
+
+async def test_absolute_cwd_is_left_alone_and_none_stays_none() -> None:
+    backend, client, _session = _backend_with([_msg("hi"), SessionIdleData()])
+    task = backend.create_session(model="auto", cwd="/srv/chief/memory")
+
+    [event async for event in task.run_turn("go")]
+
+    assert client.create_kwargs is not None
+    assert client.create_kwargs["working_directory"] == "/srv/chief/memory"
+
+    backend2, client2, _s2 = _backend_with([_msg("hi"), SessionIdleData()])
+    task2 = backend2.create_session(model="auto")
+
+    [event async for event in task2.run_turn("go")]
+
+    assert client2.create_kwargs is not None
+    assert client2.create_kwargs["working_directory"] is None
 
 
 # --- Branch forks the casual session, never shares it (#93) --------------------------

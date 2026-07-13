@@ -76,6 +76,7 @@ gate callbacks — they are re-supplied on **every** connect (create and resume)
 
 import asyncio
 import logging
+import os
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Protocol
@@ -398,7 +399,12 @@ class CopilotTaskSession:
         #: :meth:`chief.core.tasks.TaskManager.branch`; ignored on a plain create or
         #: resume.
         self._fork_session = fork_session
-        self._cwd = cwd
+        #: The SDK refuses a relative directory ("Directory path must be absolute:
+        #: data/memory") and fails the turn at session.create. chief's own defaults are
+        #: relative (``memory_dir``, ``chief_skills_dir``), so resolve here — the single
+        #: boundary every caller crosses — against the process cwd, the same convention
+        #: ``config.yaml`` and ``SKILLS_PLUGIN_DIR`` are resolved by.
+        self._cwd = os.path.abspath(cwd) if cwd is not None else None
         #: chief's gate, adapted onto the Copilot boundary by the backend. Non-persisted
         #: SDK callbacks, so re-registered on every connect (create *and* resume) below.
         self._on_permission_request = on_permission_request
@@ -427,10 +433,16 @@ class CopilotTaskSession:
         #: re-supplied on every connect (create *and* resume), like the tool surface.
         #: Owner-only: guests are handed ``None`` at the wiring layer.
         self._custom_agents = custom_agents
+        #: Absolute for the same reason ``_cwd`` is — and doubly so: the SDK resolves a
+        #: relative skill dir against the session's cwd (``memory_dir``), not chief's.
         #: Ported M10 skill directories (#87) — the Copilot analogue of chief's plugin +
         #: ``skills=`` filter. Non-empty turns skills on for this session; also
         #: re-supplied on every connect.
-        self._skill_directories = skill_directories
+        self._skill_directories = (
+            [os.path.abspath(d) for d in skill_directories]
+            if skill_directories
+            else skill_directories
+        )
         self._client: _CopilotClient | None = None
         self._session: _CopilotSession | None = None
         self._connected = False
