@@ -8,6 +8,7 @@ swaps in via htmx or SSE. Every interpolated value passes :func:`html.escape`.
 
 import html
 from collections.abc import Iterable, Mapping
+from urllib.parse import urlencode
 
 #: Nav entries: (href, label). The active one is highlighted by :func:`page`.
 _NAV: tuple[tuple[str, str], ...] = (
@@ -200,6 +201,11 @@ def approvals_html(cards: Iterable[Mapping[str, object]]) -> str:
     return rendered or ""
 
 
+def _thread_query(platform: str, thread_key: str) -> str:
+    """URL-encoded ``platform``/``thread_key`` pair, HTML-escaped for attributes."""
+    return _esc(urlencode({"platform": platform, "thread_key": thread_key}))
+
+
 def thread_list_html(
     threads: Iterable[Mapping[str, object]],
     *,
@@ -216,8 +222,7 @@ def thread_list_html(
         title = str(t.get("title") or thread_key)
         status = str(t.get("status") or "")
         items.append(
-            f'<a href="/chat?platform={_esc(platform)}'
-            f'&amp;thread_key={_esc(thread_key)}"'
+            f'<a href="/chat?{_thread_query(platform, thread_key)}"'
             f'{" class=\"active\"" if is_active else ""}>'
             f"{_esc(title)}"
             f'{" ⏳" if status == "running" else ""}</a>'
@@ -225,7 +230,69 @@ def thread_list_html(
     if not seen_active:
         items.insert(
             0,
-            f'<a class="active" href="/chat?platform={_esc(active_platform)}'
-            f'&amp;thread_key={_esc(active_thread)}">{_esc(active_thread)}</a>',
+            f'<a class="active" href="/chat?'
+            f'{_thread_query(active_platform, active_thread)}">'
+            f"{_esc(active_thread)}</a>",
         )
+    items.append('<a href="/chat/new">＋ New</a>')
     return "".join(items)
+
+
+def history_message_html(message: Mapping[str, object]) -> str:
+    """Render one #134 backfill row (role/kind/text/filename) as a transcript entry."""
+    kind = str(message.get("kind") or "")
+    text = str(message.get("text") or "")
+    if kind == "milestone":
+        return message_html("milestone", text)
+    if kind == "file":
+        filename = str(message.get("filename") or "file")
+        return f'<div class="msg chief file">📄 {_esc(filename)} {_esc(text)}</div>'
+    role = "owner" if message.get("role") == "owner" else "chief"
+    return message_html(kind, text, role=role)
+
+
+def chat_page_body(
+    *,
+    platform: str,
+    thread_key: str,
+    threads: Iterable[Mapping[str, object]],
+    history: Iterable[Mapping[str, object]],
+    cards: Iterable[Mapping[str, object]],
+) -> str:
+    """The whole chat surface: thread strip, approvals, transcript, composer."""
+    query = _thread_query(platform, thread_key)
+    transcript = "".join(history_message_html(m) for m in history)
+    cancel_form = (
+        f'<form hx-post="/chat/cancel" hx-swap="none">'
+        f'<input type="hidden" name="platform" value="{_esc(platform)}">'
+        f'<input type="hidden" name="thread_key" value="{_esc(thread_key)}">'
+        '<button class="quiet" title="Cancel the running task">✕ Cancel task'
+        "</button></form>"
+        if platform == "cli"
+        else ""
+    )
+    return (
+        f'<div class="chat" hx-ext="sse" sse-connect="/events?{query}">'
+        f'<div class="threads" hx-get="/chat/threads?{query}"'
+        ' hx-trigger="every 5s" hx-swap="innerHTML">'
+        + thread_list_html(
+            threads, active_platform=platform, active_thread=thread_key
+        )
+        + "</div>"
+        '<div id="approvals" sse-swap="approvals" hx-swap="innerHTML">'
+        + approvals_html(cards)
+        + "</div>"
+        '<div id="transcript" sse-swap="message" hx-swap="beforeend">'
+        + transcript
+        + "</div>"
+        f'<form class="composer" hx-post="/chat/send" hx-target="#transcript"'
+        ' hx-swap="beforeend" hx-on::after-request="this.reset();'
+        "document.getElementById('transcript').scrollTop = 1e9\">"
+        f'<input type="hidden" name="platform" value="{_esc(platform)}">'
+        f'<input type="hidden" name="thread_key" value="{_esc(thread_key)}">'
+        '<input type="text" name="text" autocomplete="off" autofocus'
+        ' placeholder="Message chief — /commands work too">'
+        "<button>Send</button></form>"
+        f"{cancel_form}"
+        "</div>"
+    )
