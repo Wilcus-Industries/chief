@@ -20,7 +20,14 @@ import pytest
 from textual.widgets import Footer, Static
 
 from chief.adapters.commands import OWNER_COMMANDS
-from chief.cli.app import AWAY_FOOTER, AWAY_HEADER, ChiefCliApp, Line, PromptInput
+from chief.cli.app import (
+    AWAY_FOOTER,
+    AWAY_HEADER,
+    OWNER_STYLE,
+    ChiefCliApp,
+    Line,
+    PromptInput,
+)
 from chief.cli.connection import SocketConnection
 from chief.client_plane import (
     PROTOCOL_VERSION,
@@ -149,7 +156,7 @@ async def test_typing_a_message_emits_a_user_frame(
         await pilot.press(*"hi", "enter")
         await _settle(app, lambda: bool(peer.received))
         assert peer.received[-1] == user_frame("cli:main", "hi")
-        assert Line("bold", "> hi") in app.transcript
+        assert Line(OWNER_STYLE, "> hi") in app.transcript
 
 
 async def test_milestone_then_reply_render_in_order_with_styles(
@@ -819,6 +826,62 @@ async def test_cancel_picker_with_no_cli_threads_says_so(
             lambda: any("nothing to cancel" in line.text for line in app.transcript),
         )
         assert app.dropdown_options == []
+
+
+# ---- owner vs agent lines are visually distinct --------------------------------------
+
+
+async def test_owner_lines_are_colored_and_spaced_apart_from_replies(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """Owner echoes get their own color and a blank separator line above, so an
+    exchange reads as a block and the agent's lines are tellable at a glance."""
+    async with app.run_test() as pilot:
+        await peer.push(reply_frame("cli:main", "earlier reply"))
+        await _settle(
+            app, lambda: any("earlier reply" in line.text for line in app.transcript)
+        )
+        await pilot.press(*"hi", "enter")
+        await _settle(
+            app, lambda: any(line.text == "> hi" for line in app.transcript)
+        )
+        owner_idx = next(
+            i for i, line in enumerate(app.transcript) if line.text == "> hi"
+        )
+        assert app.transcript[owner_idx].style == OWNER_STYLE
+        assert app.transcript[owner_idx - 1].text == ""  # breathing room above
+        reply_line = next(
+            line for line in app.transcript if line.text == "earlier reply"
+        )
+        assert reply_line.style != OWNER_STYLE
+
+
+async def test_backfilled_owner_rows_use_the_owner_style(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await _switch_onto_telegram(app, peer, pilot)
+        await peer.push(
+            backfill_frame(
+                "telegram",
+                "-100:5",
+                [
+                    {
+                        "role": "owner", "kind": "user", "text": "hi",
+                        "filename": None, "created_at": "2026-01-01T00:00:00",
+                    },
+                    {
+                        "role": "chief", "kind": "reply", "text": "hello",
+                        "filename": None, "created_at": "2026-01-01T00:00:01",
+                    },
+                ],
+            )
+        )
+        await _settle(app, lambda: any("hello" in line.text for line in app.transcript))
+        owner_line = next(line for line in app.transcript if line.text == "> hi")
+        assert owner_line.style == OWNER_STYLE
+        reply_line = next(line for line in app.transcript if line.text == "hello")
+        assert reply_line.style != OWNER_STYLE
 
 
 # ---- ctrl+c: cancel the running turn, again to clear the chat -----------------------
