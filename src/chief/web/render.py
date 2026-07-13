@@ -7,6 +7,7 @@ swaps in via htmx or SSE. Every interpolated value passes :func:`html.escape`.
 """
 
 import html
+import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Protocol
@@ -118,7 +119,7 @@ def page(title: str, body: str, *, active: str | None = None) -> str:
         f"<title>{_esc(title)} — chief</title>"
         f"<style>{_STYLE}</style>"
         '<script src="/static/htmx.min.js"></script>'
-        '<script src="/static/htmx-sse.js"></script>'
+        '<script src="/static/chief.js" defer></script>'
         "</head><body>"
         f'<header><span class="brand">chief</span><nav>{nav}</nav></header>'
         f"<main>{body}</main>"
@@ -188,13 +189,28 @@ def file_message_html(
     )
 
 
-def card_html(card: Mapping[str, object]) -> str:
-    """An actionable approval card: preview text + the four answer buttons."""
+def card_html(
+    card: Mapping[str, object],
+    *,
+    active_platform: str = "",
+    active_thread: str = "",
+) -> str:
+    """An actionable approval card: preview text + the four answer buttons.
+
+    The answer POST carries the page's active thread so the response re-renders
+    the approvals block scoped the same way this page was.
+    """
     approval_id = _esc(card.get("approval_id"))
     options = card.get("options")
+    context = (
+        f', "platform": "{_esc(active_platform)}"'
+        f', "thread_key": "{_esc(active_thread)}"'
+        if active_platform
+        else ""
+    )
     buttons = "".join(
         f'<button hx-post="/approvals/{approval_id}"'
-        f' hx-vals=\'{{"action": "{_esc(o["action"])}"}}\''
+        f' hx-vals=\'{{"action": "{_esc(o["action"])}"{context}}}\''
         f' hx-target="#approvals" hx-swap="innerHTML">{_esc(o["label"])}</button>'
         for o in options
         if isinstance(o, dict)
@@ -208,10 +224,48 @@ def card_html(card: Mapping[str, object]) -> str:
     )
 
 
-def approvals_html(cards: Iterable[Mapping[str, object]]) -> str:
-    """The pending-approvals block (swapped whole on every card event)."""
-    rendered = "".join(card_html(c) for c in cards)
-    return rendered or ""
+def _foreign_card_link(card: Mapping[str, object]) -> str:
+    """A one-line pointer to an approval waiting in another thread."""
+    platform = str(card.get("platform"))
+    thread_key = str(card.get("thread_key"))
+    return (
+        f'<a class="card-elsewhere" href="/chat?'
+        f'{_thread_query(platform, thread_key)}">'
+        f"⧗ approval waiting in {_esc(platform)} · {_esc(thread_key)}</a>"
+    )
+
+
+def approvals_html(
+    cards: Iterable[Mapping[str, object]],
+    *,
+    active_platform: str = "",
+    active_thread: str = "",
+) -> str:
+    """The pending-approvals block (swapped whole on every card event).
+
+    Scoped to the page's active thread: only that thread's cards render with
+    answer buttons here; a card pending in any other thread shows as a compact
+    link to its own chat page, so answer-from-anywhere stays one tap away
+    without foreign requests masquerading as this conversation's. With no
+    active context (no filter), every card renders in full.
+    """
+    full, elsewhere = [], []
+    for card in cards:
+        matches = not active_platform or (
+            str(card.get("platform")) == active_platform
+            and str(card.get("thread_key")) == active_thread
+        )
+        if matches:
+            full.append(
+                card_html(
+                    card,
+                    active_platform=active_platform,
+                    active_thread=active_thread,
+                )
+            )
+        else:
+            elsewhere.append(_foreign_card_link(card))
+    return "".join(full) + "".join(elsewhere)
 
 
 def _human_size(size: int) -> str:
@@ -512,6 +566,17 @@ def history_message_html(message: Mapping[str, object]) -> str:
     return message_html(kind, text, role=role)
 
 
+def commands_json(commands: Iterable[tuple[str, str]]) -> str:
+    """The slash-command palette as embeddable JSON (for the composer dropdown).
+
+    ``</`` is escaped so the payload can never close its ``<script>`` container.
+    """
+    payload = json.dumps(
+        [{"name": f"/{name}", "desc": desc} for name, desc in commands]
+    )
+    return payload.replace("</", "<\\/")
+
+
 def chat_page_body(
     *,
     platform: str,
@@ -519,6 +584,7 @@ def chat_page_body(
     threads: Iterable[Mapping[str, object]],
     history: Iterable[Mapping[str, object]],
     cards: Iterable[Mapping[str, object]],
+    commands: Iterable[tuple[str, str]] = (),
 ) -> str:
     """The whole chat surface: thread strip, approvals, transcript, composer."""
     query = _thread_query(platform, thread_key)
@@ -533,27 +599,33 @@ def chat_page_body(
         else ""
     )
     return (
-        f'<div class="chat" hx-ext="sse" sse-connect="/events?{query}">'
+        f'<div class="chat" data-events-url="/events?{query}">'
         f'<div class="threads" hx-get="/chat/threads?{query}"'
         ' hx-trigger="every 5s" hx-swap="innerHTML">'
         + thread_list_html(
             threads, active_platform=platform, active_thread=thread_key
         )
         + "</div>"
-        '<div id="approvals" sse-swap="approvals" hx-swap="innerHTML">'
-        + approvals_html(cards)
+        '<div id="approvals">'
+        + approvals_html(
+            cards, active_platform=platform, active_thread=thread_key
+        )
         + "</div>"
-        '<div id="transcript" sse-swap="message" hx-swap="beforeend">'
+        '<div id="transcript">'
         + transcript
         + "</div>"
+        '<div id="cmd-menu" role="listbox" hidden></div>'
         f'<form class="composer" hx-post="/chat/send" hx-target="#transcript"'
         ' hx-swap="beforeend" hx-on::after-request="this.reset();'
         "document.getElementById('transcript').scrollTop = 1e9\">"
         f'<input type="hidden" name="platform" value="{_esc(platform)}">'
         f'<input type="hidden" name="thread_key" value="{_esc(thread_key)}">'
         '<input type="text" name="text" autocomplete="off" autofocus'
-        ' placeholder="Message chief — /commands work too">'
+        ' placeholder="Message chief — / for commands">'
         "<button>Send</button></form>"
         f"{cancel_form}"
+        '<script type="application/json" id="cmd-data">'
+        + commands_json(commands)
+        + "</script>"
         "</div>"
     )

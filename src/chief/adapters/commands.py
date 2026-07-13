@@ -135,16 +135,23 @@ async def _cmd_route(ctx: CommandContext) -> None:
 
 
 class CommandRegistry:
-    """A platform-neutral table of owner command name → handler."""
+    """A platform-neutral table of owner command name → handler (+ description)."""
 
     def __init__(self) -> None:
         self._commands: dict[str, CommandFn] = {}
+        self._descriptions: dict[str, str] = {}
 
-    def register(self, name: str, handler: CommandFn) -> None:
+    def register(self, name: str, handler: CommandFn, description: str = "") -> None:
         self._commands[name] = handler
+        self._descriptions[name] = description
 
     def names(self) -> list[str]:
         return list(self._commands)
+
+    def entries(self) -> list[tuple[str, str]]:
+        """Every ``(name, description)`` pair, in registration order — the one
+        source both clients' autocomplete menus describe commands from."""
+        return [(name, self._descriptions[name]) for name in self._commands]
 
     async def dispatch(self, name: str, ctx: CommandContext) -> None:
         """Run ``name``'s handler, or silently no-op if unknown (both adapters)."""
@@ -157,16 +164,16 @@ class CommandRegistry:
 def owner_registry() -> CommandRegistry:
     """Build a fresh registry carrying every owner command."""
     registry = CommandRegistry()
-    registry.register("cancel", _cmd_cancel)
-    registry.register("tasks", _cmd_tasks)
-    registry.register("close", _cmd_close)
-    registry.register("rename", _cmd_rename)
-    registry.register("memory", _cmd_memory)
-    registry.register("forget", _cmd_forget)
-    registry.register("branch", _cmd_branch)
-    registry.register("opus", _cmd_opus)
-    registry.register("sonnet", _cmd_sonnet)
-    registry.register("route", _cmd_route)
+    registry.register("cancel", _cmd_cancel, "Stop this thread's running task")
+    registry.register("tasks", _cmd_tasks, "List active tasks")
+    registry.register("close", _cmd_close, "Finish and archive this thread")
+    registry.register("rename", _cmd_rename, "Retitle this thread: /rename <title>")
+    registry.register("memory", _cmd_memory, "List stored facts")
+    registry.register("forget", _cmd_forget, "Forget matching facts: /forget <text>")
+    registry.register("branch", _cmd_branch, "Promote casual chat into a thread")
+    registry.register("opus", _cmd_opus, "Escalate this thread to Opus")
+    registry.register("sonnet", _cmd_sonnet, "Revert this thread to the default model")
+    registry.register("route", _cmd_route, "Pin a routing category: /route <category>")
     return registry
 
 

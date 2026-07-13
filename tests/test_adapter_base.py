@@ -10,6 +10,7 @@ from chief.adapters.base import (
     should_send_as_file,
     split_message,
 )
+from chief.adapters.commands import owner_registry
 
 
 def test_owner_id_matches_exactly() -> None:
@@ -128,3 +129,15 @@ def test_reply_filename_is_timestamped_markdown() -> None:
     name = reply_filename()
 
     assert name.startswith("reply-") and name.endswith(".md")
+
+
+def test_owner_registry_entries_describe_every_command() -> None:
+    # entries() is the one source both clients' autocomplete menus draw from:
+    # same names as names(), registration order, and no command left blank.
+    registry = owner_registry()
+
+    entries = registry.entries()
+
+    assert [name for name, _ in entries] == registry.names()
+    assert all(desc for _, desc in entries)
+    assert ("tasks", "List active tasks") in entries

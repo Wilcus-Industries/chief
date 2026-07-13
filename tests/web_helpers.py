@@ -204,13 +204,13 @@ class SseReader:
     async def __aexit__(self, *exc: object) -> None:
         await self._cm.__aexit__(*exc)
 
-    async def next_event(self) -> tuple[str, str]:
+    async def next_event(self, timeout: float | None = None) -> tuple[str, str]:
         """The next ``(event, data)`` pair; data lines re-joined with newlines."""
         event = "message"
         data: list[str] = []
         while True:
             line = await asyncio.wait_for(
-                self._lines.__anext__(), timeout=self._timeout
+                self._lines.__anext__(), timeout=timeout or self._timeout
             )
             if line.startswith("event:"):
                 event = line.split(":", 1)[1].strip()
