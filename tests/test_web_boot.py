@@ -37,6 +37,30 @@ def test_web_port_out_of_range_fails_the_boot() -> None:
         Settings(web_port=70000)
 
 
+def test_build_web_stack_binds_settings(tmp_path: Path) -> None:
+    from chief.web.wiring import build_web_stack
+
+    settings = Settings(web_port=9321, socket_path=str(tmp_path / "s.sock"))
+    stack = build_web_stack(settings, secrets_dir=tmp_path / "secrets")
+    assert stack.server.host == "127.0.0.1"
+    assert stack.server.port == 9321
+
+
+def test_web_auth_dir_prefers_the_live_secrets_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from chief.app import web_auth_dir
+
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    monkeypatch.setenv("CHIEF_SECRETS_DIR", str(secrets))
+    assert web_auth_dir() == str(secrets)
+    # A not-yet-existing override still names where the credential must go — the
+    # store creates it on demand (fresh env-only install).
+    monkeypatch.setenv("CHIEF_SECRETS_DIR", str(tmp_path / "missing"))
+    assert web_auth_dir() == str(tmp_path / "missing")
+
+
 async def test_real_server_serves_login_and_stops(tmp_path: Path) -> None:
     auth = WebAuth(tmp_path / "secrets")
     auth.set_password("bootpassword")

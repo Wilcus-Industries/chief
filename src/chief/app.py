@@ -71,6 +71,7 @@ from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
 from .tools.web import BraveSearcher, WebFetcher, WebService
+from .web.wiring import build_web_stack
 
 logger = logging.getLogger("chief.app")
 
@@ -103,19 +104,42 @@ _PLATFORM_LIMITS = {
 }
 
 
-def load_settings() -> Settings:
-    """Load settings, using the first existing secrets dir and env otherwise.
+def find_secrets_dir() -> str | None:
+    """The first existing secrets dir (``CHIEF_SECRETS_DIR`` overrides), or ``None``.
 
-    ``CHIEF_SECRETS_DIR`` overrides the candidate list (``~/.config/chief/secrets``,
-    then the repo-local ``./secrets``). Skipping the secrets source when no dir exists
-    avoids a noisy "directory does not exist" warning on env-only runs.
+    The candidate list is ``~/.config/chief/secrets``, then the repo-local
+    ``./secrets``. Shared by settings loading and the web UI's credential store so
+    the two can never disagree on where secrets live.
     """
     override = os.environ.get("CHIEF_SECRETS_DIR")
     candidates = (override,) if override else SECRETS_DIR_CANDIDATES
     for candidate in candidates:
         if candidate and os.path.isdir(candidate):
-            return Settings(_secrets_dir=candidate)  # type: ignore[call-arg]
+            return candidate
+    return None
+
+
+def load_settings() -> Settings:
+    """Load settings, using the first existing secrets dir and env otherwise.
+
+    Skipping the secrets source when no dir exists avoids a noisy "directory does
+    not exist" warning on env-only runs.
+    """
+    found = find_secrets_dir()
+    if found is not None:
+        return Settings(_secrets_dir=found)  # type: ignore[call-arg]
     return Settings()
+
+
+def web_auth_dir() -> str:
+    """Where the web UI credential lives (#153): the live secrets dir, or the
+    default candidate — created on demand by the credential store — when no
+    secrets dir exists yet (a fresh env-only install still needs somewhere to put
+    the owner password)."""
+    found = find_secrets_dir()
+    if found is not None:
+        return found
+    return os.environ.get("CHIEF_SECRETS_DIR") or SECRETS_DIR_CANDIDATES[0]
 
 
 def warn_if_classifier_degraded(settings: Settings) -> None:
@@ -1053,6 +1077,14 @@ async def serve(settings: Settings) -> None:
     scheduler, http = build_scheduler(
         settings, stacks=stacks, session_factory=factory
     )
+    # The web UI (#153) — ON by default (the zero-token day-one channel). Its chat
+    # surface attaches to the socket above as one more client-plane client; its
+    # bridge retries the dial, so gather order vs the socket bind doesn't matter.
+    web_stack = (
+        build_web_stack(settings, secrets_dir=Path(web_auth_dir()))
+        if settings.web_enabled
+        else None
+    )
 
     def make_ready(manager: TaskManager, approvals: ApprovalManager) -> ReadyHook:
         async def on_ready() -> None:
@@ -1069,6 +1101,8 @@ async def serve(settings: Settings) -> None:
         coros.append(scheduler.run())
     # Unconditional (#130): a socket-only chief has no other coro to keep gather alive.
     coros.append(socket_server.run())
+    if web_stack is not None:
+        coros.append(web_stack.run())
 
     try:
         await asyncio.gather(*coros)
@@ -1090,6 +1124,13 @@ async def serve(settings: Settings) -> None:
                 await http.aclose()
             except Exception:
                 logger.exception("heartbeat http close failed during shutdown")
+        # The web surface detaches from the socket before the listener closes (#153);
+        # guarded like every other stop.
+        if web_stack is not None:
+            try:
+                await web_stack.stop()
+            except Exception:
+                logger.exception("web stack stop failed during shutdown")
         # Close the client-plane listener (removes the socket file) before disposing the
         # engine; guarded so a stop failure can't mask the dispose (#130).
         try:
