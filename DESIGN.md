@@ -804,6 +804,33 @@ surface is **tokenless** — authenticated by the `0600` socket, always the owne
   flat sessions, not owner task-topics.
 - **Group chats: mention-activated** — chief stays quiet in groups until `@mentioned`.
 
+**iMessage (PRD #156, macOS-only, opt-in).** chief has a phone number people just text,
+built on a **dedicated Apple ID**: the Messages account signed in on chief's Mac mini
+*is* chief's identity — it texts as itself, never ghost-writes as the owner. Inbound is
+a poll loop in the adapter's run loop over the local Messages store (the #155 read
+layer, persisted cursor so restarts neither replay nor drop); outbound is OS automation
+on the ScriptRunner seam (fixed JXA, data as argv). The **whitelist is the event
+gate**: owner handles are seeded at setup (`imessage_owner_handles`; the installer
+wizard calls `persistence.imessage.seed_owner_handles`), the owner adds guests by chat
+("listen to Mom") or the web Settings page, and each added handle rides the existing
+guest machinery (rate limits, budget caps, restricted tools). Non-whitelisted senders:
+no session, no reply, a metadata-only unknown-senders log (handle + timestamp, never
+content — "who's texted you?"). Per guest conversation the owner picks **auto**
+(default) or **draft-first** (every outbound parks on an approval card; the first send
+to a new handle cards regardless of mode). DMs only in v1; group threads are never
+read. Cards render as text on iMessage (no buttons) — the mirror's socket broadcast
+makes them answerable from the web UI / terminal. The poller fails loud (Front Desk
+alert + red `/health` row), and the env-gated live suite (`CHIEF_IMESSAGE_LIVE`) is the
+canary for Apple changing store or scripting shapes.
+
+*Dedicated-Apple-ID setup (manual, one-time):* create a fresh Apple ID for chief
+(appleid.apple.com; its own email; 2FA enrolled on the mini), sign **Messages.app** on
+the mini into that ID (Messages → Settings → iMessage), enable the handles it may
+receive at, grant the terminal running chief Full Disk Access **and** Automation →
+Messages (`check_apple_health` walks through both), then set `imessage_enabled: true` +
+`imessage_owner_handles` in `config.yaml` and restart. Text it from the owner's phone
+to verify.
+
 **Incoming media:** **images** (native Claude vision) and **documents/PDFs** (downloaded to
 the workspace, parsed/summarized). **Voice notes deferred** — STT isn't covered by Max
 (would need local Whisper or an API); revisit later.
@@ -846,6 +873,26 @@ card:
 - **File workspace** — scratch dir (Read/Write/Edit) at `data/workspace`; host-native:
   writes anywhere are allowed, the workspace is just the suggested scratch area +
   shell cwd. Opt-in (`workspace_enabled`).
+- **Apple ecosystem** (#155) — owner-only, **auto-detected and self-gating**: on a
+  macOS boot (`apple_enabled` defaults ON; force-off available) per-capability TCC
+  permission probes decide which app areas register; on Linux none of it exists.
+  Subprocess-first — one in-process server per app area drives the OS automation
+  layer (fixed JXA via `osascript`, the Shortcuts CLI, the sqlite3 CLI) through the
+  `chief.tools.apple.runner.ScriptRunner` seam; no PyObjC. Areas: Reminders
+  (create/list/complete), Notes (create/search/read), Contacts lookup, Apple
+  Calendar (create/list events), Shortcuts (list/run), system control (clipboard,
+  notifications, screenshots), and **read-only** Messages history (the read layer
+  the iMessage adapter PRD builds on; sending lives there, not here). Gated shapes:
+  `run_shortcut` + Apple Calendar `create_event` are blacklist-seeded (ASK);
+  Messages reads are screened (other people's text). The **permissions doctor**
+  (`check_apple_health`) probes each grant, reports per-capability health **as
+  data** (the #153 web health page consumes `AppleToolFamily.check_health`), and
+  carries the exact System Settings walk-through per missing grant; capabilities
+  degrade individually and register at the next boot. Supported macOS floor:
+  **macOS 14 (Sonoma)** — older releases differ in TCC behavior, scripting
+  dictionaries, and the sqlite3 `-json` mode; the env-gated live suite
+  (`CHIEF_APPLE_LIVE=1`, on the Mac mini rig) is the canary for Apple changing any
+  of those.
 - **Memory, scheduler/monitors** — owner-tier management tools.
 
 **Guest toolset (v1):** take-a-message, check-availability (free/busy only), request-booking.

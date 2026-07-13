@@ -188,6 +188,34 @@ workspace_dir: data/workspace        # shell cwd + scratch area (repo-local, git
 shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 
+# Apple ecosystem tools (#155, owner-only, darwin-gated). Unlike the opt-in subsystems,
+# apple_enabled defaults ON — the family is auto-detected: effective only when chief
+# boots on macOS, silently absent on Linux, force-off with apple_enabled: false. At boot,
+# per-capability macOS permission probes decide which app areas register (Reminders,
+# Notes, Contacts, Apple Calendar, Shortcuts, system control, read-only Messages
+# history); the check_apple_health doctor tool reports each grant's state with exact
+# System Settings steps, and newly granted capabilities register at the next restart.
+# run_shortcut and the Apple Calendar create_event ask for approval (blacklist-seeded);
+# Messages reads are screened. Supported macOS floor: 14 (Sonoma) — see DESIGN.md.
+# apple_enabled: true
+# apple_script_timeout_seconds: 30     # per osascript/shortcuts/sqlite3 child process
+# apple_output_limit: 200000           # cap on captured output per call
+# apple_messages_db_path: ~/Library/Messages/chat.db  # needs Full Disk Access
+
+# iMessage adapter (#156, macOS-only, opt-in). chief gets a phone number people just
+# text — built on a DEDICATED Apple ID signed into Messages on chief's Mac (it texts
+# as itself, never as you; see DESIGN.md "iMessage" for the setup steps). The
+# whitelist is the event gate: only whitelisted handles reach chief (owner handles
+# seeded below; add guests by chat — "listen to Mom" — or the web Settings page).
+# Strangers burn zero tokens and land in a metadata-only unknown-senders log. Guest
+# conversations run auto (free replies within guest limits) or draft-first (every
+# outbound text raises an approval card). DMs only; group chats are never read.
+# Needs Full Disk Access (store) + Automation → Messages (send) — check_apple_health.
+imessage_enabled: false
+# imessage_owner_handles: ["+15551234567"]  # REQUIRED when enabled: your handles,
+#                                           # E.164 or email; first = card/alert route
+# imessage_poll_seconds: 2                  # store-poll cadence
+
 # chief-owned web tools (#81, part of #72, owner-only, opt-in). With web_tools_enabled on,
 # owner sessions get a web-fetch + web-search tool that reach both backends (the Copilot
 # SDK has no built-in web tools). web-fetch is SSRF-guarded (private/loopback/link-local

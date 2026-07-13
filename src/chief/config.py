@@ -15,6 +15,7 @@ import fnmatch
 import logging
 import os
 import re
+import sys
 from datetime import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,13 @@ from pydantic_settings import (
 
 from .client_plane import CLI_PLATFORM
 from .gate.blacklist import DEFAULT_SHELL_PATTERNS
+from .tools.apple.calendar import (
+    MUTATING_TOOL_NAMES as _APPLE_CALENDAR_WRITE_TOOLS,
+)
+from .tools.apple.messages import READ_TOOL_NAMES as _APPLE_MESSAGES_READ_TOOLS
+from .tools.apple.shortcuts import (
+    MUTATING_TOOL_NAMES as _APPLE_SHORTCUTS_MUTATING_TOOLS,
+)
 from .tools.calendar.mcp import WRITE_TOOLS as _CALENDAR_WRITE_TOOLS
 from .tools.drive.mcp import WRITE_TOOLS as _DRIVE_WRITE_TOOLS
 from .tools.gmail.mcp import WRITE_TOOLS as _GMAIL_WRITE_TOOLS
@@ -57,6 +65,12 @@ logger = logging.getLogger("chief.config")
 #: own routing table, so under the owner default-allow gate a bare registration would
 #: run un-carded — each mutating edit must ASK. Its read-only ``list_routing`` is left
 #: off (it ALLOWs freely). The gate is this tool's security boundary.
+#: The Apple family's gated shapes (#155) are seeded too: ``run_shortcut`` is the
+#: escape hatch to anything the owner has automated (it can send, delete, or reach
+#: other people), so each shape's first run must ASK until approved into the APPROVED
+#: list; the Apple Calendar ``create_event`` matches the Google calendar write
+#: posture. The family's reads and owner-local creates (reminders, notes, clipboard,
+#: …) ALLOW freely.
 _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     _GMAIL_WRITE_TOOLS
     + _CALENDAR_WRITE_TOOLS
@@ -64,6 +78,8 @@ _DEFAULT_BLACKLIST_TOOLS: tuple[str, ...] = (
     + _SHEETS_WRITE_TOOLS
     + (_WEB_FETCH_TOOL,)
     + _ROUTING_ADMIN_TOOLS
+    + _APPLE_CALENDAR_WRITE_TOOLS
+    + _APPLE_SHORTCUTS_MUTATING_TOOLS
 )
 
 #: Where chief writes its own behavioral overlay (#107, part of #103). Kept as a
@@ -100,6 +116,13 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     # must not move where chief listens. (web_enabled / web_lan_enabled are already
     # denied by *_enabled; LAN exposure is owner-only by construction.)
     "web_port",
+    # Repointing which database the Messages read tools open is an endpoint move —
+    # the same fence class as *_mcp_url (#155). apple_enabled is caught by *_enabled.
+    "apple_messages_db_path",
+    # The iMessage whitelist's owner tier (#156) is an owner-identity key — the same
+    # fence class as owner_*_id. An overlay must never mint itself an owner handle.
+    # (imessage_enabled is caught by *_enabled.)
+    "imessage_owner_handles",
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
@@ -173,6 +196,9 @@ MERGE_SAFE: frozenset[str] = frozenset(
         "workspace_dir",
         "shell_timeout_seconds",
         "shell_output_limit",
+        "apple_script_timeout_seconds",
+        "apple_output_limit",
+        "imessage_poll_seconds",
         "web_fetch_timeout_seconds",
         "web_fetch_max_bytes",
         "web_search_count",
@@ -385,7 +411,9 @@ class Settings(BaseSettings):
         "mcp__gmail_chief__gmail_search_messages",
         "mcp__gmail_chief__gmail_list_drafts",
         "mcp__drive__ReadDriveFile",
-    )
+        # Apple Messages history reads (#155): message text arrives from other
+        # people, the same untrusted channel class as Gmail bodies.
+    ) + _APPLE_MESSAGES_READ_TOOLS
 
     # Guest receptionist (M6), default off. When enabled, guests route into a tight,
     # tier-isolated session (take-a-message + calendar free/busy + owner-approved
@@ -437,8 +465,39 @@ class Settings(BaseSettings):
     playwright_mcp_url: str = "http://127.0.0.1:3000/mcp"
     # Host directory bind-mounted into mcp-playwright at /screenshots. Core reads
     # screenshot files from here to deliver them via send_file after
-    # browser_take_screenshot runs.
+    # browser_take_screenshot runs. The Apple screenshot tool (#155) writes its
+    # captures here too, so every screenshot lands in one place.
     playwright_screenshots_dir: str = "data/screenshots"
+
+    # Apple ecosystem tools (#155), owner-only, darwin-gated. Unlike the other opt-in
+    # subsystems, apple_enabled defaults ON: the family is auto-detected — effective
+    # only when chief boots on macOS (see the apple_configured property), inert on
+    # Linux regardless, and force-off with apple_enabled: false. At boot,
+    # per-capability TCC permission probes (chief.tools.apple.doctor) decide which
+    # app-area services actually register; the permissions doctor always registers on
+    # a Mac. apple_script_timeout_seconds bounds one osascript/shortcuts/sqlite3
+    # child process; apple_output_limit caps its captured output;
+    # apple_messages_db_path is the Messages store the read-only history tools open
+    # (needs Full Disk Access).
+    apple_enabled: bool = True
+    apple_script_timeout_seconds: float = 30.0
+    apple_output_limit: int = 200_000
+    apple_messages_db_path: str = "~/Library/Messages/chat.db"
+
+    # iMessage adapter (#156), macOS-only, default OFF (opt-in pattern — unlike
+    # apple_enabled it needs real setup first: a dedicated Apple ID signed into
+    # Messages on chief's Mac, so it texts as itself and never ghost-writes as the
+    # owner). Rides the Apple family's store read layer + ScriptRunner, so it is
+    # inert unless apple_configured too; at boot the #155 doctor probes must also
+    # pass (Full Disk Access for the store, Automation → Messages for sending).
+    # imessage_owner_handles seeds the whitelist owner-tier (E.164 phone numbers
+    # and/or emails; the #154 installer wizard writes it) — required when enabled,
+    # since guest cards and poller alerts route to the first owner handle.
+    # imessage_poll_seconds is the store-poll cadence (the adapter's own tick,
+    # well under the scheduler's monitor floor).
+    imessage_enabled: bool = False
+    imessage_poll_seconds: float = 2.0
+    imessage_owner_handles: tuple[str, ...] = ()
 
     # Host shell + file workspace (M7, host-native rework), owner-only.
     # shell_enabled wires the in-process bash tool that runs a persistent per-task
@@ -630,6 +689,7 @@ class Settings(BaseSettings):
         "chief_skills_dir",
         "harness_dir",
         "self_config_path",
+        "apple_messages_db_path",
     )
     @classmethod
     def _expand_user_paths(cls, value: str) -> str:
@@ -793,6 +853,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("apple_script_timeout_seconds", "apple_output_limit")
+    @classmethod
+    def _validate_apple_bounds(cls, value: float) -> float:
+        """The Apple runner's timeout and output cap must be positive — a zero or
+        negative bound would kill every child process (or drop all output)."""
+        if value <= 0:
+            raise ValueError(
+                f"apple runner bounds must be > 0, got {value!r}"
+            )
+        return value
+
     @field_validator("group_context_max_messages")
     @classmethod
     def _validate_group_buffer_cap(cls, value: int) -> int:
@@ -823,6 +894,53 @@ class Settings(BaseSettings):
     def discord_configured(self) -> bool:
         """True iff both the Discord owner id and bot token are set (non-empty)."""
         return bool(self.owner_discord_id) and bool(self.discord_bot_token)
+
+    @property
+    def apple_configured(self) -> bool:
+        """True iff the Apple tool family should exist: enabled AND on macOS (#155).
+
+        The cross-field check pairs the flag with the platform the process actually
+        runs on — a Mac boot grows the family with zero config, a Linux boot is
+        silently inert regardless, and ``apple_enabled: false`` is the force-off.
+        """
+        return self.apple_enabled and sys.platform == "darwin"
+
+    @property
+    def imessage_configured(self) -> bool:
+        """True iff the iMessage adapter should exist (#156): the flag is on AND
+        the Apple family is live (enabled + macOS — the adapter rides its store
+        read layer and ScriptRunner). Boot additionally gates on the doctor's
+        permission probes (:func:`chief.adapters.imessage.imessage_ready`)."""
+        return self.imessage_enabled and self.apple_configured
+
+    @field_validator("imessage_poll_seconds")
+    @classmethod
+    def _validate_imessage_poll(cls, value: float) -> float:
+        """The poll cadence must be positive — 0 would spin the loop hot."""
+        if value <= 0:
+            raise ValueError(
+                f"imessage_poll_seconds must be > 0, got {value!r}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _require_owner_handles_for_imessage(self) -> "Settings":
+        """The iMessage adapter needs at least one owner handle (#156).
+
+        The owner's handles seed the whitelist owner-tier, and the first one is
+        the adapter's Front Desk — where guest admission/draft cards and poller
+        failure alerts land. Enabled with none configured, every card would have
+        nowhere to route (mirrors ``_require_front_desk_for_guests``).
+        """
+        if self.imessage_enabled and not any(
+            handle.strip() for handle in self.imessage_owner_handles
+        ):
+            raise ValueError(
+                "imessage_enabled requires imessage_owner_handles — the owner's "
+                "handles seed the whitelist and route guest cards and poller "
+                "alerts."
+            )
+        return self
 
     @model_validator(mode="after")
     def _require_front_desk_for_guests(self) -> "Settings":
@@ -881,6 +999,7 @@ class Settings(BaseSettings):
         configured = {
             "telegram": self.telegram_configured,
             "discord": self.discord_configured,
+            "imessage": self.imessage_configured,
             # #139: the client-plane socket is always-on infrastructure (#130) and the
             # CLI stack is built unconditionally (app.build_cli_stack), so ``cli`` is
             # always configured — a tokenless chief can run the scheduler, and its
