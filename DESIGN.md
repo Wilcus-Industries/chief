@@ -794,6 +794,33 @@ surface is **tokenless** — authenticated by the `0600` socket, always the owne
   flat sessions, not owner task-topics.
 - **Group chats: mention-activated** — chief stays quiet in groups until `@mentioned`.
 
+**iMessage (PRD #156, macOS-only, opt-in).** chief has a phone number people just text,
+built on a **dedicated Apple ID**: the Messages account signed in on chief's Mac mini
+*is* chief's identity — it texts as itself, never ghost-writes as the owner. Inbound is
+a poll loop in the adapter's run loop over the local Messages store (the #155 read
+layer, persisted cursor so restarts neither replay nor drop); outbound is OS automation
+on the ScriptRunner seam (fixed JXA, data as argv). The **whitelist is the event
+gate**: owner handles are seeded at setup (`imessage_owner_handles`; the installer
+wizard calls `persistence.imessage.seed_owner_handles`), the owner adds guests by chat
+("listen to Mom") or the web Settings page, and each added handle rides the existing
+guest machinery (rate limits, budget caps, restricted tools). Non-whitelisted senders:
+no session, no reply, a metadata-only unknown-senders log (handle + timestamp, never
+content — "who's texted you?"). Per guest conversation the owner picks **auto**
+(default) or **draft-first** (every outbound parks on an approval card; the first send
+to a new handle cards regardless of mode). DMs only in v1; group threads are never
+read. Cards render as text on iMessage (no buttons) — the mirror's socket broadcast
+makes them answerable from the web UI / terminal. The poller fails loud (Front Desk
+alert + red `/health` row), and the env-gated live suite (`CHIEF_IMESSAGE_LIVE`) is the
+canary for Apple changing store or scripting shapes.
+
+*Dedicated-Apple-ID setup (manual, one-time):* create a fresh Apple ID for chief
+(appleid.apple.com; its own email; 2FA enrolled on the mini), sign **Messages.app** on
+the mini into that ID (Messages → Settings → iMessage), enable the handles it may
+receive at, grant the terminal running chief Full Disk Access **and** Automation →
+Messages (`check_apple_health` walks through both), then set `imessage_enabled: true` +
+`imessage_owner_handles` in `config.yaml` and restart. Text it from the owner's phone
+to verify.
+
 **Incoming media:** **images** (native Claude vision) and **documents/PDFs** (downloaded to
 the workspace, parsed/summarized). **Voice notes deferred** — STT isn't covered by Max
 (would need local Whisper or an API); revisit later.

@@ -202,6 +202,20 @@ shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then
 # apple_output_limit: 200000           # cap on captured output per call
 # apple_messages_db_path: ~/Library/Messages/chat.db  # needs Full Disk Access
 
+# iMessage adapter (#156, macOS-only, opt-in). chief gets a phone number people just
+# text — built on a DEDICATED Apple ID signed into Messages on chief's Mac (it texts
+# as itself, never as you; see DESIGN.md "iMessage" for the setup steps). The
+# whitelist is the event gate: only whitelisted handles reach chief (owner handles
+# seeded below; add guests by chat — "listen to Mom" — or the web Settings page).
+# Strangers burn zero tokens and land in a metadata-only unknown-senders log. Guest
+# conversations run auto (free replies within guest limits) or draft-first (every
+# outbound text raises an approval card). DMs only; group chats are never read.
+# Needs Full Disk Access (store) + Automation → Messages (send) — check_apple_health.
+imessage_enabled: false
+# imessage_owner_handles: ["+15551234567"]  # REQUIRED when enabled: your handles,
+#                                           # E.164 or email; first = card/alert route
+# imessage_poll_seconds: 2                  # store-poll cadence
+
 # chief-owned web tools (#81, part of #72, owner-only, opt-in). With web_tools_enabled on,
 # owner sessions get a web-fetch + web-search tool that reach both backends (the Copilot
 # SDK has no built-in web tools). web-fetch is SSRF-guarded (private/loopback/link-local
