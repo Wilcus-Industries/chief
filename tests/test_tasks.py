@@ -37,9 +37,13 @@ from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
 from chief.core.session import NO_REPLY, Final, Milestone, TurnEvent
 from chief.core.tasks import (
+    CLOSE_CONFIRM,
     GROUP_MODE_NOTE,
     MEMORY_TOOLS,
+    NOTHING_TO_CLOSE,
+    NOTHING_TO_RENAME,
     PAUSED_BUDGET_ACK,
+    RENAME_CONFIRM,
     TURN_TIMEOUT_NOTE,
     SessionProto,
     TaskManager,
@@ -1270,6 +1274,101 @@ async def test_cancel_interrupts_and_marks_cancelled(
     async with session_factory() as session:
         db = await get_task(session, platform="telegram", thread_key="-100:5")
     assert db is not None and db.status == CANCELLED
+    await mgr.shutdown()
+
+
+# ---- /close + /rename: owner session management -------------------------------
+
+
+async def test_close_marks_done_archives_and_tears_down(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """/close is the owner-initiated twin of the idle archive: DONE, archived,
+    session torn down — without waiting out the idle timer."""
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="do a thing")
+    await _until(lambda: ("-100:5", "reply:do a thing") in io.sends)
+    await wait_for_task_open(
+        session_factory, platform="telegram", thread_key="-100:5"
+    )
+
+    assert await mgr.close("-100:5") == CLOSE_CONFIRM
+    assert "-100:5" in io.archived
+    assert sess.closed is True
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.status == DONE
+    await mgr.shutdown()
+
+
+async def test_close_interrupts_a_generating_turn(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    gate = asyncio.Event()
+    sess = FakeSession(model="m", gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="long task")
+    await _until(lambda: sess.queries == ["long task"])
+
+    assert await mgr.close("-100:5") == CLOSE_CONFIRM
+    assert sess.interrupted is True
+    assert "-100:5" in io.archived
+    await mgr.shutdown()
+
+
+async def test_close_with_no_task_or_terminal_task_is_a_polite_no(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    assert await mgr.close("-100:9") == NOTHING_TO_CLOSE  # never existed
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await wait_for_task_open(
+        session_factory, platform="telegram", thread_key="-100:5"
+    )
+    assert await mgr.close("-100:5") == CLOSE_CONFIRM
+    assert await mgr.close("-100:5") == NOTHING_TO_CLOSE  # already terminal
+    await mgr.shutdown()
+
+
+async def test_rename_persists_the_title(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+    await wait_for_task_open(
+        session_factory, platform="telegram", thread_key="-100:5"
+    )
+
+    reply = await mgr.rename("-100:5", "Trip planning")
+    assert reply == RENAME_CONFIRM.format(title="Trip planning")
+    async with session_factory() as session:
+        db = await get_task(session, platform="telegram", thread_key="-100:5")
+    assert db is not None and db.title == "Trip planning"
+    await mgr.shutdown()
+
+
+async def test_rename_unknown_thread_is_a_polite_no(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    assert await mgr.rename("-100:9", "Anything") == NOTHING_TO_RENAME
     await mgr.shutdown()
 
 

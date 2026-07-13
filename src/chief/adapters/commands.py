@@ -1,7 +1,8 @@
 """Platform-neutral owner command registry (#129).
 
-Every owner slash-command (``/cancel``, ``/tasks``, ``/memory``, ``/forget``,
-``/branch``, ``/opus``, ``/sonnet``, ``/route``) is defined **once** here, over the
+Every owner slash-command (``/cancel``, ``/tasks``, ``/close``, ``/rename``,
+``/memory``, ``/forget``, ``/branch``, ``/opus``, ``/sonnet``, ``/route``) is
+defined **once** here, over the
 shared :class:`~chief.adapters.base.Engine` / :class:`~chief.adapters.base.MemoryReader`
 interfaces. Each platform adapter (Telegram, Discord, …) parses its native update
 into a :class:`CommandContext` and dispatches through :data:`OWNER_COMMANDS` — a
@@ -47,6 +48,26 @@ async def _cmd_tasks(ctx: CommandContext) -> None:
         return
     lines = [f"• {t.title or t.thread_key} — {t.status}" for t in tasks]
     await ctx.reply("\n".join(lines))
+
+
+async def _cmd_close(ctx: CommandContext) -> None:
+    """Finish this thread now: mark it done and archive it (owner only)."""
+    if ctx.is_casual:
+        # The casual lane self-compacts and deliberately never archives — /close
+        # must not become the back door around that.
+        await ctx.reply(
+            "The casual channel stays open — /close only works in a task thread."
+        )
+        return
+    await ctx.reply(await ctx.engine.close(ctx.thread_key))
+
+
+async def _cmd_rename(ctx: CommandContext) -> None:
+    """Retitle this thread in every listing (owner only)."""
+    if not ctx.arg:
+        await ctx.reply("Usage: /rename <title>")
+        return
+    await ctx.reply(await ctx.engine.rename(ctx.thread_key, ctx.arg))
 
 
 async def _cmd_memory(ctx: CommandContext) -> None:
@@ -138,6 +159,8 @@ def owner_registry() -> CommandRegistry:
     registry = CommandRegistry()
     registry.register("cancel", _cmd_cancel)
     registry.register("tasks", _cmd_tasks)
+    registry.register("close", _cmd_close)
+    registry.register("rename", _cmd_rename)
     registry.register("memory", _cmd_memory)
     registry.register("forget", _cmd_forget)
     registry.register("branch", _cmd_branch)

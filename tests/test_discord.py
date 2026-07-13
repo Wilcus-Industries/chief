@@ -37,6 +37,8 @@ class FakeEngine:
         self.escalated: list[str] = []
         self.reverted: list[str] = []
         self.routed: list[tuple[str, str]] = []
+        self.closed: list[str] = []
+        self.renamed: list[tuple[str, str]] = []
         self.downgraded = 0
         self._active = active or []
         self._cancel = cancel
@@ -95,6 +97,14 @@ class FakeEngine:
     async def route(self, thread_key: str, category: str) -> str:
         self.routed.append((thread_key, category))
         return f"🧭 Routing this thread as “{category}”."
+
+    async def close(self, thread_key: str) -> str:
+        self.closed.append(thread_key)
+        return "Closed."
+
+    async def rename(self, thread_key: str, title: str) -> str:
+        self.renamed.append((thread_key, title))
+        return f"Renamed to “{title}”."
 
     async def downgrade_live_sessions(self) -> None:
         self.downgraded += 1

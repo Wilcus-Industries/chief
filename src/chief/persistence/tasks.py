@@ -81,6 +81,12 @@ async def set_status(session: AsyncSession, task: Task, status: str) -> None:
     await session.commit()
 
 
+async def set_title(session: AsyncSession, task: Task, title: str) -> None:
+    """Persist a new owner-facing ``title`` for ``task`` (``/rename``)."""
+    task.title = title
+    await session.commit()
+
+
 async def set_session_id(
     session: AsyncSession, task: Task, sdk_session_id: str
 ) -> None:
