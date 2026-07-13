@@ -17,6 +17,8 @@ secrets/
 ├── telegram_bot_token                 ← ignored, never commit
 ├── openrouter_api_key                 ← ignored, never commit (optional — #88/#90)
 ├── brave_search_api_key               ← ignored, never commit (optional — #81 web-search)
+├── web_password                       ← ignored, never commit (written by the web UI, #153)
+├── web_sessions.json                  ← ignored, never commit (written by the web UI, #153)
 └── google_tokens/                     ← dedicated Google account tokens subdir
     ├── .gitkeep                       ← tracked (keeps the dir in git)
     ├── google_token.json              ← ignored, never commit (primary account)
@@ -58,6 +60,8 @@ chmod 0600 secrets/discord_bot_token \
 | `google_tokens/google_token.json` | Minted by the auth helper — one token, Calendar + Drive + Sheets + Gmail |
 | `openrouter_api_key` | OpenRouter API key (optional — see "OpenRouter BYOK" below) |
 | `brave_search_api_key` | Brave Search API key (optional — see "Web search" below) |
+| `web_password` | scrypt hash of the web UI owner password — **written by chief** (first-visit `/setup` or the installer prompt), never hand-made (#153) |
+| `web_sessions.json` | SHA-256 digests of live web sessions — **written by chief**; deleting it (or changing the password) logs every browser out |
 
 ## Chat platforms (Telegram and/or Discord)
 

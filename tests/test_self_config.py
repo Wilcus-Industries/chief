@@ -251,6 +251,7 @@ _PATTERN_COVERAGE = {
         "playwright_enabled", "shell_enabled", "workspace_enabled",
         "web_tools_enabled", "scheduler_enabled", "budget_enabled",
         "skills_enabled", "subagents_enabled", "group_chat_enabled",
+        "web_enabled", "web_lan_enabled",
     },
     "owner_*_id": {"owner_telegram_id", "owner_discord_id",
                    "owner_home_chat_id", "owner_home_guild_id"},
