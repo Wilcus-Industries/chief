@@ -27,6 +27,13 @@ from telegram.ext import Application
 from .adapters.base import Adapter, ReadyHook
 from .adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO, ForeignPlatform
 from .adapters.discord import DISCORD_LIMIT, DiscordAdapter, DiscordTaskIO
+from .adapters.imessage import (
+    IMESSAGE_LIMIT,
+    DraftFirstIO,
+    IMessageAdapter,
+    IMessageTaskIO,
+    imessage_ready,
+)
 from .adapters.mirror import MirrorTaskIO
 from .adapters.telegram import TELEGRAM_LIMIT, TelegramAdapter, TelegramTaskIO
 from .client_plane import SocketServer
@@ -56,8 +63,10 @@ from .obs.audit import AuditLog
 from .obs.logging import configure_logging
 from .persistence import usage
 from .persistence.db import create_engine, init_db, session_factory
+from .persistence.imessage import normalize_handle
 from .persistence.messages import MessageLog
 from .tools.apple import AppleService, AppleToolFamily, ScriptRunner
+from .tools.apple.doctor import CapabilityHealth
 from .tools.browser import mcp as browser_mcp
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
@@ -68,11 +77,13 @@ from .tools.google.auth import _USERINFO_URL
 from .tools.google.list_accounts_service import ListAccountsService
 from .tools.google.set_account_service import SetAccountService
 from .tools.guest import GuestAdminService
+from .tools.imessage_admin import IMessageAdminService
 from .tools.routing_admin import RoutingAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
 from .tools.web import BraveSearcher, WebFetcher, WebService
+from .web.health import HealthCheck, HealthItem
 from .web.wiring import build_web_stack
 
 logger = logging.getLogger("chief.app")
@@ -102,8 +113,13 @@ Stack = tuple[TaskManager, Adapter, ApprovalManager]
 _PLATFORM_LIMITS = {
     "telegram": TELEGRAM_LIMIT,
     "discord": DISCORD_LIMIT,
+    "imessage": IMESSAGE_LIMIT,
     "cli": CLI_LIMIT,
 }
+
+#: Where the iMessage stack writes outbound file attachments (#156) — Messages
+#: reads the path asynchronously, so files must persist past the send call.
+IMESSAGE_OUTBOX_DIR = "data/imessage_outbox"
 
 
 def find_secrets_dir() -> str | None:
@@ -299,18 +315,20 @@ def build_apple_family(settings: Settings) -> AppleToolFamily | None:
 
 async def resolve_apple_services(
     settings: Settings,
-) -> tuple[AppleService, ...]:
+) -> tuple[tuple[AppleService, ...], list[CapabilityHealth]]:
     """Probe + build the Apple services at boot (empty off macOS).
 
     Runs the family's TCC permission probes once and registers one in-process
     server per *healthy* app area plus the doctor — the per-capability degradation
     the PRD requires (a missing Contacts grant disables lookup, not the family).
     On a fresh Mac the probes are also what raises the macOS consent prompts.
-    Degraded capabilities are logged; the doctor tool carries the fix steps.
+    Degraded capabilities are logged; the doctor tool carries the fix steps. The
+    raw health list rides along so other darwin-gated subsystems (the iMessage
+    adapter, #156) key off the same single probe pass.
     """
     family = build_apple_family(settings)
     if family is None:
-        return ()
+        return (), []
     health = await family.check_health()
     for item in health:
         if not item.ok:
@@ -326,7 +344,7 @@ async def resolve_apple_services(
         "apple tools registered: %s",
         ", ".join(svc.capability for svc in services),
     )
-    return services
+    return services, health
 
 
 def build_routing_admin_service(
@@ -529,6 +547,13 @@ def build_engine(
         if settings.guest_enabled
         else None
     )
+    # iMessage whitelist admin (#156): every stack's owner session gets it when the
+    # adapter exists, so "listen to Mom" works from any surface, not just iMessage.
+    imessage_admin = (
+        IMessageAdminService(session_factory=session_factory)
+        if settings.imessage_configured
+        else None
+    )
     # Account registry: always wired into owner sessions (read-only, no card).
     # Re-scans the tokens dir per call so new tokens appear with no restart.
     list_accounts = build_list_accounts_service()
@@ -623,6 +648,7 @@ def build_engine(
         guest_model=settings.guest_model,
         guest_calendar_service=build_guest_calendar_service(settings),
         guest_admin_service=guest_admin,
+        imessage_admin_service=imessage_admin,
         list_accounts_service=list_accounts,
         set_account_service=set_account,
         add_account_service=add_account,
@@ -870,6 +896,95 @@ def build_discord_stack(
     return manager, adapter, approvals
 
 
+def build_imessage_stack(
+    settings: Settings,
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    policy: PolicyStore,
+    audit: AuditLog,
+    memory: MemoryStore,
+    routing: RoutingStore | None = None,
+    harness_versioner: Versioner | None = None,
+    socket_server: SocketServer | None = None,
+    registry: ApprovalRegistry | None = None,
+    foreign_out: dict[str, ForeignPlatform] | None = None,
+    apple_services: Sequence[AppleService] = (),
+) -> Stack:
+    """Build the iMessage engine stack (#156) — the chat stacks' darwin twin.
+
+    Only called when ``settings.imessage_configured`` AND the #155 doctor probes
+    pass (see :func:`build_stacks`). The IO chain is engine →
+    :class:`DraftFirstIO` → :class:`MirrorTaskIO` → :class:`IMessageTaskIO`: the
+    draft gate sits OUTSIDE the mirror so a killed draft is never delivered,
+    broadcast, or logged; an approved (or ungated) send mirrors onto the socket +
+    message log like every chat stack (#133). The approval manager posts through
+    the mirror, so a card texted to the owner also broadcasts as an answerable
+    card frame (#136) — iMessage itself renders no buttons. Guest cards and
+    poller alerts route to the first owner handle (the iMessage Front Desk); the
+    global ``front_desk_thread_key`` belongs to another platform's key space.
+    """
+    assert settings.imessage_owner_handles
+    registry = registry or ApprovalRegistry()
+    runner = ScriptRunner(
+        timeout=settings.apple_script_timeout_seconds,
+        output_limit=settings.apple_output_limit,
+    )
+    io = IMessageTaskIO(runner, outbox_dir=IMESSAGE_OUTBOX_DIR)
+    mirror = MirrorTaskIO(
+        io,
+        platform="imessage",
+        log=MessageLog(session_factory),
+        server=socket_server,
+    )
+    approvals = ApprovalManager(
+        session_factory=session_factory,
+        io=mirror,
+        policy=policy,
+        audit=audit,
+        timeout_seconds=settings.approval_timeout_seconds,
+        registry=registry,
+    )
+    front_desk = normalize_handle(settings.imessage_owner_handles[0])
+    draft_io = DraftFirstIO(
+        mirror,
+        approvals=approvals,
+        session_factory=session_factory,
+        front_desk=front_desk,
+    )
+    manager = build_engine(
+        settings,
+        platform="imessage",
+        io=draft_io,
+        session_factory=session_factory,
+        policy=policy,
+        approvals=approvals,
+        audit=audit,
+        memory=memory,
+        budget=build_budget(settings, io=io, session_factory=session_factory),
+        routing=routing,
+        harness_versioner=harness_versioner,
+        apple_services=apple_services,
+    )
+    adapter = IMessageAdapter(
+        runner=runner,
+        db_path=settings.apple_messages_db_path,
+        engine=manager,
+        session_factory=session_factory,
+        io=io,
+        owner_handles=settings.imessage_owner_handles,
+        guest_ack=settings.guest_ack,
+        guest_enabled=settings.guest_enabled,
+        guest_rate=settings.guest_rate_per_window,
+        guest_rate_window=settings.guest_rate_window_seconds,
+        guest_global_rate=settings.guest_global_rate_per_window,
+        poll_seconds=settings.imessage_poll_seconds,
+        memory=memory,
+    )
+    if foreign_out is not None:
+        foreign_out["imessage"] = ForeignPlatform(engine=manager, io=io)
+    return manager, adapter, approvals
+
+
 def build_cli_stack(
     settings: Settings,
     *,
@@ -963,6 +1078,7 @@ def build_stacks(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
     apple_services: Sequence[AppleService] = (),
+    apple_health: Sequence[CapabilityHealth] = (),
 ) -> list[Stack]:
     """Build one engine stack per configured platform, plus the always-on CLI stack.
 
@@ -1015,6 +1131,32 @@ def build_stacks(
                 apple_services=apple_services,
             )
         )
+    if settings.imessage_configured:
+        # The #155 doctor probes are the adapter's second gate (darwin + flag is
+        # the first): both the store read (Full Disk Access) and the send path
+        # (Automation → Messages) must be green, or the stack stays off and the
+        # boot says why — never a silent poller that can't deliver.
+        ready, reason = imessage_ready(apple_health)
+        if ready:
+            stacks.append(
+                build_imessage_stack(
+                    settings,
+                    session_factory=session_factory,
+                    policy=policy,
+                    audit=audit,
+                    memory=memory,
+                    routing=routing,
+                    harness_versioner=harness_versioner,
+                    socket_server=socket_server,
+                    registry=registry,
+                    foreign_out=foreign,
+                    apple_services=apple_services,
+                )
+            )
+        else:
+            logger.warning(
+                "imessage adapter disabled — permission probes failed: %s", reason
+            )
     stacks.append(
         build_cli_stack(
             settings,
@@ -1085,6 +1227,21 @@ def build_scheduler(
     return scheduler, http
 
 
+def _imessage_poller_check(adapter: IMessageAdapter) -> HealthCheck:
+    """The live iMessage poller row for the web health page (#156).
+
+    The poller must fail red, not silent: this reads the adapter's live failure
+    streak, so a store/permission breakage shows on /health while the loop keeps
+    retrying (and the owner also gets a Front Desk alert).
+    """
+
+    async def check() -> HealthItem:
+        ok, detail = adapter.poll_status()
+        return HealthItem(name="imessage poller", ok=ok, detail=detail)
+
+    return check
+
+
 async def serve(settings: Settings) -> None:
     """Bring up db + gate + memory + every configured platform stack, then run.
 
@@ -1133,7 +1290,7 @@ async def serve(settings: Settings) -> None:
     # Apple ecosystem tools (#155): darwin-gated, probed once here at boot (the
     # probes are async subprocess calls — and on a fresh Mac they raise the macOS
     # consent prompts). Empty off macOS or when force-off, making every stack inert.
-    apple_services = await resolve_apple_services(settings)
+    apple_services, apple_health = await resolve_apple_services(settings)
     stacks = build_stacks(
         settings,
         socket_server=socket_server,
@@ -1144,6 +1301,7 @@ async def serve(settings: Settings) -> None:
         routing=routing,
         harness_versioner=harness_versioner,
         apple_services=apple_services,
+        apple_health=apple_health,
     )
     # One scheduler loop across all stacks (it binds to the primary platform's manager),
     # owning an http client for the heartbeat when configured. None when disabled.
@@ -1154,7 +1312,18 @@ async def serve(settings: Settings) -> None:
     # surface attaches to the socket above as one more client-plane client; its
     # bridge retries the dial, so gather order vs the socket bind doesn't matter.
     web_stack = (
-        build_web_stack(settings, secrets_dir=Path(web_auth_dir()))
+        build_web_stack(
+            settings,
+            secrets_dir=Path(web_auth_dir()),
+            session_factory=factory,
+            # The live poller state joins the health page (#156, red-not-silent);
+            # the static configured/enabled rows come from build_health_checks.
+            extra_health=[
+                _imessage_poller_check(adapter)
+                for _, adapter, _ in stacks
+                if isinstance(adapter, IMessageAdapter)
+            ],
+        )
         if settings.web_enabled
         else None
     )

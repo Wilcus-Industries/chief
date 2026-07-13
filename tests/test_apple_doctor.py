@@ -202,7 +202,10 @@ def _all_ok() -> list[CapabilityHealth]:
 
 def test_family_registers_every_capability_when_all_probes_pass() -> None:
     services = _family().build_services(_all_ok())
-    assert tuple(s.capability for s in services) == CAPABILITIES + ("doctor",)
+    # messages_send is probe-only (#156): it gates the iMessage adapter's send
+    # path, so no tool service registers off it even when green.
+    expected = tuple(c for c in CAPABILITIES if c != "messages_send")
+    assert tuple(s.capability for s in services) == expected + ("doctor",)
     assert {s.server_name for s in services} == {
         "chief_apple_reminders",
         "chief_apple_notes",

@@ -119,6 +119,10 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     # Repointing which database the Messages read tools open is an endpoint move —
     # the same fence class as *_mcp_url (#155). apple_enabled is caught by *_enabled.
     "apple_messages_db_path",
+    # The iMessage whitelist's owner tier (#156) is an owner-identity key — the same
+    # fence class as owner_*_id. An overlay must never mint itself an owner handle.
+    # (imessage_enabled is caught by *_enabled.)
+    "imessage_owner_handles",
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
@@ -194,6 +198,7 @@ MERGE_SAFE: frozenset[str] = frozenset(
         "shell_output_limit",
         "apple_script_timeout_seconds",
         "apple_output_limit",
+        "imessage_poll_seconds",
         "web_fetch_timeout_seconds",
         "web_fetch_max_bytes",
         "web_search_count",
@@ -478,6 +483,21 @@ class Settings(BaseSettings):
     apple_script_timeout_seconds: float = 30.0
     apple_output_limit: int = 200_000
     apple_messages_db_path: str = "~/Library/Messages/chat.db"
+
+    # iMessage adapter (#156), macOS-only, default OFF (opt-in pattern — unlike
+    # apple_enabled it needs real setup first: a dedicated Apple ID signed into
+    # Messages on chief's Mac, so it texts as itself and never ghost-writes as the
+    # owner). Rides the Apple family's store read layer + ScriptRunner, so it is
+    # inert unless apple_configured too; at boot the #155 doctor probes must also
+    # pass (Full Disk Access for the store, Automation → Messages for sending).
+    # imessage_owner_handles seeds the whitelist owner-tier (E.164 phone numbers
+    # and/or emails; the #154 installer wizard writes it) — required when enabled,
+    # since guest cards and poller alerts route to the first owner handle.
+    # imessage_poll_seconds is the store-poll cadence (the adapter's own tick,
+    # well under the scheduler's monitor floor).
+    imessage_enabled: bool = False
+    imessage_poll_seconds: float = 2.0
+    imessage_owner_handles: tuple[str, ...] = ()
 
     # Host shell + file workspace (M7, host-native rework), owner-only.
     # shell_enabled wires the in-process bash tool that runs a persistent per-task
@@ -885,6 +905,43 @@ class Settings(BaseSettings):
         """
         return self.apple_enabled and sys.platform == "darwin"
 
+    @property
+    def imessage_configured(self) -> bool:
+        """True iff the iMessage adapter should exist (#156): the flag is on AND
+        the Apple family is live (enabled + macOS — the adapter rides its store
+        read layer and ScriptRunner). Boot additionally gates on the doctor's
+        permission probes (:func:`chief.adapters.imessage.imessage_ready`)."""
+        return self.imessage_enabled and self.apple_configured
+
+    @field_validator("imessage_poll_seconds")
+    @classmethod
+    def _validate_imessage_poll(cls, value: float) -> float:
+        """The poll cadence must be positive — 0 would spin the loop hot."""
+        if value <= 0:
+            raise ValueError(
+                f"imessage_poll_seconds must be > 0, got {value!r}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _require_owner_handles_for_imessage(self) -> "Settings":
+        """The iMessage adapter needs at least one owner handle (#156).
+
+        The owner's handles seed the whitelist owner-tier, and the first one is
+        the adapter's Front Desk — where guest admission/draft cards and poller
+        failure alerts land. Enabled with none configured, every card would have
+        nowhere to route (mirrors ``_require_front_desk_for_guests``).
+        """
+        if self.imessage_enabled and not any(
+            handle.strip() for handle in self.imessage_owner_handles
+        ):
+            raise ValueError(
+                "imessage_enabled requires imessage_owner_handles — the owner's "
+                "handles seed the whitelist and route guest cards and poller "
+                "alerts."
+            )
+        return self
+
     @model_validator(mode="after")
     def _require_front_desk_for_guests(self) -> "Settings":
         """Guests need a Front Desk: their approvals/admissions/relays route there.
@@ -942,6 +999,7 @@ class Settings(BaseSettings):
         configured = {
             "telegram": self.telegram_configured,
             "discord": self.discord_configured,
+            "imessage": self.imessage_configured,
             # #139: the client-plane socket is always-on infrastructure (#130) and the
             # CLI stack is built unconditionally (app.build_cli_stack), so ``cli`` is
             # always configured — a tokenless chief can run the scheduler, and its
