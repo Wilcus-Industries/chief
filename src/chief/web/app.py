@@ -42,7 +42,7 @@ from ..client_plane import (
 )
 from ..config import parse_hhmm
 from . import render
-from .auth import SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
+from .auth import MIN_PASSWORD_LENGTH, SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
 from .bridge import BridgeError, SocketBridge
 from .files import (
     UPLOAD_AREA,
@@ -52,9 +52,6 @@ from .files import (
 )
 from .health import HealthCheck
 from .settings_io import PLATFORM_FIELDS, SettingsPanel
-
-#: Minimum password length enforced on /setup and the change-password form.
-MIN_PASSWORD_LENGTH = 8
 
 _STATIC_DIR = Path(__file__).parent / "static"
 

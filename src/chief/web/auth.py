@@ -33,6 +33,11 @@ SESSIONS_FILE: Final[str] = "web_sessions.json"
 #: The persistent session cookie ("login once per browser").
 SESSION_COOKIE: Final[str] = "chief_session"
 
+#: One floor for both credential writers — the web /setup form and the installer
+#: wizard (#154) — so the two surfaces can never disagree on what a valid
+#: password is.
+MIN_PASSWORD_LENGTH: Final[int] = 8
+
 #: Cookie lifetime: ~half a year. The cookie outliving the browser session is the
 #: autologin; the server-side digest store is what actually decides validity.
 SESSION_MAX_AGE: Final[int] = 180 * 24 * 3600
