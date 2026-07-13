@@ -13,7 +13,7 @@ from uuid import uuid4
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 
 from ..adapters.commands import OWNER_COMMANDS
 from ..client_plane import (
@@ -49,8 +49,12 @@ AWAY_HEADER = "── while you were away ──"
 AWAY_FOOTER = "── caught up ──"
 
 #: Slash commands this client handles itself, never forwarded to the daemon.
+#: ``/cancel`` is client-handled too: bare, it opens a picker over cli threads and
+#: sends the ``command`` frame under the *picked* thread_key (the daemon's cancel
+#: acts on the frame's thread_key, so no daemon change is needed).
 CLIENT_COMMANDS = (
     "/help", "/new", "/quit", "/tasks", "/switch", "/status", "/skills", "/drive",
+    "/cancel",
 )
 
 #: Shown when the owner tries to send input into a foreign-platform pane (#138
@@ -80,6 +84,18 @@ class Line(NamedTuple):
     text: str
 
 
+class PromptInput(Input):
+    """The prompt: hands dropdown-navigation keys to the app before ``Input`` eats
+    them (Enter would fire ``Submitted``, Tab would move focus)."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        if await cast("ChiefCliApp", self.app).dropdown_key(event.key):
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+
 class ChiefCliApp(App[None]):
     """The terminal client of the client plane (#137)."""
 
@@ -91,6 +107,7 @@ class ChiefCliApp(App[None]):
     CSS = (
         "#transcript { height: 1fr; } "
         "#statusbar { height: 1; } "
+        "#dropdown { height: auto; max-height: 8; display: none; } "
         "#prompt { height: 3; }"
     )
     TITLE = "chief"
@@ -111,12 +128,28 @@ class ChiefCliApp(App[None]):
         #: Unanswered approval ids, oldest first (FIFO — one prompt at a time).
         self._pending: deque[int] = deque()
         self._in_replay = False
+        #: Every completable command, client-handled first — the same union /help
+        #: prints.
+        self._all_commands: list[str] = list(CLIENT_COMMANDS) + [
+            f"/{n}" for n in OWNER_COMMANDS.names() if f"/{n}" not in CLIENT_COMMANDS
+        ]
+        #: What the dropdown is doing: ``None`` (hidden), ``"command"`` (autocomplete)
+        #: or a picker name (``"switch"``/``"cancel"``).
+        self._dropdown_mode: str | None = None
+        #: Which picker the next ``threads`` frame feeds, if any.
+        self._picker_pending: str | None = None
+        #: The threads backing an open picker, aligned with the dropdown rows.
+        self._picker_threads: list[dict[str, object]] = []
+        #: The labels currently offered by the dropdown — the test seam (empty when
+        #: hidden), like ``transcript``.
+        self.dropdown_options: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield RichLog(id="transcript", wrap=True, markup=False)
         yield Static(id="statusbar")
-        yield Input(placeholder="message chief — /help", id="prompt")
+        yield OptionList(id="dropdown")
+        yield PromptInput(placeholder="message chief — /help", id="prompt")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -238,6 +271,10 @@ class ChiefCliApp(App[None]):
     def _render_threads(self, frame: dict[str, object]) -> None:
         threads = cast(list[dict[str, object]], frame.get("threads", []))
         self._last_threads = list(threads)
+        if self._picker_pending is not None:
+            mode, self._picker_pending = self._picker_pending, None
+            self._show_picker(mode, threads)
+            return
         if not threads:
             self._write("no active threads", "dim")
             return
@@ -313,6 +350,106 @@ class ChiefCliApp(App[None]):
             return
         self._write("skills: " + ", ".join(str(s) for s in skills))
 
+    # ---- dropdown: live autocomplete + no-arg pickers -------------------------------
+
+    def _show_dropdown(self, mode: str, labels: list[str]) -> None:
+        self._dropdown_mode = mode
+        self.dropdown_options = list(labels)
+        dropdown = self.query_one("#dropdown", OptionList)
+        dropdown.clear_options()
+        dropdown.add_options(labels)
+        dropdown.highlighted = 0
+        dropdown.display = True
+
+    def _hide_dropdown(self) -> None:
+        self._dropdown_mode = None
+        self.dropdown_options = []
+        self._picker_threads = []
+        dropdown = self.query_one("#dropdown", OptionList)
+        dropdown.clear_options()
+        dropdown.display = False
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Filter command completions as the owner types; any edit also dismisses an
+        open picker (typing over a menu means they changed their mind)."""
+        value = event.value
+        if value.startswith("/") and " " not in value:
+            matches = [c for c in self._all_commands if c.startswith(value)]
+            if matches:
+                self._show_dropdown("command", matches)
+                return
+        if self._dropdown_mode is not None:
+            self._hide_dropdown()
+
+    async def dropdown_key(self, key: str) -> bool:
+        """Route one prompt keystroke while the dropdown is open.
+
+        True means consumed: ↑/↓ move the highlight, Esc dismisses, Tab completes the
+        highlighted command into the input, Enter accepts it — submitting the command
+        in autocomplete mode, acting on the picked thread in picker mode.
+        """
+        if self._dropdown_mode is None:
+            return False
+        dropdown = self.query_one("#dropdown", OptionList)
+        if key == "down":
+            dropdown.action_cursor_down()
+            return True
+        if key == "up":
+            dropdown.action_cursor_up()
+            return True
+        if key == "escape":
+            self._hide_dropdown()
+            return True
+        if key not in ("tab", "enter"):
+            return False
+        idx = dropdown.highlighted
+        if idx is None or not 0 <= idx < len(self.dropdown_options):
+            self._hide_dropdown()
+            return True
+        if self._dropdown_mode == "command":
+            chosen = self.dropdown_options[idx]
+            prompt = self.query_one(Input)
+            if key == "tab":
+                prompt.value = chosen
+                prompt.cursor_position = len(chosen)
+                return True
+            prompt.clear()
+            self._hide_dropdown()
+            await self._submit(chosen)
+            return True
+        if key == "tab":
+            return True  # a picker has nothing to complete into the input
+        mode, thread = self._dropdown_mode, self._picker_threads[idx]
+        self._hide_dropdown()
+        if mode == "switch":
+            await self._conn.send(
+                switch_frame(str(thread["platform"]), str(thread["thread_key"]))
+            )
+        else:  # cancel
+            await self._conn.send(command_frame(str(thread["thread_key"]), "cancel"))
+        return True
+
+    def _show_picker(self, mode: str, threads: list[dict[str, object]]) -> None:
+        """Offer ``threads`` as a menu. ``/cancel`` sees cli threads only — a
+        ``command`` frame dispatches on the cli engine, so cancelling a foreign
+        platform's thread through it is a no-op."""
+        if mode == "cancel":
+            threads = [t for t in threads if t.get("platform") == CLI_PLATFORM]
+        if not threads:
+            self._write(
+                "nothing to cancel" if mode == "cancel" else "no active threads", "dim"
+            )
+            return
+        self._show_dropdown(
+            mode,
+            [
+                f"({t['platform']}) {t['thread_key']} — "
+                f"{t.get('title') or t['thread_key']} [{t['status']}]"
+                for t in threads
+            ],
+        )
+        self._picker_threads = list(threads)
+
     def _prompt_card(self) -> None:
         if not self._pending:
             return
@@ -344,6 +481,9 @@ class ChiefCliApp(App[None]):
         event.input.clear()
         if not text:
             return
+        await self._submit(text)
+
+    async def _submit(self, text: str) -> None:
         if text.startswith("/"):
             await self._handle_slash(text)
             return
@@ -395,6 +535,12 @@ class ChiefCliApp(App[None]):
         if name == "drive":
             await self._cmd_drive(arg)
             return
+        if name == "cancel":
+            # Client-handled: always a picker (the frame carries the picked
+            # thread_key, which is what the daemon's cancel acts on).
+            self._picker_pending = "cancel"
+            await self._conn.send(list_threads_frame())
+            return
         if self._active_platform != CLI_PLATFORM:
             self._write(f"! {READ_ONLY_PANE_MESSAGE}", "red")
             return
@@ -425,8 +571,12 @@ class ChiefCliApp(App[None]):
         )
 
     async def _cmd_switch(self, arg: str) -> None:
+        if not arg:
+            self._picker_pending = "switch"
+            await self._conn.send(list_threads_frame())
+            return
         if not arg.isdigit() or not self._last_threads:
-            self._write("! usage: /switch <n> — run /tasks first", "red")
+            self._write("! usage: /switch [<n>] — bare /switch opens a picker", "red")
             return
         idx = int(arg) - 1
         if not (0 <= idx < len(self._last_threads)):
