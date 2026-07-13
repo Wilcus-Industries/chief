@@ -4,28 +4,41 @@
 # Core runs natively on this machine; only the MCP sidecars (Google servers,
 # playwright) live in docker compose. This script checks prerequisites, scaffolds
 # the config/secrets/data layout, installs Python deps, runs the DB migrations,
-# optionally builds + starts the sidecar containers, and installs a `chief`
-# launcher. macOS (bash 3.2) and Linux compatible.
+# walks the first-run wizard (owner password + model auth — no platform bot
+# tokens; the web UI is the day-one channel), installs the `chief` launcher and
+# the autostart service, then starts the daemon, waits for health, and opens the
+# web UI. Normally invoked by bootstrap.sh (the curl|bash one-liner); running it
+# from a clone works too. Re-runs are idempotent — existing secrets, data, and
+# services are kept. macOS (bash 3.2) and Linux compatible.
 #
 # Usage:
-#   ./install.sh [--google] [--playwright]
+#   ./install.sh [--google] [--playwright] [--no-service] [--no-launch] [--non-interactive]
 #
-#   --google      build + start the Google MCP sidecars (compose profile "google")
-#   --playwright  build + start the browser sidecar (compose profile "playwright")
+#   --google           build + start the Google MCP sidecars (compose profile "google")
+#   --playwright       build + start the browser sidecar (compose profile "playwright")
+#   --no-service       skip the autostart service (launchd agent / systemd user unit)
+#   --no-launch        do not start the daemon or open the browser at the end
+#   --non-interactive  no wizard prompts (env: CHIEF_OWNER_PASSWORD, CHIEF_OPENROUTER_KEY)
 
 set -euo pipefail
 
-REPO_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$REPO_DIR"
 
 WITH_GOOGLE=0
 WITH_PLAYWRIGHT=0
+NO_SERVICE=0
+NO_LAUNCH=0
+NON_INTERACTIVE=0
 for arg in "$@"; do
   case "$arg" in
     --google) WITH_GOOGLE=1 ;;
     --playwright) WITH_PLAYWRIGHT=1 ;;
+    --no-service) NO_SERVICE=1 ;;
+    --no-launch) NO_LAUNCH=1 ;;
+    --non-interactive) NON_INTERACTIVE=1 ;;
     -h|--help)
-      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
@@ -40,15 +53,23 @@ fail() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---- prerequisites -----------------------------------------------------------
 say "checking prerequisites"
-command -v git >/dev/null 2>&1 || fail "git is required (https://git-scm.com)"
+command -v git >/dev/null 2>&1 \
+  || fail "git is required — bootstrap.sh (the curl one-liner) auto-installs it (https://git-scm.com)"
 ok "git"
-command -v uv >/dev/null 2>&1 || fail "uv is required (https://docs.astral.sh/uv/)"
+command -v uv >/dev/null 2>&1 \
+  || fail "uv is required — bootstrap.sh (the curl one-liner) auto-installs it (https://docs.astral.sh/uv/)"
 ok "uv"
-command -v docker >/dev/null 2>&1 \
-  || fail "docker is required for the MCP sidecars (https://docs.docker.com)"
-docker compose version >/dev/null 2>&1 \
-  || fail "docker compose v2 is required ('docker compose' not found)"
-ok "docker + compose"
+# Docker powers the MCP sidecars. Its absence only blocks those, so it fails the
+# install only when a sidecar profile was explicitly requested (PRD #154: guide,
+# don't abort — bootstrap.sh does the guiding).
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  ok "docker + compose"
+else
+  if [ "$WITH_GOOGLE" = 1 ] || [ "$WITH_PLAYWRIGHT" = 1 ]; then
+    fail "docker + compose v2 are required for the requested sidecars (https://docs.docker.com)"
+  fi
+  miss "docker not found — MCP sidecars stay unavailable until it is installed (https://docs.docker.com)"
+fi
 
 # ---- repo layout -------------------------------------------------------------
 say "scaffolding directories"
@@ -57,52 +78,28 @@ mkdir -p data/screenshots data/workspace secrets/google_tokens
 ok "data/ (sqlite, audit log, memory, workspace, screenshots — gitignored)"
 ok "secrets/ (one file per secret — gitignored)"
 
-# ---- secrets checklist -------------------------------------------------------
-# Missing secrets are reported, never fabricated: an empty token file would just
-# turn a clear boot error into a confusing API failure.
-say "checking secrets (files under ./secrets/, or env vars of the same name)"
-SECRETS_OK=1
-# Agent auth (#88): the GitHub Copilot SDK authenticates via the Copilot CLI's own
-# login (~/.copilot/config.json), not a chief secret — there is no Claude OAuth token
-# to scaffold. Log in once with the Copilot CLI before the first run.
-say "Copilot auth: log in with the Copilot CLI once (writes ~/.copilot/config.json)"
-# openrouter_api_key (optional) powers the cheap classifiers + injection screening
-# (#88). Keyless, they make no HTTP call and fail safe — and screening fails OPEN
-# (untrusted content passes unscreened) — so this is recommended, not required.
-if [ -s secrets/openrouter_api_key ] || [ -n "${OPENROUTER_API_KEY:-}" ]; then
-  ok "openrouter_api_key"
-else
-  miss "openrouter_api_key (optional) — without it the classifiers + injection screening fail safe/open (see secrets/README.md)"
-fi
-if [ -s secrets/telegram_bot_token ] || [ -n "${TELEGRAM_BOT_TOKEN:-}" ] \
-  || [ -s secrets/discord_bot_token ] || [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
-  ok "chat platform token (telegram and/or discord)"
-else
-  SECRETS_OK=0
-  miss "no chat platform token — save a bot token to secrets/telegram_bot_token (BotFather) or secrets/discord_bot_token, and set the matching owner id in config.yaml"
-fi
-
 # ---- python deps + migrations --------------------------------------------------
 say "installing python dependencies (uv sync)"
 uv sync
 
 say "running database migrations"
-uv run python - <<'PY'
-import os
+uv run python -m chief.install migrate
 
-import yaml
-
-from chief.persistence.db import _run_migrations
-
-with open("config.yaml", encoding="utf-8") as fh:
-    db_path = yaml.safe_load(fh).get("db_path", "data/chief.db")
-db_path = os.path.expanduser(os.environ.get("DB_PATH", db_path))
-parent = os.path.dirname(db_path)
-if parent:
-    os.makedirs(parent, exist_ok=True)
-_run_migrations(db_path)
-print(f"  migrations applied: {db_path}")
-PY
+# ---- first-run wizard -----------------------------------------------------------
+# Replaces the old manual secrets checklist: owner password (the web UI
+# credential, hashed into the secrets dir) + model auth (Copilot login or
+# OpenRouter key, validated). No platform bot token is requested — the web UI is
+# the day-one channel; Telegram/Discord connect later in the web Settings pages.
+if [ "$NON_INTERACTIVE" = 1 ]; then
+  say "first-run wizard (non-interactive)"
+  uv run python -m chief.install wizard --non-interactive
+elif [ -r /dev/tty ]; then
+  say "first-run wizard"
+  uv run python -m chief.install wizard < /dev/tty
+else
+  say "first-run wizard (no terminal — non-interactive)"
+  uv run python -m chief.install wizard --non-interactive
+fi
 
 # ---- MCP sidecars ---------------------------------------------------------------
 # (plain string, not an array: empty-array expansion trips set -u on macOS bash 3.2)
@@ -115,7 +112,8 @@ if [ "$WITH_PLAYWRIGHT" = 1 ]; then
 fi
 if [ -n "$PROFILE_FLAGS" ]; then
   say "building + starting MCP sidecars ($PROFILE_FLAGS)"
-  # shellcheck disable=SC2086 — deliberate word-splitting of the flag string
+  # deliberate word-splitting of the flag string
+  # shellcheck disable=SC2086
   docker compose $PROFILE_FLAGS up -d --build
 else
   say "skipping MCP sidecars (pass --google / --playwright to start them)"
@@ -125,10 +123,43 @@ fi
 say "installing the 'chief' launcher"
 BIN_DIR="${HOME}/.local/bin"
 mkdir -p "$BIN_DIR"
+UV_BIN="$(command -v uv)"
 cat > "$BIN_DIR/chief" <<EOF
 #!/usr/bin/env bash
-# Launcher for the host-native chief core (generated by install.sh).
-cd "$REPO_DIR" && exec uv run python -m chief.entrypoint "\$@"
+# chief launcher (generated by install.sh) — dispatches to the repo's tooling.
+set -euo pipefail
+REPO_DIR="$REPO_DIR"
+UV_BIN="$UV_BIN"
+if [ ! -x "\$UV_BIN" ]; then
+  UV_BIN="\$(command -v uv)" || { echo "uv not found" >&2; exit 1; }
+fi
+cd "\$REPO_DIR"
+CMD="\${1:-help}"
+case "\$CMD" in
+  run)
+    exec "\$UV_BIN" run python -m chief.entrypoint
+    ;;
+  start|stop|status|update|wizard|uninstall)
+    shift
+    exec "\$UV_BIN" run python -m chief.install "\$CMD" "\$@"
+    ;;
+  help|-h|--help)
+    cat <<'USAGE'
+chief — personal AI agent
+  chief run        run the daemon in the foreground
+  chief start      start the daemon (autostart service)
+  chief stop       stop the daemon
+  chief status     service + web UI state
+  chief update     jump to the newest tagged release (migrations + restart)
+  chief wizard     re-run the first-run wizard (password / model auth)
+  chief uninstall  remove service + launcher (--purge-data removes data too)
+USAGE
+    ;;
+  *)
+    echo "unknown command: \$CMD (try: chief help)" >&2
+    exit 2
+    ;;
+esac
 EOF
 chmod +x "$BIN_DIR/chief"
 ok "$BIN_DIR/chief"
@@ -137,12 +168,36 @@ case ":$PATH:" in
   *) miss "$BIN_DIR is not on your PATH — add it, or run: uv run python -m chief.entrypoint" ;;
 esac
 
+# ---- autostart service ------------------------------------------------------------
+if [ "$NO_SERVICE" = 1 ]; then
+  say "skipping the autostart service (--no-service)"
+else
+  say "installing the autostart service (launchd agent / systemd user unit)"
+  uv run python -m chief.install service-install \
+    --repo "$REPO_DIR" --launcher "$BIN_DIR/chief"
+fi
+
+# ---- launch -----------------------------------------------------------------------
+if [ "$NO_LAUNCH" = 1 ]; then
+  say "skipping launch (--no-launch)"
+  echo "  start chief with: chief start (service) or chief run (foreground)"
+else
+  if [ "$NO_SERVICE" = 1 ]; then
+    say "starting the daemon in the background (no service installed)"
+    nohup "$BIN_DIR/chief" run >> data/chief.log 2>&1 &
+  fi
+  say "waiting for the web UI"
+  if uv run python -m chief.install await-health --timeout 120; then
+    uv run python -m chief.install open-browser
+  else
+    miss "the web UI did not come up — check data/chief.log (or: journalctl --user -u chief)"
+  fi
+fi
+
 # ---- summary ----------------------------------------------------------------------
 say "done"
-if [ "$SECRETS_OK" = 1 ]; then
-  echo "  run 'chief' to start (or: uv run python -m chief.entrypoint)"
-else
-  echo "  finish the secrets checklist above, then run 'chief' to start"
-fi
+echo "  chat in the browser — the web UI is chief's day-one channel; no platform"
+echo "  bot token is needed. Connect Telegram/Discord later in the web Settings."
+echo "  lifecycle: chief start | stop | status | update | uninstall"
 echo "  config: config.yaml (owner ids, enabled services, blacklist, screening)"
 echo "  google: mint the shared token once with 'uv run python -m chief.tools.google.auth'"
