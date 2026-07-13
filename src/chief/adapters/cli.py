@@ -47,6 +47,7 @@ from ..client_plane import (
     TYPE_COMMAND,
     TYPE_INJECT,
     TYPE_LIST_THREADS,
+    TYPE_MILESTONE,
     TYPE_REPLY,
     TYPE_SKILLS,
     TYPE_STATUS,
@@ -57,15 +58,19 @@ from ..client_plane import (
     backfill_frame,
     card_frame,
     card_resolved_frame,
+    delta_frame,
     error_frame,
     file_frame,
+    milestone_frame,
     outbound_frame,
     reply_frame,
     skills_list_frame,
     status_snapshot_frame,
     threads_frame,
+    tool_frame,
 )
 from ..core.budget import BudgetGate
+from ..core.session import LiveEvent, ToolEnd, ToolStart
 from ..gate.approvals import ApprovalAction, ApprovalCard
 from ..persistence.messages import (
     BACKFILL_LIMIT,
@@ -187,6 +192,52 @@ class CliTaskIO:
         """
         frame = outbound_frame(thread_key, text)
         await self._emit(thread_key, frame, text=str(frame["text"]))
+
+    async def send_live(self, thread_key: str, event: LiveEvent) -> None:
+        """Broadcast one ephemeral live event as a delta / tool frame.
+
+        Deltas and tool ends are broadcast-only — never logged, never replayed (the
+        full reply and the tool-start line carry the durable history). A tool start
+        additionally records the ``using <name>`` milestone row the log kept before
+        live streaming existed, so detach-replay and backfill still show it.
+        """
+        if isinstance(event, ToolStart):
+            # Broadcast the structured frame, but record the plain milestone row
+            # (with a milestone-frame payload): backfill keeps its "using <name>"
+            # line, and a detach-replay re-delivers a milestone — replaying a bare
+            # tool start would strand a live view's chip open forever.
+            text = f"using {event.name}"
+            frame = tool_frame(thread_key, event.tool_call_id, event.name, "start")
+            async with self._server.delivery_lock:
+                delivered = self._server.has_clients
+                await self._server.broadcast(frame)
+                if self._log is not None:
+                    await self._log.record(
+                        platform=CLI_PLATFORM,
+                        thread_key=thread_key,
+                        role=ROLE_CHIEF,
+                        surface=Surface.DM.value,
+                        kind=TYPE_MILESTONE,
+                        text=text,
+                        payload=json.dumps(milestone_frame(thread_key, text)),
+                        delivered=delivered,
+                    )
+            return
+        if isinstance(event, ToolEnd):
+            frame = tool_frame(
+                thread_key,
+                event.tool_call_id,
+                "",
+                "end",
+                ok=event.ok,
+                detail=event.detail,
+            )
+        else:
+            frame = delta_frame(
+                thread_key, event.message_id, event.text, done=event.done
+            )
+        async with self._server.delivery_lock:
+            await self._server.broadcast(frame)
 
     async def send_file(
         self,
