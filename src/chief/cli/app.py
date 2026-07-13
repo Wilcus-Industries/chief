@@ -13,6 +13,7 @@ from uuid import uuid4
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 
 from ..adapters.commands import OWNER_COMMANDS
@@ -112,6 +113,12 @@ class ChiefCliApp(App[None]):
     )
     TITLE = "chief"
 
+    #: Priority so it beats Textual's system ctrl+c (help_quit) even with the Input
+    #: focused. Quitting stays on /quit (and Textual's own ctrl+q).
+    BINDINGS = [
+        Binding("ctrl+c", "cancel_or_clear", "cancel/clear", priority=True, show=False)
+    ]
+
     def __init__(
         self, connection: SocketConnection, *, thread_key: str = DEFAULT_THREAD_KEY
     ) -> None:
@@ -143,6 +150,9 @@ class ChiefCliApp(App[None]):
         #: The labels currently offered by the dropdown — the test seam (empty when
         #: hidden), like ``transcript``.
         self.dropdown_options: list[str] = []
+        #: True after a ctrl+c: the next consecutive ctrl+c clears the chat. Any
+        #: typing disarms it.
+        self._ctrl_c_armed = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -372,6 +382,7 @@ class ChiefCliApp(App[None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         """Filter command completions as the owner types; any edit also dismisses an
         open picker (typing over a menu means they changed their mind)."""
+        self._ctrl_c_armed = False
         value = event.value
         if value.startswith("/") and " " not in value:
             matches = [c for c in self._all_commands if c.startswith(value)]
@@ -464,6 +475,25 @@ class ChiefCliApp(App[None]):
         inp = self.query_one(Input)
         inp.disabled = False
         self.set_focus(inp)
+
+    async def action_cancel_or_clear(self) -> None:
+        """ctrl+c: cancel the active thread's running turn; a second consecutive
+        press clears the chat instead (any typing in between disarms the clear).
+
+        On a foreign pane the first press only arms the clear — a ``command`` frame
+        dispatches on the cli engine, so cancelling a foreign thread there is a no-op.
+        """
+        if self._ctrl_c_armed:
+            self._ctrl_c_armed = False
+            self.query_one("#transcript", RichLog).clear()
+            self.transcript.clear()
+            return
+        self._ctrl_c_armed = True
+        if self._active_platform == CLI_PLATFORM:
+            await self._conn.send(command_frame(self._thread_key, "cancel"))
+            self._write("cancel requested — ctrl+c again to clear chat", "dim")
+        else:
+            self._write("ctrl+c again to clear chat", "dim")
 
     async def on_key(self, event: events.Key) -> None:
         if not self._pending or event.key not in ("y", "n"):

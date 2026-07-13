@@ -821,6 +821,71 @@ async def test_cancel_picker_with_no_cli_threads_says_so(
         assert app.dropdown_options == []
 
 
+# ---- ctrl+c: cancel the running turn, again to clear the chat -----------------------
+
+
+async def test_ctrl_c_cancels_the_active_thread(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+c")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "command")
+        assert peer.received[-1] == command_frame("cli:main", "cancel", "")
+        assert app.is_running  # ctrl+c must not quit the app
+
+
+async def test_second_ctrl_c_clears_the_chat(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await peer.push(reply_frame("cli:main", "old chatter"))
+        await _settle(
+            app, lambda: any("old chatter" in line.text for line in app.transcript)
+        )
+        await pilot.press("ctrl+c")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "command")
+        n = len(peer.received)
+        await pilot.press("ctrl+c")
+        await _settle(app, lambda: app.transcript == [])
+        assert len(peer.received) == n  # the second press clears, it does not resend
+
+
+async def test_typing_between_presses_disarms_the_clear(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await peer.push(reply_frame("cli:main", "keep me"))
+        await _settle(
+            app, lambda: any("keep me" in line.text for line in app.transcript)
+        )
+        await pilot.press("ctrl+c")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "command")
+        await pilot.press(*"x")
+        await pilot.press("ctrl+c")
+        await _settle(
+            app, lambda: peer.received[-1] == command_frame("cli:main", "cancel", "")
+        )
+        assert any("keep me" in line.text for line in app.transcript)
+
+
+async def test_ctrl_c_on_a_foreign_pane_sends_no_cancel(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """A ``command`` frame dispatches on the cli engine — cancelling a foreign
+    platform's thread through it is a no-op, so the press only arms the clear."""
+    async with app.run_test() as pilot:
+        await _switch_onto_telegram(app, peer, pilot)
+
+        n = len(peer.received)
+        await pilot.press("ctrl+c")
+        await pilot.press("ctrl+c")
+        await _settle(app, lambda: app.transcript == [])
+        assert len(peer.received) == n
+
+
 # --- The bottom edge is shared, so nothing may overlap it (#140 live-boot defect) -----
 #
 # Textual OVERLAYS widgets docked to the same edge, it does not stack them. With
