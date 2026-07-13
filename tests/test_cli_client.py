@@ -20,7 +20,7 @@ import pytest
 from textual.widgets import Footer, Static
 
 from chief.adapters.commands import OWNER_COMMANDS
-from chief.cli.app import AWAY_FOOTER, AWAY_HEADER, ChiefCliApp, Line
+from chief.cli.app import AWAY_FOOTER, AWAY_HEADER, ChiefCliApp, Line, PromptInput
 from chief.cli.connection import SocketConnection
 from chief.client_plane import (
     PROTOCOL_VERSION,
@@ -639,6 +639,186 @@ async def test_skills_lists_composed_set(app: ChiefCliApp, peer: ScriptedPeer) -
         blob = "\n".join(line.text for line in app.transcript)
         assert "setup-morning-brief" in blob
         assert "docx" in blob
+
+
+# ---- slash autocomplete + no-arg pickers --------------------------------------------
+#
+# One Dropdown (an OptionList above the prompt) serves two jobs: live command-name
+# completion while typing, and a picker for commands submitted with no argument
+# (``/switch``, ``/cancel``). ``app.dropdown_options`` is the test seam — the labels
+# currently offered, empty when hidden — mirroring the ``transcript`` seam philosophy.
+
+
+async def test_typing_slash_prefix_offers_matching_commands(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/s")
+        assert "/switch" in app.dropdown_options
+        assert "/status" in app.dropdown_options
+        assert "/skills" in app.dropdown_options
+        assert "/sonnet" in app.dropdown_options
+        assert "/help" not in app.dropdown_options
+
+
+async def test_plain_text_never_opens_the_dropdown(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"status")
+        assert app.dropdown_options == []
+
+
+async def test_argument_typing_closes_the_dropdown(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/switch 1")
+        assert app.dropdown_options == []
+
+
+async def test_tab_completes_to_the_highlighted_command(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/sw", "tab")
+        assert app.query_one("#prompt", PromptInput).value == "/switch"
+
+
+async def test_enter_accepts_the_highlighted_command_and_submits(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/sk", "enter")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "skills")
+        assert peer.received[-1] == skills_frame()
+        assert app.dropdown_options == []
+        assert app.query_one("#prompt", PromptInput).value == ""
+
+
+async def test_escape_hides_the_dropdown(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/s")
+        assert app.dropdown_options
+        await pilot.press("escape")
+        assert app.dropdown_options == []
+
+
+async def test_bare_switch_opens_a_thread_picker(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """``/switch`` with no argument fetches fresh threads and offers them as a menu —
+    no more mandatory ``/tasks`` first."""
+    async with app.run_test() as pilot:
+        await pilot.press(*"/switch", "enter")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "list_threads")
+
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "cli", "thread_key": "cli:main",
+                        "title": None, "status": "open",
+                    },
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: len(app.dropdown_options) == 2)
+        assert "-100:5" in app.dropdown_options[1]
+
+        await pilot.press("down", "enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "switch")
+        assert peer.received[-1] == switch_frame("telegram", "-100:5")
+        assert app.dropdown_options == []
+
+
+async def test_bare_cancel_offers_only_cli_threads(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    """``/cancel`` pickers over cli threads only — a ``command`` frame dispatches on
+    the cli engine, so cancelling a foreign platform's thread there is a no-op."""
+    async with app.run_test() as pilot:
+        await pilot.press(*"/cancel", "enter")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "list_threads")
+
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                    {
+                        "platform": "cli", "thread_key": "cli:main",
+                        "title": None, "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: len(app.dropdown_options) == 1)
+        assert "cli:main" in app.dropdown_options[0]
+
+        await pilot.press("enter")
+        await _settle(app, lambda: peer.received[-1].get("type") == "command")
+        assert peer.received[-1] == command_frame("cli:main", "cancel", "")
+
+
+async def test_picker_escape_sends_nothing(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/switch", "enter")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "cli", "thread_key": "cli:main",
+                        "title": None, "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(app, lambda: bool(app.dropdown_options))
+
+        n = len(peer.received)
+        await pilot.press("escape")
+        assert app.dropdown_options == []
+        assert len(peer.received) == n
+
+
+async def test_cancel_picker_with_no_cli_threads_says_so(
+    app: ChiefCliApp, peer: ScriptedPeer
+) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press(*"/cancel", "enter")
+        await _settle(app, lambda: bool(peer.received) and
+                      peer.received[-1].get("type") == "list_threads")
+        await peer.push(
+            threads_frame(
+                [
+                    {
+                        "platform": "telegram", "thread_key": "-100:5",
+                        "title": "chat", "status": "open",
+                    },
+                ]
+            )
+        )
+        await _settle(
+            app,
+            lambda: any("nothing to cancel" in line.text for line in app.transcript),
+        )
+        assert app.dropdown_options == []
 
 
 # --- The bottom edge is shared, so nothing may overlap it (#140 live-boot defect) -----
