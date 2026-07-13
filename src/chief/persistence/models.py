@@ -219,6 +219,68 @@ class MessageLogEntry(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class IMessagePref(Base):
+    """Per-handle iMessage conversation prefs (#156): delegation mode + first-send.
+
+    One row per whitelisted handle (a DM thread *is* a handle in v1, so
+    per-conversation mode == per-handle mode). ``mode`` is the owner's delegation
+    choice for conversations chief conducts with this guest —
+    ``imessage.MODE_AUTO`` (reply freely within guest limits) or
+    ``imessage.MODE_DRAFT`` (every outbound parks on an approval card first).
+    ``contacted`` records whether chief has ever texted the handle: the first send
+    to a never-contacted guest handle raises an approval card regardless of mode
+    (an outward-facing effect, blacklist-seeded by design).
+    """
+
+    __tablename__ = "imessage_prefs"
+    __table_args__ = (UniqueConstraint("handle", name="uq_imessage_pref_handle"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    handle: Mapped[str]
+    mode: Mapped[str] = mapped_column(default="auto")
+    contacted: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
+class UnknownSender(Base):
+    """Metadata-only log of non-whitelisted senders (#156): handle + timestamps.
+
+    Deliberately content-free — a stranger's text NEVER lands in this table (or in
+    any model context); the poller records only who and when, so the owner can ask
+    "who's texted you?" and whitelist from there. One row per (platform, handle),
+    accumulated in place.
+    """
+
+    __tablename__ = "unknown_senders"
+    __table_args__ = (
+        UniqueConstraint("platform", "handle", name="uq_unknown_platform_handle"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str]
+    handle: Mapped[str]
+    first_seen: Mapped[datetime] = mapped_column(default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(default=_utcnow)
+    count: Mapped[int] = mapped_column(default=0)
+
+
+class AdapterCursor(Base):
+    """A poll adapter's persisted read position (#156): restart-safe incremental
+    polling. One row per platform; the iMessage adapter stores the last processed
+    ``message.ROWID`` so restarts neither replay old texts nor drop ones that
+    arrived while down."""
+
+    __tablename__ = "adapter_cursors"
+    __table_args__ = (
+        UniqueConstraint("platform", name="uq_adapter_cursor_platform"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform: Mapped[str]
+    position: Mapped[int] = mapped_column(default=0)
+    updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
+
+
 class Schedule(Base):
     """A one-off reminder, a recurring job, or a monitor (owned by M9).
 
