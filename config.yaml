@@ -188,6 +188,20 @@ workspace_dir: data/workspace        # shell cwd + scratch area (repo-local, git
 shell_timeout_seconds: 900           # per-command wall clock; a hang is SIGINT'd + respawned
 shell_output_limit: 64000            # cap on captured stdout/stderr bytes (then truncated)
 
+# Apple ecosystem tools (#155, owner-only, darwin-gated). Unlike the opt-in subsystems,
+# apple_enabled defaults ON — the family is auto-detected: effective only when chief
+# boots on macOS, silently absent on Linux, force-off with apple_enabled: false. At boot,
+# per-capability macOS permission probes decide which app areas register (Reminders,
+# Notes, Contacts, Apple Calendar, Shortcuts, system control, read-only Messages
+# history); the check_apple_health doctor tool reports each grant's state with exact
+# System Settings steps, and newly granted capabilities register at the next restart.
+# run_shortcut and the Apple Calendar create_event ask for approval (blacklist-seeded);
+# Messages reads are screened. Supported macOS floor: 14 (Sonoma) — see DESIGN.md.
+# apple_enabled: true
+# apple_script_timeout_seconds: 30     # per osascript/shortcuts/sqlite3 child process
+# apple_output_limit: 200000           # cap on captured output per call
+# apple_messages_db_path: ~/Library/Messages/chat.db  # needs Full Disk Access
+
 # chief-owned web tools (#81, part of #72, owner-only, opt-in). With web_tools_enabled on,
 # owner sessions get a web-fetch + web-search tool that reach both backends (the Copilot
 # SDK has no built-in web tools). web-fetch is SSRF-guarded (private/loopback/link-local

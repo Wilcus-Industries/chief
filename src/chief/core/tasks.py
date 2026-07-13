@@ -76,6 +76,7 @@ from ..persistence.tasks import (
     set_task_model,
     set_title,
 )
+from ..tools.apple import AppleService
 from ..tools.browser.screenshot import build_screenshot_hook
 from ..tools.calendar import mcp as calendar_mcp
 from ..tools.drive import mcp as drive_mcp
@@ -333,6 +334,7 @@ class TaskManager:
         owner_tz: str = "UTC",
         shell_service: ShellService | None = None,
         web_service: WebService | None = None,
+        apple_services: Sequence[AppleService] = (),
         routing_admin_service: RoutingAdminService | None = None,
         workspace_dir: str | None = None,
         guest_model: str | None = None,
@@ -407,6 +409,10 @@ class TaskManager:
         # chief-owned web-fetch/web-search tools (#81), owner-only. Built the shell way
         # so the single in-process ``chief_web`` MCP server reaches both backends.
         self._web_service = web_service
+        # Apple ecosystem tools (#155), owner-only, darwin-gated. Resolved at boot
+        # (app.resolve_apple_services): one in-process server per healthy app area
+        # plus the permissions doctor; empty on Linux or when force-off.
+        self._apple_services = tuple(apple_services)
         # Self-config routing tool (#83), owner-only. Edits the shared RoutingStore's
         # persisted table; its mutating verbs are gated via blacklist_tools (config.py).
         self._routing_admin_service = routing_admin_service
@@ -947,6 +953,13 @@ class TaskManager:
             workspace_enabled=workspace_on,
             shell_enabled=shell_on,
             web_enabled=self._web_service is not None,
+            # The healthy Apple app areas (#155) — the doctor is plumbing, not a
+            # capability the persona should advertise.
+            apple_capabilities=tuple(
+                svc.capability
+                for svc in self._apple_services
+                if svc.capability != "doctor"
+            ),
             guest_admin_enabled=admin is not None,
             skills=self._default_skills if skills_on else (),
             platform=self._platform,
@@ -1035,6 +1048,13 @@ class TaskManager:
             # card is defense in depth. The one server reaches both backends.
             web = self._web_service
             mcp_servers[web.server_name] = web.server_config()
+        for apple in self._apple_services:
+            # Apple ecosystem tools (#155), owner-only. Kept OFF allowed_tools so
+            # every call routes through can_use_tool → classify: reads and
+            # owner-local creates ALLOW under owner default-allow, while
+            # run_shortcut and the Apple Calendar create_event trip their
+            # blacklist_tools entries (config.py) and raise an approval card.
+            mcp_servers[apple.server_name] = apple.server_config()
         if self._routing_admin_service is not None:
             # Self-config routing edits (#83), owner-only. Kept OFF allowed_tools so
             # every call routes through can_use_tool → classify: each mutating verb
