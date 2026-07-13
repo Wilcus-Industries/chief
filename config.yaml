@@ -48,6 +48,16 @@ routing_enabled: false
 #   - {category: reasoning, target_class: openrouter, model: deepseek/deepseek-v4-flash}
 # routing_surface_defaults: {}   # e.g. {group: general}
 
+# Web UI (#153) — the LAN-served owner cockpit and zero-token day-one channel, ON by
+# default. Serves at http://127.0.0.1:<web_port>; flip web_lan_enabled to bind all
+# interfaces (0.0.0.0) for phone access on the home LAN (no TLS in v1 — front it with
+# a reverse proxy for anything beyond that). Auth is one owner password, set on first
+# visit (/setup) or by the installer; it lives hashed in the secrets dir
+# (web_password) with revocable browser sessions beside it (web_sessions.json).
+web_enabled: true
+web_port: 8130
+web_lan_enabled: false
+
 # sqlite file path (repo-local data/ dir, gitignored; ~ expands).
 db_path: data/chief.db
 

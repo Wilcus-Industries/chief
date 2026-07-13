@@ -96,6 +96,10 @@ SELF_CONFIG_DENYLIST: tuple[str, ...] = (
     # Repointing the control socket relocates a privileged local-control surface —
     # same fence class as db_path (an overlay must not move where chief listens).
     "socket_path",
+    # The web UI's listen port (#153): same fence class as socket_path — an overlay
+    # must not move where chief listens. (web_enabled / web_lan_enabled are already
+    # denied by *_enabled; LAN exposure is owner-only by construction.)
+    "web_port",
     "*_mcp_url",         # calendar/drive/sheets/gmail/playwright MCP urls
     "*_thread_key",      # front_desk_thread_key, primary_thread_key
     "primary_platform",  # inbox routing: picks the platform the owner inbox lives on
@@ -276,6 +280,17 @@ class Settings(BaseSettings):
     guest_ack: str = (
         "Thanks for reaching out — I'm an assistant and I've passed your message along."
     )
+
+    # Web UI (#153): the LAN-served owner cockpit and zero-token day-one channel —
+    # ON by default (unlike the opt-in subsystems, this is the surface a fresh
+    # install chats through before any platform token exists). Binds 127.0.0.1
+    # unless web_lan_enabled explicitly opens it to the LAN (no TLS in v1 — home-LAN
+    # threat model; put a reverse proxy in front for anything beyond that). Auth is
+    # a single owner password, hashed at rest in the secrets dir next to the
+    # platform tokens (never a Settings field).
+    web_enabled: bool = True
+    web_port: int = 8130
+    web_lan_enabled: bool = False
 
     # Task engine (M2). concurrency bounds turns actively generating;
     # turn_timeout_seconds is the per-turn watchdog (a turn whose stream never
@@ -611,6 +626,20 @@ class Settings(BaseSettings):
         root under the ``chief`` launcher), matching how ``config.yaml`` is found.
         """
         return os.path.expanduser(value)
+
+    @field_validator("web_port")
+    @classmethod
+    def _validate_web_port(cls, value: int) -> int:
+        """A real TCP port. 0 (ephemeral) is refused — the owner could never find
+        the UI after a restart; tests bind ephemerally via ``WebServer`` directly."""
+        if not 1 <= value <= 65535:
+            raise ValueError(f"web_port must be 1–65535, got {value!r}")
+        return value
+
+    @property
+    def web_host(self) -> str:
+        """The bind address: localhost by default, all interfaces on the LAN toggle."""
+        return "0.0.0.0" if self.web_lan_enabled else "127.0.0.1"  # noqa: S104
 
     @field_validator("blacklist_shell_patterns")
     @classmethod
