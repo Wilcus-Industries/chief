@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 import discord
@@ -56,6 +57,7 @@ from .obs.logging import configure_logging
 from .persistence import usage
 from .persistence.db import create_engine, init_db, session_factory
 from .persistence.messages import MessageLog
+from .tools.apple import AppleService, AppleToolFamily, ScriptRunner
 from .tools.browser import mcp as browser_mcp
 from .tools.calendar import mcp as calendar_mcp
 from .tools.drive import mcp as drive_mcp
@@ -251,6 +253,58 @@ def build_web_service(settings: Settings) -> WebService | None:
     )
 
 
+def build_apple_family(settings: Settings) -> AppleToolFamily | None:
+    """The Apple tool family (#155), or ``None`` off macOS / when force-off.
+
+    Darwin detection + the enabled flag live in ``settings.apple_configured``; the
+    family's own per-capability permission probes run in
+    :func:`resolve_apple_services` (async, at boot). Screenshots share the browser
+    screenshots dir so every capture lands in one place.
+    """
+    if not settings.apple_configured:
+        return None
+    return AppleToolFamily(
+        runner=ScriptRunner(
+            timeout=settings.apple_script_timeout_seconds,
+            output_limit=settings.apple_output_limit,
+        ),
+        messages_db_path=settings.apple_messages_db_path,
+        screenshots_dir=settings.playwright_screenshots_dir,
+    )
+
+
+async def resolve_apple_services(
+    settings: Settings,
+) -> tuple[AppleService, ...]:
+    """Probe + build the Apple services at boot (empty off macOS).
+
+    Runs the family's TCC permission probes once and registers one in-process
+    server per *healthy* app area plus the doctor — the per-capability degradation
+    the PRD requires (a missing Contacts grant disables lookup, not the family).
+    On a fresh Mac the probes are also what raises the macOS consent prompts.
+    Degraded capabilities are logged; the doctor tool carries the fix steps.
+    """
+    family = build_apple_family(settings)
+    if family is None:
+        return ()
+    health = await family.check_health()
+    for item in health:
+        if not item.ok:
+            logger.warning(
+                "apple capability %s degraded (%s): %s — %s",
+                item.capability,
+                item.status,
+                item.detail,
+                item.fix,
+            )
+    services = family.build_services(health)
+    logger.info(
+        "apple tools registered: %s",
+        ", ".join(svc.capability for svc in services),
+    )
+    return services
+
+
 def build_routing_admin_service(
     routing: RoutingStore | None,
 ) -> RoutingAdminService | None:
@@ -443,6 +497,7 @@ def build_engine(
     budget: BudgetGate | None = None,
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
+    apple_services: Sequence[AppleService] = (),
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
     guest_admin = (
@@ -532,6 +587,9 @@ def build_engine(
         # chief-owned web fetch/search (#81) — owner-only, SSRF-guarded, one server for
         # both backends. None when web_tools_enabled is off.
         web_service=build_web_service(settings),
+        # Apple ecosystem tools (#155) — owner-only, darwin-gated, probed once at
+        # boot (serve → resolve_apple_services); empty off macOS or when force-off.
+        apple_services=apple_services,
         # Self-config routing tool (#83) — owner-only, shares the live routing table;
         # its edits are gated via blacklist_tools. None when routing is off.
         routing_admin_service=build_routing_admin_service(routing),
@@ -627,6 +685,7 @@ def build_telegram_stack(
     socket_server: SocketServer | None = None,
     registry: ApprovalRegistry | None = None,
     foreign_out: dict[str, ForeignPlatform] | None = None,
+    apple_services: Sequence[AppleService] = (),
 ) -> Stack:
     """Build the Telegram engine stack against the shared gate/memory singletons.
 
@@ -677,6 +736,7 @@ def build_telegram_stack(
         budget=build_budget(settings, io=io, session_factory=session_factory),
         routing=routing,
         harness_versioner=harness_versioner,
+        apple_services=apple_services,
     )
     adapter = TelegramAdapter(
         application=application,
@@ -712,6 +772,7 @@ def build_discord_stack(
     socket_server: SocketServer | None = None,
     registry: ApprovalRegistry | None = None,
     foreign_out: dict[str, ForeignPlatform] | None = None,
+    apple_services: Sequence[AppleService] = (),
 ) -> Stack:
     """Build the Discord engine stack — the Telegram stack's twin on the shared gate.
 
@@ -760,6 +821,7 @@ def build_discord_stack(
         budget=build_budget(settings, io=io, session_factory=session_factory),
         routing=routing,
         harness_versioner=harness_versioner,
+        apple_services=apple_services,
     )
     adapter = DiscordAdapter(
         client=client,
@@ -796,6 +858,7 @@ def build_cli_stack(
     harness_versioner: Versioner | None = None,
     registry: ApprovalRegistry | None = None,
     foreign: dict[str, ForeignPlatform] | None = None,
+    apple_services: Sequence[AppleService] = (),
 ) -> Stack:
     """Build the CLI engine stack bound to the always-on client-plane socket (#131).
 
@@ -850,6 +913,7 @@ def build_cli_stack(
         budget=budget_gate,
         routing=routing,
         harness_versioner=harness_versioner,
+        apple_services=apple_services,
     )
     adapter = CliAdapter(
         server=socket_server,
@@ -874,6 +938,7 @@ def build_stacks(
     memory: MemoryStore,
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
+    apple_services: Sequence[AppleService] = (),
 ) -> list[Stack]:
     """Build one engine stack per configured platform, plus the always-on CLI stack.
 
@@ -907,6 +972,7 @@ def build_stacks(
                 socket_server=socket_server,
                 registry=registry,
                 foreign_out=foreign,
+                apple_services=apple_services,
             )
         )
     if settings.discord_configured:
@@ -922,6 +988,7 @@ def build_stacks(
                 socket_server=socket_server,
                 registry=registry,
                 foreign_out=foreign,
+                apple_services=apple_services,
             )
         )
     stacks.append(
@@ -936,6 +1003,7 @@ def build_stacks(
             harness_versioner=harness_versioner,
             registry=registry,
             foreign=foreign,
+            apple_services=apple_services,
         )
     )
     return stacks
@@ -1038,6 +1106,10 @@ async def serve(settings: Settings) -> None:
     # the process) alive on a zero-platform, no-scheduler boot, where every other
     # long-lived coro is absent.
     socket_server = SocketServer(settings.socket_path)
+    # Apple ecosystem tools (#155): darwin-gated, probed once here at boot (the
+    # probes are async subprocess calls — and on a fresh Mac they raise the macOS
+    # consent prompts). Empty off macOS or when force-off, making every stack inert.
+    apple_services = await resolve_apple_services(settings)
     stacks = build_stacks(
         settings,
         socket_server=socket_server,
@@ -1047,6 +1119,7 @@ async def serve(settings: Settings) -> None:
         memory=memory,
         routing=routing,
         harness_versioner=harness_versioner,
+        apple_services=apple_services,
     )
     # One scheduler loop across all stacks (it binds to the primary platform's manager),
     # owning an http client for the heartbeat when configured. None when disabled.

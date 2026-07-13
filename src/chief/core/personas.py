@@ -168,6 +168,20 @@ _SHELL_GUIDANCE = (
     "which raises an approval card first."
 )
 
+#: Owner-only Apple guidance (#155), included only when the darwin-gated Apple tool
+#: family registered at boot. Names the healthy capabilities so chief reaches for the
+#: native surface without asking what platform the owner is on.
+_APPLE_GUIDANCE = (
+    "## Apple\n"
+    "This machine is a Mac and you have native Apple tools for: {capabilities}. Use "
+    "them for {owner}'s reminders, notes, contacts, Apple Calendar, shortcuts, "
+    "clipboard, notifications, screenshots, and Messages history — never ask what "
+    "platform they're on. Running a shortcut and creating an Apple Calendar event "
+    "need {owner}'s approval; the rest run freely. If an Apple tool fails with a "
+    "permission error or a capability is missing, run check_apple_health and walk "
+    "{owner} through the exact System Settings steps it reports."
+)
+
 #: Platform-aware reply formatting guidance (issue #65). Telegram does not render
 #: Markdown, so the model must default to plain text there. Discord renders Markdown
 #: normally, so the model can use headers, bold, code blocks, and lists freely.
@@ -202,6 +216,7 @@ def build_system_prompt(
     workspace_enabled: bool = False,
     shell_enabled: bool = False,
     web_enabled: bool = False,
+    apple_capabilities: Sequence[str] = (),
     guest_admin_enabled: bool = False,
     skills: Sequence[str] = (),
     platform: str | None = None,
@@ -213,7 +228,9 @@ def build_system_prompt(
     service's rules (calendar booking states times in ``owner_tz``).
     ``workspace_enabled`` / ``shell_enabled`` add the M7 workspace + host-shell
     guidance; ``web_enabled`` adds the ## Web block only when the chief_web tools are
-    wired (they default off, #88 MEDIUM-2). ``skills`` (M10, owner only) names the
+    wired (they default off, #88 MEDIUM-2). ``apple_capabilities`` (#155, owner only)
+    names the healthy Apple app areas registered at boot, adding the ## Apple block
+    on a Mac. ``skills`` (M10, owner only) names the
     enabled packaged skills, adding a
     block that points chief at them. Guests get none of these.
     ``platform`` (issue #65) names the reply surface (``"telegram"`` or ``"discord"``);
@@ -236,6 +253,13 @@ def build_system_prompt(
                 sections.append(guidance.format(owner=owner_name, tz=tz))
         if web_enabled:
             sections.append(_WEB_GUIDANCE.format(owner=owner_name))
+        if apple_capabilities:
+            sections.append(
+                _APPLE_GUIDANCE.format(
+                    owner=owner_name,
+                    capabilities=", ".join(apple_capabilities),
+                )
+            )
         if workspace_enabled:
             sections.append(_WORKSPACE_GUIDANCE)
         if shell_enabled:
