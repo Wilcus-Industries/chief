@@ -50,6 +50,7 @@ dev = [
     # vendored docker/mcp-* servers in-process, which import ``mcp``. Dev group ONLY —
     # the core reaches those servers over HTTP, never imports this package at runtime.
     "mcp>=1",
+    "playwright>=1.61.0",
 ]
 
 [build-system]

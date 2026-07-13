@@ -23,6 +23,7 @@ from starlette.applications import Starlette
 
 from chief.adapters.cli import CLI_LIMIT, CliAdapter, CliTaskIO, ForeignPlatform
 from chief.client_plane import SocketServer
+from chief.config import Settings
 from chief.gate.approvals import ApprovalManager, ApprovalRegistry
 from chief.gate.blacklist import Blacklist
 from chief.gate.policy import PolicyStore
@@ -31,7 +32,10 @@ from chief.persistence.messages import MessageLog
 from chief.web.app import WebDeps, build_web_app
 from chief.web.auth import WebAuth
 from chief.web.bridge import SocketBridge
+from chief.web.files import FileAreas
+from chief.web.health import build_health_checks
 from chief.web.server import WebServer
+from chief.web.settings_io import OwnerConfig, SecretsStore, SettingsPanel
 from test_cli_platform import _cli_manager, _running_server
 
 PASSWORD = "correct-horse-battery"
@@ -139,7 +143,22 @@ async def start_web_stack(
 
     auth = WebAuth(tmp_path / "web-secrets")
     auth.set_password(PASSWORD)
-    app = build_web_app(WebDeps(auth=auth, bridge=bridge, **(deps_extra or {})))
+    # Production-shaped deps (mirrors chief.web.wiring.build_web_stack) so the
+    # full surface — chat, files, settings, health — is drivable in one stack.
+    boot_settings = Settings()
+    deps = WebDeps(
+        auth=auth,
+        bridge=bridge,
+        files=FileAreas(workspace=tmp_path / "web-workspace", screenshots=None),
+        settings_panel=SettingsPanel(
+            secrets=SecretsStore(tmp_path / "web-secrets"),
+            config=OwnerConfig(tmp_path / "web-config.yaml"),
+            settings=boot_settings,
+        ),
+        health=tuple(build_health_checks(boot_settings)),
+        **(deps_extra or {}),
+    )
+    app = build_web_app(deps)
     web = WebServer(app, host="127.0.0.1", port=0)
     web_task = asyncio.create_task(web.run())
     await asyncio.wait_for(web.started.wait(), 10)
