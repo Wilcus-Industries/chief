@@ -15,7 +15,7 @@ cursor (:class:`~chief.persistence.models.AdapterCursor`) persists the last
 processed ``message.ROWID`` so restarts neither replay nor drop.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -219,7 +219,13 @@ async def set_cursor(session: AsyncSession, platform: str, position: int) -> Non
 async def record_unknown_sender(
     session: AsyncSession, *, platform: str, handle: str, seen_at: datetime
 ) -> None:
-    """Accumulate one metadata-only sighting: handle + timestamps, NEVER content."""
+    """Accumulate one metadata-only sighting: handle + timestamps, NEVER content.
+
+    ``seen_at`` is coerced to naive UTC — the shape sqlite round-trips — so a later
+    sighting can always compare against a stored ``last_seen``.
+    """
+    if seen_at.tzinfo is not None:
+        seen_at = seen_at.astimezone(UTC).replace(tzinfo=None)
     stmt = select(UnknownSender).where(
         UnknownSender.platform == platform, UnknownSender.handle == handle
     )

@@ -735,6 +735,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
         Route("/approvals", approvals_partial, methods=["GET"]),
         Route("/approvals/{approval_id:int}", approvals_answer, methods=["POST"]),
         Route("/settings", settings_page, methods=["GET"]),
+        Route("/settings/imessage", settings_imessage, methods=["POST"]),
         Route("/settings/platform/{platform}", settings_platform, methods=["POST"]),
         Route("/settings/openrouter", settings_openrouter, methods=["POST"]),
         Route("/settings/model", settings_model, methods=["POST"]),

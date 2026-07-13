@@ -32,7 +32,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -555,10 +555,11 @@ class IMessageAdapter(Adapter):
 
     @staticmethod
     def _row_time(row: dict[str, Any]) -> datetime:
+        """The row's UTC wall clock, naive (the shape sqlite round-trips)."""
         try:
             return datetime.fromisoformat(str(row.get("timestamp")))
         except ValueError:
-            return datetime.utcnow()  # noqa: DTZ003 - naive UTC, like the stored rows
+            return datetime.now(UTC).replace(tzinfo=None)
 
     async def _on_owner(self, sender: str, text: str) -> None:
         if text.startswith("/"):
