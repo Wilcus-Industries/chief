@@ -112,7 +112,7 @@ from .screening import Screener, build_screening_hook, prefix_flagged
 
 # SessionProto lives in session.py; re-exported here (``as`` = explicit re-export) so
 # the engine's callers keep importing it from the TaskManager module.
-from .session import NO_REPLY, Final, close_wedged_session
+from .session import NO_REPLY, Final, LiveEvent, ToolStart, close_wedged_session
 from .session import SessionProto as SessionProto
 from .subagents import (
     build_custom_agents,
@@ -1829,6 +1829,8 @@ class TaskManager:
                                     per_block_sent += 1
                             else:
                                 block_parts.append(event.text)
+                        elif isinstance(event, LiveEvent):
+                            await self._emit_live(task, event)
                         else:
                             await self._io.send(task.thread_key, f"· {event.text}")
                 if task.cancelled:
@@ -1904,6 +1906,21 @@ class TaskManager:
         else:
             await self._io.send(task.thread_key, text)
         task.transcript.append(("chief", text))
+
+    async def _emit_live(self, task: _RunningTask, event: LiveEvent) -> None:
+        """Stream one ephemeral live event (delta / tool lifecycle) to the IO.
+
+        ``send_live`` is discovered by ``getattr`` rather than declared on ``TaskIO``
+        (the ``force_close`` precedent): live streaming is an optional side channel,
+        and an IO without it keeps today's behavior — a tool start degrades to the
+        plain milestone line, deltas and tool ends are dropped (the full reply still
+        arrives through ``send``).
+        """
+        send_live = getattr(self._io, "send_live", None)
+        if send_live is not None:
+            await send_live(task.thread_key, event)
+        elif isinstance(event, ToolStart):
+            await self._io.send(task.thread_key, f"· using {event.name}")
 
     def _arm_idle(self, task: _RunningTask) -> None:
         if task.cancelled or self._tasks.get(task.thread_key) is not task:

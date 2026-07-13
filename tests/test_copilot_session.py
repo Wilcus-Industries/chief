@@ -23,6 +23,7 @@ from copilot._jsonrpc import JsonRpcError, ProcessExitedError
 from copilot.generated.rpc import SessionsForkRequest, SessionsForkResult
 from copilot.session_events import (
     AssistantMessageData,
+    AssistantMessageDeltaData,
     AssistantUsageData,
     SessionErrorData,
     SessionEvent,
@@ -30,6 +31,8 @@ from copilot.session_events import (
     SessionIdleData,
     SessionLimitsExhaustedRequestedData,
     SubagentStartedData,
+    ToolExecutionCompleteData,
+    ToolExecutionCompleteError,
     ToolExecutionStartData,
 )
 
@@ -45,7 +48,14 @@ from chief.core.copilot_session import (
     read_premium_requests,
 )
 from chief.core.personas import build_system_prompt
-from chief.core.session import Final, Milestone, close_wedged_session
+from chief.core.session import (
+    Delta,
+    Final,
+    Milestone,
+    ToolEnd,
+    ToolStart,
+    close_wedged_session,
+)
 from chief.memory.store import Fact
 from chief.memory.versioning import NullVersioner
 from chief.tools.guest import GuestService
@@ -61,8 +71,13 @@ def _event(data: Any) -> SessionEvent:
     )
 
 
-def _msg(content: str) -> AssistantMessageData:
-    return AssistantMessageData(content=content, message_id=uuid4().hex)
+def _msg(content: str, message_id: str = "m1") -> AssistantMessageData:
+    return AssistantMessageData(content=content, message_id=message_id)
+
+
+def _done(message_id: str = "m1") -> Delta:
+    """The done-delta every assistant message now yields before its Final."""
+    return Delta(message_id=message_id, text="", done=True)
 
 
 def _usage(cost: float | None, model: str = "auto") -> AssistantUsageData:
@@ -195,14 +210,14 @@ async def test_owner_turn_returns_reply_through_backend() -> None:
 
     events = [event async for event in task.run_turn("hello")]
 
-    assert events == [Final(text="hi from copilot")]
+    assert events == [_done(), Final(text="hi from copilot")]
     assert client.started is True
     assert session.sent == ["hello"]
     assert task.session_id == "sess-1"
 
 
 async def test_events_map_to_milestones_and_final_in_order() -> None:
-    # AC2: tool.execution_start → Milestone, assistant.message → Final, streamed in
+    # AC2: tool.execution_start → ToolStart, assistant.message → Final, streamed in
     # arrival order; session.idle ends the turn (run_turn returns).
     backend, _client, _session = _backend_with(
         [
@@ -215,19 +230,83 @@ async def test_events_map_to_milestones_and_final_in_order() -> None:
 
     events = [event async for event in task.run_turn("go")]
 
-    assert events == [Milestone(text="using shell"), Final(text="done")]
+    assert events == [
+        ToolStart(tool_call_id="c1", name="shell"),
+        _done(),
+        Final(text="done"),
+    ]
 
 
-async def test_multiple_assistant_messages_stream_as_separate_finals() -> None:
-    # Per-block reply streaming (#64): each assistant message is its own Final.
+async def test_message_deltas_stream_then_done_precedes_final() -> None:
+    # Live streaming: each assistant.message_delta yields a Delta increment; the
+    # full assistant.message then yields the done-delta (retiring the increments)
+    # immediately before its Final. Empty increments are skipped.
     backend, _client, _session = _backend_with(
-        [_msg("part one"), _msg("part two"), SessionIdleData()]
+        [
+            AssistantMessageDeltaData(delta_content="hel", message_id="m1"),
+            AssistantMessageDeltaData(delta_content="", message_id="m1"),
+            AssistantMessageDeltaData(delta_content="lo", message_id="m1"),
+            _msg("hello"),
+            SessionIdleData(),
+        ]
     )
     task = backend.create_session(model="auto")
 
     events = [event async for event in task.run_turn("go")]
 
-    assert events == [Final(text="part one"), Final(text="part two")]
+    assert events == [
+        Delta(message_id="m1", text="hel"),
+        Delta(message_id="m1", text="lo"),
+        _done(),
+        Final(text="hello"),
+    ]
+
+
+async def test_tool_execution_complete_maps_to_tool_end() -> None:
+    # The tool lifecycle pairs by tool_call_id; a failure carries its error message.
+    backend, _client, _session = _backend_with(
+        [
+            ToolExecutionStartData(tool_call_id="c1", tool_name="shell", arguments={}),
+            ToolExecutionCompleteData(success=True, tool_call_id="c1"),
+            ToolExecutionStartData(tool_call_id="c2", tool_name="fetch", arguments={}),
+            ToolExecutionCompleteData(
+                success=False,
+                tool_call_id="c2",
+                error=ToolExecutionCompleteError(message="connection refused"),
+            ),
+            _msg("done"),
+            SessionIdleData(),
+        ]
+    )
+    task = backend.create_session(model="auto")
+
+    events = [event async for event in task.run_turn("go")]
+
+    assert events == [
+        ToolStart(tool_call_id="c1", name="shell"),
+        ToolEnd(tool_call_id="c1", ok=True),
+        ToolStart(tool_call_id="c2", name="fetch"),
+        ToolEnd(tool_call_id="c2", ok=False, detail="connection refused"),
+        _done(),
+        Final(text="done"),
+    ]
+
+
+async def test_multiple_assistant_messages_stream_as_separate_finals() -> None:
+    # Per-block reply streaming (#64): each assistant message is its own Final.
+    backend, _client, _session = _backend_with(
+        [_msg("part one", "p1"), _msg("part two", "p2"), SessionIdleData()]
+    )
+    task = backend.create_session(model="auto")
+
+    events = [event async for event in task.run_turn("go")]
+
+    assert events == [
+        _done("p1"),
+        Final(text="part one"),
+        _done("p2"),
+        Final(text="part two"),
+    ]
 
 
 async def test_empty_response_is_no_reply() -> None:
@@ -349,7 +428,7 @@ async def test_resume_opens_resume_session() -> None:
 
     events = [event async for event in task.run_turn("continue")]
 
-    assert events == [Final(text="resumed")]
+    assert events == [_done(), Final(text="resumed")]
     assert client.resume_args is not None
     assert client.resume_args[0] == "sess-9"
     assert client.create_kwargs is None
@@ -483,7 +562,7 @@ async def test_branch_forks_source_session_into_independent_id() -> None:
     )
     events = [event async for event in task.run_turn("carry on")]
 
-    assert events == [Final(text="branched")]
+    assert events == [_done(), Final(text="branched")]
     # The fork sourced from the casual channel's id — the SDK leaves that id untouched.
     assert client.forked_from == "sess-casual"
     # The live turn drove the FORKED session, not the casual one: we resumed the new id,
@@ -549,7 +628,7 @@ async def test_attachments_are_dropped_with_warning_this_slice(
     with caplog.at_level(logging.WARNING):
         events = [event async for event in task.run_turn("what is this?", (att,))]
 
-    assert events == [Final(text="ok")]
+    assert events == [_done(), Final(text="ok")]
     assert session.sent == ["what is this?"]
     assert any("attachment" in r.message.lower() for r in caplog.records)
 
@@ -585,6 +664,7 @@ async def test_subagent_started_maps_to_delegation_milestone() -> None:
 
     assert events == [
         Milestone(text="delegating to coder (deepseek/deepseek-v4-flash)"),
+        _done(),
         Final(text="done"),
     ]
 
@@ -1081,7 +1161,7 @@ async def test_dead_resume_self_heals_onto_fresh_session(error: Exception) -> No
 
     events = [event async for event in task.run_turn("continue")]
 
-    assert events == [Final(text="healed")]
+    assert events == [_done(), Final(text="healed")]
     assert client.resume_args is not None  # the resume was genuinely attempted first
     assert client.create_kwargs is not None  # then healed onto a fresh create
     assert task.session_id == "fresh-id"
@@ -1128,8 +1208,8 @@ async def test_parallel_chats_get_independent_sessions() -> None:
     events_a = [event async for event in task_a.run_turn("chat A")]
     events_b = [event async for event in task_b.run_turn("chat B")]
 
-    assert events_a == [Final(text="reply 1")]
-    assert events_b == [Final(text="reply 2")]
+    assert events_a == [_done(), Final(text="reply 1")]
+    assert events_b == [_done(), Final(text="reply 2")]
     assert len(made) == 2  # a distinct runtime per chat, not one shared client
     assert made[0] is not made[1]
     assert task_a.session_id == "sess-1"

@@ -86,6 +86,21 @@ every client, not just the surface that raised it:
   "action": <str>}`` — a client's decision, ``action`` one of :data:`CARD_OPTIONS`'s
   action tokens.
 
+Live-turn frames (web streaming) — ephemeral progress for attached clients only:
+never recorded in the message log, never replayed, and additive to the vocabulary
+(an older client that ignores unknown frame types keeps working, so no version bump):
+
+- ``delta`` (server→client): ``{"type": "delta", "platform": <str>,
+  "thread_key": <str>, "message_id": <str>, "text": <str>, "done": <bool>}`` — one
+  streamed increment of an in-progress assistant block. ``done: true`` (empty
+  ``text``) retires the block's accumulated deltas; the full block then arrives as
+  a normal ``reply`` frame.
+- ``tool`` (server→client): ``{"type": "tool", "platform": <str>,
+  "thread_key": <str>, "tool_call_id": <str>, "name": <str>,
+  "status": "start"|"end", "ok": <bool|null>, "detail": <str>}`` — a tool call's
+  lifecycle; ``tool_call_id`` pairs the end with its start (``name`` is empty on
+  end, ``ok``/``detail`` only meaningful there).
+
 Error codes: ``invalid_json`` (line was not parseable JSON), ``invalid_frame``
 (parseable JSON but not an object), ``unknown_type`` (missing/unrecognized ``type``),
 ``line_too_long`` (the read stream limit was overrun; the connection then closes),
@@ -127,6 +142,8 @@ TYPE_THREADS: Final[str] = "threads"
 TYPE_SWITCH: Final[str] = "switch"
 TYPE_BACKFILL: Final[str] = "backfill"
 TYPE_INJECT: Final[str] = "inject"
+TYPE_DELTA: Final[str] = "delta"
+TYPE_TOOL: Final[str] = "tool"
 TYPE_STATUS: Final[str] = "status"
 TYPE_STATUS_SNAPSHOT: Final[str] = "status_snapshot"
 TYPE_SKILLS: Final[str] = "skills"
@@ -235,6 +252,58 @@ def file_frame(
         "filename": filename,
         "data": base64.b64encode(data).decode("ascii"),
         "caption": caption,
+    }
+
+
+def delta_frame(
+    thread_key: str,
+    message_id: str,
+    text: str,
+    *,
+    done: bool = False,
+    platform: str = CLI_PLATFORM,
+) -> dict[str, object]:
+    """A server→client streamed increment of an in-progress assistant block.
+
+    Ephemeral: broadcast to attached clients only, never logged or replayed.
+    ``done=True`` (with empty ``text``) marks the block complete — its full text
+    then arrives as a normal ``reply`` frame.
+    """
+    return {
+        "type": TYPE_DELTA,
+        "platform": platform,
+        "thread_key": thread_key,
+        "message_id": message_id,
+        "text": text,
+        "done": done,
+    }
+
+
+def tool_frame(
+    thread_key: str,
+    tool_call_id: str,
+    name: str,
+    status: str,
+    *,
+    ok: bool | None = None,
+    detail: str = "",
+    platform: str = CLI_PLATFORM,
+) -> dict[str, object]:
+    """A server→client tool-call lifecycle event (``status`` is start/end).
+
+    Ephemeral like ``delta``. ``tool_call_id`` pairs an end with its start;
+    ``name`` is set on start, ``ok``/``detail`` on end (``detail`` carries the
+    error message for a failed call).
+    """
+    return {
+        "type": TYPE_TOOL,
+        "platform": platform,
+        "thread_key": thread_key,
+        "tool_call_id": tool_call_id,
+        "name": name,
+        "status": status,
+        "ok": ok,
+        "detail": detail,
     }
 
 
