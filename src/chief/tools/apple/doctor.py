@@ -44,6 +44,8 @@ STATUS_UNAVAILABLE = "unavailable"
 STATUS_ERROR = "error"
 
 #: The canonical capability order (the checklist and registration both follow it).
+#: ``messages_send`` is probe-only: no tool service registers off it — it gates the
+#: iMessage adapter's outbound path (#156) the way ``messages`` gates its store read.
 CAPABILITIES: tuple[str, ...] = (
     "reminders",
     "notes",
@@ -51,6 +53,7 @@ CAPABILITIES: tuple[str, ...] = (
     "calendar",
     "shortcuts",
     "messages",
+    "messages_send",
     "system",
 )
 
@@ -69,6 +72,11 @@ _JXA_PROBES: dict[str, str] = {
     "calendar": (
         "function run() { return String(Application('Calendar').calendars.length); }"
     ),
+    # The iMessage send path (#156): one count Apple event against Messages —
+    # enough to trip (or verify) its Automation grant without sending anything.
+    "messages_send": (
+        "function run() { return String(Application('Messages').chats.length); }"
+    ),
 }
 
 #: The Messages-store probe: the cheapest read that still exercises Full Disk Access.
@@ -82,6 +90,7 @@ _GRANTS: dict[str, str] = {
     "calendar": "Automation → Calendar",
     "shortcuts": "Automation → Shortcuts",
     "messages": "Full Disk Access",
+    "messages_send": "Automation → Messages",
     "system": "None (clipboard); Screen Recording affects screenshots",
 }
 
@@ -112,6 +121,7 @@ _FIXES: dict[str, str] = {
     "calendar": _AUTOMATION_FIX.format(app="Calendar"),
     "shortcuts": _AUTOMATION_FIX.format(app="Shortcuts"),
     "messages": _FULL_DISK_FIX,
+    "messages_send": _AUTOMATION_FIX.format(app="Messages"),
     "system": _SYSTEM_FIX,
 }
 

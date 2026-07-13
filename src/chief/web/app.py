@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 from starlette.datastructures import UploadFile
 from starlette.requests import Request
@@ -41,6 +42,7 @@ from ..client_plane import (
     TYPE_REPLY,
 )
 from ..config import parse_hhmm
+from ..persistence import imessage as imessage_repo
 from . import render
 from .auth import SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
 from .bridge import BridgeError, SocketBridge
@@ -65,6 +67,55 @@ _OPEN_PREFIXES = ("/static/",)
 
 
 @dataclass
+class IMessagePanel:
+    """The web side of the iMessage whitelist (#156): DB-backed, unlike the
+    file-backed curated settings — edits apply immediately, no restart."""
+
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def entries(self) -> list[tuple[str, str, str]]:
+        """Whitelist rows as ``(handle, tier, mode)`` for the renderer."""
+        async with self.session_factory() as session:
+            rows = await imessage_repo.list_whitelist(session)
+        return [
+            (
+                contact.user_id,
+                contact.tier,
+                pref.mode if pref is not None else imessage_repo.MODE_AUTO,
+            )
+            for contact, pref in rows
+        ]
+
+    async def unknown(self) -> list[tuple[str, int, str]]:
+        """Unknown-sender rows as ``(handle, count, last_seen)`` — metadata only."""
+        async with self.session_factory() as session:
+            rows = await imessage_repo.list_unknown_senders(
+                session, platform=imessage_repo.PLATFORM
+            )
+        return [
+            (row.handle, row.count, f"{row.last_seen:%Y-%m-%d %H:%M} UTC")
+            for row in rows
+        ]
+
+    async def add(self, handle: str, mode: str) -> None:
+        async with self.session_factory() as session:
+            await imessage_repo.add_handle(
+                session,
+                handle=handle,
+                tier=imessage_repo.TIER_GUEST,
+                mode=mode,
+            )
+
+    async def remove(self, handle: str) -> bool:
+        async with self.session_factory() as session:
+            return await imessage_repo.remove_handle(session, handle)
+
+    async def set_mode(self, handle: str, mode: str) -> bool:
+        async with self.session_factory() as session:
+            return await imessage_repo.set_mode(session, handle, mode) is not None
+
+
+@dataclass
 class WebDeps:
     """Everything the app serves with — injected, never constructed by routes."""
 
@@ -76,6 +127,8 @@ class WebDeps:
     files: FileAreas | None = None
     #: The curated settings write targets. ``None`` hides the settings forms.
     settings_panel: SettingsPanel | None = None
+    #: The iMessage whitelist panel (#156). ``None`` hides that section.
+    imessage: IMessagePanel | None = None
     #: The health page's pluggable checklist (append to extend the page).
     health: tuple[HealthCheck, ...] | list[HealthCheck] = ()
 
@@ -429,7 +482,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
         ]
         return HTMLResponse(render.approvals_html(remaining))
 
-    def _settings_page_html(error: str | None = None) -> str:
+    async def _settings_page_html(error: str | None = None) -> str:
         panel = deps.settings_panel
         assert panel is not None
         secrets = panel.secrets
@@ -440,6 +493,11 @@ def build_web_app(deps: WebDeps) -> Starlette:
         def current(key: str) -> object:
             return stored.get(key, getattr(panel.settings, key))
 
+        imessage_html = ""
+        if deps.imessage is not None:
+            imessage_html = render.imessage_section(
+                await deps.imessage.entries(), await deps.imessage.unknown()
+            )
         body = render.settings_page_body(
             telegram_connected=secrets.exists("telegram_bot_token"),
             discord_connected=secrets.exists("discord_bot_token"),
@@ -453,6 +511,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
                     "quiet_hours_end",
                 )
             },
+            imessage_html=imessage_html,
             error=error,
         )
         return render.page("Settings", body, active="/settings")
@@ -461,7 +520,53 @@ def build_web_app(deps: WebDeps) -> Starlette:
         if deps.settings_panel is None:
             body = '<h1>Settings</h1><p class="note">Settings are not wired.</p>'
             return HTMLResponse(render.page("Settings", body, active="/settings"))
-        return HTMLResponse(_settings_page_html())
+        return HTMLResponse(await _settings_page_html())
+
+    async def settings_imessage(request: Request) -> Response:
+        """Whitelist edits (#156): add / remove / flip delegation mode.
+
+        DB-backed and effective immediately — no restart banner applies here.
+        """
+        if deps.imessage is None:
+            return PlainTextResponse("imessage is not enabled", status_code=404)
+        form = await request.form()
+        action = str(form.get("action") or "")
+        handle = str(form.get("handle") or "").strip()
+        if not handle:
+            return HTMLResponse(
+                await _settings_page_html("A handle is required."),
+                status_code=400,
+            )
+        if action == "add":
+            mode = (
+                imessage_repo.MODE_DRAFT
+                if form.get("draft") is not None
+                or form.get("mode") == imessage_repo.MODE_DRAFT
+                else imessage_repo.MODE_AUTO
+            )
+            await deps.imessage.add(handle, mode)
+        elif action == "remove":
+            await deps.imessage.remove(handle)
+        elif action == "mode":
+            mode = str(form.get("mode") or "")
+            if mode not in (imessage_repo.MODE_AUTO, imessage_repo.MODE_DRAFT):
+                return HTMLResponse(
+                    await _settings_page_html("Mode must be auto or draft."),
+                    status_code=400,
+                )
+            if not await deps.imessage.set_mode(handle, mode):
+                return HTMLResponse(
+                    await _settings_page_html(
+                        f"{handle} is not on the whitelist."
+                    ),
+                    status_code=400,
+                )
+        else:
+            return HTMLResponse(
+                await _settings_page_html(f"Unknown action {action!r}."),
+                status_code=400,
+            )
+        return RedirectResponse("/settings", status_code=303)
 
     async def settings_platform(request: Request) -> Response:
         if deps.settings_panel is None:
@@ -482,16 +587,16 @@ def build_web_app(deps: WebDeps) -> Starlette:
         raw_owner_id = str(form.get("owner_id") or "").strip()
         if not token:
             return HTMLResponse(
-                _settings_page_html("A bot token is required."), status_code=400
+                await _settings_page_html("A bot token is required."), status_code=400
             )
         if not raw_owner_id.isdigit() or int(raw_owner_id) <= 0:
             return HTMLResponse(
-                _settings_page_html("The owner id must be a positive number."),
+                await _settings_page_html("The owner id must be a positive number."),
                 status_code=400,
             )
         error = await panel.validators[platform](token)
         if error is not None:
-            return HTMLResponse(_settings_page_html(error), status_code=400)
+            return HTMLResponse(await _settings_page_html(error), status_code=400)
         panel.secrets.write(token_file, token)
         panel.config.update({owner_id_key: int(raw_owner_id)})
         return RedirectResponse("/settings", status_code=303)
@@ -507,11 +612,11 @@ def build_web_app(deps: WebDeps) -> Starlette:
         key = str(form.get("api_key") or "").strip()
         if not key:
             return HTMLResponse(
-                _settings_page_html("An API key is required."), status_code=400
+                await _settings_page_html("An API key is required."), status_code=400
             )
         error = await panel.validators["openrouter"](key)
         if error is not None:
-            return HTMLResponse(_settings_page_html(error), status_code=400)
+            return HTMLResponse(await _settings_page_html(error), status_code=400)
         panel.secrets.write("openrouter_api_key", key)
         return RedirectResponse("/settings", status_code=303)
 
@@ -521,7 +626,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
         model = (await _form_str(request, "owner_model_default")).strip()
         if not model:
             return HTMLResponse(
-                _settings_page_html("A model id is required."), status_code=400
+                await _settings_page_html("A model id is required."), status_code=400
             )
         deps.settings_panel.config.update({"owner_model_default": model})
         return RedirectResponse("/settings", status_code=303)
@@ -542,12 +647,12 @@ def build_web_app(deps: WebDeps) -> Starlette:
         end = str(form.get("end") or "").strip()
         if start and parse_hhmm(start) is None:
             return HTMLResponse(
-                _settings_page_html("Quiet-hours start must be 24-hour HH:MM."),
+                await _settings_page_html("Quiet-hours start must be 24-hour HH:MM."),
                 status_code=400,
             )
         if not end or parse_hhmm(end) is None:
             return HTMLResponse(
-                _settings_page_html("Quiet-hours end must be 24-hour HH:MM."),
+                await _settings_page_html("Quiet-hours end must be 24-hour HH:MM."),
                 status_code=400,
             )
         deps.settings_panel.config.update(
@@ -571,7 +676,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
             error = "The new passwords do not match."
         if error is not None:
             if deps.settings_panel is not None:
-                return HTMLResponse(_settings_page_html(error), status_code=400)
+                return HTMLResponse(await _settings_page_html(error), status_code=400)
             return PlainTextResponse(error, status_code=400)
         deps.auth.set_password(password)  # revokes every session, everywhere
         response = RedirectResponse("/settings", status_code=303)

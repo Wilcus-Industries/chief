@@ -90,6 +90,7 @@ from ..tools.google.add_account_service import AddAccountService
 from ..tools.google.list_accounts_service import ListAccountsService
 from ..tools.google.set_account_service import SetAccountService
 from ..tools.guest import GuestAdminService, GuestService
+from ..tools.imessage_admin import IMessageAdminService
 from ..tools.routing_admin import RoutingAdminService
 from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.sheets import mcp as sheets_mcp
@@ -340,6 +341,7 @@ class TaskManager:
         guest_model: str | None = None,
         guest_calendar_service: GoogleService | None = None,
         guest_admin_service: GuestAdminService | None = None,
+        imessage_admin_service: IMessageAdminService | None = None,
         list_accounts_service: ListAccountsService | None = None,
         set_account_service: SetAccountService | None = None,
         add_account_service: AddAccountService | None = None,
@@ -420,6 +422,9 @@ class TaskManager:
         self._guest_model = guest_model
         self._guest_calendar_service = guest_calendar_service
         self._guest_admin_service = guest_admin_service
+        # iMessage whitelist admin (#156), owner-only — same tier isolation as the
+        # guest-admin tool; None unless the iMessage adapter is configured.
+        self._imessage_admin_service = imessage_admin_service
         self._list_accounts_service = list_accounts_service
         self._set_account_service = set_account_service
         self._add_account_service = add_account_service
@@ -928,6 +933,11 @@ class TaskManager:
         if admin is not None:
             # Owner-initiated, reversible → pre-approved (no card) to block/mute guests.
             allowed.append(admin.tool_name)
+        imessage_admin = self._imessage_admin_service
+        if imessage_admin is not None:
+            # Owner-initiated, reversible whitelist edits (#156) — pre-approved
+            # (no card), the manage_guest posture.
+            allowed += list(imessage_admin.tool_names)
         if list_accounts is not None:
             # Pure read — no approval card; guests never see this service.
             allowed.append(list_accounts.tool_name)
@@ -1065,6 +1075,10 @@ class TaskManager:
             mcp_servers[routing_admin.server_name] = routing_admin.server_config()
         if admin is not None:
             mcp_servers[admin.server_name] = admin.server_config()
+        if imessage_admin is not None:
+            mcp_servers[imessage_admin.server_name] = (
+                imessage_admin.server_config()
+            )
         if list_accounts is not None:
             mcp_servers[list_accounts.server_name] = list_accounts.server_config()
         if set_account is not None:

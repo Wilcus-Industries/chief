@@ -317,12 +317,89 @@ def _platform_section(name: str, key: str, connected: bool) -> str:
     )
 
 
+def imessage_section(
+    entries: Iterable[tuple[str, str, str]],
+    unknown: Iterable[tuple[str, int, str]],
+) -> str:
+    """The iMessage whitelist panel (#156): handles, modes, unknown senders.
+
+    ``entries`` are ``(handle, tier, mode)`` rows; ``unknown`` are
+    ``(handle, count, last_seen)`` rows from the metadata-only log — content-free
+    by construction, so there is nothing to show beyond who and when.
+    """
+    rows = "".join(
+        "<tr>"
+        f"<td>{_esc(handle)}</td><td>{_esc(tier)}</td>"
+        + (
+            "<td>"
+            '<form method="post" action="/settings/imessage">'
+            f'<input type="hidden" name="handle" value="{_esc(handle)}">'
+            '<input type="hidden" name="action" value="mode">'
+            '<input type="hidden" name="mode" value="'
+            + ("auto" if mode == "draft" else "draft")
+            + '">'
+            + f"<button>{'draft-first' if mode == 'draft' else 'auto'}"
+            " ⇄</button></form></td>"
+            if tier == "guest"
+            else "<td>—</td>"
+        )
+        + '<td><form method="post" action="/settings/imessage">'
+        f'<input type="hidden" name="handle" value="{_esc(handle)}">'
+        '<input type="hidden" name="action" value="remove">'
+        '<button class="danger">Remove</button></form></td>'
+        "</tr>"
+        for handle, tier, mode in entries
+    )
+    table = (
+        "<table><tr><th>Handle</th><th>Tier</th><th>Mode</th><th></th></tr>"
+        f"{rows}</table>"
+        if rows
+        else '<p class="note">No whitelisted handles yet.</p>'
+    )
+    unknown_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(handle)}</td><td>{count}</td>"
+        f'<td class="note">{_esc(last_seen)}</td>'
+        '<td><form method="post" action="/settings/imessage">'
+        f'<input type="hidden" name="handle" value="{_esc(handle)}">'
+        '<input type="hidden" name="action" value="add">'
+        "<button>Allow</button></form></td>"
+        "</tr>"
+        for handle, count, last_seen in unknown
+    )
+    unknown_html = (
+        "<h3>Unknown senders</h3>"
+        '<p class="note">Texted chief without being whitelisted — logged by'
+        " handle and time only; their messages were never read.</p>"
+        "<table><tr><th>Handle</th><th>Msgs</th><th>Last seen</th><th></th>"
+        f"</tr>{unknown_rows}</table>"
+        if unknown_rows
+        else ""
+    )
+    return (
+        '<div class="panel"><h2>iMessage whitelist</h2>'
+        '<p class="note">Only whitelisted handles reach chief. Guests enter'
+        " under guest limits; draft-first holds every outbound text for your"
+        " approval. Changes apply immediately.</p>"
+        + table
+        + '<form class="stack" method="post" action="/settings/imessage">'
+        '<input type="hidden" name="action" value="add">'
+        '<input type="text" name="handle"'
+        ' placeholder="+15551234567 or email">'
+        '<label><input type="checkbox" name="draft"> Draft-first</label>'
+        "<button>Whitelist handle</button></form>"
+        + unknown_html
+        + "</div>"
+    )
+
+
 def settings_page_body(
     *,
     telegram_connected: bool,
     discord_connected: bool,
     openrouter_connected: bool,
     current: Mapping[str, object],
+    imessage_html: str = "",
     error: str | None = None,
 ) -> str:
     """The curated settings forms — never a general config editor."""
@@ -353,6 +430,7 @@ def settings_page_body(
         + banner
         + _platform_section("Telegram", "telegram", telegram_connected)
         + _platform_section("Discord", "discord", discord_connected)
+        + imessage_html
         + openrouter
         + '<div class="panel"><h2>Model</h2>'
         '<form class="stack" method="post" action="/settings/model">'

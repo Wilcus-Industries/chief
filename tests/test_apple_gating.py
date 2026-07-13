@@ -125,7 +125,7 @@ async def test_resolve_apple_services_is_empty_off_darwin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
-    assert await resolve_apple_services(Settings(**_SETTINGS_KW)) == ()
+    assert await resolve_apple_services(Settings(**_SETTINGS_KW)) == ((), [])
 
 
 async def test_resolve_on_darwin_without_binaries_registers_only_the_doctor(
@@ -135,8 +135,9 @@ async def test_resolve_on_darwin_without_binaries_registers_only_the_doctor(
     # probe reports unavailable, so per-capability gating strips every app area and
     # only the doctor registers — degradation, not a crash.
     monkeypatch.setattr(sys, "platform", "darwin")
-    services = await resolve_apple_services(Settings(**_SETTINGS_KW))
+    services, health = await resolve_apple_services(Settings(**_SETTINGS_KW))
     assert [svc.capability for svc in services] == ["doctor"]
+    assert not any(item.ok for item in health)
 
 
 # ---- owner-session wiring ------------------------------------------------------------
