@@ -8,6 +8,7 @@ streaming. All routes except ``/login``, ``/setup``, and ``/static`` sit behind 
 session-cookie gate.
 """
 
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -30,16 +31,19 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ..adapters.commands import OWNER_COMMANDS
 from ..client_plane import (
     CARD_OPTIONS,
     CLI_PLATFORM,
     DEFAULT_THREAD_KEY,
     TYPE_CARD,
     TYPE_CARD_RESOLVED,
+    TYPE_DELTA,
     TYPE_ERROR,
     TYPE_FILE,
     TYPE_MILESTONE,
     TYPE_REPLY,
+    TYPE_TOOL,
 )
 from ..config import parse_hhmm
 from ..persistence import imessage as imessage_repo
@@ -240,8 +244,47 @@ def _sse_events_for(
                 ),
             )
         )
+    elif ftype == TYPE_DELTA and matches:
+        # JSON, not HTML: the client accumulates increments into a streaming
+        # bubble itself (textContent assignment escapes, so no markup needed).
+        events.append(
+            (
+                "delta",
+                json.dumps(
+                    {
+                        "message_id": frame.get("message_id"),
+                        "text": frame.get("text"),
+                        "done": bool(frame.get("done")),
+                    }
+                ),
+            )
+        )
+    elif ftype == TYPE_TOOL and matches:
+        events.append(
+            (
+                "tool",
+                json.dumps(
+                    {
+                        "tool_call_id": frame.get("tool_call_id"),
+                        "name": frame.get("name"),
+                        "status": frame.get("status"),
+                        "ok": frame.get("ok"),
+                        "detail": frame.get("detail"),
+                    }
+                ),
+            )
+        )
     elif ftype in (TYPE_CARD, TYPE_CARD_RESOLVED):
-        events.append(("approvals", render.approvals_html(bridge.pending_cards())))
+        events.append(
+            (
+                "approvals",
+                render.approvals_html(
+                    bridge.pending_cards(),
+                    active_platform=platform,
+                    active_thread=thread_key,
+                ),
+            )
+        )
         if ftype == TYPE_CARD_RESOLVED and matches:
             events.append(
                 ("message", render.message_html("milestone", str(frame.get("text"))))
@@ -332,6 +375,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
             threads=threads,
             history=history,
             cards=deps.bridge.pending_cards(),
+            commands=OWNER_COMMANDS.entries(),
         )
         return HTMLResponse(render.page("Chat", body, active="/chat"))
 
@@ -453,13 +497,26 @@ def build_web_app(deps: WebDeps) -> Starlette:
     async def approvals_partial(request: Request) -> Response:
         if deps.bridge is None:
             return HTMLResponse("")
-        return HTMLResponse(render.approvals_html(deps.bridge.pending_cards()))
+        platform, thread_key = _active_thread(request)
+        return HTMLResponse(
+            render.approvals_html(
+                deps.bridge.pending_cards(),
+                active_platform=platform,
+                active_thread=thread_key,
+            )
+        )
 
     async def approvals_answer(request: Request) -> Response:
         if deps.bridge is None:
             return PlainTextResponse("chat plane not connected", status_code=503)
         approval_id = int(request.path_params["approval_id"])
-        action = await _form_str(request, "action")
+        form = await request.form()
+        action = form.get("action")
+        action = action if isinstance(action, str) else ""
+        # The page's active thread, carried by the card's hx-vals, so the
+        # optimistic re-render below stays scoped the way the page renders.
+        platform = str(form.get("platform") or CLI_PLATFORM)
+        thread_key = str(form.get("thread_key") or DEFAULT_THREAD_KEY)
         if action not in {option["action"] for option in CARD_OPTIONS}:
             return PlainTextResponse(f"unknown action {action!r}", status_code=400)
         if approval_id not in deps.bridge.cards:
@@ -477,7 +534,11 @@ def build_web_app(deps: WebDeps) -> Starlette:
             for card in deps.bridge.pending_cards()
             if card.get("approval_id") != approval_id
         ]
-        return HTMLResponse(render.approvals_html(remaining))
+        return HTMLResponse(
+            render.approvals_html(
+                remaining, active_platform=platform, active_thread=thread_key
+            )
+        )
 
     async def _settings_page_html(error: str | None = None) -> str:
         panel = deps.settings_panel

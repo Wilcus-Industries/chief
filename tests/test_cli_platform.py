@@ -46,7 +46,7 @@ from chief.core.budget import (
     BudgetGate,
     CurrencyPolicy,
 )
-from chief.core.session import Final, Milestone, TurnEvent
+from chief.core.session import Delta, Final, Milestone, ToolEnd, ToolStart, TurnEvent
 from chief.core.tasks import (
     CLOSE_CONFIRM,
     NOTHING_TO_CLOSE,
@@ -261,6 +261,59 @@ async def test_user_frame_streams_milestones_then_reply(
         assert reply["platform"] == "cli"
         assert reply["thread_key"] == "cli:main"
         assert reply["text"] == "reply:hello"
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+
+
+async def test_user_frame_streams_live_events_and_backfill_keeps_milestone(
+    cli_stack: Callable[..., Any],
+) -> None:
+    # Live streaming on the CLI stack: the socket carries structured tool/delta
+    # frames in stream order, and a switch backfill afterwards still shows the
+    # tool start as its plain "using Bash" milestone row — deltas and tool ends
+    # left no rows behind.
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="hel"),
+        ToolEnd(tool_call_id="c1", ok=True),
+        Delta(message_id="m1", text="", done=True),
+    ]
+    session = FakeSession(model="m", milestones=events)
+    server, _io = await cli_stack([session])
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+        writer.write(json.dumps(user_frame("cli:main", "hello")).encode() + b"\n")
+        await writer.drain()
+
+        start = await _read_frame(reader)
+        assert start["type"] == "tool"
+        assert (start["tool_call_id"], start["name"], start["status"]) == (
+            "c1",
+            "Bash",
+            "start",
+        )
+        delta = await _read_frame(reader)
+        assert (delta["type"], delta["text"], delta["done"]) == ("delta", "hel", False)
+        end = await _read_frame(reader)
+        assert (end["type"], end["status"], end["ok"]) == ("tool", "end", True)
+        done = await _read_frame(reader)
+        assert (done["type"], done["done"]) == ("delta", True)
+        reply = await _read_frame(reader)
+        assert (reply["type"], reply["text"]) == ("reply", "reply:hello")
+
+        writer.write(json.dumps(switch_frame("cli", "cli:main")).encode() + b"\n")
+        await writer.drain()
+        backfill = await _read_frame(reader)
+        assert backfill["type"] == "backfill"
+        rows = [
+            (m["kind"], m["text"])
+            for m in backfill["messages"]  # type: ignore[attr-defined]
+            if m["role"] == "chief"
+        ]
+        assert rows == [("milestone", "using Bash"), ("reply", "reply:hello")]
     finally:
         writer.close()
         with suppress(OSError):

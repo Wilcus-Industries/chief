@@ -93,6 +93,7 @@ from copilot.session import (
 )
 from copilot.session_events import (
     AssistantMessageData,
+    AssistantMessageDeltaData,
     AssistantUsageData,
     ModelCallFailureData,
     SessionErrorData,
@@ -100,6 +101,7 @@ from copilot.session_events import (
     SessionIdleData,
     SessionLimitsExhaustedRequestedData,
     SubagentStartedData,
+    ToolExecutionCompleteData,
     ToolExecutionStartData,
 )
 
@@ -107,7 +109,7 @@ from ..adapters.base import Attachment
 from ..config import Settings
 from .copilot_gate import PermissionHandlerFn
 from .copilot_tools import partition_mcp_servers
-from .session import NO_REPLY, Final, Milestone, TurnEvent
+from .session import NO_REPLY, Delta, Final, Milestone, ToolEnd, ToolStart, TurnEvent
 
 logger = logging.getLogger("chief.core.copilot_session")
 
@@ -600,13 +602,29 @@ class CopilotTaskSession:
             if isinstance(data, SessionIdleData):
                 break
             if isinstance(data, AssistantMessageData):
+                # The done delta precedes the Final so a live view can retire its
+                # accumulated deltas before the authoritative block arrives.
+                yield Delta(message_id=data.message_id, text="", done=True)
                 if data.content:
                     text_blocks_seen += 1
                     yield Final(text=data.content)
+            elif isinstance(data, AssistantMessageDeltaData):
+                if data.delta_content:
+                    yield Delta(
+                        message_id=data.message_id, text=data.delta_content
+                    )
             elif isinstance(data, SubagentStartedData):
                 yield Milestone(text=_subagent_milestone(data))
             elif isinstance(data, ToolExecutionStartData):
-                yield Milestone(text=f"using {data.tool_name}")
+                yield ToolStart(
+                    tool_call_id=data.tool_call_id, name=data.tool_name
+                )
+            elif isinstance(data, ToolExecutionCompleteData):
+                yield ToolEnd(
+                    tool_call_id=data.tool_call_id,
+                    ok=data.success,
+                    detail=data.error.message if data.error else "",
+                )
             elif isinstance(data, AssistantUsageData):
                 if data.cost is not None:
                     self.last_cost_usd += data.cost

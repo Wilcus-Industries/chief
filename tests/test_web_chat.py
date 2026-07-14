@@ -6,6 +6,7 @@ SSE stream is read for real — the central mechanism (HTTP + SSE over the clien
 frame vocabulary) is never mocked.
 """
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.cli import ForeignPlatform
-from chief.core.session import Milestone
+from chief.core.session import Delta, Milestone, ToolEnd, ToolStart, TurnEvent
 from chief.persistence.tasks import get_or_create_task
 from test_broadcast_bus import _RecordingInner
 from test_cli_platform import _mirror_manager, _seq_factory
@@ -55,6 +56,103 @@ async def test_send_echoes_owner_line_then_streams_milestone_and_reply(
         event, data = await sse.next_event()
         assert event == "message"
         assert "reply:go" in data and "msg chief" in data
+
+
+async def test_live_turn_streams_deltas_and_tool_lifecycle(
+    tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    # The web live view: deltas and tool lifecycle arrive as their own SSE event
+    # types (JSON payloads), in stream order, before the final reply fragment.
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="hel"),
+        ToolEnd(tool_call_id="c1", ok=True),
+        Delta(message_id="m1", text="", done=True),
+    ]
+    session = FakeSession(model="m", milestones=events)
+    stack = await start_web_stack(
+        tmp_path, session_factory, sdk_factory=_seq_factory([session])
+    )
+    try:
+        async with SseReader(
+            stack.client, "/events?platform=cli&thread_key=cli:main"
+        ) as sse:
+            resp = await stack.client.post(
+                "/chat/send",
+                data={"platform": "cli", "thread_key": "cli:main", "text": "go"},
+            )
+            assert resp.status_code == 200
+
+            event, data = await sse.next_event()
+            assert event == "tool"
+            start = json.loads(data)
+            assert (start["tool_call_id"], start["name"], start["status"]) == (
+                "c1",
+                "Bash",
+                "start",
+            )
+
+            event, data = await sse.next_event()
+            assert event == "delta"
+            assert json.loads(data) == {
+                "message_id": "m1",
+                "text": "hel",
+                "done": False,
+            }
+
+            event, data = await sse.next_event()
+            assert event == "tool"
+            end = json.loads(data)
+            assert (end["status"], end["ok"]) == ("end", True)
+
+            event, data = await sse.next_event()
+            assert event == "delta"
+            assert json.loads(data)["done"] is True
+
+            event, data = await sse.next_event()
+            assert event == "message"
+            assert "reply:go" in data
+    finally:
+        await stack.aclose()
+
+
+async def test_deltas_for_another_thread_never_reach_this_page(
+    tmp_path: Path, session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    # The active thread is client state: a page watching cli:other sees none of
+    # cli:main's ephemera (no delta, no tool), only silence until its own traffic.
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="hel"),
+        Delta(message_id="m1", text="", done=True),
+    ]
+    session = FakeSession(model="m", milestones=events)
+    stack = await start_web_stack(
+        tmp_path, session_factory, sdk_factory=_seq_factory([session])
+    )
+    try:
+        async with SseReader(
+            stack.client, "/events?platform=cli&thread_key=cli:other"
+        ) as sse:
+            resp = await stack.client.post(
+                "/chat/send",
+                data={"platform": "cli", "thread_key": "cli:main", "text": "go"},
+            )
+            assert resp.status_code == 200
+            with pytest.raises(TimeoutError):
+                await sse.next_event(timeout=0.5)
+    finally:
+        await stack.aclose()
+
+
+async def test_chat_page_embeds_the_command_palette(chat_stack: WebStack) -> None:
+    resp = await chat_stack.client.get("/chat?platform=cli&thread_key=cli:main")
+    assert resp.status_code == 200
+    assert 'id="cmd-data"' in resp.text
+    assert 'id="cmd-menu"' in resp.text
+    assert "/tasks" in resp.text
+    assert "List active tasks" in resp.text
+    assert "/static/chief.js" in resp.text
 
 
 async def test_chat_page_renders_backfill_and_thread_list(

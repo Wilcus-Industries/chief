@@ -25,7 +25,7 @@ NO_REPLY = "(no reply)"
 
 @dataclass(frozen=True)
 class Milestone:
-    """A short progress line (e.g. a tool-use start), posted to the task thread."""
+    """A short progress line (e.g. a subagent start), posted to the task thread."""
 
     text: str
 
@@ -37,7 +37,41 @@ class Final:
     text: str
 
 
-TurnEvent = Milestone | Final
+@dataclass(frozen=True)
+class Delta:
+    """One streamed increment of an in-progress assistant block.
+
+    ``done=True`` (with empty ``text``) marks the block complete — the full block
+    then arrives as its own :class:`Final`, so a live view drops the accumulated
+    deltas and renders that instead.
+    """
+
+    message_id: str
+    text: str
+    done: bool = False
+
+
+@dataclass(frozen=True)
+class ToolStart:
+    """A tool call began; ``tool_call_id`` keys the matching :class:`ToolEnd`."""
+
+    tool_call_id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ToolEnd:
+    """A tool call finished. ``detail`` carries the error message when it failed."""
+
+    tool_call_id: str
+    ok: bool
+    detail: str = ""
+
+
+TurnEvent = Milestone | Final | Delta | ToolStart | ToolEnd
+
+#: The live-only subset: streamed straight to attached clients, never persisted.
+LiveEvent = Delta | ToolStart | ToolEnd
 
 
 class SessionProto(Protocol):

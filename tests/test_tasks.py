@@ -35,7 +35,16 @@ from chief.core.budget import (
 )
 from chief.core.copilot_tools import sdk_server_to_tools
 from chief.core.routing import RoutingStore
-from chief.core.session import NO_REPLY, Final, Milestone, TurnEvent
+from chief.core.session import (
+    NO_REPLY,
+    Delta,
+    Final,
+    LiveEvent,
+    Milestone,
+    ToolEnd,
+    ToolStart,
+    TurnEvent,
+)
 from chief.core.tasks import (
     CLOSE_CONFIRM,
     GROUP_MODE_NOTE,
@@ -124,8 +133,8 @@ class FakeSession:
         resume: str | None = None,
         gate: asyncio.Event | None = None,
         on_start: Callable[[], None] | None = None,
-        milestones: list[Milestone] | None = None,
-        after_gate: list[Milestone] | None = None,
+        milestones: list[TurnEvent] | None = None,
+        after_gate: list[TurnEvent] | None = None,
         cost: float = 0.0,
         rate_limit: str | None = None,
         premium: dict[str, int] | None = None,
@@ -376,6 +385,64 @@ async def test_turn_replies_inline_without_ack(
     assert ("-100:5", "· using Bash") in io.sends  # milestone posted
     # No "working on it…" ack on any surface — the auto-message is gone.
     assert all("working on it" not in text for _, text in io.sends)
+    await mgr.shutdown()
+
+
+class LiveIO(FakeIO):
+    """FakeIO plus the optional live side channel the engine discovers by getattr."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.live: list[tuple[str, LiveEvent]] = []
+
+    async def send_live(self, thread_key: str, event: LiveEvent) -> None:
+        self.live.append((thread_key, event))
+
+
+async def test_live_events_route_through_send_live(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An IO exposing send_live receives the ephemeral events in stream order, and
+    # the tool start no longer degrades to a plain milestone line.
+    io = LiveIO()
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="hel"),
+        ToolEnd(tool_call_id="c1", ok=True),
+        Delta(message_id="m1", text="", done=True),
+    ]
+    sess = FakeSession(model="m", milestones=events)
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    assert [e for _, e in io.live] == events
+    assert all(k == "-100:5" for k, _ in io.live)
+    assert all("using Bash" not in text for _, text in io.sends)
+    await mgr.shutdown()
+
+
+async def test_tool_start_degrades_to_milestone_without_send_live(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An IO without the side channel keeps today's behavior: the tool start posts
+    # the "· using <name>" line; deltas and tool ends are dropped silently.
+    io = FakeIO()
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="partial"),
+        ToolEnd(tool_call_id="c1", ok=False, detail="boom"),
+    ]
+    sess = FakeSession(model="m", milestones=events)
+    mgr = _manager(session_factory, io, factory=_one(sess))
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await _until(lambda: ("-100:5", "reply:hi") in io.sends)
+
+    assert ("-100:5", "· using Bash") in io.sends
+    assert all("partial" not in text for _, text in io.sends)
+    assert all("boom" not in text for _, text in io.sends)
     await mgr.shutdown()
 
 

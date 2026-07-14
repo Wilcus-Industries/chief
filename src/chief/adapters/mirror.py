@@ -34,9 +34,12 @@ from ..client_plane import (
     SocketServer,
     card_frame,
     card_resolved_frame,
+    delta_frame,
     file_frame,
     outbound_frame,
+    tool_frame,
 )
+from ..core.session import LiveEvent, ToolEnd, ToolStart
 from ..gate.approvals import ApprovalCard
 from ..persistence.messages import (
     KIND_CARD,
@@ -109,6 +112,57 @@ class MirrorTaskIO:
             text=str(frame["text"]),
             filename=None,
         )
+
+    async def send_live(self, thread_key: str, event: LiveEvent) -> None:
+        """Stream one live event: platform text for a tool start, socket for the rest.
+
+        A tool start keeps the chat platform's ``· using <name>`` progress line (and
+        its milestone row in the log) exactly as before live streaming existed, and
+        additionally broadcasts the structured ``tool`` frame. Deltas and tool ends
+        are socket-only and ephemeral — a chat platform cannot stream, and the full
+        reply still arrives through :meth:`send`.
+        """
+        if isinstance(event, ToolStart):
+            text = f"using {event.name}"
+            await self._inner.send(thread_key, f"· {text}")
+            frame = tool_frame(
+                thread_key,
+                event.tool_call_id,
+                event.name,
+                "start",
+                platform=self._platform,
+            )
+            await self._mirror(frame, kind="milestone", text=text, filename=None)
+            return
+        if isinstance(event, ToolEnd):
+            frame = tool_frame(
+                thread_key,
+                event.tool_call_id,
+                "",
+                "end",
+                ok=event.ok,
+                detail=event.detail,
+                platform=self._platform,
+            )
+        else:
+            frame = delta_frame(
+                thread_key,
+                event.message_id,
+                event.text,
+                done=event.done,
+                platform=self._platform,
+            )
+        await self._broadcast_only(frame)
+
+    async def _broadcast_only(self, frame: dict[str, object]) -> None:
+        """Best-effort ephemeral broadcast: no log row, so nothing to sequence."""
+        if self._server is None:
+            return
+        try:
+            async with self._server.delivery_lock:
+                await self._server.broadcast(frame)
+        except Exception:
+            logger.exception("mirror live broadcast failed")
 
     async def send_file(
         self,

@@ -24,6 +24,7 @@ from chief.client_plane import (
     card_resolved_frame,
     command_frame,
     decode,
+    delta_frame,
     encode,
     error_frame,
     file_frame,
@@ -34,6 +35,7 @@ from chief.client_plane import (
     reply_frame,
     switch_frame,
     threads_frame,
+    tool_frame,
     user_frame,
 )
 from chief.gate.approvals import ApprovalAction
@@ -128,6 +130,36 @@ def test_milestone_frame_carries_no_prefix() -> None:
     assert frame["type"] == "milestone"
     assert frame["platform"] == "cli"
     assert frame["text"] == "using Bash"
+
+
+def test_delta_frame_shape() -> None:
+    frame = delta_frame("cli:main", "m1", "hel")
+    assert frame == {
+        "type": "delta",
+        "platform": "cli",
+        "thread_key": "cli:main",
+        "message_id": "m1",
+        "text": "hel",
+        "done": False,
+    }
+    done = delta_frame("-100:5", "m1", "", done=True, platform="telegram")
+    assert (done["platform"], done["text"], done["done"]) == ("telegram", "", True)
+
+
+def test_tool_frame_shape() -> None:
+    start = tool_frame("cli:main", "c1", "Bash", "start")
+    assert start == {
+        "type": "tool",
+        "platform": "cli",
+        "thread_key": "cli:main",
+        "tool_call_id": "c1",
+        "name": "Bash",
+        "status": "start",
+        "ok": None,
+        "detail": "",
+    }
+    end = tool_frame("cli:main", "c1", "", "end", ok=False, detail="boom")
+    assert (end["status"], end["ok"], end["detail"]) == ("end", False, "boom")
 
 
 def test_file_frame_base64_roundtrips_the_raw_bytes() -> None:

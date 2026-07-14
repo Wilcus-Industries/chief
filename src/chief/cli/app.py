@@ -24,6 +24,7 @@ from ..client_plane import (
     TYPE_BACKFILL,
     TYPE_CARD,
     TYPE_CARD_RESOLVED,
+    TYPE_DELTA,
     TYPE_ERROR,
     TYPE_FILE,
     TYPE_HELLO,
@@ -33,6 +34,7 @@ from ..client_plane import (
     TYPE_SKILLS_LIST,
     TYPE_STATUS_SNAPSHOT,
     TYPE_THREADS,
+    TYPE_TOOL,
     answer_frame,
     command_frame,
     inject_frame,
@@ -230,6 +232,9 @@ class ChiefCliApp(App[None]):
         if ftype == TYPE_BACKFILL:
             self._render_backfill(frame)
             return
+        if ftype == TYPE_DELTA:
+            # Per-block replies land whole in an append-only log; nothing to stream.
+            return
 
         scope = self._scope(frame)
         if scope == "hidden":
@@ -254,6 +259,11 @@ class ChiefCliApp(App[None]):
             self._write(f"{tag}{frame.get('text')}")
         elif ftype == TYPE_MILESTONE:
             self._write(f"· {tag}{frame.get('text')}", "dim")
+        elif ftype == TYPE_TOOL:
+            # The tool start carries what the old milestone line said; ends are
+            # noise in an append-only log (the next reply block implies them).
+            if frame.get("status") == "start":
+                self._write(f"· {tag}using {frame.get('name')}", "dim")
         elif ftype == TYPE_FILE:
             caption = frame.get("caption")
             suffix = f" — {caption}" if caption else ""
@@ -295,7 +305,9 @@ class ChiefCliApp(App[None]):
             and frame.get("thread_key") == self._thread_key
         ):
             return "full"
-        if ftype in (TYPE_REPLY, TYPE_MILESTONE, TYPE_FILE):
+        if ftype in (TYPE_REPLY, TYPE_MILESTONE, TYPE_FILE) or (
+            ftype == TYPE_TOOL and frame.get("status") == "start"
+        ):
             return "notice"
         return "hidden"
 
