@@ -44,8 +44,10 @@ Self-mode is otherwise as inert as the dedicated-ID posture: any non-self sender
 including a stale or admin-added guest-tier whitelist row — gets no session, no
 reply, and no card; only the metadata-only ``unknown_senders`` line is written
 (#163) — unless the handle carries an active armed watch (#166), in which case the
-row is admitted as a report-only evaluation dispatched into the self-thread: the
-verdict reports there and nothing is ever sent to the watched thread. That inert
+row is admitted as an evaluation dispatched into the self-thread; a relevant verdict
+fires a guarded ghost-send back to the watched contact and retires the watch (#167,
+via ``reply_to_watch``, :mod:`chief.tools.watches`), while the outbound send seam
+refuses any self-DM text to a non-self handle no active watch authorizes. That inert
 path is also where an unbound watch (#168, part of PRD #160,
 :mod:`chief.persistence.watches`) gets its candidate sighting: each unknown
 sender not yet seen for a given unbound watch is recorded as a
@@ -257,18 +259,22 @@ def _card_text(prefix: str, body: str) -> str:
     return f"{prefix}\n\n{body}\n\n(Answer from the chief web UI or terminal.)"
 
 
-def watch_dispatch_text(*, sender: str, instruction: str, message: str) -> str:
-    """The report-only evaluation prompt for a watched-thread hit (#166).
+def watch_dispatch_text(
+    *, sender: str, instruction: str, message: str, watch_id: int
+) -> str:
+    """The firing evaluation prompt for a watched-thread hit (#166/#167).
 
-    The turn runs in the owner's self-thread, so its verdict ("… — relevant / not
-    relevant") reports back there; nothing is ever sent to the watched thread.
+    The turn runs in the owner's self-thread. If the message is relevant to the
+    standing instruction, the model fires by calling ``reply_to_watch`` — that sends
+    the reply to the watched contact AS THE OWNER through the guarded send seam
+    (#167) and retires the watch; an irrelevant message fires nothing.
 
     The watched contact's message is untrusted third-party data injected into an
     owner-privileged turn, so it is wrapped in an explicit untrusted-data fence and
     any forged fence markers in the body are neutralized — a prompt-injection payload
-    inside the message can't be read as instructions for this turn. (The hard send
-    guard is design-deferred to the firing milestone; this fence is the in-slice
-    defense.)
+    inside the message can't be read as instructions for this turn. The send seam
+    re-checks watch authorization as defense-in-depth, so even a hijacked turn can
+    only ever reach this watch's own stored contact.
     """
     safe = message.replace("BEGIN UNTRUSTED", "BEGIN_UNTRUSTED").replace(
         "END UNTRUSTED", "END_UNTRUSTED"
@@ -280,8 +286,10 @@ def watch_dispatch_text(*, sender: str, instruction: str, message: str) -> str:
         f"--- BEGIN UNTRUSTED MESSAGE (from {sender}) ---\n"
         f"{safe}\n"
         "--- END UNTRUSTED MESSAGE ---\n\n"
-        "Decide whether it is relevant to that instruction and report back here in "
-        "the self-thread. Do not message them — this is report-only."
+        "Decide whether it is relevant to that instruction. If it is, reply to them "
+        f"by calling reply_to_watch(watch_id={watch_id}, text=…) — that sends your "
+        "reply to them as the owner and closes the watch. If it is not relevant, do "
+        "nothing. Do not reply to any other handle."
     )
 
 
@@ -300,6 +308,7 @@ class IMessageTaskIO:
         self_dm: bool = False,
         self_handles: frozenset[str] = frozenset(),
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        front_desk: str | None = None,
     ) -> None:
         self._runner = runner
         #: Where outbound file attachments are written so Messages can pick them
@@ -311,15 +320,52 @@ class IMessageTaskIO:
         self._self_dm = self_dm
         self._self_handles = self_handles
         self._session_factory = session_factory
+        #: The owner's self-thread (#167): where a blocked ghost-send is surfaced.
+        self._front_desk = front_desk
 
     def _is_self(self, handle: str) -> bool:
         return self._self_dm and repo.normalize_handle(handle) in self._self_handles
 
     async def _record(self, handle: str, body: str) -> None:
-        """Durably record an own send to a self-handle (loop-proof echo filter)."""
-        if self._is_self(handle) and self._session_factory is not None:
+        """Durably record an own send in self-DM mode (loop-proof echo filter).
+
+        In self-DM mode every own send is recorded — a self-thread reply (#161) and
+        an authorized ghost-send alike (#167) — so its store echo is consumed at
+        re-poll and never re-dispatched. (Only authorized ghost-sends reach here for
+        a non-self handle; the guard blocks unauthorized ones before any send.)
+        """
+        if self._self_dm and self._session_factory is not None:
             async with self._session_factory() as session:
                 await repo.record_send(session, handle, body)
+
+    async def _guard_nonself(self, handle: str) -> bool:
+        """Self-DM ghost-send guard (#167): a send to a non-self handle must be
+        authorized by an active watch; else refuse, log, surface to the self-thread.
+
+        Off in dedicated-ID mode and for self-thread sends (both return ``True``
+        immediately), so the byte-for-byte dedicated-ID posture is unaffected.
+        """
+        if (
+            not self._self_dm
+            or self._is_self(handle)
+            or self._session_factory is None
+        ):
+            return True
+        async with self._session_factory() as session:
+            if await watches_repo.authorizing_watches(
+                session, handle, now=datetime.now(UTC)
+            ):
+                return True
+        logger.warning(
+            "refused unauthorized iMessage ghost-send",
+            extra={"thread_key": handle},
+        )
+        if self._front_desk is not None:
+            await self.send(
+                self._front_desk,
+                f"🚫 Blocked a text to {handle}: no active watch authorizes it.",
+            )
+        return False
 
     async def _send_raw(self, handle: str, text: str) -> None:
         result = await self._runner.run_jxa(SEND_TEXT_SCRIPT, [handle, text])
@@ -328,6 +374,8 @@ class IMessageTaskIO:
             raise RuntimeError(f"iMessage send to {handle} failed: {detail}")
 
     async def send(self, thread_key: str, text: str) -> None:
+        if not await self._guard_nonself(thread_key):
+            return
         for chunk in _split(text, IMESSAGE_LIMIT):
             # Every chunk (not just the first) is prefixed so each echoed chunk is
             # caught by the stateless filter (#161); off, this is a no-op.
@@ -343,6 +391,8 @@ class IMessageTaskIO:
         caption: str | None = None,
     ) -> None:
         """Write the bytes to the outbox and send them as a Messages attachment."""
+        if not await self._guard_nonself(thread_key):
+            return
         self._outbox_dir.mkdir(parents=True, exist_ok=True)
         path = self._outbox_dir / filename
         path.write_bytes(data)
@@ -692,6 +742,10 @@ class IMessageAdapter(Adapter):
             # no session, no reply, no guest ack, no card; only the metadata-only
             # sighting lands (plus, #168, a watch-candidate prompt if an unbound
             # watch is waiting on exactly this kind of sighting).
+            if text:
+                async with self._session_factory() as session:
+                    if await repo.take_send(session, sender, text):
+                        return  # chief's own ghost-send echoed back — don't re-eval
             if await self._admit_watched(sender, text, row):
                 return
             seen_at = self._row_time(row)
@@ -763,13 +817,16 @@ class IMessageAdapter(Adapter):
             return False
         for watch in matched:
             logger.info(
-                "watch fired",
+                "watch eval dispatched",
                 extra={"thread_key": sender, "watch_id": watch.id},
             )
             await self._engine.dispatch(
                 thread_key=self._front_desk,
                 text=watch_dispatch_text(
-                    sender=sender, instruction=watch.instruction, message=text
+                    sender=sender,
+                    instruction=watch.instruction,
+                    message=text,
+                    watch_id=watch.id,
                 ),
                 surface=Surface.DM,
             )

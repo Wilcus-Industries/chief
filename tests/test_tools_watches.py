@@ -4,14 +4,20 @@ Determinism: a fixed ``now`` (12:00 EDT) and owner_tz America/New_York frame the
 expiry math, mirroring test_tools_schedule.py.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.imessage import IMessageTaskIO
+from chief.persistence import imessage as imessage_repo
 from chief.persistence import watches as repo
 from chief.tools.watches import WatchService
+from imessage_helpers import FixtureRunner
 
 NOW = datetime(2026, 6, 4, 16, 0, tzinfo=UTC)  # 12:00 EDT
+OWNER = "+15550000001"
+MOM = "+15550000002"
 
 
 def _svc(session_factory: async_sessionmaker[AsyncSession]) -> WatchService:
@@ -311,3 +317,138 @@ async def test_confirm_watch_candidate_expired_watch_errors(
         {"candidate_id": candidate.id, "decision": "yes"}
     )
     assert out["is_error"] is True
+
+
+# ---- reply_to_watch: the fire round-trip through the real send seam (#167) ---------
+
+
+def _fire_setup(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> tuple[WatchService, FixtureRunner]:
+    """A WatchService wired with a real guarded IMessageTaskIO send seam."""
+    runner = FixtureRunner()
+    io = IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        self_dm=True,
+        self_handles=frozenset({imessage_repo.normalize_handle(OWNER)}),
+        session_factory=session_factory,
+        front_desk=OWNER,
+    )
+    svc = WatchService(
+        session_factory=session_factory,
+        owner_tz="UTC",
+        now=lambda: datetime.now(UTC),
+        send=io,
+        front_desk=OWNER,
+    )
+    return svc, runner
+
+
+async def _armed_watch(
+    session_factory: async_sessionmaker[AsyncSession], *, tone: str = repo.TONE_REPORT
+) -> int:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="reply when she asks",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+            tone=tone,
+        )
+    return watch.id
+
+
+def test_reply_to_watch_absent_without_send_seam() -> None:
+    svc = WatchService(session_factory=None, owner_tz="UTC")  # type: ignore[arg-type]
+    assert set(svc.tool_names) == {
+        "mcp__chief_watches__create_watch",
+        "mcp__chief_watches__list_watches",
+        "mcp__chief_watches__cancel_watch",
+        "mcp__chief_watches__list_watch_candidates",
+        "mcp__chief_watches__confirm_watch_candidate",
+    }
+
+
+def test_reply_to_watch_present_with_send_seam(tmp_path: Path) -> None:
+    svc, _ = _fire_setup(None, tmp_path)  # type: ignore[arg-type]
+    assert "mcp__chief_watches__reply_to_watch" in svc.tool_names
+
+
+async def test_reply_to_watch_report_tone_sends_and_retires(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "text": "running late"}
+    )
+
+    assert out["is_error"] is False
+    mom = [c for c in runner.jxa_calls if c[-2:] == (MOM, "running late")]
+    assert len(mom) == 1  # the reply reaches MOM as the owner (no prefix)
+    report = [c for c in runner.jxa_calls if c[-2] == OWNER]
+    assert len(report) == 1 and "✅ Replied to" in report[0][-1]
+    async with session_factory() as session:
+        watch = await repo.get_watch(session, watch_id)
+    assert watch is not None and watch.state == repo.STATE_FIRED
+
+
+async def test_reply_to_watch_keep_watching_leaves_it_armed(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "text": "ok", "keep_watching": True}
+    )
+
+    assert out["is_error"] is False
+    async with session_factory() as session:
+        watch = await repo.get_watch(session, watch_id)
+    assert watch is not None and watch.state == repo.STATE_ARMED
+
+
+async def test_reply_to_watch_silent_tone_posts_no_self_thread_report(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory, tone=repo.TONE_SILENT)
+
+    await svc._build_reply().handler({"watch_id": watch_id, "text": "ok"})
+
+    assert [c[-2] for c in runner.jxa_calls] == [MOM]  # only the contact, no report
+
+
+async def test_reply_to_watch_on_inactive_watch_errors_and_sends_nothing(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+    async with session_factory() as session:
+        await repo.cancel_watch(session, watch_id)
+
+    out = await svc._build_reply().handler({"watch_id": watch_id, "text": "hi"})
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []  # nothing sent for a cancelled watch
+
+
+async def test_reply_to_watch_unbound_watch_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,  # unbound — no handle to send to
+            instruction="watch for someone",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    out = await svc._build_reply().handler({"watch_id": watch.id, "text": "hi"})
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
