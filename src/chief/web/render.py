@@ -530,6 +530,28 @@ def imessage_section(
     )
 
 
+def watches_section(
+    entries: Iterable[tuple[str, str, str, str, str]],
+) -> str:
+    """Read-only watches table (#165): manage from chat or /watches, not here."""
+    rows = "".join(
+        f"<tr><td>{_esc(target)}</td><td>{_esc(instruction)}</td>"
+        f"<td>{_esc(expiry)}</td><td>{_esc(tone)}</td><td>{_esc(state)}</td></tr>"
+        for target, instruction, expiry, tone, state in entries
+    )
+    table = (
+        "<table><tr><th>Target</th><th>Instruction</th><th>Expiry</th>"
+        f"<th>Tone</th><th>State</th></tr>{rows}</table>"
+        if rows
+        else '<p class="note">No watches.</p>'
+    )
+    return (
+        '<div class="panel"><h2>Watches</h2>'
+        '<p class="note">Read-only — create or cancel a watch by talking to'
+        " chief, or with /watches.</p>" + table + "</div>"
+    )
+
+
 def settings_page_body(
     *,
     telegram_connected: bool,
@@ -537,6 +559,7 @@ def settings_page_body(
     openrouter_connected: bool,
     current: Mapping[str, object],
     imessage_html: str = "",
+    watches_html: str = "",
     error: str | None = None,
 ) -> str:
     """The curated settings forms — never a general config editor."""
@@ -568,6 +591,7 @@ def settings_page_body(
         + _platform_section("Telegram", "telegram", telegram_connected)
         + _platform_section("Discord", "discord", discord_connected)
         + imessage_html
+        + watches_html
         + openrouter
         + '<div class="panel"><h2>Model</h2>'
         '<form class="stack" method="post" action="/settings/model">'

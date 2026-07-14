@@ -30,6 +30,7 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from copilot import ProviderConfig
@@ -57,7 +58,8 @@ from ..memory.store import MemoryStore
 from ..memory.versioning import NullVersioner, Versioner
 from ..obs.audit import AuditLog
 from ..persistence import usage
-from ..persistence.models import Task
+from ..persistence import watches as watches_repo
+from ..persistence.models import Task, Watch
 from ..persistence.tasks import (
     CANCELLED,
     DONE,
@@ -95,6 +97,7 @@ from ..tools.routing_admin import RoutingAdminService
 from ..tools.schedule import ScheduleBashService, ScheduleService
 from ..tools.sheets import mcp as sheets_mcp
 from ..tools.shell import ShellService
+from ..tools.watches import WatchService
 from ..tools.web import WebService
 from . import classify
 from .backend import CopilotBackend
@@ -347,6 +350,7 @@ class TaskManager:
         add_account_service: AddAccountService | None = None,
         schedule_service: ScheduleService | None = None,
         schedule_bash_service: ScheduleBashService | None = None,
+        watches_service: WatchService | None = None,
         budget: BudgetProto | None = None,
         owner_inbox: str | None = None,
         budget_downgrade_model: str | None = None,
@@ -430,6 +434,9 @@ class TaskManager:
         self._add_account_service = add_account_service
         self._schedule_service = schedule_service
         self._schedule_bash_service = schedule_bash_service
+        # Watch CRUD tools (#165), owner-only — None unless the iMessage adapter is
+        # configured (watches are meaningless without it).
+        self._watches_service = watches_service
         self._budget = budget
         self._owner_inbox = owner_inbox
         self._budget_downgrade_model = budget_downgrade_model
@@ -698,6 +705,24 @@ class TaskManager:
             names += chief_skill_names(self._chief_skills_dir)
         return names
 
+    async def list_watches(self) -> list[Watch]:
+        """Every watch, for the ``/watches`` listing and the web panel (#165)."""
+        async with self._session_factory() as session:
+            return await watches_repo.list_watches(session)
+
+    async def cancel_watch(self, watch_id: int) -> str:
+        """Cancel watch ``watch_id`` (``/watches cancel <id>`` and the tool, #165)."""
+        async with self._session_factory() as session:
+            watch = await watches_repo.get_watch(session, watch_id)
+            if watch is None:
+                return f"No watch #{watch_id}."
+            state = watches_repo.effective_state(watch, now=datetime.now(UTC))
+            if state != watches_repo.STATE_ARMED:
+                return f"#{watch_id} is already {state} — nothing to cancel."
+            target_handle = watch.target_handle
+            await watches_repo.cancel_watch(session, watch_id)
+        return f"Cancelled #{watch_id} — {target_handle} will never fire."
+
     async def recover(self) -> None:
         """Ping the owner about tasks left mid-flight by a restart (no auto-resume)."""
         async with self._session_factory() as session:
@@ -954,6 +979,11 @@ class TaskManager:
             # actions, so they're pre-approved (no card) — extra_read_only in
             # _build_gate keeps the gate hook from carding them despite the allow entry.
             allowed += list(schedule.tool_names)
+        watches = self._watches_service
+        if watches is not None:
+            # Owner-initiated watch CRUD (#165) — pre-approved (no card), same posture
+            # as the schedule tools.
+            allowed += list(watches.tool_names)
         system_prompt = build_system_prompt(
             tier="owner",
             memory=self._memory,
@@ -1102,6 +1132,8 @@ class TaskManager:
             # blacklist_tools to include it. Being off allowed_tools routes the call
             # through the gate; it does not by itself raise a card.
             mcp_servers[bash_schedule.server_name] = bash_schedule.server_config()
+        if watches is not None:
+            mcp_servers[watches.server_name] = watches.server_config()
         if mcp_servers:
             gate_kwargs["mcp_servers"] = mcp_servers
         # Google deferred ops (delete) refused on top of the always-disallowed built-in

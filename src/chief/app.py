@@ -82,6 +82,7 @@ from .tools.routing_admin import RoutingAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
+from .tools.watches import WatchService
 from .tools.web import BraveSearcher, WebFetcher, WebService
 from .web.health import HealthCheck, HealthItem
 from .web.wiring import build_web_stack
@@ -586,6 +587,13 @@ def build_engine(
         if settings.scheduler_enabled
         else None
     )
+    # Watch CRUD tools (#165): meaningless without the iMessage adapter, so gated the
+    # same way as IMessageAdminService.
+    watches = (
+        WatchService(session_factory=session_factory, owner_tz=settings.owner_tz)
+        if settings.imessage_configured
+        else None
+    )
     # Every session is built through the Copilot backend (#88, chief's sole harness):
     # CopilotBackend.create_session is the SessionFactory the engine builds each
     # owner/guest session with.
@@ -654,6 +662,7 @@ def build_engine(
         add_account_service=add_account,
         schedule_service=schedule,
         schedule_bash_service=schedule_bash,
+        watches_service=watches,
         # When budgeting is on, the gate records each turn's spend and the manager
         # enforces its mode (pause/downgrade); both are inert (None) otherwise.
         budget=budget,

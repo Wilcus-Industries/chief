@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from chief.adapters.base import Attachment, Surface
-from chief.persistence.models import Task
+from chief.persistence.models import Task, Watch
 from chief.tools.apple.runner import ScriptResult, ScriptRunner
 
 #: Apple epoch (2001-01-01) offset from the unix epoch, in seconds.
@@ -285,3 +285,9 @@ class FakeEngine:
 
     async def composed_skills(self) -> list[str]:
         return []
+
+    async def list_watches(self) -> list[Watch]:
+        return []
+
+    async def cancel_watch(self, watch_id: int) -> str:
+        return f"Cancelled #{watch_id}."

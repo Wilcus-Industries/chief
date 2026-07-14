@@ -14,7 +14,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..config import Settings
-from .app import IMessagePanel, WebDeps, build_web_app
+from .app import IMessagePanel, WatchesPanel, WebDeps, build_web_app
 from .auth import WebAuth
 from .bridge import SocketBridge
 from .files import FileAreas
@@ -83,6 +83,13 @@ def build_web_stack(
         if session_factory is not None and settings.imessage_enabled
         else None
     )
+    # Watches (#165) are meaningless without the iMessage adapter — same gate as the
+    # owner's watch tools (settings.imessage_configured).
+    watches = (
+        WatchesPanel(session_factory=session_factory)
+        if session_factory is not None and settings.imessage_configured
+        else None
+    )
     app = build_web_app(
         WebDeps(
             auth=auth,
@@ -90,6 +97,7 @@ def build_web_stack(
             files=files,
             settings_panel=panel,
             imessage=imessage,
+            watches=watches,
             health=tuple(build_health_checks(settings)) + tuple(extra_health),
         )
     )
