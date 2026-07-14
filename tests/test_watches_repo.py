@@ -459,3 +459,94 @@ async def test_list_pending_candidates_excludes_expired_watch_candidates(
     async with session_factory() as session:
         pending = await repo.list_pending_candidates(session, now=later)
     assert [c.id for c in pending] == [live_candidate.id]
+
+
+# ---- outbound-guard predicate + single-fire retire (#167) -------------------------
+
+
+async def test_authorizing_watches_matches_armed_unexpired_on_the_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+    # The guard's ``now`` is the real wall clock at send time, always at or after
+    # the watch's created_at floor — a just-created watch authorizes a send.
+    async with session_factory() as session:
+        matched = await repo.authorizing_watches(
+            session, MOM, now=datetime.now(UTC)
+        )
+    assert [w.id for w in matched] == [watch.id]
+
+
+async def test_authorizing_watches_excludes_expired_cancelled_and_other_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        expired = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="expired",
+            expiry=now - timedelta(days=1),
+        )
+        cancelled = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="cancelled",
+            expiry=now + timedelta(days=1),
+        )
+        await repo.cancel_watch(session, cancelled.id)
+        await repo.create_watch(
+            session,
+            target_handle=OTHER,
+            instruction="other handle",
+            expiry=now + timedelta(days=1),
+        )
+    _ = expired
+    async with session_factory() as session:
+        matched = await repo.authorizing_watches(session, MOM, now=now)
+    assert matched == []
+
+
+async def test_retire_watch_flips_armed_to_fired_and_drops_authorization(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        retired = await repo.retire_watch(session, watch.id)
+    assert retired is not None and retired.state == repo.STATE_FIRED
+    # A fired watch no longer authorizes a send.
+    async with session_factory() as session:
+        matched = await repo.authorizing_watches(session, MOM, now=now)
+    assert matched == []
+
+
+async def test_retire_watch_returns_none_for_a_non_armed_watch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+        await repo.cancel_watch(session, watch.id)
+    async with session_factory() as session:
+        assert await repo.retire_watch(session, watch.id) is None
+    # Idempotent: retiring a missing watch is also a no-op.
+    async with session_factory() as session:
+        assert await repo.retire_watch(session, 999999) is None

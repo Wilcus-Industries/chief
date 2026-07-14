@@ -8,6 +8,7 @@ resolve, deliver) with only the osascript child faked.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from chief.gate.approvals import (
 from chief.gate.policy import PolicyStore
 from chief.obs.audit import AuditLog
 from chief.persistence import imessage as imessage_repo
+from chief.persistence import watches as watches_repo
 from chief.persistence.approvals import list_pending
 from chief.persistence.messages import ROLE_CHIEF, MessageLog
 from chief.persistence.models import IMessageSend, MessageLogEntry, PolicyEntry
@@ -141,17 +143,26 @@ def _self_io(
     )
 
 
-async def test_self_dm_prefixes_self_handle_but_not_others(
+async def test_self_dm_prefixes_self_handle_but_not_authorized_others(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
     runner = FixtureRunner()
     io = _self_io(runner, session_factory, tmp_path)
+    # An armed watch on MOM authorizes the ghost-send (#167); without it the guard
+    # would refuse the non-self send.
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
 
     await io.send(OWNER, "your brief")
     await io.send(MOM, "hi mom")
 
     assert runner.jxa_calls[0][-2:] == (OWNER, "🤖 your brief")  # prefixed
-    assert runner.jxa_calls[1][-2:] == (MOM, "hi mom")  # non-self untouched
+    assert runner.jxa_calls[1][-2:] == (MOM, "hi mom")  # ghost-send, no prefix
 
 
 async def test_self_dm_records_the_prefixed_send(

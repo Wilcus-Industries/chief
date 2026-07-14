@@ -31,8 +31,9 @@ TONE_REPORT = "report"  # tell the owner what happened
 TONE_SILENT = "silent"  # act, but don't narrate back
 TONES = (TONE_REPORT, TONE_SILENT)
 
-#: Lifecycle states. ``fired``/``expired`` are reserved for the firing milestone;
-#: this slice only ever writes ``armed`` (on create) and ``cancelled`` (on cancel).
+#: Lifecycle states. ``armed`` (on create), ``cancelled`` (on cancel), and ``fired``
+#: (single-fire retire, #167) are written here; ``expired`` stays a display-only state
+#: computed by :func:`effective_state` (no sweep writes it yet).
 STATE_ARMED = "armed"
 STATE_FIRED = "fired"
 STATE_EXPIRED = "expired"
@@ -143,6 +144,37 @@ async def active_watches_for_handle(
         if effective_state(w, now=now) == STATE_ARMED
         and _as_utc(w.created_at) <= _as_utc(arrived_at)
     ]
+
+
+async def authorizing_watches(
+    session: AsyncSession, handle: str, *, now: datetime
+) -> list[Watch]:
+    """Armed, unexpired watches on ``handle`` that authorize an outbound send *now*.
+
+    The #167 outbound-guard predicate: a self-DM ghost-send to ``handle`` is
+    authorized only when an armed, unexpired watch on it exists at ``now``. Reuses
+    :func:`active_watches_for_handle` with ``arrived_at=now`` — the inbound arrival
+    floor is irrelevant to an outbound send, so it drops away, leaving the
+    armed+unexpired+handle filter.
+    """
+    return await active_watches_for_handle(
+        session, handle, now=now, arrived_at=now
+    )
+
+
+async def retire_watch(session: AsyncSession, watch_id: int) -> Watch | None:
+    """Single-fire retire: flip an armed watch to ``fired`` (#167).
+
+    ``None`` if the watch is missing or not armed (already fired/expired/cancelled),
+    so a second fire is an idempotent no-op. A retired watch then falls out of
+    :func:`active_watches_for_handle`, so no further send is authorized.
+    """
+    watch = await get_watch(session, watch_id)
+    if watch is None or watch.state != STATE_ARMED:
+        return None
+    watch.state = STATE_FIRED
+    await session.commit()
+    return watch
 
 
 # ---- unbound-watch candidates (#168, part of PRD #160) ---------------------------

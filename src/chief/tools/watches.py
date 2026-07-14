@@ -1,7 +1,8 @@
 """chief's watch tools (#165/#168, part of PRD #160) — standing owner instructions.
 
 One in-process server (``chief_watches``), owner-only, wired into owner sessions
-whenever the iMessage adapter is configured. Five tools:
+whenever the iMessage adapter is configured. Five CRUD tools, plus a sixth
+(``reply_to_watch``) added only for the iMessage owner session (#167):
 
 - ``create_watch`` — record a standing instruction over a Contacts-resolved
   handle ("if mom texts me today about x, tell her y"). Contact resolution is
@@ -31,17 +32,24 @@ whenever the iMessage adapter is configured. Five tools:
   watch, indistinguishable from a directly-created one); "no" rejects it and
   the sender stays inert.
 
-All five are owner-initiated and reversible-enough (cancel always undoes a watch;
-a wrong-target create is caught by the confirmation echo) → pre-approved, no card,
-the same posture as :class:`~chief.tools.imessage_admin.IMessageAdminService`.
+- ``reply_to_watch`` (#167) — fire a watch: send a reply to its stored contact AS
+  THE OWNER through the guarded iMessage send seam and retire the watch (single-fire;
+  ``keep_watching=true`` keeps a standing instruction armed). The model can only
+  target a watch's own ``target_handle``, never a free-form handle, and the seam
+  re-checks authorization as defense-in-depth. A ``report``-tone fire also posts a
+  confirmation to the self-thread; a ``silent`` one does not. Added only when the
+  session carries the send seam + front-desk route (the iMessage owner session).
 
-Nothing here fires a watch — that's a later milestone (PRD #160).
+The CRUD five are owner-initiated and reversible-enough (cancel always undoes a
+watch; a wrong-target create is caught by the confirmation echo) → pre-approved, no
+card, the same posture as
+:class:`~chief.tools.imessage_admin.IMessageAdminService`.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
-from typing import Any
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -129,6 +137,42 @@ _CONFIRM_CANDIDATE_SCHEMA: dict[str, Any] = {
     "required": ["candidate_id", "decision"],
 }
 
+_REPLY_DESCRIPTION = (
+    "Fire a watch: reply to the watched contact AS THE OWNER and close the watch "
+    "(#167). Use this ONLY from a watch evaluation turn, when the watched person's "
+    "message is relevant to the standing instruction. `watch_id` is that watch; "
+    "`text` is the reply — it is sent to the watch's own stored contact and can "
+    "NEVER target any other handle. By default the watch is single-fire and "
+    "retires after this reply; pass `keep_watching=true` only for a standing/"
+    "ongoing instruction that should keep firing on future messages. A 'report'-"
+    "tone watch also posts a confirmation to your self-thread; a 'silent'-tone "
+    "watch sends only to the contact and stays quiet."
+)
+_REPLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "watch_id": {"type": "integer"},
+        "text": {
+            "type": "string",
+            "description": "The reply sent to the watched contact as the owner.",
+        },
+        "keep_watching": {
+            "type": "boolean",
+            "description": (
+                "Keep the watch armed after this reply (ongoing instruction). "
+                "Omit for the default single-fire retire."
+            ),
+        },
+    },
+    "required": ["watch_id", "text"],
+}
+
+
+class WatchSend(Protocol):
+    """The send slice of the iMessage IO the fire tool drives (#167)."""
+
+    async def send(self, thread_key: str, text: str) -> None: ...
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -171,18 +215,29 @@ class WatchService:
     owner_tz: str = "UTC"
     now: Callable[[], datetime] = _utcnow
     server_name: str = "chief_watches"
+    #: The guarded send seam + self-thread route the fire tool needs (#167). Both are
+    #: set only for the iMessage owner session; without them, no ``reply_to_watch``.
+    send: WatchSend | None = None
+    front_desk: str | None = None
+
+    @property
+    def _can_fire(self) -> bool:
+        return self.send is not None and self.front_desk is not None
 
     @property
     def tool_names(self) -> tuple[str, ...]:
         """The SDK-qualified tool names — added to the owner's allow-list."""
         n = self.server_name
-        return (
+        names: tuple[str, ...] = (
             f"mcp__{n}__create_watch",
             f"mcp__{n}__list_watches",
             f"mcp__{n}__cancel_watch",
             f"mcp__{n}__list_watch_candidates",
             f"mcp__{n}__confirm_watch_candidate",
         )
+        if self._can_fire:
+            names = (*names, f"mcp__{n}__reply_to_watch")
+        return names
 
     def _tz(self) -> tzinfo:
         return ZoneInfo(self.owner_tz)
@@ -346,15 +401,57 @@ class WatchService:
 
         return confirm_watch_candidate
 
+    def _build_reply(self) -> InProcessTool:
+        factory, now_fn = self.session_factory, self.now
+        send, front_desk = self.send, self.front_desk
+        assert send is not None and front_desk is not None  # gated by _can_fire
+
+        @tool("reply_to_watch", _REPLY_DESCRIPTION, _REPLY_SCHEMA)
+        async def reply_to_watch(args: dict[str, Any]) -> dict[str, Any]:
+            watch_id = int(args["watch_id"])
+            text = _opt(args, "text")
+            if not text:
+                return _text_result("What should I say? Give a reply.", is_error=True)
+            keep_watching = bool(args.get("keep_watching"))
+            async with factory() as session:
+                watch = await repo.get_watch(session, watch_id)
+                if watch is None:
+                    return _text_result(f"No watch #{watch_id}.", is_error=True)
+                if (
+                    repo.effective_state(watch, now=now_fn()) != repo.STATE_ARMED
+                    or not watch.target_handle
+                ):
+                    return _text_result(
+                        f"Watch #{watch_id} is not active — fired, expired, "
+                        "cancelled, or unbound.",
+                        is_error=True,
+                    )
+                handle, tone = watch.target_handle, watch.tone
+            # The active watch authorizes this at the send seam, which sends argv +
+            # records the own-send so its echo is consumed, never re-evaluated.
+            await send.send(handle, text)
+            if not keep_watching:
+                async with factory() as session:
+                    await repo.retire_watch(session, watch_id)
+            if tone == repo.TONE_REPORT:
+                await send.send(
+                    front_desk,
+                    f'✅ Replied to {handle} for watch #{watch_id}: "{text}"',
+                )
+            status = "still armed" if keep_watching else "retired"
+            return _text_result(f"Replied to {handle}; watch #{watch_id} {status}.")
+
+        return reply_to_watch
+
     def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the watch tools."""
-        return create_sdk_mcp_server(
-            self.server_name,
-            tools=[
-                self._build_create(),
-                self._build_list(),
-                self._build_cancel(),
-                self._build_list_candidates(),
-                self._build_confirm_candidate(),
-            ],
-        )
+        tools = [
+            self._build_create(),
+            self._build_list(),
+            self._build_cancel(),
+            self._build_list_candidates(),
+            self._build_confirm_candidate(),
+        ]
+        if self._can_fire:
+            tools.append(self._build_reply())
+        return create_sdk_mcp_server(self.server_name, tools=tools)

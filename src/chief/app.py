@@ -541,6 +541,7 @@ def build_engine(
     routing: RoutingStore | None = None,
     harness_versioner: Versioner | None = None,
     apple_services: Sequence[AppleService] = (),
+    imessage_front_desk: str | None = None,
 ) -> TaskManager:
     """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
     guest_admin = (
@@ -588,9 +589,21 @@ def build_engine(
         else None
     )
     # Watch CRUD tools (#165): meaningless without the iMessage adapter, so gated the
-    # same way as IMessageAdminService.
+    # same way as IMessageAdminService. The firing tool (reply_to_watch, #167) is
+    # added only for the iMessage owner session — its send/front_desk gate keys off
+    # the iMessage front desk, so a non-iMessage owner session never gets a fire tool
+    # that would send on the wrong platform.
     watches = (
-        WatchService(session_factory=session_factory, owner_tz=settings.owner_tz)
+        WatchService(
+            session_factory=session_factory,
+            owner_tz=settings.owner_tz,
+            send=(
+                io
+                if platform == "imessage" and imessage_front_desk is not None
+                else None
+            ),
+            front_desk=imessage_front_desk,
+        )
         if settings.imessage_configured
         else None
     )
@@ -941,12 +954,14 @@ def build_imessage_stack(
     self_handles = frozenset(
         normalize_handle(handle) for handle in settings.imessage_owner_handles
     )
+    front_desk = normalize_handle(settings.imessage_owner_handles[0])
     io = IMessageTaskIO(
         runner,
         outbox_dir=IMESSAGE_OUTBOX_DIR,
         self_dm=settings.imessage_self_dm,
         self_handles=self_handles,
         session_factory=session_factory,
+        front_desk=front_desk,
     )
     mirror = MirrorTaskIO(
         io,
@@ -962,7 +977,6 @@ def build_imessage_stack(
         timeout_seconds=settings.approval_timeout_seconds,
         registry=registry,
     )
-    front_desk = normalize_handle(settings.imessage_owner_handles[0])
     draft_io = DraftFirstIO(
         mirror,
         approvals=approvals,
@@ -982,6 +996,7 @@ def build_imessage_stack(
         routing=routing,
         harness_versioner=harness_versioner,
         apple_services=apple_services,
+        imessage_front_desk=front_desk,
     )
     adapter = IMessageAdapter(
         runner=runner,
