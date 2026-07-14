@@ -324,7 +324,10 @@ async def test_confirm_watch_candidate_expired_watch_errors(
 
 
 def _fire_setup(
-    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    fire_gate: WatchFireGate | None = None,
 ) -> tuple[WatchService, FixtureRunner]:
     """A WatchService wired with a real guarded IMessageTaskIO send seam."""
     runner = FixtureRunner()
@@ -342,6 +345,7 @@ def _fire_setup(
         now=lambda: datetime.now(UTC),
         send=io,
         front_desk=OWNER,
+        fire_gate=fire_gate,
     )
     return svc, runner
 
@@ -410,6 +414,32 @@ async def test_reply_to_watch_keep_watching_leaves_it_armed(
     async with session_factory() as session:
         watch = await repo.get_watch(session, watch_id)
     assert watch is not None and watch.state == repo.STATE_ARMED
+
+
+async def test_reply_to_watch_consumes_clearance_even_when_keep_watching(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#167 medium: a fire consumes the eval-turn clearance even for keep_watching, so
+    one (possibly hijacked) eval turn can't fire the same watch twice — the 'exactly
+    one send' AC. The standing watch re-authorizes on its next real inbound."""
+    fire_gate = WatchFireGate()
+    svc, runner = _fire_setup(session_factory, tmp_path, fire_gate=fire_gate)
+    watch_id = await _armed_watch(session_factory)
+    fire_gate.authorize(watch_id)
+
+    first = await svc._build_reply().handler(
+        {"watch_id": watch_id, "text": "on my way", "keep_watching": True}
+    )
+    assert first["is_error"] is False
+    assert not fire_gate.is_authorized(watch_id)  # clearance spent regardless
+
+    # The watch is still armed, but its clearance is gone: a second fire this turn is
+    # refused by the gate, so only one send reached MOM.
+    second = await svc._build_reply().handler(
+        {"watch_id": watch_id, "text": "again", "keep_watching": True}
+    )
+    assert second["is_error"] is True
+    assert not any(c[-2:] == (MOM, "again") for c in runner.jxa_calls)
 
 
 async def test_reply_to_watch_silent_tone_posts_no_self_thread_report(

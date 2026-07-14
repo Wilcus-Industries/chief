@@ -1031,6 +1031,53 @@ async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
     assert not fire_gate.is_authorized(watch.id + 1)  # a would-be minted id is not
 
 
+async def test_self_mode_next_inbound_drops_a_prior_unfired_watchs_clearance(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#167 medium: a watch whose eval turn ended without firing must not stay
+    fireable. The next real inbound's admit clears every stale clearance and
+    re-authorizes only its own watches, so a later (possibly hijacked) eval turn
+    can't fire the earlier watch."""
+    now = datetime.now(UTC)
+    fire_gate = WatchFireGate()
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, fire_gate=fire_gate
+    )
+    mom_h, mom_c = store.add_handle(MOM), store.add_chat(MOM)
+    stranger_h, stranger_c = store.add_handle(STRANGER), store.add_chat(STRANGER)
+    async with session_factory() as session:
+        mom_watch = await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="reply about dinner",
+            expiry=now + timedelta(days=1),
+        )
+        stranger_watch = await watches_repo.create_watch(
+            session,
+            target_handle=STRANGER,
+            instruction="reply about the delivery",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=mom_h, chat_rowid=mom_c, text="dinner?",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+    assert fire_gate.is_authorized(mom_watch.id)  # cleared to fire this turn
+
+    # Mom's eval concluded without firing (nothing consumed the clearance). A later
+    # inbound for a different watch must drop mom's stale clearance.
+    store.add_message(
+        handle_rowid=stranger_h, chat_rowid=stranger_c, text="delivery is here",
+        when=now + timedelta(minutes=2),
+    )
+    await adapter.poll_once()
+    assert not fire_gate.is_authorized(mom_watch.id)  # stale clearance dropped
+    assert fire_gate.is_authorized(stranger_watch.id)  # only this inbound's watch
+
+
 async def test_self_mode_pre_creation_row_is_inert(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

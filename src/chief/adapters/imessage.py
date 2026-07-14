@@ -825,6 +825,12 @@ class IMessageAdapter(Adapter):
             )
         if not matched:
             return False
+        # Drop any clearance a prior eval turn left behind (#167 medium): a watch whose
+        # eval concluded without firing, or a keep_watching watch, must not stay
+        # fireable into a later (possibly hijacked) turn. Only the watches THIS inbound
+        # dispatches may fire; a standing watch re-authorizes on its own next inbound.
+        if self._fire_gate is not None:
+            self._fire_gate.clear()
         for watch in matched:
             logger.info(
                 "watch eval dispatched",

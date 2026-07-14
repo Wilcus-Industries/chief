@@ -201,11 +201,15 @@ class WatchFireGate:
     minted watch and exfiltrate owner-authored text to an arbitrary handle.
 
     The adapter :meth:`~chief.adapters.imessage.IMessageAdapter._admit_watched`
-    :meth:`authorize`\\ s a fire ONLY for the watch(es) a real incoming message
-    dispatched an eval for — those already passed the created-before-arrival
-    admission gate. :func:`reply_to_watch` refuses any other ``watch_id``. A watch
-    minted inside the eval turn was never dispatched, so it can never fire. The
-    record is in-process and fails closed across a restart (a standing watch simply
+    :meth:`clear`\\ s every prior clearance and then :meth:`authorize`\\ s a fire ONLY
+    for the watch(es) *this* incoming message dispatched an eval for — those already
+    passed the created-before-arrival admission gate. :func:`reply_to_watch` refuses
+    any other ``watch_id`` and :meth:`consume`\\ s a watch's clearance on *every* fire
+    (even ``keep_watching``), so a clearance is single-use: one eval turn, one send. A
+    watch minted inside the eval turn was never dispatched, so it can never fire; a
+    watch whose eval turn ended without firing loses its stale clearance at the next
+    inbound's :meth:`clear`, so a later (possibly hijacked) eval turn can't fire it.
+    The record is in-process and fails closed across a restart (a standing watch simply
     re-authorizes on its next inbound).
     """
 
@@ -219,8 +223,16 @@ class WatchFireGate:
         return watch_id in self._authorized
 
     def consume(self, watch_id: int) -> None:
-        """Drop a single-fire watch's clearance once it has fired and retired."""
+        """Drop a watch's clearance once it has fired — every fire is single-use."""
         self._authorized.discard(watch_id)
+
+    def clear(self) -> None:
+        """Drop every clearance — a new inbound re-authorizes only its own watches.
+
+        Called by the adapter as each real inbound is admitted, so a clearance left by
+        a prior eval turn that concluded without firing can't leak into a later turn.
+        """
+        self._authorized.clear()
 
 
 def _utcnow() -> datetime:
@@ -502,11 +514,15 @@ class WatchService:
                     f"#{watch_id} stays armed.",
                     is_error=True,
                 )
+            # Consume the eval-turn clearance on EVERY fire, even keep_watching (#167
+            # medium): a clearance is single-use, so one hijacked eval turn can't fire
+            # the same watch twice (the 'exactly one send' AC). A standing watch simply
+            # re-authorizes on its next real inbound.
+            if fire_gate is not None:
+                fire_gate.consume(watch_id)
             if not keep_watching:
                 async with factory() as session:
                     await repo.retire_watch(session, watch_id)
-                if fire_gate is not None:
-                    fire_gate.consume(watch_id)
             if tone == repo.TONE_REPORT:
                 await send.send(
                     front_desk,
