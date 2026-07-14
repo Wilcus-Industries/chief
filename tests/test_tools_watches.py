@@ -550,6 +550,16 @@ class _RefusingSend:
         self.calls.append((thread_key, text))
         raise GhostSendRefused(thread_key)
 
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None:
+        self.calls.append((thread_key, filename))
+        raise GhostSendRefused(thread_key)
+
 
 async def test_reply_to_watch_refused_send_leaves_watch_armed_and_reports_no_success(
     session_factory: async_sessionmaker[AsyncSession],
@@ -577,3 +587,83 @@ async def test_reply_to_watch_refused_send_leaves_watch_armed_and_reports_no_suc
     async with session_factory() as session:
         watch = await repo.get_watch(session, watch_id)
     assert watch is not None and watch.state == repo.STATE_ARMED  # not retired
+
+
+# ---- reply_to_watch: file replies (#169) -------------------------------------------
+
+
+async def test_reply_to_watch_file_path_sends_and_retires(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+    form = tmp_path / "form.pdf"
+    form.write_bytes(b"%PDF-1.4\nfilled form\n")
+
+    out = await svc._build_reply().handler(
+        {
+            "watch_id": watch_id,
+            "file_path": str(form),
+            "text": "here's the filled form",
+        }
+    )
+
+    assert out["is_error"] is False
+    outbox_file = tmp_path / "outbox" / "form.pdf"
+    file_calls = [
+        c for c in runner.jxa_calls if c[-2:] == (MOM, str(outbox_file.resolve()))
+    ]
+    assert len(file_calls) == 1
+    caption_calls = [
+        c for c in runner.jxa_calls if c[-2:] == (MOM, "here's the filled form")
+    ]
+    assert len(caption_calls) == 1
+    report = [c for c in runner.jxa_calls if c[-2] == OWNER]
+    assert len(report) == 1 and "file form.pdf" in report[0][-1]
+    async with session_factory() as session:
+        watch = await repo.get_watch(session, watch_id)
+    assert watch is not None and watch.state == repo.STATE_FIRED
+
+
+async def test_reply_to_watch_file_path_and_text_both_absent_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+
+    out = await svc._build_reply().handler({"watch_id": watch_id})
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
+
+
+async def test_reply_to_watch_file_path_over_cap_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    from chief.tools.watches import _MAX_REPLY_FILE_BYTES
+
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+    big = tmp_path / "big.pdf"
+    big.write_bytes(b"x" * (_MAX_REPLY_FILE_BYTES + 1))
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "file_path": str(big)}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
+
+
+async def test_reply_to_watch_unreadable_file_path_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "file_path": str(tmp_path / "missing.pdf")}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []

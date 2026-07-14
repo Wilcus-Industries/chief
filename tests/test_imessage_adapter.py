@@ -30,7 +30,7 @@ from chief.persistence.models import (
     UnknownSender,
     WatchCandidate,
 )
-from chief.tools.watches import GhostSendRefused, WatchFireGate
+from chief.tools.watches import GhostSendRefused, WatchFireGate, WatchService
 from imessage_helpers import (
     FAKE_JPEG_BYTES,
     STYLE_GROUP,
@@ -42,6 +42,7 @@ from imessage_helpers import (
 OWNER = "+15550000001"
 MOM = "+15550000002"
 STRANGER = "+15550000003"
+DOCTOR = "+15550000004"
 
 
 def _self_io(
@@ -998,6 +999,132 @@ async def test_self_mode_watched_handle_dispatches_evaluation_to_self_thread(
     assert unknown == []  # admitted, so no inert metadata line
 
 
+async def test_self_mode_watched_handle_image_attachment_dispatches_with_payload(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: a watched (non-self) handle's PDF/image is admitted through the same
+    M8 cap/skip pipeline as the owner path and carried into the dispatch."""
+    now = datetime.now(UTC)
+    adapter, store, _, engine = make_adapter(tmp_path, session_factory, self_dm=True)
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="if she sends a photo, note it",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    image_path = tmp_path / "watched.jpg"
+    jpeg_bytes = b"\xff\xd8\xff\xe0WATCHEDJPEG"
+    image_path.write_bytes(jpeg_bytes)
+    msg = store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="look at this",
+        when=now + timedelta(minutes=1),
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="watched.jpg",
+        total_bytes=len(jpeg_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert len(engine.dispatched) == 1
+    assert "look at this" in engine.dispatched[0][1]
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "image/jpeg"
+    assert att.data == jpeg_bytes
+
+
+async def test_self_mode_watched_handle_textless_pdf_attachment_dispatches(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: a textless PDF from a watched handle still admits and dispatches."""
+    now = datetime.now(UTC)
+    adapter, store, _, engine = make_adapter(tmp_path, session_factory, self_dm=True)
+    handle = store.add_handle(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="if she sends a form, tell me",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    pdf_bytes = b"%PDF-1.4\n%watched pdf\n"
+    pdf_path = tmp_path / "watched.pdf"
+    pdf_path.write_bytes(pdf_bytes)
+    # A textless received row has no chat_message_join (chat_id NULL), same shape
+    # as the self-chat's textless copy.
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=None, text=None, when=now + timedelta(minutes=1)
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(pdf_path),
+        mime_type="application/pdf",
+        transfer_name="watched.pdf",
+        total_bytes=len(pdf_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert len(engine.dispatched) == 1
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "application/pdf"
+    assert att.data == pdf_bytes
+
+
+async def test_self_mode_watched_handle_oversized_attachment_dropped_dispatch_continues(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: an over-cap attachment is dropped but the watched dispatch still fires
+    (text-only), matching the owner path's over-cap behavior."""
+    now = datetime.now(UTC)
+    adapter, store, _, engine = make_adapter(tmp_path, session_factory, self_dm=True)
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="watch for updates",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    image_path = tmp_path / "huge.jpg"
+    image_path.write_bytes(b"\xff\xd8\xff\xe0TOO BIG")
+    msg = store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="here's a big file",
+        when=now + timedelta(minutes=1),
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="huge.jpg",
+        total_bytes=MAX_ATTACHMENT_BYTES + 1,
+    )
+
+    await adapter.poll_once()
+
+    assert len(engine.dispatched) == 1
+    assert engine.dispatched_attachments == [()]
+
+
 async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
@@ -1252,6 +1379,163 @@ async def test_self_mode_group_row_never_admitted_despite_watch(
             session, platform=PLATFORM
         )
     assert unknown == []  # group rows are skipped wholesale, not even logged
+
+
+# ---- doctor-form round trip: PDF in, filled file back out (#169) ------------------
+
+
+def _doctor_form_rig(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> tuple[IMessageAdapter, ChatDb, FixtureRunner, FakeEngine, WatchFireGate]:
+    runner = FixtureRunner()
+    fire_gate = WatchFireGate()
+    io = IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        self_dm=True,
+        self_handles=frozenset({imessage_repo.normalize_handle(OWNER)}),
+        session_factory=session_factory,
+        front_desk=OWNER,
+    )
+    adapter, store, runner, engine = make_adapter(
+        tmp_path,
+        session_factory,
+        self_dm=True,
+        runner=runner,
+        io=io,
+        fire_gate=fire_gate,
+    )
+    return adapter, store, runner, engine, fire_gate
+
+
+async def test_doctor_form_round_trip_report_tone(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine, fire_gate = _doctor_form_rig(
+        session_factory, tmp_path
+    )
+    handle = store.add_handle(DOCTOR)
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=DOCTOR,
+            instruction="if the doctor sends an intake form, fill it out and "
+            "send it back",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    intake_bytes = b"%PDF-1.4\n%intake form\n"
+    intake_path = tmp_path / "intake.pdf"
+    intake_path.write_bytes(intake_bytes)
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=None, text=None, when=now + timedelta(minutes=1)
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(intake_path),
+        mime_type="application/pdf",
+        transfer_name="intake.pdf",
+        total_bytes=len(intake_bytes),
+    )
+    await adapter.poll_once()
+
+    assert len(engine.dispatched) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "application/pdf"
+    assert att.data == intake_bytes
+
+    svc = WatchService(
+        session_factory=session_factory,
+        owner_tz="UTC",
+        now=lambda: datetime.now(UTC),
+        send=adapter._io,
+        front_desk=OWNER,
+        fire_gate=fire_gate,
+    )
+    filled = tmp_path / "intake_filled.pdf"
+    filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
+
+    out = await svc._build_reply().handler(
+        {
+            "watch_id": watch.id,
+            "file_path": str(filled),
+            "text": "Filled and sent back.",
+        }
+    )
+
+    assert out["is_error"] is False
+    outbox_file = tmp_path / "outbox" / "intake_filled.pdf"
+    file_calls = [
+        c for c in runner.jxa_calls if c[-2:] == (DOCTOR, str(outbox_file.resolve()))
+    ]
+    assert len(file_calls) == 1
+    report = [c for c in runner.jxa_calls if c[-2] == OWNER]
+    assert len(report) == 1 and "✅ Replied to" in report[0][-1]
+    async with session_factory() as session:
+        fired = await watches_repo.get_watch(session, watch.id)
+    assert fired is not None and fired.state == watches_repo.STATE_FIRED
+
+
+async def test_doctor_form_round_trip_silent_tone(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine, fire_gate = _doctor_form_rig(
+        session_factory, tmp_path
+    )
+    handle = store.add_handle(DOCTOR)
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=DOCTOR,
+            instruction="if the doctor sends an intake form, fill it out and "
+            "send it back",
+            expiry=now + timedelta(days=1),
+            tone=watches_repo.TONE_SILENT,
+        )
+    await adapter.prime()
+
+    intake_bytes = b"%PDF-1.4\n%intake form\n"
+    intake_path = tmp_path / "intake2.pdf"
+    intake_path.write_bytes(intake_bytes)
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=None, text=None, when=now + timedelta(minutes=1)
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(intake_path),
+        mime_type="application/pdf",
+        transfer_name="intake2.pdf",
+        total_bytes=len(intake_bytes),
+    )
+    await adapter.poll_once()
+    assert len(engine.dispatched) == 1
+
+    svc = WatchService(
+        session_factory=session_factory,
+        owner_tz="UTC",
+        now=lambda: datetime.now(UTC),
+        send=adapter._io,
+        front_desk=OWNER,
+        fire_gate=fire_gate,
+    )
+    filled = tmp_path / "intake2_filled.pdf"
+    filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
+
+    out = await svc._build_reply().handler(
+        {
+            "watch_id": watch.id,
+            "file_path": str(filled),
+            "text": "Filled and sent back.",
+        }
+    )
+
+    assert out["is_error"] is False
+    # Both the file send and its caption reach the doctor; no report to OWNER.
+    assert all(c[-2] == DOCTOR for c in runner.jxa_calls)
+    assert runner.jxa_calls
 
 
 # ---- expiry sweep + timestamp-pure admission (#170) -------------------------------
@@ -1607,3 +1891,81 @@ async def test_own_ghost_send_echo_is_consumed_not_re_evaluated(
             session, platform=PLATFORM
         )
     assert unknown == []  # not recorded as an unknown sender either
+
+
+async def test_authorized_file_send_reaches_the_watched_handle(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: an active watch also authorizes a self-DM FILE send to the watched
+    handle, exactly like the existing text ghost-send guard."""
+    runner = FixtureRunner()
+    io = _guarded_io(runner, session_factory, tmp_path)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="reply when she asks",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    await io.send_file(MOM, "form.pdf", b"filled form bytes")
+
+    outbox_file = tmp_path / "outbox" / "form.pdf"
+    file_calls = [
+        c for c in runner.jxa_calls if c[-2:] == (MOM, str(outbox_file.resolve()))
+    ]
+    assert len(file_calls) == 1
+    async with session_factory() as session:
+        rows = list((await session.execute(select(IMessageSend))).scalars())
+    assert (MOM, "form.pdf") in [(r.handle, r.body) for r in rows]
+
+
+async def test_file_send_to_watched_handle_refused_without_watch(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: with no authorizing watch, a self-DM FILE send to a non-self handle is
+    refused (nothing reaches that handle), mirroring the text refusal test."""
+    runner = FixtureRunner()
+    io = _guarded_io(runner, session_factory, tmp_path)
+
+    with pytest.raises(GhostSendRefused):
+        await io.send_file(STRANGER, "form.pdf", b"x")
+
+    assert not any(c[-2] == STRANGER for c in runner.jxa_calls)
+    blocked = [c for c in runner.jxa_calls if c[-2] == OWNER]
+    assert len(blocked) == 1 and "🚫 Blocked a text to" in blocked[0][-1]
+
+
+async def test_own_ghost_send_file_echo_is_consumed_not_re_evaluated(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169: a re-polled echo of chief's own ghost-sent FILE is consumed by
+    take_send (matched on transfer_name) and never re-dispatched, mirroring the
+    text-echo guard."""
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+        await imessage_repo.record_send(session, MOM, "form.pdf")
+    await adapter.prime()
+
+    # The echo of the ghost-sent file re-enters the store as a textless inbound row
+    # from MOM carrying an attachment whose transfer_name matches the recorded send.
+    msg = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(tmp_path / "form.pdf"),
+        mime_type="application/pdf",
+        transfer_name="form.pdf",
+        total_bytes=3,
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []  # echo consumed, no re-evaluation

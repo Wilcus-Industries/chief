@@ -32,9 +32,11 @@ whenever the iMessage adapter is configured. Five CRUD tools, plus a sixth
   watch, indistinguishable from a directly-created one); "no" rejects it and
   the sender stays inert.
 
-- ``reply_to_watch`` (#167) — fire a watch: send a reply to its stored contact AS
-  THE OWNER through the guarded iMessage send seam and retire the watch (single-fire;
-  ``keep_watching=true`` keeps a standing instruction armed). The model can only
+- ``reply_to_watch`` (#167, file replies #169) — fire a watch: send a reply to its
+  stored contact AS THE OWNER through the guarded iMessage send seam and retire the
+  watch (single-fire; ``keep_watching=true`` keeps a standing instruction armed).
+  The reply can be text, a file (``file_path``, e.g. a filled-out form chief just
+  wrote), or both (the file with the text as its caption). The model can only
   target a watch's own ``target_handle``, never a free-form handle. Because this tool
   runs in the owner session — the same one that hosts the untrusted watched-message
   eval turn — a prompt-injected turn could otherwise mint its own watch and fire it;
@@ -55,6 +57,7 @@ card, the same posture as
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -143,16 +146,23 @@ _CONFIRM_CANDIDATE_SCHEMA: dict[str, Any] = {
     "required": ["candidate_id", "decision"],
 }
 
+#: Cap on a reply_to_watch file send (#169) — mirrors the M8 inbound attachment
+#: cap (chief.adapters.base.MAX_ATTACHMENT_BYTES) for the outbound side; kept
+#: local (not imported) so tools/ never imports from adapters/.
+_MAX_REPLY_FILE_BYTES = 20 * 1024 * 1024
+
 _REPLY_DESCRIPTION = (
     "Fire a watch: reply to the watched contact AS THE OWNER and close the watch "
     "(#167). Use this ONLY from a watch evaluation turn, when the watched person's "
     "message is relevant to the standing instruction. `watch_id` is that watch; "
-    "`text` is the reply — it is sent to the watch's own stored contact and can "
-    "NEVER target any other handle. By default the watch is single-fire and "
-    "retires after this reply; pass `keep_watching=true` only for a standing/"
-    "ongoing instruction that should keep firing on future messages. A 'report'-"
-    "tone watch also posts a confirmation to your self-thread; a 'silent'-tone "
-    "watch sends only to the contact and stays quiet."
+    "the reply is sent to the watch's own stored contact and can NEVER target any "
+    "other handle. Give `text`, `file_path` (an absolute path to a file chief "
+    "already wrote, e.g. a filled-out form — #169), or both: with both, `text` is "
+    "sent as the file's caption. At least one is required. By default the watch is "
+    "single-fire and retires after this reply; pass `keep_watching=true` only for "
+    "a standing/ongoing instruction that should keep firing on future messages. A "
+    "'report'-tone watch also posts a confirmation to your self-thread; a "
+    "'silent'-tone watch sends only to the contact and stays quiet."
 )
 _REPLY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -160,7 +170,17 @@ _REPLY_SCHEMA: dict[str, Any] = {
         "watch_id": {"type": "integer"},
         "text": {
             "type": "string",
-            "description": "The reply sent to the watched contact as the owner.",
+            "description": (
+                "The reply sent to the watched contact as the owner. When "
+                "file_path is also given, this becomes the file's caption."
+            ),
+        },
+        "file_path": {
+            "type": "string",
+            "description": (
+                "Absolute path to a file chief already wrote to send into the "
+                "watched thread (e.g. a filled-out form, #169)."
+            ),
         },
         "keep_watching": {
             "type": "boolean",
@@ -170,14 +190,21 @@ _REPLY_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["watch_id", "text"],
+    "required": ["watch_id"],
 }
 
 
 class WatchSend(Protocol):
-    """The send slice of the iMessage IO the fire tool drives (#167)."""
+    """The send slice of the iMessage IO the fire tool drives (#167/#169)."""
 
     async def send(self, thread_key: str, text: str) -> None: ...
+    async def send_file(
+        self,
+        thread_key: str,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+    ) -> None: ...
 
 
 class GhostSendRefused(RuntimeError):
@@ -476,8 +503,28 @@ class WatchService:
         async def reply_to_watch(args: dict[str, Any]) -> dict[str, Any]:
             watch_id = int(args["watch_id"])
             text = _opt(args, "text")
-            if not text:
-                return _text_result("What should I say? Give a reply.", is_error=True)
+            file_path = _opt(args, "file_path")
+            if not text and not file_path:
+                return _text_result(
+                    "Give a reply (text) or a file to send (file_path).",
+                    is_error=True,
+                )
+            data: bytes | None = None
+            filename: str | None = None
+            if file_path is not None:
+                try:
+                    data = Path(file_path).read_bytes()
+                except OSError:
+                    return _text_result(
+                        f"Couldn't read {file_path}.", is_error=True
+                    )
+                if len(data) > _MAX_REPLY_FILE_BYTES:
+                    cap_mb = _MAX_REPLY_FILE_BYTES // (1024 * 1024)
+                    return _text_result(
+                        f"{file_path} is over the {cap_mb}MB reply file cap.",
+                        is_error=True,
+                    )
+                filename = Path(file_path).name
             keep_watching = bool(args.get("keep_watching"))
             async with factory() as session:
                 watch = await repo.get_watch(session, watch_id)
@@ -507,7 +554,11 @@ class WatchService:
             # refusal there RAISES (never a silent drop) so we don't retire the watch
             # or post a false "✅ Replied".
             try:
-                await send.send(handle, text)
+                if filename is not None and data is not None:
+                    await send.send_file(handle, filename, data, caption=text)
+                else:
+                    assert text is not None  # guaranteed by the compound guard above
+                    await send.send(handle, text)
             except GhostSendRefused:
                 return _text_result(
                     f"Couldn't reach {handle} — the send was refused; watch "
@@ -523,10 +574,11 @@ class WatchService:
             if not keep_watching:
                 async with factory() as session:
                     await repo.retire_watch(session, watch_id)
+            sent_desc = f"file {filename}" if filename is not None else f'"{text}"'
             if tone == repo.TONE_REPORT:
                 await send.send(
                     front_desk,
-                    f'✅ Replied to {handle} for watch #{watch_id}: "{text}"',
+                    f"✅ Replied to {handle} for watch #{watch_id}: {sent_desc}",
                 )
             status = "still armed" if keep_watching else "retired"
             return _text_result(f"Replied to {handle}; watch #{watch_id} {status}.")
