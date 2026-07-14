@@ -210,6 +210,8 @@ class Turn:
 
     text: str
     attachments: tuple[Attachment, ...] = ()
+    # The watch this turn is a fire-cleared eval for (#178); None for every other turn.
+    watch_fire_id: int | None = None
 
 
 class TaskIO(Protocol):
@@ -560,6 +562,7 @@ class TaskManager:
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
         surface: Surface = Surface.DM,
+        watch_fire_id: int | None = None,
     ) -> None:
         """Route an owner message (+ media) into its task, spawning a topic when due.
 
@@ -568,6 +571,9 @@ class TaskManager:
         carry a PDF content block (claude-agent-sdk sent a ``document`` block; the
         Copilot session dropped it). Images pass through untouched. Extraction runs off
         the event loop (``to_thread``) so a big PDF can't block other tasks' turns.
+
+        ``watch_fire_id`` scopes a watch-eval fire clearance to this one turn: it rides
+        the queued :class:`Turn` and is consumed at turn end (#178).
         """
         text, attachments = await asyncio.to_thread(
             extract_pdf_attachments, text, attachments
@@ -594,7 +600,9 @@ class TaskManager:
         task = await self._ensure_task(
             thread_key, is_casual=is_casual, classify_text=text
         )
-        await self._submit(task, Turn(text=text, attachments=attachments))
+        await self._submit(
+            task, Turn(text=text, attachments=attachments, watch_fire_id=watch_fire_id)
+        )
 
     async def dispatch_guest(
         self,
@@ -1826,82 +1834,98 @@ class TaskManager:
         return task.tier == "owner"
 
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
-        if not await self._budget_admits():
-            return  # paused at budget — skip without spending (owner already nudged)
-        await self._maybe_auto_escalate(task, turn.text)
-        task.transcript.append(("owner", turn.text))
         try:
-            async with self._semaphore:
-                task.generating = True
-                await self._set_status(task, RUNNING)
-                # Owner turns (home, DM, group) stream each text block immediately as
-                # it arrives (per-block streaming, issues #64/#67).  Guest turns
-                # accumulate all blocks into a single joined message (unchanged).
-                per_block = self._streams_per_block(task)
-                block_parts: list[str] = []
-                per_block_sent = 0  # non-empty blocks delivered in per-block mode
-                # Watchdog: a turn whose stream never reaches a terminal result (wedged
-                # SDK / hung tool call) must not pin the semaphore and generating=True
-                # forever. The timeout cancels the loop; exiting the semaphore block
-                # frees the slot, and the TimeoutError handler tears the session down.
-                async with asyncio.timeout(self._turn_timeout):
-                    async for event in task.session.run_turn(
-                        turn.text, turn.attachments
-                    ):
-                        if task.cancelled:
-                            break  # interrupted — stop streaming its milestones
-                        if isinstance(event, Final):
-                            if per_block:
-                                # Guard against empty/whitespace-only blocks that the
-                                # SDK emits as separators around tool calls (#69).
-                                # Both Telegram and Discord reject empty content.
-                                stripped = event.text.strip()
-                                if stripped:
-                                    await self._emit_final(task, stripped)
-                                    per_block_sent += 1
+            if not await self._budget_admits():
+                # paused at budget — skip without spending (owner already nudged)
+                return
+            await self._maybe_auto_escalate(task, turn.text)
+            task.transcript.append(("owner", turn.text))
+            try:
+                async with self._semaphore:
+                    task.generating = True
+                    await self._set_status(task, RUNNING)
+                    # Owner turns (home, DM, group) stream each text block immediately
+                    # as it arrives (per-block streaming, issues #64/#67).  Guest turns
+                    # accumulate all blocks into a single joined message (unchanged).
+                    per_block = self._streams_per_block(task)
+                    block_parts: list[str] = []
+                    per_block_sent = 0  # non-empty blocks delivered in per-block mode
+                    # Watchdog: a turn whose stream never reaches a terminal result
+                    # (wedged SDK / hung tool call) must not pin the semaphore and
+                    # generating=True forever. The timeout cancels the loop; exiting the
+                    # semaphore block frees the slot, and the TimeoutError handler tears
+                    # the session down.
+                    async with asyncio.timeout(self._turn_timeout):
+                        async for event in task.session.run_turn(
+                            turn.text, turn.attachments
+                        ):
+                            if task.cancelled:
+                                break  # interrupted — stop streaming its milestones
+                            if isinstance(event, Final):
+                                if per_block:
+                                    # Guard against empty/whitespace-only blocks the
+                                    # SDK emits as separators around tool calls (#69).
+                                    # Both Telegram and Discord reject empty content.
+                                    stripped = event.text.strip()
+                                    if stripped:
+                                        await self._emit_final(task, stripped)
+                                        per_block_sent += 1
+                                else:
+                                    block_parts.append(event.text)
+                            elif isinstance(event, LiveEvent):
+                                await self._emit_live(task, event)
                             else:
-                                block_parts.append(event.text)
-                        elif isinstance(event, LiveEvent):
-                            await self._emit_live(task, event)
-                        else:
-                            await self._io.send(task.thread_key, f"· {event.text}")
-                if task.cancelled:
-                    return
-                if per_block:
-                    # Empty per-block turn on GROUP: post NO_REPLY so the owner gets an
-                    # acknowledgement in the shared room. Home/DM stay silent.
-                    if per_block_sent == 0 and task.surface is Surface.GROUP:
-                        await self._emit_final(task, NO_REPLY)
-                else:
-                    # Accumulated path (guest): join and emit as one message,
-                    # reproducing the original single-Final behaviour.
-                    joined = "".join(block_parts).strip() or NO_REPLY
-                    await self._emit_final(task, joined)
-                if task.session.session_id:
-                    await self._set_session_id(task, task.session.session_id)
-                await self._record_spend(task)
-                await self._set_status(task, OPEN)
-                # Commit memory dir after the turn's writes settle (#22/#29). The
-                # versioner self-serializes concurrent callers; it also skips empty
-                # commits, so no-op turns cost one git status check (< 1 ms).
-                await self._versioner.commit("chief: memory auto-save")
-                # Commit the harness dir too (#110): a separate root + lock from the
-                # memory versioner above, so a subagent/skill write this turn made
-                # lands as its own revertible commit. Also skips empty commits.
-                await self._harness_versioner.commit("chief: harness auto-save")
-                # Only a clean turn re-arms the idle→archive timer.
-                self._arm_idle(task)
-        except TimeoutError:
-            logger.warning("task turn timed out", extra={"thread_key": task.thread_key})
-            await self._set_status(task, FAILED)
-            await self._io.send(task.thread_key, TURN_TIMEOUT_NOTE)
-            await self._reset_session(task)
-        except Exception:
-            logger.exception("task turn failed", extra={"thread_key": task.thread_key})
-            await self._set_status(task, FAILED)
-            await self._io.send(task.thread_key, "⚠️ that task hit an error.")
+                                await self._io.send(task.thread_key, f"· {event.text}")
+                    if task.cancelled:
+                        return
+                    if per_block:
+                        # Empty per-block turn on GROUP: post NO_REPLY so the owner gets
+                        # an acknowledgement in the shared room. Home/DM stay silent.
+                        if per_block_sent == 0 and task.surface is Surface.GROUP:
+                            await self._emit_final(task, NO_REPLY)
+                    else:
+                        # Accumulated path (guest): join and emit as one message,
+                        # reproducing the original single-Final behaviour.
+                        joined = "".join(block_parts).strip() or NO_REPLY
+                        await self._emit_final(task, joined)
+                    if task.session.session_id:
+                        await self._set_session_id(task, task.session.session_id)
+                    await self._record_spend(task)
+                    await self._set_status(task, OPEN)
+                    # Commit memory dir after the turn's writes settle (#22/#29). The
+                    # versioner self-serializes concurrent callers; it also skips empty
+                    # commits, so no-op turns cost one git status check (< 1 ms).
+                    await self._versioner.commit("chief: memory auto-save")
+                    # Commit the harness dir too (#110): a separate root + lock from the
+                    # memory versioner above, so a subagent/skill write this turn made
+                    # lands as its own revertible commit. Also skips empty commits.
+                    await self._harness_versioner.commit("chief: harness auto-save")
+                    # Only a clean turn re-arms the idle→archive timer.
+                    self._arm_idle(task)
+            except TimeoutError:
+                logger.warning(
+                    "task turn timed out", extra={"thread_key": task.thread_key}
+                )
+                await self._set_status(task, FAILED)
+                await self._io.send(task.thread_key, TURN_TIMEOUT_NOTE)
+                await self._reset_session(task)
+            except Exception:
+                logger.exception(
+                    "task turn failed", extra={"thread_key": task.thread_key}
+                )
+                await self._set_status(task, FAILED)
+                await self._io.send(task.thread_key, "⚠️ that task hit an error.")
+            finally:
+                task.generating = False
         finally:
-            task.generating = False
+            # #178: a watch eval's fire clearance is scoped to exactly this turn —
+            # consume it on every exit path (fired or not, budget-skipped, errored),
+            # so a stale clearance can't be hijacked by later unwatched traffic in
+            # this same owner session.
+            if turn.watch_fire_id is not None and self._watches_service is not None:
+                gate = self._watches_service.fire_gate
+                if gate is not None:
+                    gate.consume(turn.watch_fire_id)
 
     async def _reset_session(self, task: _RunningTask) -> None:
         """Best-effort teardown of a wedged session so the next turn reconnects fresh.

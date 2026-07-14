@@ -284,6 +284,7 @@ class FakeEngine:
     def __init__(self) -> None:
         self.dispatched: list[tuple[str, str]] = []
         self.dispatched_attachments: list[tuple[Attachment, ...]] = []
+        self.dispatched_watch_fire_ids: list[int | None] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
 
@@ -295,9 +296,11 @@ class FakeEngine:
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
         surface: Surface = Surface.DM,
+        watch_fire_id: int | None = None,
     ) -> None:
         self.dispatched.append((thread_key, text))
         self.dispatched_attachments.append(attachments)
+        self.dispatched_watch_fire_ids.append(watch_fire_id)
 
     async def dispatch_guest(
         self,

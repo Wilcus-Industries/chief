@@ -66,6 +66,7 @@ class FakeEngine:
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
         surface: Any = None,
+        watch_fire_id: int | None = None,
     ) -> None:
         self.dispatched.append((thread_key, text, is_general))
         self.dispatched_attachments.append(attachments)

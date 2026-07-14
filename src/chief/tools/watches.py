@@ -237,12 +237,18 @@ class WatchFireGate:
     for the watch(es) *this* incoming message dispatched an eval for — those already
     passed the created-before-arrival admission gate. :func:`reply_to_watch` refuses
     any other ``watch_id`` and :meth:`consume`\\ s a watch's clearance on *every* fire
-    (even ``keep_watching``), so a clearance is single-use: one eval turn, one send. A
-    watch minted inside the eval turn was never dispatched, so it can never fire; a
-    watch whose eval turn ended without firing loses its stale clearance at the next
-    inbound's :meth:`clear`, so a later (possibly hijacked) eval turn can't fire it.
-    The record is in-process and fails closed across a restart (a standing watch simply
-    re-authorizes on its next inbound).
+    (even ``keep_watching``), so a clearance is single-use: one eval turn, one send.
+
+    A clearance is scoped to its eval turn (#178): the dispatched
+    :class:`~chief.core.tasks.Turn` carries the watch id, and
+    :meth:`~chief.core.tasks.TaskManager._run_turn` :meth:`consume`\\ s it at turn end
+    on every exit path (fired or not, budget-skipped, errored). So a watch whose eval
+    turn ended without firing carries no live clearance into later unwatched traffic in
+    the same owner session — the residual window #178 closes. The adapter's
+    :meth:`clear` on the next inbound stays as a backstop. A watch minted inside the
+    eval turn was never dispatched, so it can never fire. The record is in-process and
+    fails closed across a restart (a standing watch simply re-authorizes on its next
+    inbound).
     """
 
     def __init__(self) -> None:
@@ -255,14 +261,21 @@ class WatchFireGate:
         return watch_id in self._authorized
 
     def consume(self, watch_id: int) -> None:
-        """Drop a watch's clearance once it has fired — every fire is single-use."""
+        """Drop a watch's clearance — single-use per eval turn.
+
+        Called on every fire (so a clearance is single-use: one eval turn, one send)
+        and, as of #178, by :meth:`~chief.core.tasks.TaskManager._run_turn` at the end
+        of the eval turn regardless of outcome, so an unfired clearance can't outlive
+        its turn.
+        """
         self._authorized.discard(watch_id)
 
     def clear(self) -> None:
         """Drop every clearance — a new inbound re-authorizes only its own watches.
 
-        Called by the adapter as each real inbound is admitted, so a clearance left by
-        a prior eval turn that concluded without firing can't leak into a later turn.
+        A backstop since #178 scoped each clearance to its eval turn (consumed at turn
+        end). Called by the adapter as each real inbound is admitted, so any clearance a
+        prior eval turn somehow left behind can't leak into a later turn.
         """
         self._authorized.clear()
 
