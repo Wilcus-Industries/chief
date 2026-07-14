@@ -26,6 +26,16 @@ Built on a **dedicated Apple ID** — the Messages account signed in on chief's 
 
 iMessage renders no buttons, so cards sent here are text renderings; the mirror's
 socket broadcast is what makes them answerable (web UI / terminal, #136).
+
+**Self-DM mode** (#161, opt-in via ``imessage_self_dm``) relaxes the dedicated-ID
+assumption for a personal Apple ID: the owner texts chief inside the *self-chat*
+(a message to their own number), whose received copy already routes owner-tier. To
+keep chief distinct from the owner in that shared thread — and to break the reply
+loop it creates (chief's own reply re-enters the store as another inbound row) —
+every reply to a self-handle is prefixed :data:`BOT_PREFIX` and passed through a
+two-layer echo filter: a durable send-record (``imessage_sends``, matched and
+consumed when the echo re-polls) plus a stateless prefix skip. With the flag off,
+none of this engages and the dedicated-ID behavior above holds byte-for-byte.
 """
 
 import asyncio
@@ -71,6 +81,11 @@ PLATFORM = repo.PLATFORM
 #: bubbles read terribly on a phone; longer replies split (and very long ones ship
 #: as a file note — see ``send_file``).
 IMESSAGE_LIMIT = 4000
+
+#: Prefix on every self-DM reply (#161): the owner-visible "this is chief, not you"
+#: marker inside the shared self-chat, and the stateless half of the echo filter —
+#: an inbound row bearing it is chief's own echo and is never dispatched.
+BOT_PREFIX = "🤖 "
 
 #: Rows pulled per poll tick — bounds one tick's work; the cursor picks up the rest.
 POLL_BATCH_LIMIT = 200
@@ -194,13 +209,33 @@ class IMessageTaskIO:
     """
 
     def __init__(
-        self, runner: ScriptRunner, *, outbox_dir: str = "data/imessage_outbox"
+        self,
+        runner: ScriptRunner,
+        *,
+        outbox_dir: str = "data/imessage_outbox",
+        self_dm: bool = False,
+        self_handles: frozenset[str] = frozenset(),
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
         self._runner = runner
         #: Where outbound file attachments are written so Messages can pick them
         #: up (the JXA send takes a path; Messages reads it asynchronously, so the
         #: file must outlive the call).
         self._outbox_dir = Path(outbox_dir)
+        #: Self-DM echo-filter state (#161): when on, every send to a self-handle is
+        #: prefixed and recorded so its store echo can be consumed at re-poll.
+        self._self_dm = self_dm
+        self._self_handles = self_handles
+        self._session_factory = session_factory
+
+    def _is_self(self, handle: str) -> bool:
+        return self._self_dm and repo.normalize_handle(handle) in self._self_handles
+
+    async def _record(self, handle: str, body: str) -> None:
+        """Durably record an own send to a self-handle (loop-proof echo filter)."""
+        if self._is_self(handle) and self._session_factory is not None:
+            async with self._session_factory() as session:
+                await repo.record_send(session, handle, body)
 
     async def _send_raw(self, handle: str, text: str) -> None:
         result = await self._runner.run_jxa(SEND_TEXT_SCRIPT, [handle, text])
@@ -210,7 +245,11 @@ class IMessageTaskIO:
 
     async def send(self, thread_key: str, text: str) -> None:
         for chunk in _split(text, IMESSAGE_LIMIT):
-            await self._send_raw(thread_key, chunk)
+            # Every chunk (not just the first) is prefixed so each echoed chunk is
+            # caught by the stateless filter (#161); off, this is a no-op.
+            body = BOT_PREFIX + chunk if self._is_self(thread_key) else chunk
+            await self._send_raw(thread_key, body)
+            await self._record(thread_key, body)
 
     async def send_file(
         self,
@@ -231,6 +270,9 @@ class IMessageTaskIO:
             raise RuntimeError(
                 f"iMessage file send to {thread_key} failed: {detail}"
             )
+        # Record the file send at send time (its echo carries the filename); the
+        # caption then routes through send() and is prefixed + recorded there.
+        await self._record(thread_key, filename)
         if caption:
             await self.send(thread_key, caption)
 
@@ -387,6 +429,7 @@ class IMessageAdapter(Adapter):
         poll_seconds: float = 2.0,
         memory: MemoryReader | None = None,
         commands: CommandRegistry | None = None,
+        self_dm: bool = False,
     ) -> None:
         self._runner = runner
         self._db_path = db_path
@@ -396,6 +439,11 @@ class IMessageAdapter(Adapter):
         self._owner_handles = tuple(
             repo.normalize_handle(handle) for handle in owner_handles
         )
+        #: Self-DM inbound echo filter (#161): the owner's own handles are the
+        #: self-chat, so an inbound from one that matches a recorded send (or
+        #: carries the bot prefix) is chief's own echo — skipped, not dispatched.
+        self._self_dm = self_dm
+        self._self_handles = frozenset(self._owner_handles)
         #: Guest cards/relays route to the owner's own thread — the iMessage Front
         #: Desk is the first owner handle (the global ``front_desk_thread_key`` is
         #: another platform's key, unusable as a Messages target).
@@ -533,6 +581,14 @@ class IMessageAdapter(Adapter):
         text = str(row.get("text") or "")
         if not sender or not text:
             return
+        if self._self_dm and sender in self._self_handles:
+            # Loop-proof echo filter (#161): consume the durable send-record first,
+            # then fall back to the stateless bot-prefix skip for any un-recorded
+            # "🤖 " row. Either way chief's own reply never re-dispatches.
+            async with self._session_factory() as session:
+                consumed = await repo.take_send(session, sender, text)
+            if consumed or text.startswith(BOT_PREFIX):
+                return
         async with self._session_factory() as session:
             contact = await get_contact(
                 session, platform=PLATFORM, user_id=sender

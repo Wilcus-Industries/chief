@@ -242,6 +242,30 @@ class IMessagePref(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
 
 
+class IMessageSend(Base):
+    """One own send to a self-handle in self-DM mode (#161): the durable half of
+    the loop-proof echo filter.
+
+    In self-DM mode chief's reply to the owner's own handle re-enters the local
+    Messages store as an ``is_from_me=0`` row and would re-dispatch forever. Each
+    outbound to a self-handle records a row here (``body`` is the exact wire text,
+    including the "🤖 " prefix — for a bare file send, the filename); when the echo
+    re-polls, the matching row is consumed (deleted) and the row is dropped. The
+    record is content-keyed (send returns no ROWID/guid), so it survives a restart.
+    Corner: if chief ever sends a file named exactly what the owner later self-texts,
+    that owner message is consumed once — astronomically unlikely in a self-chat and
+    one-shot, so accepted. No unique constraint/index: single-user, low volume, and
+    autogenerate-drift-clean.
+    """
+
+    __tablename__ = "imessage_sends"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    handle: Mapped[str]
+    body: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+
+
 class UnknownSender(Base):
     """Metadata-only log of non-whitelisted senders (#156): handle + timestamps.
 
