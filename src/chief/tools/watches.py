@@ -35,10 +35,16 @@ whenever the iMessage adapter is configured. Five CRUD tools, plus a sixth
 - ``reply_to_watch`` (#167) — fire a watch: send a reply to its stored contact AS
   THE OWNER through the guarded iMessage send seam and retire the watch (single-fire;
   ``keep_watching=true`` keeps a standing instruction armed). The model can only
-  target a watch's own ``target_handle``, never a free-form handle, and the seam
-  re-checks authorization as defense-in-depth. A ``report``-tone fire also posts a
-  confirmation to the self-thread; a ``silent`` one does not. Added only when the
-  session carries the send seam + front-desk route (the iMessage owner session).
+  target a watch's own ``target_handle``, never a free-form handle. Because this tool
+  runs in the owner session — the same one that hosts the untrusted watched-message
+  eval turn — a prompt-injected turn could otherwise mint its own watch and fire it;
+  the :class:`WatchFireGate` closes that by only letting a watch a real inbound
+  dispatched an eval for fire (the seam's watch check is then a redundant backstop,
+  not the sole control). A refused/undeliverable send RAISES
+  (:class:`GhostSendRefused`), so the watch stays armed and no false confirmation is
+  posted. A ``report``-tone fire also posts a confirmation to the self-thread; a
+  ``silent`` one does not. Added only when the session carries the send seam +
+  front-desk route (the iMessage owner session).
 
 The CRUD five are owner-initiated and reversible-enough (cancel always undoes a
 watch; a wrong-target create is caught by the confirmation echo) → pre-approved, no
@@ -174,6 +180,49 @@ class WatchSend(Protocol):
     async def send(self, thread_key: str, text: str) -> None: ...
 
 
+class GhostSendRefused(RuntimeError):
+    """The send seam refused a self-DM ghost-send (#167).
+
+    Raised by :class:`chief.adapters.imessage.IMessageTaskIO` when a send to a
+    non-self handle isn't authorized by any active watch. It is surfaced (not
+    swallowed) so :func:`reply_to_watch` reports the delivery failure and leaves the
+    watch armed, instead of retiring it and posting a false "✅ Replied" — the #167
+    medium finding: a parked/denied fire must never read as a success.
+    """
+
+
+class WatchFireGate:
+    """Which watches an actual inbound eval has cleared to fire (#167 hardening).
+
+    The watched-message evaluation turn runs in the owner session, where both
+    ``create_watch`` and ``reply_to_watch`` are pre-approved. Without this gate a
+    prompt-injected turn could mint its own armed watch on an attacker handle and
+    fire it, so the send seam's watch check would authorize chief's own freshly
+    minted watch and exfiltrate owner-authored text to an arbitrary handle.
+
+    The adapter :meth:`~chief.adapters.imessage.IMessageAdapter._admit_watched`
+    :meth:`authorize`\\ s a fire ONLY for the watch(es) a real incoming message
+    dispatched an eval for — those already passed the created-before-arrival
+    admission gate. :func:`reply_to_watch` refuses any other ``watch_id``. A watch
+    minted inside the eval turn was never dispatched, so it can never fire. The
+    record is in-process and fails closed across a restart (a standing watch simply
+    re-authorizes on its next inbound).
+    """
+
+    def __init__(self) -> None:
+        self._authorized: set[int] = set()
+
+    def authorize(self, watch_id: int) -> None:
+        self._authorized.add(watch_id)
+
+    def is_authorized(self, watch_id: int) -> bool:
+        return watch_id in self._authorized
+
+    def consume(self, watch_id: int) -> None:
+        """Drop a single-fire watch's clearance once it has fired and retired."""
+        self._authorized.discard(watch_id)
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
 
@@ -219,6 +268,10 @@ class WatchService:
     #: set only for the iMessage owner session; without them, no ``reply_to_watch``.
     send: WatchSend | None = None
     front_desk: str | None = None
+    #: The eval-turn fire gate (#167): only watches a real inbound dispatched an eval
+    #: for may fire, so a hijacked turn can't mint and fire its own watch. ``None`` in
+    #: unit tests that drive ``reply_to_watch`` directly; production always wires it.
+    fire_gate: WatchFireGate | None = None
 
     @property
     def _can_fire(self) -> bool:
@@ -404,6 +457,7 @@ class WatchService:
     def _build_reply(self) -> InProcessTool:
         factory, now_fn = self.session_factory, self.now
         send, front_desk = self.send, self.front_desk
+        fire_gate = self.fire_gate
         assert send is not None and front_desk is not None  # gated by _can_fire
 
         @tool("reply_to_watch", _REPLY_DESCRIPTION, _REPLY_SCHEMA)
@@ -427,12 +481,32 @@ class WatchService:
                         is_error=True,
                     )
                 handle, tone = watch.target_handle, watch.tone
+            # Age-gate (#167): only a watch a real incoming message dispatched an eval
+            # for may fire, so a hijacked eval turn can't mint its own watch and fire
+            # it. A watch minted inside this turn was never authorized by the adapter.
+            if fire_gate is not None and not fire_gate.is_authorized(watch_id):
+                return _text_result(
+                    f"Watch #{watch_id} can't be fired here — only a watch a real "
+                    "incoming message triggered may reply.",
+                    is_error=True,
+                )
             # The active watch authorizes this at the send seam, which sends argv +
-            # records the own-send so its echo is consumed, never re-evaluated.
-            await send.send(handle, text)
+            # records the own-send so its echo is consumed, never re-evaluated. A
+            # refusal there RAISES (never a silent drop) so we don't retire the watch
+            # or post a false "✅ Replied".
+            try:
+                await send.send(handle, text)
+            except GhostSendRefused:
+                return _text_result(
+                    f"Couldn't reach {handle} — the send was refused; watch "
+                    f"#{watch_id} stays armed.",
+                    is_error=True,
+                )
             if not keep_watching:
                 async with factory() as session:
                     await repo.retire_watch(session, watch_id)
+                if fire_gate is not None:
+                    fire_gate.consume(watch_id)
             if tone == repo.TONE_REPORT:
                 await send.send(
                     front_desk,

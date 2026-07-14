@@ -75,6 +75,7 @@ from ..persistence import watches as watches_repo
 from ..persistence.contacts import get_contact
 from ..tools.apple.doctor import CapabilityHealth
 from ..tools.apple.runner import ScriptRunner
+from ..tools.watches import GhostSendRefused, WatchFireGate
 from .base import (
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENTS,
@@ -272,9 +273,13 @@ def watch_dispatch_text(
     The watched contact's message is untrusted third-party data injected into an
     owner-privileged turn, so it is wrapped in an explicit untrusted-data fence and
     any forged fence markers in the body are neutralized — a prompt-injection payload
-    inside the message can't be read as instructions for this turn. The send seam
-    re-checks watch authorization as defense-in-depth, so even a hijacked turn can
-    only ever reach this watch's own stored contact.
+    inside the message can't be read as instructions for this turn. Defense in depth:
+    the eval runs in the owner session where ``create_watch`` is pre-approved, so a
+    hijacked turn could otherwise mint its own watch on an attacker handle and fire
+    it; the :class:`~chief.tools.watches.WatchFireGate` blocks that by only clearing a
+    watch a real inbound dispatched an eval for (see :meth:`_admit_watched`), and the
+    send seam then re-checks watch authorization as a backstop. A refused ghost-send
+    RAISES rather than dropping silently, so a blocked fire can't read as delivered.
     """
     safe = message.replace("BEGIN UNTRUSTED", "BEGIN_UNTRUSTED").replace(
         "END UNTRUSTED", "END_UNTRUSTED"
@@ -338,24 +343,27 @@ class IMessageTaskIO:
             async with self._session_factory() as session:
                 await repo.record_send(session, handle, body)
 
-    async def _guard_nonself(self, handle: str) -> bool:
+    async def _guard_nonself(self, handle: str) -> None:
         """Self-DM ghost-send guard (#167): a send to a non-self handle must be
-        authorized by an active watch; else refuse, log, surface to the self-thread.
+        authorized by an active watch; else log, surface to the self-thread, and
+        RAISE :class:`~chief.tools.watches.GhostSendRefused`.
 
-        Off in dedicated-ID mode and for self-thread sends (both return ``True``
-        immediately), so the byte-for-byte dedicated-ID posture is unaffected.
+        Off in dedicated-ID mode and for self-thread sends (both return immediately),
+        so the byte-for-byte dedicated-ID posture is unaffected. Raising rather than
+        silently returning is the #167 medium fix: a refused ghost-send must surface
+        to its caller (``reply_to_watch``) so the fire isn't reported as delivered.
         """
         if (
             not self._self_dm
             or self._is_self(handle)
             or self._session_factory is None
         ):
-            return True
+            return
         async with self._session_factory() as session:
             if await watches_repo.authorizing_watches(
                 session, handle, now=datetime.now(UTC)
             ):
-                return True
+                return
         logger.warning(
             "refused unauthorized iMessage ghost-send",
             extra={"thread_key": handle},
@@ -365,7 +373,7 @@ class IMessageTaskIO:
                 self._front_desk,
                 f"🚫 Blocked a text to {handle}: no active watch authorizes it.",
             )
-        return False
+        raise GhostSendRefused(handle)
 
     async def _send_raw(self, handle: str, text: str) -> None:
         result = await self._runner.run_jxa(SEND_TEXT_SCRIPT, [handle, text])
@@ -374,8 +382,7 @@ class IMessageTaskIO:
             raise RuntimeError(f"iMessage send to {handle} failed: {detail}")
 
     async def send(self, thread_key: str, text: str) -> None:
-        if not await self._guard_nonself(thread_key):
-            return
+        await self._guard_nonself(thread_key)
         for chunk in _split(text, IMESSAGE_LIMIT):
             # Every chunk (not just the first) is prefixed so each echoed chunk is
             # caught by the stateless filter (#161); off, this is a no-op.
@@ -391,8 +398,7 @@ class IMessageTaskIO:
         caption: str | None = None,
     ) -> None:
         """Write the bytes to the outbox and send them as a Messages attachment."""
-        if not await self._guard_nonself(thread_key):
-            return
+        await self._guard_nonself(thread_key)
         self._outbox_dir.mkdir(parents=True, exist_ok=True)
         path = self._outbox_dir / filename
         path.write_bytes(data)
@@ -564,6 +570,7 @@ class IMessageAdapter(Adapter):
         memory: MemoryReader | None = None,
         commands: CommandRegistry | None = None,
         self_dm: bool = False,
+        fire_gate: WatchFireGate | None = None,
     ) -> None:
         self._runner = runner
         self._db_path = db_path
@@ -590,6 +597,9 @@ class IMessageAdapter(Adapter):
         self._poll_seconds = poll_seconds
         self._memory = memory
         self._commands = commands or OWNER_COMMANDS
+        #: Cleared-to-fire gate (#167): the adapter authorizes a watch's fire here, so a
+        #: watch minted inside the eval turn (never dispatched) can never reply-send.
+        self._fire_gate = fire_gate
         self._prompted_admission: set[int] = set()
         self._stop = asyncio.Event()
         self._failures = 0
@@ -820,6 +830,11 @@ class IMessageAdapter(Adapter):
                 "watch eval dispatched",
                 extra={"thread_key": sender, "watch_id": watch.id},
             )
+            # Clear THIS watch to fire (#167): reply_to_watch refuses any watch a real
+            # inbound didn't dispatch, so a hijacked eval turn can't mint and fire its
+            # own. Only watches that passed active_watches_for_handle reach here.
+            if self._fire_gate is not None:
+                self._fire_gate.authorize(watch.id)
             await self._engine.dispatch(
                 thread_key=self._front_desk,
                 text=watch_dispatch_text(
