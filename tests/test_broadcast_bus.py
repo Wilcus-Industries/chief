@@ -33,7 +33,7 @@ from chief.adapters.cli import CLI_LIMIT, CliTaskIO
 from chief.adapters.mirror import MirrorTaskIO
 from chief.adapters.telegram import TELEGRAM_LIMIT, TelegramTaskIO
 from chief.client_plane import SocketServer
-from chief.core.session import Milestone
+from chief.core.session import Delta, Milestone, ToolEnd, ToolStart, TurnEvent
 from chief.core.tasks import SessionProto, TaskManager
 from chief.gate.approvals import ApprovalCard
 from chief.persistence.messages import KIND_CARD, KIND_FILE, ROLE_CHIEF, MessageLog
@@ -168,6 +168,77 @@ async def _read_rows(
             select(MessageLogEntry).order_by(MessageLogEntry.id)
         )
         return list(result.scalars().all())
+
+
+async def test_mirror_streams_live_events_platform_text_and_one_log_row(
+    running_manager: Callable[..., Any],
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Live streaming over a chat stack: the tool start reaches the bot as the plain
+    # "· using" line AND the socket as a structured tool frame; deltas and the tool
+    # end are socket-only. Exactly two log rows — the tool-start milestone and the
+    # reply — so the ephemeral frames never pollute backfill.
+    bot = AsyncMock()
+    events: list[TurnEvent] = [
+        ToolStart(tool_call_id="c1", name="Bash"),
+        Delta(message_id="m1", text="hel"),
+        ToolEnd(tool_call_id="c1", ok=True),
+        Delta(message_id="m1", text="", done=True),
+    ]
+    session = FakeSession(model="m", milestones=events)
+    server, manager = await running_manager(
+        lambda s, log: MirrorTaskIO(
+            TelegramTaskIO(bot), platform="telegram", log=log, server=s
+        ),
+        platform="telegram",
+        sessions=[session],
+        message_limit=TELEGRAM_LIMIT,
+    )
+    reader, writer = await asyncio.open_unix_connection(server.path)
+    try:
+        assert (await _read_frame(reader))["type"] == "hello"
+
+        await manager.dispatch(thread_key="-100:7", text="hi")
+
+        start = await _read_frame(reader)
+        assert start["type"] == "tool"
+        assert start["platform"] == "telegram"
+        assert start["thread_key"] == "-100:7"
+        assert (start["tool_call_id"], start["name"]) == ("c1", "Bash")
+        assert start["status"] == "start"
+
+        delta = await _read_frame(reader)
+        assert delta["type"] == "delta"
+        assert (delta["message_id"], delta["text"], delta["done"]) == (
+            "m1",
+            "hel",
+            False,
+        )
+
+        end = await _read_frame(reader)
+        assert end["type"] == "tool"
+        assert (end["tool_call_id"], end["status"], end["ok"]) == ("c1", "end", True)
+
+        done = await _read_frame(reader)
+        assert (done["type"], done["done"]) == ("delta", True)
+
+        reply = await _read_frame(reader)
+        assert (reply["type"], reply["text"]) == ("reply", "reply:hi")
+
+        # Platform delivery: the "· using Bash" line and the reply — never a delta.
+        sent = [c.kwargs["text"] for c in bot.send_message.await_args_list]
+        assert sent == ["· using Bash", "reply:hi"]
+
+        rows = await _rows(session_factory, expect=2)
+        assert [(r.kind, r.text) for r in rows] == [
+            ("milestone", "using Bash"),
+            ("reply", "reply:hi"),
+        ]
+    finally:
+        writer.close()
+        with suppress(OSError):
+            await writer.wait_closed()
+        await manager.shutdown()
 
 
 async def test_second_stack_mirrors_onto_two_clients_and_logs(

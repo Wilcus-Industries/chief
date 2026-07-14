@@ -7,6 +7,7 @@ swaps in via htmx or SSE. Every interpolated value passes :func:`html.escape`.
 """
 
 import html
+import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Protocol
@@ -31,71 +32,150 @@ _NAV: tuple[tuple[str, str], ...] = (
     ("/health", "Health"),
 )
 
+#: One coherent visual system: fired-clay monochrome. A single hue family carries
+#: everything — dark mode is smoke-fired blackware (deep brown-black ground, pale
+#: clay ink, ochre accent), light mode is its inverse (sand ground, ink-brown text).
+#: Monospace throughout (chief is a terminal-born daemon), square geometry, and one
+#: signature motif: the woven zigzag band under the header and above the composer.
 _STYLE = """
 :root { color-scheme: light dark;
-  --bg: #f6f6f4; --fg: #1c1c1a; --muted: #6f6f68; --line: #d9d9d2;
-  --panel: #ffffff; --accent: #2f6f4f; --accent-fg: #ffffff; --danger: #a03030; }
+  --bg: #ece0cb; --fg: #40260f; --muted: #8a6b4a; --line: #cfb894;
+  --panel: #f4ecdc; --accent: #a34e1a; --accent-fg: #f7efe0; --danger: #952d0e; }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #161614; --fg: #e8e8e2; --muted: #93938a; --line: #33332e;
-    --panel: #1f1f1c; --accent: #4d9973; --accent-fg: #10130f; } }
+  :root { --bg: #191008; --fg: #e6c9a3; --muted: #99795c; --line: #40301f;
+    --panel: #241812; --accent: #d98546; --accent-fg: #1c0f05; --danger: #e0603a; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  min-height: 100dvh; display: flex; flex-direction: column;
+  font: 15px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    "DejaVu Sans Mono", monospace; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* the signature band: a woven zigzag strip, drawn in CSS only */
+.band { height: 8px; background:
+  linear-gradient(135deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px,
+  linear-gradient(225deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px; }
 header { display: flex; align-items: baseline; gap: 1rem; padding: .6rem .9rem;
-  border-bottom: 1px solid var(--line); position: sticky; top: 0;
-  background: var(--bg); z-index: 5; flex-wrap: wrap; }
-header .brand { font-weight: 700; letter-spacing: .04em; }
-nav { display: flex; gap: .8rem; }
-nav a { color: var(--muted); text-decoration: none; padding: .1rem 0; }
+  position: sticky; top: 0; background: var(--bg); z-index: 5; flex-wrap: wrap; }
+header::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px;
+  height: 8px; background:
+  linear-gradient(135deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px,
+  linear-gradient(225deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px; }
+header .brand { font-weight: 700; letter-spacing: .3em; text-transform: uppercase; }
+header .brand::before { content: "\\25c6 "; color: var(--accent); }
+nav { display: flex; gap: .75rem; margin-left: auto; }
+nav a { color: var(--muted); text-decoration: none; padding: .1rem 0;
+  text-transform: uppercase; letter-spacing: .08em; font-size: .78rem; }
 nav a.active { color: var(--fg); border-bottom: 2px solid var(--accent); }
-main { max-width: 44rem; margin: 0 auto; padding: .9rem; }
-h1 { font-size: 1.15rem; margin: .2rem 0 .8rem; }
-h2 { font-size: 1rem; margin: 1rem 0 .4rem; }
+main { max-width: 44rem; margin: 0 auto; padding: 1.1rem .9rem .9rem;
+  width: 100%; flex: 1; display: flex; flex-direction: column; }
+main > * { flex: 0 0 auto; }
+/* login/setup: no nav anywhere to go — one centered brand block instead */
+body.bare main { justify-content: center; padding-bottom: 5rem; }
+.auth-brand { text-align: center; font-weight: 700; letter-spacing: .5em;
+  text-transform: uppercase; font-size: 1.35rem; text-indent: .5em; }
+.auth-brand::before { content: "\\25c6"; display: block; color: var(--accent);
+  letter-spacing: 0; text-indent: 0; margin-bottom: .5rem; }
+.auth-brand + .band { margin: 1rem 0 1.6rem; }
+body.bare h1 { text-align: center; }
+h1 { font-size: .95rem; margin: .2rem 0 .8rem; text-transform: uppercase;
+  letter-spacing: .14em; color: var(--muted); font-weight: 600; }
+h1::before { content: "\\25c6 "; color: var(--accent); font-size: .7em; }
+h2 { font-size: .85rem; margin: .2rem 0 .5rem; text-transform: uppercase;
+  letter-spacing: .1em; font-weight: 600; }
+h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .1em; }
 form.stack { display: flex; flex-direction: column; gap: .55rem; }
 input, select, button, textarea { font: inherit; color: inherit; }
 input[type=text], input[type=password], input[type=file], select, textarea {
-  width: 100%; padding: .5rem .6rem; border: 1px solid var(--line);
-  border-radius: .45rem; background: var(--panel); }
-button { padding: .5rem .9rem; border: 0; border-radius: .45rem;
-  background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  width: 100%; padding: .55rem .65rem; border: 1px solid var(--line);
+  border-radius: 0; background: var(--panel); }
+input[type=file]::file-selector-button { font: inherit; font-size: .78rem;
+  margin-right: .6rem; padding: .15rem .6rem; border: 1px solid var(--line);
+  border-radius: 0; background: var(--bg); color: var(--muted); cursor: pointer;
+  text-transform: uppercase; letter-spacing: .06em; }
+input::placeholder { color: var(--muted); }
+button { padding: .55rem .9rem; border: 1px solid var(--accent); border-radius: 0;
+  background: var(--accent); color: var(--accent-fg); cursor: pointer;
+  text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; }
 button.quiet { background: transparent; color: var(--muted);
   border: 1px solid var(--line); }
-button.danger { background: var(--danger); color: #fff; }
+button.danger { background: transparent; color: var(--danger);
+  border: 1px solid var(--danger); }
 .error { color: var(--danger); margin: .4rem 0; }
-.note { color: var(--muted); font-size: .88rem; }
+.error::before { content: "\\2717 "; }
+.note { color: var(--muted); font-size: .85rem; }
 .panel { background: var(--panel); border: 1px solid var(--line);
-  border-radius: .6rem; padding: .7rem .8rem; margin: .5rem 0; }
+  padding: .8rem .9rem; margin: .7rem 0; }
 /* chat */
-.chat { display: flex; flex-direction: column;
-  min-height: calc(100dvh - 8.5rem); }
-.threads { display: flex; gap: .4rem; overflow-x: auto; padding-bottom: .4rem; }
+.chat { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.threads { display: flex; gap: .4rem; overflow-x: auto; padding: .5rem 0 .4rem; }
 .threads a { white-space: nowrap; text-decoration: none; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 1rem; padding: .15rem .7rem;
-  font-size: .88rem; }
-.threads a.active { color: var(--fg); border-color: var(--accent); }
+  border: 1px solid var(--line); padding: .2rem .7rem; font-size: .8rem;
+  background: var(--panel); }
+.threads a.active { color: var(--accent); border-color: var(--accent); }
 #transcript { flex: 1; overflow-y: auto; display: flex;
-  flex-direction: column; gap: .45rem; padding: .4rem 0; }
-.msg { padding: .45rem .65rem; border-radius: .55rem; max-width: 92%;
+  flex-direction: column; gap: .5rem; padding: .4rem 0; }
+.msg { padding: .5rem .7rem; max-width: 92%;
   overflow-wrap: break-word; white-space: pre-wrap; }
 .msg.owner { align-self: flex-end; background: var(--accent);
   color: var(--accent-fg); }
 .msg.chief { align-self: flex-start; background: var(--panel);
-  border: 1px solid var(--line); }
+  border: 1px solid var(--line); border-left: 3px solid var(--accent); }
+.msg.streaming::after { content: "\\258a"; color: var(--accent);
+  animation: blink 1s step-end infinite; }
 .msg.milestone { align-self: flex-start; color: var(--muted);
-  font-size: .88rem; padding: 0 .65rem; }
+  font-size: .85rem; padding: 0 .7rem; }
 .msg.file a { color: inherit; }
-.card { border: 1px solid var(--accent); border-radius: .6rem;
-  padding: .6rem .8rem; margin: .4rem 0; background: var(--panel); }
-.card .actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .5rem; }
-.card button { font-size: .88rem; padding: .35rem .6rem; }
+/* live tool chips */
+.tool { align-self: flex-start; font-size: .8rem; color: var(--muted);
+  border: 1px dashed var(--line); padding: .15rem .6rem;
+  text-transform: uppercase; letter-spacing: .06em; }
+.tool::before { content: "\\2699 "; }
+.tool.running::after { content: " \\2026"; color: var(--accent);
+  animation: blink 1s step-end infinite; }
+.tool.ok { border-style: solid; }
+.tool.ok::before { content: "\\2713 "; color: var(--accent); }
+.tool.fail { border-color: var(--danger); color: var(--danger);
+  border-style: solid; }
+.tool.fail::before { content: "\\2717 "; }
+.tool .tool-detail { text-transform: none; letter-spacing: 0;
+  margin-left: .5rem; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .msg.streaming::after, .tool.running::after { animation: none; } }
+/* approval cards */
+.card { border: 1px solid var(--accent); padding: .7rem .8rem; margin: .4rem 0;
+  background: var(--panel); }
+.card > .note::before { content: "\\25c6 "; color: var(--accent); }
+.card .actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .55rem; }
+.card button { font-size: .78rem; padding: .4rem .6rem; }
+.card-elsewhere { display: block; font-size: .85rem; color: var(--muted);
+  border: 1px dashed var(--line); padding: .35rem .7rem; margin: .3rem 0;
+  text-decoration: none; }
+/* composer + command menu */
 .composer { display: flex; gap: .5rem; position: sticky; bottom: 0;
-  background: var(--bg); padding: .5rem 0; }
+  background: var(--bg); padding: .6rem 0 .5rem; }
+.composer::before { content: ""; position: absolute; left: 0; right: 0; top: -8px;
+  height: 8px; background:
+  linear-gradient(135deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px,
+  linear-gradient(225deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px; }
 .composer input { flex: 1; }
+#cmd-menu { position: sticky; bottom: 4.3rem; background: var(--panel);
+  border: 1px solid var(--line); max-height: 14rem; overflow-y: auto;
+  margin-bottom: 8px; /* clear the composer's woven band drawn at top:-8px */ }
+.cmd-item { display: flex; gap: .7rem; align-items: baseline;
+  padding: .5rem .7rem; cursor: pointer; }
+.cmd-item.selected { background: var(--bg); border-left: 3px solid var(--accent); }
+.cmd-item .cmd-name { color: var(--accent); font-weight: 600;
+  white-space: nowrap; }
+.cmd-item .cmd-desc { color: var(--muted); font-size: .85rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* tables */
 table { width: 100%; border-collapse: collapse; }
-td, th { text-align: left; padding: .35rem .3rem;
+td, th { text-align: left; padding: .4rem .3rem;
   border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 500; font-size: .88rem; }
+th { color: var(--muted); font-weight: 600; font-size: .78rem;
+  text-transform: uppercase; letter-spacing: .08em; }
 .ok { color: var(--accent); } .bad { color: var(--danger); }
 """
 
@@ -118,7 +198,7 @@ def page(title: str, body: str, *, active: str | None = None) -> str:
         f"<title>{_esc(title)} — chief</title>"
         f"<style>{_STYLE}</style>"
         '<script src="/static/htmx.min.js"></script>'
-        '<script src="/static/htmx-sse.js"></script>'
+        '<script src="/static/chief.js" defer></script>'
         "</head><body>"
         f'<header><span class="brand">chief</span><nav>{nav}</nav></header>'
         f"<main>{body}</main>"
@@ -127,16 +207,20 @@ def page(title: str, body: str, *, active: str | None = None) -> str:
 
 
 def bare_page(title: str, body: str) -> str:
-    """A layout without the nav — for login/setup, where nothing else is reachable."""
+    """A layout without the nav — for login/setup, where nothing else is reachable.
+
+    No header either: a single centered brand block over the woven band carries
+    the identity, and the form hangs from it in the middle of the screen.
+    """
     return (
         "<!doctype html><html><head>"
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{_esc(title)} — chief</title>"
         f"<style>{_STYLE}</style>"
-        "</head><body>"
-        '<header><span class="brand">chief</span></header>'
-        f"<main>{body}</main>"
+        '</head><body class="bare">'
+        '<main><div class="auth-brand">chief</div><div class="band"></div>'
+        f"{body}</main>"
         "</body></html>"
     )
 
@@ -188,13 +272,28 @@ def file_message_html(
     )
 
 
-def card_html(card: Mapping[str, object]) -> str:
-    """An actionable approval card: preview text + the four answer buttons."""
+def card_html(
+    card: Mapping[str, object],
+    *,
+    active_platform: str = "",
+    active_thread: str = "",
+) -> str:
+    """An actionable approval card: preview text + the four answer buttons.
+
+    The answer POST carries the page's active thread so the response re-renders
+    the approvals block scoped the same way this page was.
+    """
     approval_id = _esc(card.get("approval_id"))
     options = card.get("options")
+    context = (
+        f', "platform": "{_esc(active_platform)}"'
+        f', "thread_key": "{_esc(active_thread)}"'
+        if active_platform
+        else ""
+    )
     buttons = "".join(
         f'<button hx-post="/approvals/{approval_id}"'
-        f' hx-vals=\'{{"action": "{_esc(o["action"])}"}}\''
+        f' hx-vals=\'{{"action": "{_esc(o["action"])}"{context}}}\''
         f' hx-target="#approvals" hx-swap="innerHTML">{_esc(o["label"])}</button>'
         for o in options
         if isinstance(o, dict)
@@ -208,10 +307,48 @@ def card_html(card: Mapping[str, object]) -> str:
     )
 
 
-def approvals_html(cards: Iterable[Mapping[str, object]]) -> str:
-    """The pending-approvals block (swapped whole on every card event)."""
-    rendered = "".join(card_html(c) for c in cards)
-    return rendered or ""
+def _foreign_card_link(card: Mapping[str, object]) -> str:
+    """A one-line pointer to an approval waiting in another thread."""
+    platform = str(card.get("platform"))
+    thread_key = str(card.get("thread_key"))
+    return (
+        f'<a class="card-elsewhere" href="/chat?'
+        f'{_thread_query(platform, thread_key)}">'
+        f"⧗ approval waiting in {_esc(platform)} · {_esc(thread_key)}</a>"
+    )
+
+
+def approvals_html(
+    cards: Iterable[Mapping[str, object]],
+    *,
+    active_platform: str = "",
+    active_thread: str = "",
+) -> str:
+    """The pending-approvals block (swapped whole on every card event).
+
+    Scoped to the page's active thread: only that thread's cards render with
+    answer buttons here; a card pending in any other thread shows as a compact
+    link to its own chat page, so answer-from-anywhere stays one tap away
+    without foreign requests masquerading as this conversation's. With no
+    active context (no filter), every card renders in full.
+    """
+    full, elsewhere = [], []
+    for card in cards:
+        matches = not active_platform or (
+            str(card.get("platform")) == active_platform
+            and str(card.get("thread_key")) == active_thread
+        )
+        if matches:
+            full.append(
+                card_html(
+                    card,
+                    active_platform=active_platform,
+                    active_thread=active_thread,
+                )
+            )
+        else:
+            elsewhere.append(_foreign_card_link(card))
+    return "".join(full) + "".join(elsewhere)
 
 
 def _human_size(size: int) -> str:
@@ -512,6 +649,17 @@ def history_message_html(message: Mapping[str, object]) -> str:
     return message_html(kind, text, role=role)
 
 
+def commands_json(commands: Iterable[tuple[str, str]]) -> str:
+    """The slash-command palette as embeddable JSON (for the composer dropdown).
+
+    ``</`` is escaped so the payload can never close its ``<script>`` container.
+    """
+    payload = json.dumps(
+        [{"name": f"/{name}", "desc": desc} for name, desc in commands]
+    )
+    return payload.replace("</", "<\\/")
+
+
 def chat_page_body(
     *,
     platform: str,
@@ -519,6 +667,7 @@ def chat_page_body(
     threads: Iterable[Mapping[str, object]],
     history: Iterable[Mapping[str, object]],
     cards: Iterable[Mapping[str, object]],
+    commands: Iterable[tuple[str, str]] = (),
 ) -> str:
     """The whole chat surface: thread strip, approvals, transcript, composer."""
     query = _thread_query(platform, thread_key)
@@ -533,27 +682,33 @@ def chat_page_body(
         else ""
     )
     return (
-        f'<div class="chat" hx-ext="sse" sse-connect="/events?{query}">'
+        f'<div class="chat" data-events-url="/events?{query}">'
         f'<div class="threads" hx-get="/chat/threads?{query}"'
         ' hx-trigger="every 5s" hx-swap="innerHTML">'
         + thread_list_html(
             threads, active_platform=platform, active_thread=thread_key
         )
         + "</div>"
-        '<div id="approvals" sse-swap="approvals" hx-swap="innerHTML">'
-        + approvals_html(cards)
+        '<div id="approvals">'
+        + approvals_html(
+            cards, active_platform=platform, active_thread=thread_key
+        )
         + "</div>"
-        '<div id="transcript" sse-swap="message" hx-swap="beforeend">'
+        '<div id="transcript">'
         + transcript
         + "</div>"
+        '<div id="cmd-menu" role="listbox" hidden></div>'
         f'<form class="composer" hx-post="/chat/send" hx-target="#transcript"'
         ' hx-swap="beforeend" hx-on::after-request="this.reset();'
         "document.getElementById('transcript').scrollTop = 1e9\">"
         f'<input type="hidden" name="platform" value="{_esc(platform)}">'
         f'<input type="hidden" name="thread_key" value="{_esc(thread_key)}">'
         '<input type="text" name="text" autocomplete="off" autofocus'
-        ' placeholder="Message chief — /commands work too">'
+        ' placeholder="Message chief — / for commands">'
         "<button>Send</button></form>"
         f"{cancel_form}"
+        '<script type="application/json" id="cmd-data">'
+        + commands_json(commands)
+        + "</script>"
         "</div>"
     )
