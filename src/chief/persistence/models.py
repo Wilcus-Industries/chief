@@ -342,11 +342,12 @@ class Watch(Base):
     her y"), chief resolves the target handle via Contacts and records the
     instruction, its expiry (a parsed bound, else the 14-day default), and a
     reporting tone. ``created_at`` is the read-scope floor a later firing milestone
-    will enforce (only messages arriving after it ever admit); this slice only
-    creates, lists, and cancels a watch — nothing fires yet, so ``state`` is either
-    ``armed`` or ``cancelled`` here (``fired``/``expired`` are reserved for that
-    later milestone; ``expired`` is also derived read-only at list time — see
-    :func:`chief.persistence.watches.effective_state`).
+    will enforce (only messages arriving after it ever admit); this slice creates,
+    lists, and cancels a watch, and (#170) a per-tick sweep
+    (:func:`chief.persistence.watches.sweep_expired`) physically retires an armed
+    watch past its expiry to ``expired`` — ``fired`` is still reserved for a later
+    milestone. :func:`chief.persistence.watches.effective_state` remains a
+    read-time safety net for the gap between real expiry and the next sweep tick.
     """
 
     __tablename__ = "watches"
