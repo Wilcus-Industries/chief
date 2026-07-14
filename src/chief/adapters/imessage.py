@@ -36,6 +36,10 @@ every reply to a self-handle is prefixed :data:`BOT_PREFIX` and passed through a
 two-layer echo filter: a durable send-record (``imessage_sends``, matched and
 consumed when the echo re-polls) plus a stateless prefix skip. With the flag off,
 none of this engages and the dedicated-ID behavior above holds byte-for-byte.
+Self-mode is otherwise as inert as the dedicated-ID posture: any non-self sender —
+including a stale or admin-added guest-tier whitelist row — gets no session, no
+reply, and no card; only the metadata-only ``unknown_senders`` line is written
+(#163).
 """
 
 import asyncio
@@ -581,13 +585,29 @@ class IMessageAdapter(Adapter):
         text = str(row.get("text") or "")
         if not sender or not text:
             return
-        if self._self_dm and sender in self._self_handles:
-            # Loop-proof echo filter (#161): consume the durable send-record first,
-            # then fall back to the stateless bot-prefix skip for any un-recorded
-            # "🤖 " row. Either way chief's own reply never re-dispatches.
-            async with self._session_factory() as session:
-                consumed = await repo.take_send(session, sender, text)
-            if consumed or text.startswith(BOT_PREFIX):
+        if self._self_dm:
+            if sender in self._self_handles:
+                # Loop-proof echo filter (#161): consume the durable send-record
+                # first, then fall back to the stateless bot-prefix skip for any
+                # un-recorded "🤖 " row. Either way chief's own reply never
+                # re-dispatches.
+                async with self._session_factory() as session:
+                    consumed = await repo.take_send(session, sender, text)
+                if consumed or text.startswith(BOT_PREFIX):
+                    return
+                # else: fall through to the shared contact-lookup/dispatch below.
+            else:
+                # Self-mode posture (#163): every non-self sender is inert, no
+                # matter what the whitelist says — a stale or admin-added
+                # guest-tier Contact row included. No session, no reply, no
+                # guest ack, no card; only the metadata-only sighting lands.
+                async with self._session_factory() as session:
+                    await repo.record_unknown_sender(
+                        session,
+                        platform=PLATFORM,
+                        handle=sender,
+                        seen_at=self._row_time(row),
+                    )
                 return
         async with self._session_factory() as session:
             contact = await get_contact(
