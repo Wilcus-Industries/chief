@@ -36,11 +36,15 @@ every reply to a self-handle is prefixed :data:`BOT_PREFIX` and passed through a
 two-layer echo filter: a durable send-record (``imessage_sends``, matched and
 consumed when the echo re-polls) plus a stateless prefix skip. With the flag off,
 none of this engages and the dedicated-ID behavior above holds byte-for-byte.
+Self-DM media intake (#162) rides this same self-thread gate: an image/PDF sent to
+self is admitted (even textless) and threaded into the turn exactly like the other
+adapters' owner attachments — dedicated-ID mode stays text-only, byte-for-byte.
 """
 
 import asyncio
 import json
 import logging
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,8 +58,11 @@ from ..persistence.contacts import get_contact
 from ..tools.apple.doctor import CapabilityHealth
 from ..tools.apple.runner import ScriptRunner
 from .base import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS,
     Adapter,
     AdmissionCard,
+    Attachment,
     BudgetCard,
     Engine,
     MemoryReader,
@@ -63,6 +70,7 @@ from .base import (
     ReadyHook,
     Surface,
     Tier,
+    is_supported_media,
 )
 from .base import (
     handle_guest_message as _handle_guest_message,
@@ -86,6 +94,10 @@ IMESSAGE_LIMIT = 4000
 #: marker inside the shared self-chat, and the stateless half of the echo filter —
 #: an inbound row bearing it is chief's own echo and is never dispatched.
 BOT_PREFIX = "🤖 "
+
+#: HEIC/HEIF need conversion before a vision-model turn will accept them (#162);
+#: everything else `is_supported_media` allows passes through unchanged.
+HEIC_MIME_TYPES = frozenset({"image/heic", "image/heif"})
 
 #: Rows pulled per poll tick — bounds one tick's work; the cursor picks up the rest.
 POLL_BATCH_LIMIT = 200
@@ -133,15 +145,18 @@ SEND_FILE_SCRIPT = (
 
 
 def build_poll_query(after_rowid: int, limit: int = POLL_BATCH_LIMIT) -> str:
-    """The incremental inbound query: new, real, other-people texts past the cursor.
+    """The incremental inbound query: new, real, other-people texts (or attachments)
+    past the cursor.
 
     Both parameters are integers coerced with ``int()`` — no owner or sender text
     ever reaches this SQL, so there is no escaping surface (the same posture as the
     #155 read tools, which quote+LIKE-escape their one text parameter).
     ``is_from_me = 0`` keeps chief's own sends out; ``associated_message_type = 0``
     drops tapbacks/edits; the chat join classifies DM-vs-group (``style`` 45 with no
-    ``room_name`` is a 1:1) so group rows can be skipped wholesale. Timestamps
-    render as UTC.
+    ``room_name`` is a 1:1) so group rows can be skipped wholesale. A row admits with
+    either non-empty text or a real (non-rich-link) attachment join — sender-agnostic;
+    the self-DM-only restriction on textless admission is applied in Python, not here
+    (#162). Timestamps render as UTC.
     """
     return (
         "SELECT message.ROWID AS rowid, handle.id AS sender, "
@@ -159,7 +174,10 @@ def build_poll_query(after_rowid: int, limit: int = POLL_BATCH_LIMIT) -> str:
         f"WHERE message.ROWID > {int(after_rowid)} "
         "AND message.is_from_me = 0 "
         "AND message.associated_message_type = 0 "
-        "AND message.text IS NOT NULL AND message.text != '' "
+        "AND (message.text IS NOT NULL AND message.text != '' "
+        "OR EXISTS (SELECT 1 FROM message_attachment_join maj "
+        "JOIN attachment att ON att.ROWID = maj.attachment_id "
+        "WHERE maj.message_id = message.ROWID AND att.mime_type IS NOT NULL)) "
         "GROUP BY message.ROWID "
         f"ORDER BY message.ROWID ASC LIMIT {int(limit)};"
     )
@@ -168,6 +186,28 @@ def build_poll_query(after_rowid: int, limit: int = POLL_BATCH_LIMIT) -> str:
 def build_head_query() -> str:
     """The store's current head ROWID — the first-boot cursor (no history replay)."""
     return "SELECT COALESCE(MAX(ROWID), 0) AS head FROM message;"
+
+
+def build_attachments_query(rowids: Sequence[int]) -> str:
+    """Real, non-rich-link attachments for a fetched batch of message rowids.
+
+    ``rowids`` are int()-coerced (they come from the prior query's own ROWIDs, never
+    owner/sender text), so there is no escaping surface here either.
+    ``.pluginPayloadAttachment`` rich-link rows have ``mime_type`` NULL and are
+    excluded — they are not user media (#162).
+    """
+    ids = ",".join(str(int(rowid)) for rowid in rowids)
+    return (
+        "SELECT message_attachment_join.message_id AS message_id, "
+        "attachment.filename AS filename, attachment.mime_type AS mime_type, "
+        "attachment.transfer_name AS transfer_name, "
+        "attachment.total_bytes AS total_bytes "
+        "FROM message_attachment_join "
+        "JOIN attachment ON attachment.ROWID = message_attachment_join.attachment_id "
+        f"WHERE message_attachment_join.message_id IN ({ids}) "
+        "AND attachment.mime_type IS NOT NULL "
+        "ORDER BY message_attachment_join.message_id, attachment.ROWID;"
+    )
 
 
 def imessage_ready(
@@ -558,9 +598,26 @@ class IMessageAdapter(Adapter):
             self._last_error = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(f"imessage poll query failed: {self._last_error}")
         rows = json.loads(result.stdout) if result.stdout.strip() else []
+        attachments_by_rowid: dict[int, list[dict[str, Any]]] = {}
+        if rows:
+            att_result = await self._runner.run_sqlite(
+                self._db_path,
+                build_attachments_query([int(r["rowid"]) for r in rows]),
+            )
+            if att_result.ok and att_result.stdout.strip():
+                for att_row in json.loads(att_result.stdout):
+                    attachments_by_rowid.setdefault(
+                        int(att_row["message_id"]), []
+                    ).append(att_row)
+            elif not att_result.ok:
+                logger.warning(
+                    "imessage attachment fetch failed: %s", att_result.stderr
+                )
         for row in rows:
             try:
-                await self._handle_row(row)
+                await self._handle_row(
+                    row, attachments_by_rowid.get(int(row["rowid"]), [])
+                )
             except Exception:
                 logger.exception(
                     "imessage row handling failed", extra={"rowid": row.get("rowid")}
@@ -574,20 +631,36 @@ class IMessageAdapter(Adapter):
         self._last_error = None
         return len(rows)
 
-    async def _handle_row(self, row: dict[str, Any]) -> None:
+    async def _handle_row(
+        self, row: dict[str, Any], atts_raw: list[dict[str, Any]]
+    ) -> None:
         if row.get("in_group") or row.get("has_room"):
             return  # DMs only in v1: group threads are never read, logged, or answered
         sender = repo.normalize_handle(str(row.get("sender") or ""))
         text = str(row.get("text") or "")
-        if not sender or not text:
+        if not sender or (not text and not atts_raw):
             return
-        if self._self_dm and sender in self._self_handles:
-            # Loop-proof echo filter (#161): consume the durable send-record first,
-            # then fall back to the stateless bot-prefix skip for any un-recorded
-            # "🤖 " row. Either way chief's own reply never re-dispatches.
+        is_self_row = self._self_dm and sender in self._self_handles
+        if not text and not is_self_row:
+            return  # textless attachment admission is self-thread only (#162)
+        if is_self_row:
+            # Loop-proof echo filter (#161/#162): consume the durable send-record
+            # first — by text, then by a sent file's transfer_name — then fall back
+            # to the stateless bot-prefix skip for any un-recorded "🤖 " row. Either
+            # way chief's own reply (or file send) never re-dispatches.
             async with self._session_factory() as session:
-                consumed = await repo.take_send(session, sender, text)
-            if consumed or text.startswith(BOT_PREFIX):
+                consumed = bool(text) and await repo.take_send(
+                    session, sender, text
+                )
+                if not consumed:
+                    for att in atts_raw:
+                        name = att.get("transfer_name")
+                        if name and await repo.take_send(
+                            session, sender, str(name)
+                        ):
+                            consumed = True
+                            break
+            if consumed or (text and text.startswith(BOT_PREFIX)):
                 return
         async with self._session_factory() as session:
             contact = await get_contact(
@@ -605,7 +678,7 @@ class IMessageAdapter(Adapter):
                 )
             return
         if contact.tier == repo.TIER_OWNER:
-            await self._on_owner(sender, text)
+            await self._on_owner(sender, text, atts_raw)
             return
         await self._on_guest(contact.display_name or sender, sender, text)
 
@@ -617,14 +690,84 @@ class IMessageAdapter(Adapter):
         except ValueError:
             return datetime.now(UTC).replace(tzinfo=None)
 
-    async def _on_owner(self, sender: str, text: str) -> None:
+    async def _on_owner(
+        self,
+        sender: str,
+        text: str,
+        atts_raw: list[dict[str, Any]] | None = None,
+    ) -> None:
         if text.startswith("/"):
             await self._on_command(sender, text)
             return
+        attachments = await self._build_attachments(atts_raw or [])
+        if not text and not attachments:
+            return
         logger.info("owner message", extra={"thread_key": sender})
         await self._engine.dispatch(
-            thread_key=sender, text=text, surface=Surface.DM
+            thread_key=sender, text=text, attachments=attachments, surface=Surface.DM
         )
+
+    async def _build_attachments(
+        self, atts_raw: Sequence[dict[str, Any]]
+    ) -> tuple[Attachment, ...]:
+        """Read each admitted attachment off the store's attachment path, converting
+        HEIC/HEIF to JPEG for vision compatibility (#162); drops unsupported types
+        and anything over the M8 size cap, matching the Telegram intake path
+        exactly."""
+        items: list[Attachment] = []
+        for att in atts_raw:
+            if len(items) >= MAX_ATTACHMENTS:
+                break
+            loaded = await self._load_attachment(att)
+            if loaded is not None:
+                items.append(loaded)
+        return tuple(items)
+
+    async def _load_attachment(self, att: dict[str, Any]) -> Attachment | None:
+        mime = str(att.get("mime_type") or "")
+        if not is_supported_media(mime):
+            return None
+        total_bytes = att.get("total_bytes")
+        if isinstance(total_bytes, int) and total_bytes > MAX_ATTACHMENT_BYTES:
+            return None
+        raw_path = att.get("filename")
+        if not raw_path:
+            return None
+        path = Path(str(raw_path)).expanduser()
+        try:
+            data = path.read_bytes()
+        except OSError:
+            logger.warning("imessage attachment unreadable: %s", path)
+            return None
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            return None
+        filename = str(att.get("transfer_name") or path.name)
+        media_type = mime
+        if mime.lower() in HEIC_MIME_TYPES:
+            try:
+                data = await self._convert_heic(path)
+            except RuntimeError:
+                logger.warning("HEIC conversion failed for %s", path)
+                return None
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                return None
+            media_type = "image/jpeg"
+            filename = Path(filename).stem + ".jpg"
+        return Attachment(media_type=media_type, data=data, filename=filename)
+
+    async def _convert_heic(self, source: Path) -> bytes:
+        """Convert one HEIC/HEIF file to JPEG bytes via macOS ``sips`` (#162): the
+        Messages store keeps the original on disk, so this shells out on that real
+        path rather than round-tripping bytes through a temp source file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "converted.jpg"
+            result = await self._runner.run_sips(
+                ["-s", "format", "jpeg", str(source), "--out", str(out_path)]
+            )
+            if not result.ok:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise RuntimeError(f"sips HEIC conversion failed: {detail}")
+            return out_path.read_bytes()
 
     async def _on_command(self, sender: str, text: str) -> None:
         """Dispatch an owner ``/command`` through the shared registry (#129)."""

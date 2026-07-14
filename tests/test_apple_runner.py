@@ -125,6 +125,17 @@ async def test_run_sqlite_builds_a_readonly_json_invocation() -> None:
     ]
 
 
+async def test_run_sips_builds_the_exact_cli_invocation() -> None:
+    runner = _RecordingRunner()
+    await runner.run_sips(["-s", "format", "jpeg", "in.heic", "--out", "out.jpg"])
+    assert runner.calls == [
+        (
+            ("/usr/bin/sips", "-s", "format", "jpeg", "in.heic", "--out", "out.jpg"),
+            None,
+        )
+    ]
+
+
 # ---- permission-denied classification ------------------------------------------
 
 

@@ -63,7 +63,14 @@ def _fixture_columns() -> dict[str, set[str]]:
 
     conn = sqlite3.connect(":memory:")
     conn.executescript(CHAT_DB_SCHEMA)
-    tables = {"handle", "chat", "message", "chat_message_join"}
+    tables = {
+        "handle",
+        "chat",
+        "message",
+        "chat_message_join",
+        "attachment",
+        "message_attachment_join",
+    }
     return {
         table: {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
