@@ -13,6 +13,12 @@ second parser.
 confirming one binds the watch — an ordinary armed ``Watch`` row indistinguishable
 from a directly-created one, ready for a later milestone's dispatch with zero
 special-casing.
+
+#170 adds the real expiry sweep (:func:`sweep_expired`) that physically retires
+``armed`` watches past their expiry each adapter tick, and makes admission
+(:func:`active_watches_for_handle`) timestamp-pure — it compares the row's own
+``arrived_at`` to the watch's window and never consults wall-clock "now", so
+admission is correct regardless of when the sweep runs relative to a given row.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -114,35 +120,61 @@ def effective_state(watch: Watch, *, now: datetime) -> str:
     return watch.state
 
 
+async def sweep_expired(session: AsyncSession, *, now: datetime) -> list[Watch]:
+    """Retire every armed watch past its expiry (#170) and return the swept list.
+
+    This is the per-tick sweep that makes ``/watches`` and the web list show the
+    real persisted state without waiting on :func:`effective_state`'s read-time
+    derivation — it physically flips ``state`` from ``armed`` to ``expired`` and
+    commits. It does **not** gate admission: see :func:`active_watches_for_handle`,
+    which is timestamp-pure and deliberately independent of whatever this sweep
+    has or hasn't done to a row's persisted state.
+    """
+    stmt = select(Watch).where(Watch.state == STATE_ARMED)
+    rows = list((await session.execute(stmt)).scalars())
+    swept = [w for w in rows if _as_utc(w.expiry) <= now]
+    for w in swept:
+        w.state = STATE_EXPIRED
+    if swept:
+        await session.commit()
+    return swept
+
+
 async def active_watches_for_handle(
     session: AsyncSession,
     handle: str,
     *,
-    now: datetime,
     arrived_at: datetime,
 ) -> list[Watch]:
-    """Armed, unexpired watches on ``handle`` that ``arrived_at`` fires.
+    """Watches on ``handle`` whose window contains ``arrived_at`` — timestamp-pure.
 
-    The #166 admission predicate: a watch matches only when it is still ``armed``
-    (so ``cancelled``/``fired`` are excluded at the query), is not past its expiry
-    at ``now`` (per :func:`effective_state`, so an armed-but-expired watch is
-    excluded), and was created no later than the row's arrival — a message predating
-    the watch's ``created_at`` floor never fires it. Oldest ``created_at`` first.
+    The #166/#170 admission predicate: a watch matches only when ``arrived_at``
+    falls within ``[created_at, expiry]`` — no "now" is consulted. ``cancelled``/
+    ``fired`` are genuinely terminal and excluded at the query; ``armed`` and
+    ``expired`` are both included as candidates on purpose (#170): the per-tick
+    sweep (:func:`sweep_expired`) uses the real wall-clock at processing time, so a
+    message whose own ``arrived_at`` legitimately precedes a watch's ``expiry`` can
+    still be sitting unprocessed when a later tick's sweep — using a "now" that has
+    since passed ``expiry`` — flips the watch to ``expired`` first. Gating purely on
+    the row's own timestamps (independent of whatever the sweep has or hasn't
+    persisted) makes admission correct regardless of poll cadence: a row after
+    expiry is always inert, and a row before expiry is never falsely rejected just
+    because the sweep beat it to the state flip. Oldest ``created_at`` first.
     """
     stmt = (
         select(Watch)
         .where(
             Watch.target_handle == normalize_handle(handle),
-            Watch.state == STATE_ARMED,
+            Watch.state.in_((STATE_ARMED, STATE_EXPIRED)),
         )
         .order_by(Watch.created_at)
     )
     rows = list((await session.execute(stmt)).scalars())
+    arrived = _as_utc(arrived_at)
     return [
         w
         for w in rows
-        if effective_state(w, now=now) == STATE_ARMED
-        and _as_utc(w.created_at) <= _as_utc(arrived_at)
+        if _as_utc(w.created_at) <= arrived <= _as_utc(w.expiry)
     ]
 
 
@@ -157,9 +189,7 @@ async def authorizing_watches(
     floor is irrelevant to an outbound send, so it drops away, leaving the
     armed+unexpired+handle filter.
     """
-    return await active_watches_for_handle(
-        session, handle, now=now, arrived_at=now
-    )
+    return await active_watches_for_handle(session, handle, arrived_at=now)
 
 
 async def retire_watch(session: AsyncSession, watch_id: int) -> Watch | None:

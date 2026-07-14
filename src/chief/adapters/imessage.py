@@ -55,7 +55,11 @@ sender not yet seen for a given unbound watch is recorded as a
 only, never content) via :meth:`IMessageAdapter._maybe_prompt_watch_candidate` —
 confirming one (``confirm_watch_candidate``, :mod:`chief.tools.watches`) binds
 the watch, which then reads as an ordinary armed watch for a later milestone's
-dispatch.
+dispatch. Every tick (#170) also runs :func:`chief.persistence.watches.sweep_expired`,
+retiring any armed watch past its expiry in place; admission
+(:func:`chief.persistence.watches.active_watches_for_handle`) stays timestamp-only,
+so it is unaffected by whether that tick's sweep has already run — a row within its
+watch's window admits regardless of sweep timing.
 """
 
 import asyncio
@@ -694,6 +698,13 @@ class IMessageAdapter(Adapter):
         """
         async with self._session_factory() as session:
             after = await repo.get_cursor(session, PLATFORM) or 0
+        # The adapter's existing tick sweeping watches (#170): retires any armed
+        # watch past its expiry in place, every tick, regardless of whether new
+        # rows arrived — keeps /watches and the web list timely.
+        async with self._session_factory() as session:
+            swept = await watches_repo.sweep_expired(session, now=datetime.now(UTC))
+        for w in swept:
+            logger.info("watch expired", extra={"watch_id": w.id})
         result = await self._runner.run_sqlite(
             self._db_path, build_poll_query(after)
         )
@@ -817,11 +828,10 @@ class IMessageAdapter(Adapter):
         """
         if self._front_desk is None:
             return False
-        now = datetime.now(UTC)
         arrived_at = self._row_time(row)
         async with self._session_factory() as session:
             matched = await watches_repo.active_watches_for_handle(
-                session, sender, now=now, arrived_at=arrived_at
+                session, sender, arrived_at=arrived_at
             )
         if not matched:
             return False
