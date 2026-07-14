@@ -43,7 +43,9 @@ adapters' owner attachments — dedicated-ID mode stays text-only, byte-for-byte
 Self-mode is otherwise as inert as the dedicated-ID posture: any non-self sender —
 including a stale or admin-added guest-tier whitelist row — gets no session, no
 reply, and no card; only the metadata-only ``unknown_senders`` line is written
-(#163).
+(#163) — unless the handle carries an active armed watch (#166), in which case the
+row is admitted as a report-only evaluation dispatched into the self-thread: the
+verdict reports there and nothing is ever sent to the watched thread.
 """
 
 import asyncio
@@ -59,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ..gate.approvals import DRAFT_SEND_KIND, ApprovalCard
 from ..persistence import imessage as repo
+from ..persistence import watches as watches_repo
 from ..persistence.contacts import get_contact
 from ..tools.apple.doctor import CapabilityHealth
 from ..tools.apple.runner import ScriptRunner
@@ -244,6 +247,20 @@ def _card_text(prefix: str, body: str) -> str:
     """A button-less card rendering: iMessage shows text; answers come from the
     web UI / terminal client via the mirror's socket broadcast (#136)."""
     return f"{prefix}\n\n{body}\n\n(Answer from the chief web UI or terminal.)"
+
+
+def watch_dispatch_text(*, sender: str, instruction: str, message: str) -> str:
+    """The report-only evaluation prompt for a watched-thread hit (#166).
+
+    The turn runs in the owner's self-thread, so its verdict ("… — relevant / not
+    relevant") reports back there; nothing is ever sent to the watched thread.
+    """
+    return (
+        f"A watched contact ({sender}) just texted you. Standing instruction for "
+        f"them: {instruction}\n\nTheir message:\n{message}\n\nDecide whether it is "
+        "relevant to that instruction and report back here in the self-thread. Do "
+        "not message them — this is report-only."
+    )
 
 
 class IMessageTaskIO:
@@ -647,10 +664,13 @@ class IMessageAdapter(Adapter):
             return
         is_self_row = self._self_dm and sender in self._self_handles
         if self._self_dm and not is_self_row:
-            # Self-mode posture (#163): every non-self sender is inert, no matter
-            # what the whitelist says — a stale or admin-added guest-tier Contact
-            # row included. No session, no reply, no guest ack, no card; only the
-            # metadata-only sighting lands.
+            # #166 watched-thread tracer: a non-self row on a handle carrying an
+            # active armed watch is admitted as a report-only evaluation dispatched
+            # into the self-thread. Every other non-self row stays inert (#163) —
+            # no session, no reply, no guest ack, no card; only the metadata-only
+            # sighting lands.
+            if await self._admit_watched(sender, text, row):
+                return
             async with self._session_factory() as session:
                 await repo.record_unknown_sender(
                     session,
@@ -699,6 +719,39 @@ class IMessageAdapter(Adapter):
             await self._on_owner(sender, text, atts_raw)
             return
         await self._on_guest(contact.display_name or sender, sender, text)
+
+    async def _admit_watched(
+        self, sender: str, text: str, row: dict[str, Any]
+    ) -> bool:
+        """Report-only watched-thread tracer (#166).
+
+        Dispatch one evaluation turn into the self-thread for each active armed watch
+        on ``sender`` (created before this row, unexpired). Returns ``True`` when at
+        least one watch matched, so the caller skips the inert metadata line.
+        """
+        if self._front_desk is None:
+            return False
+        now = datetime.now(UTC)
+        arrived_at = self._row_time(row)
+        async with self._session_factory() as session:
+            matched = await watches_repo.active_watches_for_handle(
+                session, sender, now=now, arrived_at=arrived_at
+            )
+        if not matched:
+            return False
+        for watch in matched:
+            logger.info(
+                "watch fired",
+                extra={"thread_key": sender, "watch_id": watch.id},
+            )
+            await self._engine.dispatch(
+                thread_key=self._front_desk,
+                text=watch_dispatch_text(
+                    sender=sender, instruction=watch.instruction, message=text
+                ),
+                surface=Surface.DM,
+            )
+        return True
 
     @staticmethod
     def _row_time(row: dict[str, Any]) -> datetime:
