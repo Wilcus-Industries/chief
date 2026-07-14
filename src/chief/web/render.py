@@ -46,6 +46,7 @@ _STYLE = """
     --panel: #241812; --accent: #d98546; --accent-fg: #1c0f05; --danger: #e0603a; } }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
+  min-height: 100dvh; display: flex; flex-direction: column;
   font: 15px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
     "DejaVu Sans Mono", monospace; }
 a { color: var(--accent); }
@@ -62,11 +63,21 @@ header::after { content: ""; position: absolute; left: 0; right: 0; bottom: -8px
   linear-gradient(225deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px; }
 header .brand { font-weight: 700; letter-spacing: .3em; text-transform: uppercase; }
 header .brand::before { content: "\\25c6 "; color: var(--accent); }
-nav { display: flex; gap: .9rem; margin-left: auto; }
+nav { display: flex; gap: .75rem; margin-left: auto; }
 nav a { color: var(--muted); text-decoration: none; padding: .1rem 0;
-  text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; }
+  text-transform: uppercase; letter-spacing: .08em; font-size: .78rem; }
 nav a.active { color: var(--fg); border-bottom: 2px solid var(--accent); }
-main { max-width: 44rem; margin: 0 auto; padding: 1.1rem .9rem .9rem; }
+main { max-width: 44rem; margin: 0 auto; padding: 1.1rem .9rem .9rem;
+  width: 100%; flex: 1; display: flex; flex-direction: column; }
+main > * { flex: 0 0 auto; }
+/* login/setup: no nav anywhere to go — one centered brand block instead */
+body.bare main { justify-content: center; padding-bottom: 5rem; }
+.auth-brand { text-align: center; font-weight: 700; letter-spacing: .5em;
+  text-transform: uppercase; font-size: 1.35rem; text-indent: .5em; }
+.auth-brand::before { content: "\\25c6"; display: block; color: var(--accent);
+  letter-spacing: 0; text-indent: 0; margin-bottom: .5rem; }
+.auth-brand + .band { margin: 1rem 0 1.6rem; }
+body.bare h1 { text-align: center; }
 h1 { font-size: .95rem; margin: .2rem 0 .8rem; text-transform: uppercase;
   letter-spacing: .14em; color: var(--muted); font-weight: 600; }
 h1::before { content: "\\25c6 "; color: var(--accent); font-size: .7em; }
@@ -78,6 +89,10 @@ input, select, button, textarea { font: inherit; color: inherit; }
 input[type=text], input[type=password], input[type=file], select, textarea {
   width: 100%; padding: .55rem .65rem; border: 1px solid var(--line);
   border-radius: 0; background: var(--panel); }
+input[type=file]::file-selector-button { font: inherit; font-size: .78rem;
+  margin-right: .6rem; padding: .15rem .6rem; border: 1px solid var(--line);
+  border-radius: 0; background: var(--bg); color: var(--muted); cursor: pointer;
+  text-transform: uppercase; letter-spacing: .06em; }
 input::placeholder { color: var(--muted); }
 button { padding: .55rem .9rem; border: 1px solid var(--accent); border-radius: 0;
   background: var(--accent); color: var(--accent-fg); cursor: pointer;
@@ -92,8 +107,7 @@ button.danger { background: transparent; color: var(--danger);
 .panel { background: var(--panel); border: 1px solid var(--line);
   padding: .8rem .9rem; margin: .7rem 0; }
 /* chat */
-.chat { display: flex; flex-direction: column;
-  min-height: calc(100dvh - 8.5rem); }
+.chat { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 .threads { display: flex; gap: .4rem; overflow-x: auto; padding: .5rem 0 .4rem; }
 .threads a { white-space: nowrap; text-decoration: none; color: var(--muted);
   border: 1px solid var(--line); padding: .2rem .7rem; font-size: .8rem;
@@ -146,8 +160,9 @@ button.danger { background: transparent; color: var(--danger);
   linear-gradient(135deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px,
   linear-gradient(225deg, var(--line) 25%, transparent 25%) -4px 0 / 8px 8px; }
 .composer input { flex: 1; }
-#cmd-menu { position: sticky; bottom: 3.6rem; background: var(--panel);
-  border: 1px solid var(--line); max-height: 14rem; overflow-y: auto; }
+#cmd-menu { position: sticky; bottom: 4.3rem; background: var(--panel);
+  border: 1px solid var(--line); max-height: 14rem; overflow-y: auto;
+  margin-bottom: 8px; /* clear the composer's woven band drawn at top:-8px */ }
 .cmd-item { display: flex; gap: .7rem; align-items: baseline;
   padding: .5rem .7rem; cursor: pointer; }
 .cmd-item.selected { background: var(--bg); border-left: 3px solid var(--accent); }
@@ -192,16 +207,20 @@ def page(title: str, body: str, *, active: str | None = None) -> str:
 
 
 def bare_page(title: str, body: str) -> str:
-    """A layout without the nav — for login/setup, where nothing else is reachable."""
+    """A layout without the nav — for login/setup, where nothing else is reachable.
+
+    No header either: a single centered brand block over the woven band carries
+    the identity, and the form hangs from it in the middle of the screen.
+    """
     return (
         "<!doctype html><html><head>"
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{_esc(title)} — chief</title>"
         f"<style>{_STYLE}</style>"
-        "</head><body>"
-        '<header><span class="brand">chief</span></header>'
-        f"<main>{body}</main>"
+        '</head><body class="bare">'
+        '<main><div class="auth-brand">chief</div><div class="band"></div>'
+        f"{body}</main>"
         "</body></html>"
     )
 
