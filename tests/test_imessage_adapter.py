@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from chief.adapters.base import MAX_ATTACHMENT_BYTES
 from chief.adapters.imessage import PLATFORM, IMessageAdapter, IMessageTaskIO
 from chief.persistence import imessage as imessage_repo
+from chief.persistence import watches as watches_repo
 from chief.persistence.contacts import get_contact
 from chief.persistence.models import Contact, UnknownSender
 from imessage_helpers import (
@@ -903,3 +904,221 @@ async def test_self_mode_guest_ack_disabled_path_also_stays_silent(
             session, platform=PLATFORM
         )
     assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+# --- #166 watched-thread admission + report-only evaluation dispatch -----------
+
+
+async def test_self_mode_watched_handle_dispatches_evaluation_to_self_thread(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="let me know when she asks about dinner",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="what time is dinner?",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert len(engine.dispatched) == 1
+    thread_key, text = engine.dispatched[0]
+    assert thread_key == OWNER  # the verdict routes to the owner self-thread
+    assert "let me know when she asks about dinner" in text
+    assert "what time is dinner?" in text
+    assert runner.jxa_calls == []  # nothing sent to the watched thread
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert unknown == []  # admitted, so no inert metadata line
+
+
+async def test_self_mode_pre_creation_row_is_inert(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="old message before the watch",
+        when=now - timedelta(hours=1),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+async def test_self_mode_expired_watch_is_inert(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now - timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="ping",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+async def test_self_mode_cancelled_watch_is_inert(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+        await watches_repo.cancel_watch(session, watch.id)
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="ping",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+async def test_self_mode_watch_is_handle_scoped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    async with session_factory() as session:
+        await watches_repo.create_watch(  # a watch on MOM, not STRANGER
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="unrelated",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(STRANGER, 1)]
+
+
+async def test_self_mode_group_row_never_admitted_despite_watch(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    group = store.add_chat("chat166", style=STYLE_GROUP, room_name="chat166")
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=group,
+        text="group chatter from mom",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert unknown == []  # group rows are skipped wholesale, not even logged

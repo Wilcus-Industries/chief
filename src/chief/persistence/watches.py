@@ -32,6 +32,11 @@ STATE_EXPIRED = "expired"
 STATE_CANCELLED = "cancelled"
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Stamp a naive timestamp as UTC (sqlite hands datetimes back naive)."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def default_expiry(now: datetime) -> datetime:
     """The 14-day default TTL from ``now`` (UTC-aware in and out)."""
     return now + timedelta(days=DEFAULT_TTL_DAYS)
@@ -87,8 +92,38 @@ def effective_state(watch: Watch, *, now: datetime) -> str:
     (and any fire) belongs to the firing milestone (PRD #160); this keeps listings
     truthful today without that sweep existing yet.
     """
-    expiry = watch.expiry
-    stamped = expiry if expiry.tzinfo is not None else expiry.replace(tzinfo=UTC)
-    if watch.state == STATE_ARMED and stamped <= now:
+    if watch.state == STATE_ARMED and _as_utc(watch.expiry) <= now:
         return STATE_EXPIRED
     return watch.state
+
+
+async def active_watches_for_handle(
+    session: AsyncSession,
+    handle: str,
+    *,
+    now: datetime,
+    arrived_at: datetime,
+) -> list[Watch]:
+    """Armed, unexpired watches on ``handle`` that ``arrived_at`` fires.
+
+    The #166 admission predicate: a watch matches only when it is still ``armed``
+    (so ``cancelled``/``fired`` are excluded at the query), is not past its expiry
+    at ``now`` (per :func:`effective_state`, so an armed-but-expired watch is
+    excluded), and was created no later than the row's arrival — a message predating
+    the watch's ``created_at`` floor never fires it. Oldest ``created_at`` first.
+    """
+    stmt = (
+        select(Watch)
+        .where(
+            Watch.target_handle == normalize_handle(handle),
+            Watch.state == STATE_ARMED,
+        )
+        .order_by(Watch.created_at)
+    )
+    rows = list((await session.execute(stmt)).scalars())
+    return [
+        w
+        for w in rows
+        if effective_state(w, now=now) == STATE_ARMED
+        and _as_utc(w.created_at) <= _as_utc(arrived_at)
+    ]

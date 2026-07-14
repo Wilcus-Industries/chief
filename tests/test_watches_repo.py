@@ -113,3 +113,122 @@ def test_effective_state_leaves_cancelled_alone_even_if_past_expiry() -> None:
     )
     cancelled.state = repo.STATE_CANCELLED
     assert repo.effective_state(cancelled, now=NOW) == repo.STATE_CANCELLED
+
+
+MOM = "+15550000002"
+OTHER = "+15550000003"
+
+
+async def test_active_watches_for_handle_matches_armed_unexpired_after_floor(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="tell me about dinner",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+        )
+    assert [w.id for w in matched] == [watch.id]
+
+
+async def test_active_watches_for_handle_excludes_pre_creation_row(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, now=now, arrived_at=now - timedelta(hours=1)
+        )
+    assert matched == []
+
+
+async def test_active_watches_for_handle_excludes_expired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now - timedelta(days=1),
+        )
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+        )
+    assert matched == []
+
+
+async def test_active_watches_for_handle_excludes_cancelled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        await repo.cancel_watch(session, watch.id)
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+        )
+    assert matched == []
+
+
+async def test_active_watches_for_handle_excludes_fired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        row = await repo.get_watch(session, watch.id)
+        assert row is not None
+        row.state = repo.STATE_FIRED
+        await session.commit()
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+        )
+    assert matched == []
+
+
+async def test_active_watches_for_handle_scopes_to_the_handle(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(days=1),
+        )
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, OTHER, now=now, arrived_at=now + timedelta(minutes=1)
+        )
+    assert matched == []
