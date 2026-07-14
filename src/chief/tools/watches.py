@@ -235,12 +235,15 @@ class WatchFireGate:
     The adapter :meth:`~chief.adapters.imessage.IMessageAdapter._admit_watched` tags the
     eval :class:`~chief.core.tasks.Turn` it dispatches with the watch id — those watches
     already passed the created-before-arrival admission gate. A clearance is scoped to
-    its eval turn (#178): :meth:`~chief.core.tasks.TaskManager._run_turn`
+    its eval turn (#178/#179): :meth:`~chief.core.tasks.TaskManager._run_turn`
     :meth:`authorize`\\ s the watch at the turn's start and :meth:`consume`\\ s it at
     the turn's end on every exit path (fired or not, budget-skipped, errored). So a
     clearance is live ONLY while its eval turn runs — never from admit-time through an
     owner turn queued ahead of it, and never trailing into later unwatched traffic in
-    the same owner session. :func:`reply_to_watch` refuses any ``watch_id`` this gate
+    the same owner session. This also closes the sibling-batch race: a second watched
+    inbound in the same poll batch can't clobber an earlier watch's still-pending
+    clearance (#179), because nothing is authorized or cleared at admit.
+    :func:`reply_to_watch` refuses any ``watch_id`` this gate
     hasn't cleared and :meth:`consume`\\ s it on *every* fire (even ``keep_watching``),
     so a clearance is single-use: one eval turn, one send. A watch minted inside the
     eval turn was never dispatched, so it can never fire. The record is in-process and

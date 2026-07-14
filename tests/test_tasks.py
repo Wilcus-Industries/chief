@@ -513,6 +513,53 @@ async def test_non_eval_turn_leaves_other_watch_clearances_intact(
     await mgr.shutdown()
 
 
+async def test_queued_sibling_eval_does_not_clobber_pending_clearance(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #179: two watch evals queue on the one front-desk thread_key, so they run
+    # serially on a single consumer. A sibling eval dispatched while the first is
+    # still pending cannot clear the first's still-live clearance (the fail-closed
+    # race), because each clearance is minted at turn start and consumed at turn end
+    # inside its OWN turn — never at admit. on_start records both clearances' state
+    # at each turn start; gate=hold holds turn A pending after on_start fires.
+    io = FakeIO()
+    gate = WatchFireGate()
+    hold = asyncio.Event()
+    snapshots: list[tuple[bool, bool]] = []
+    sess = FakeSession(
+        model="m",
+        gate=hold,
+        on_start=lambda: snapshots.append(
+            (gate.is_authorized(1), gate.is_authorized(2))
+        ),
+    )
+    svc = WatchService(session_factory=session_factory, fire_gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess), watches_service=svc)
+
+    # Turn A: reaches its pending point (blocked on hold, after on_start).
+    await mgr.dispatch(thread_key="-100:5", text="eval-a", watch_fire_id=1)
+    await _until(lambda: len(snapshots) == 1)
+    assert snapshots[0] == (True, False)  # A minted, B absent
+
+    # Race: dispatch the sibling to the SAME thread_key so it queues behind A. Its
+    # dispatch must not clobber A's still-live clearance nor mint B's early.
+    await mgr.dispatch(thread_key="-100:5", text="eval-b", watch_fire_id=2)
+    assert gate.is_authorized(1)  # A still live
+    assert not gate.is_authorized(2)  # B not started yet
+
+    # Release: A completes and consumes its clearance, then B runs.
+    hold.set()
+    await _until(
+        lambda: len(snapshots) == 2
+        and not gate.is_authorized(1)
+        and not gate.is_authorized(2)
+    )
+    # During B's turn, A's clearance was already consumed — only B's is live, proving
+    # each clearance is scoped to its own turn and a consumed one does not linger.
+    assert snapshots[1] == (False, True)
+    await mgr.shutdown()
+
+
 async def test_dispatch_pre_extracts_pdf_to_text(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
