@@ -1453,6 +1453,7 @@ async def test_doctor_form_round_trip_report_tone(
         send=adapter._io,
         front_desk=OWNER,
         fire_gate=fire_gate,
+        workspace_dir=tmp_path,
     )
     filled = tmp_path / "intake_filled.pdf"
     filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
@@ -1520,6 +1521,7 @@ async def test_doctor_form_round_trip_silent_tone(
         send=adapter._io,
         front_desk=OWNER,
         fire_gate=fire_gate,
+        workspace_dir=tmp_path,
     )
     filled = tmp_path / "intake2_filled.pdf"
     filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
