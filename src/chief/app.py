@@ -613,6 +613,12 @@ def build_engine(
             ),
             front_desk=imessage_front_desk,
             fire_gate=watch_fire_gate,
+            # The reply_to_watch file_path fence (#169 hardening):
+            # settings.workspace_dir is always configured (same root chief.web.files
+            # exposes as the "workspace" area), independent of workspace_enabled — a
+            # file reply is confined to it regardless of whether the shell/Write
+            # tools are also on.
+            workspace_dir=Path(settings.workspace_dir),
         )
         if settings.imessage_configured
         else None

@@ -328,8 +328,13 @@ def _fire_setup(
     tmp_path: Path,
     *,
     fire_gate: WatchFireGate | None = None,
+    workspace_dir: Path | None = None,
 ) -> tuple[WatchService, FixtureRunner]:
-    """A WatchService wired with a real guarded IMessageTaskIO send seam."""
+    """A WatchService wired with a real guarded IMessageTaskIO send seam.
+
+    ``workspace_dir`` defaults to ``tmp_path / "workspace"`` (created) — the fence
+    ``file_path`` replies (#169) must resolve inside.
+    """
     runner = FixtureRunner()
     io = IMessageTaskIO(
         runner,
@@ -339,6 +344,9 @@ def _fire_setup(
         session_factory=session_factory,
         front_desk=OWNER,
     )
+    if workspace_dir is None:
+        workspace_dir = tmp_path / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
     svc = WatchService(
         session_factory=session_factory,
         owner_tz="UTC",
@@ -346,6 +354,7 @@ def _fire_setup(
         send=io,
         front_desk=OWNER,
         fire_gate=fire_gate,
+        workspace_dir=workspace_dir,
     )
     return svc, runner
 
@@ -597,7 +606,7 @@ async def test_reply_to_watch_file_path_sends_and_retires(
 ) -> None:
     svc, runner = _fire_setup(session_factory, tmp_path)
     watch_id = await _armed_watch(session_factory)
-    form = tmp_path / "form.pdf"
+    form = tmp_path / "workspace" / "form.pdf"
     form.write_bytes(b"%PDF-1.4\nfilled form\n")
 
     out = await svc._build_reply().handler(
@@ -644,7 +653,7 @@ async def test_reply_to_watch_file_path_over_cap_errors(
 
     svc, runner = _fire_setup(session_factory, tmp_path)
     watch_id = await _armed_watch(session_factory)
-    big = tmp_path / "big.pdf"
+    big = tmp_path / "workspace" / "big.pdf"
     big.write_bytes(b"x" * (_MAX_REPLY_FILE_BYTES + 1))
 
     out = await svc._build_reply().handler(
@@ -662,7 +671,74 @@ async def test_reply_to_watch_unreadable_file_path_errors(
     watch_id = await _armed_watch(session_factory)
 
     out = await svc._build_reply().handler(
-        {"watch_id": watch_id, "file_path": str(tmp_path / "missing.pdf")}
+        {"watch_id": watch_id, "file_path": str(tmp_path / "workspace" / "missing.pdf")}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
+
+
+async def test_reply_to_watch_file_path_outside_workspace_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#169 medium finding: an unconfined file_path let a prompt-injected eval turn
+    exfiltrate any host-readable file to the watched contact. A path resolving
+    outside the configured workspace must be refused before it's ever read."""
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+    secret = tmp_path / "secret.txt"  # sibling of tmp_path/workspace, NOT inside it
+    secret.write_bytes(b"top secret contents")
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "file_path": str(secret)}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
+    assert "top secret" not in out["content"][0]["text"]
+    async with session_factory() as session:
+        watch = await repo.get_watch(session, watch_id)
+    assert watch is not None and watch.state == repo.STATE_ARMED  # not retired
+
+
+async def test_reply_to_watch_file_path_traversal_outside_workspace_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """Same fence, ``..``-collapsing path — the check runs on the resolved path."""
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    watch_id = await _armed_watch(session_factory)
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"top secret contents")
+    traversal = tmp_path / "workspace" / ".." / "secret.txt"
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "file_path": str(traversal)}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []
+
+
+async def test_reply_to_watch_file_path_without_workspace_configured_errors(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """No workspace_dir wired at all — fail closed, never fall back to open reads."""
+    svc, runner = _fire_setup(session_factory, tmp_path)
+    svc = WatchService(
+        session_factory=svc.session_factory,
+        owner_tz=svc.owner_tz,
+        now=svc.now,
+        send=svc.send,
+        front_desk=svc.front_desk,
+        fire_gate=svc.fire_gate,
+        workspace_dir=None,
+    )
+    watch_id = await _armed_watch(session_factory)
+    form = tmp_path / "workspace" / "form.pdf"
+    form.write_bytes(b"%PDF-1.4\nfilled form\n")
+
+    out = await svc._build_reply().handler(
+        {"watch_id": watch_id, "file_path": str(form)}
     )
 
     assert out["is_error"] is True

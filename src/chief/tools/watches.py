@@ -36,7 +36,11 @@ whenever the iMessage adapter is configured. Five CRUD tools, plus a sixth
   stored contact AS THE OWNER through the guarded iMessage send seam and retire the
   watch (single-fire; ``keep_watching=true`` keeps a standing instruction armed).
   The reply can be text, a file (``file_path``, e.g. a filled-out form chief just
-  wrote), or both (the file with the text as its caption). The model can only
+  wrote), or both (the file with the text as its caption). ``file_path`` must
+  resolve inside ``workspace_dir`` — the watched contact is untrusted, so a
+  prompt-injected eval turn could otherwise point it at any host-readable file
+  (secrets, ``~/.ssh``, the DB) and exfiltrate it; no ``workspace_dir`` configured
+  fails closed (file replies refused, never an unconfined read). The model can only
   target a watch's own ``target_handle``, never a free-form handle. Because this tool
   runs in the owner session — the same one that hosts the untrusted watched-message
   eval turn — a prompt-injected turn could otherwise mint its own watch and fire it;
@@ -179,7 +183,8 @@ _REPLY_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Absolute path to a file chief already wrote to send into the "
-                "watched thread (e.g. a filled-out form, #169)."
+                "watched thread (e.g. a filled-out form, #169). Must resolve "
+                "inside chief's workspace directory — anything else is refused."
             ),
         },
         "keep_watching": {
@@ -311,6 +316,14 @@ class WatchService:
     #: for may fire, so a hijacked turn can't mint and fire its own watch. ``None`` in
     #: unit tests that drive ``reply_to_watch`` directly; production always wires it.
     fire_gate: WatchFireGate | None = None
+    #: The fence a ``reply_to_watch`` ``file_path`` must resolve inside (#169
+    #: hardening). Without a root, a prompt-injected eval turn could point
+    #: ``file_path`` at any host-readable file (secrets, ~/.ssh, the DB) and have it
+    #: sent to the watched contact — an unbounded read, not just attacker-chosen
+    #: text. ``None`` fails closed: file replies are refused outright, never opened
+    #: to an unconfined read. Production wires ``settings.workspace_dir`` (the same
+    #: root the web UI's workspace file area uses, :mod:`chief.web.files`).
+    workspace_dir: Path | None = None
 
     @property
     def _can_fire(self) -> bool:
@@ -497,6 +510,9 @@ class WatchService:
         factory, now_fn = self.session_factory, self.now
         send, front_desk = self.send, self.front_desk
         fire_gate = self.fire_gate
+        workspace_root = (
+            self.workspace_dir.resolve() if self.workspace_dir is not None else None
+        )
         assert send is not None and front_desk is not None  # gated by _can_fire
 
         @tool("reply_to_watch", _REPLY_DESCRIPTION, _REPLY_SCHEMA)
@@ -512,8 +528,29 @@ class WatchService:
             data: bytes | None = None
             filename: str | None = None
             if file_path is not None:
+                # The fence (#169 hardening): file_path must resolve inside the
+                # configured workspace root BEFORE it's ever opened, so a
+                # prompt-injected eval turn can't read arbitrary host files (secrets,
+                # ~/.ssh, the DB) into a reply sent to the watched contact. No root
+                # configured fails closed — file replies are refused outright, same
+                # as an escape attempt, never silently unconfined.
+                if workspace_root is None:
+                    return _text_result(
+                        "File replies aren't available (no workspace configured).",
+                        is_error=True,
+                    )
+                candidate = Path(file_path).resolve()
+                if (
+                    candidate == workspace_root
+                    or not candidate.is_relative_to(workspace_root)
+                ):
+                    return _text_result(
+                        f"{file_path} is outside chief's workspace — file replies "
+                        "may only send files chief already wrote there.",
+                        is_error=True,
+                    )
                 try:
-                    data = Path(file_path).read_bytes()
+                    data = candidate.read_bytes()
                 except OSError:
                     return _text_result(
                         f"Couldn't read {file_path}.", is_error=True
@@ -524,7 +561,7 @@ class WatchService:
                         f"{file_path} is over the {cap_mb}MB reply file cap.",
                         is_error=True,
                     )
-                filename = Path(file_path).name
+                filename = candidate.name
             keep_watching = bool(args.get("keep_watching"))
             async with factory() as session:
                 watch = await repo.get_watch(session, watch_id)
