@@ -45,6 +45,7 @@ SQLITE3_PATH = "/usr/bin/sqlite3"
 PBCOPY_PATH = "/usr/bin/pbcopy"
 PBPASTE_PATH = "/usr/bin/pbpaste"
 SCREENCAPTURE_PATH = "/usr/sbin/screencapture"
+SIPS_PATH = "/usr/bin/sips"
 
 #: Captured macOS permission-denial shapes (see ``tests/test_apple_runner.py``; the
 #: live suite re-validates them on the real Mac so they can't drift):
@@ -131,6 +132,7 @@ class ScriptRunner:
     pbcopy_path: str = PBCOPY_PATH
     pbpaste_path: str = PBPASTE_PATH
     screencapture_path: str = SCREENCAPTURE_PATH
+    sips_path: str = SIPS_PATH
 
     async def run(
         self, argv: Sequence[str], *, stdin: bytes | None = None
@@ -212,3 +214,8 @@ class ScriptRunner:
         return await self.run(
             [self.sqlite3_path, "-readonly", "-json", db_path, query]
         )
+
+    async def run_sips(self, args: Sequence[str]) -> ScriptResult:
+        """Run the sips CLI (HEIC/HEIF → JPEG conversion, #162 — no TCC grant needed,
+        just a plain system binary)."""
+        return await self.run([self.sips_path, *args])

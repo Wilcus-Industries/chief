@@ -13,11 +13,18 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from chief.adapters.base import MAX_ATTACHMENT_BYTES
 from chief.adapters.imessage import PLATFORM, IMessageAdapter, IMessageTaskIO
 from chief.persistence import imessage as imessage_repo
 from chief.persistence.contacts import get_contact
 from chief.persistence.models import Contact, UnknownSender
-from imessage_helpers import STYLE_GROUP, ChatDb, FakeEngine, FixtureRunner
+from imessage_helpers import (
+    FAKE_JPEG_BYTES,
+    STYLE_GROUP,
+    ChatDb,
+    FakeEngine,
+    FixtureRunner,
+)
 
 OWNER = "+15550000001"
 MOM = "+15550000002"
@@ -479,3 +486,342 @@ async def test_self_dm_off_still_dispatches_a_bot_prefixed_owner_row(
     await adapter.poll_once()
 
     assert engine.dispatched == [(OWNER, "🤖 hi")]
+
+
+# ---- self-DM media intake (#162) ---------------------------------------------------
+
+
+async def test_self_dm_image_attachment_dispatches_with_attachment_payload(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0001.jpg"
+    jpeg_bytes = b"\xff\xd8\xff\xe0REALJPEGBYTES"
+    image_path.write_bytes(jpeg_bytes)
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="check this out"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0001.jpg",
+        total_bytes=len(jpeg_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "check this out")]
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "image/jpeg"
+    assert att.data == jpeg_bytes
+
+
+async def test_self_dm_heic_attachment_converts_to_jpeg(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, runner=runner
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    heic_path = tmp_path / "IMG_0002.HEIC"
+    heic_path.write_bytes(b"placeholder heic bytes")
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="from my phone"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(heic_path),
+        mime_type="image/heic",
+        transfer_name="IMG_0002.HEIC",
+        total_bytes=heic_path.stat().st_size,
+    )
+
+    await adapter.poll_once()
+
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "image/jpeg"
+    assert att.data == FAKE_JPEG_BYTES
+    assert len(runner.sips_calls) == 1
+    call = runner.sips_calls[0]
+    assert str(heic_path) in call
+    assert "--out" in call
+
+
+async def test_self_dm_pdf_attachment_dispatches(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, runner=runner
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    pdf_bytes = b"%PDF-1.4\n%fake pdf content\n"
+    pdf_path = tmp_path / "report.pdf"
+    pdf_path.write_bytes(pdf_bytes)
+    msg = store.add_message(handle_rowid=handle, chat_rowid=chat, text="read this")
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(pdf_path),
+        mime_type="application/pdf",
+        transfer_name="report.pdf",
+        total_bytes=len(pdf_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.media_type == "application/pdf"
+    assert att.data == pdf_bytes
+    assert runner.sips_calls == []
+
+
+async def test_self_dm_textless_image_attachment_admitted(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0003.jpg"
+    jpeg_bytes = b"\xff\xd8\xff\xe0NOTEXT"
+    image_path.write_bytes(jpeg_bytes)
+    # The self-chat's textless received copy has no chat_message_join (chat_id NULL).
+    msg = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0003.jpg",
+        total_bytes=len(jpeg_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "")]
+    assert len(engine.dispatched_attachments) == 1
+    assert len(engine.dispatched_attachments[0]) == 1
+
+
+async def test_self_dm_image_with_caption_dispatches_as_one_message(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0004.jpg"
+    jpeg_bytes = b"\xff\xd8\xff\xe0CAPTIONED"
+    image_path.write_bytes(jpeg_bytes)
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="look at this"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0004.jpg",
+        total_bytes=len(jpeg_bytes),
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "look at this")]
+    assert len(engine.dispatched_attachments) == 1
+    assert len(engine.dispatched_attachments[0]) == 1
+
+
+async def test_plugin_payload_attachment_skipped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    # A row with real caption text plus a rich-link preview (mime_type NULL):
+    # dispatches on the text, but carries no attachment.
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="check this link"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(tmp_path / "richlink.plist"),
+        mime_type=None,
+        transfer_name="pluginPayloadAttachment",
+    )
+    # A second row: only a rich-link preview, no text at all — no dispatch, no crash.
+    msg2 = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg2,
+        filename=str(tmp_path / "richlink2.plist"),
+        mime_type=None,
+        transfer_name="pluginPayloadAttachment",
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "check this link")]
+    assert engine.dispatched_attachments == [()]
+
+
+async def test_self_dm_attachment_over_size_cap_dropped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0005.jpg"
+    image_path.write_bytes(b"\xff\xd8\xff\xe0TOO BIG")
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="huge file"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0005.jpg",
+        total_bytes=MAX_ATTACHMENT_BYTES + 1,
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "huge file")]
+    assert engine.dispatched_attachments == [()]
+
+
+async def test_self_dm_textless_oversized_attachment_no_dispatch(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0006.jpg"
+    image_path.write_bytes(b"\xff\xd8\xff\xe0TOO BIG NO CAPTION")
+    msg = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0006.jpg",
+        total_bytes=MAX_ATTACHMENT_BYTES + 1,
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+
+
+async def test_self_dm_unsupported_mime_attachment_dropped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    video_path = tmp_path / "clip.mov"
+    video_path.write_bytes(b"fake quicktime bytes")
+    msg = store.add_message(
+        handle_rowid=handle, chat_rowid=chat, text="watch this"
+    )
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(video_path),
+        mime_type="video/quicktime",
+        transfer_name="clip.mov",
+        total_bytes=video_path.stat().st_size,
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "watch this")]
+    assert engine.dispatched_attachments == [()]
+
+
+async def test_self_dm_own_file_send_echo_is_filtered(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, runner=runner, io=io
+    )
+    handle = store.add_handle(OWNER)
+    await adapter.prime()
+
+    await io.send_file(OWNER, "chart.png", b"chart bytes")  # records "chart.png"
+
+    # The self-chat's received-copy echo of chief's own file send: no text, an
+    # attachment whose transfer_name matches the recorded send.
+    echo_path = tmp_path / "chart_echo.png"
+    echo_path.write_bytes(b"chart bytes")
+    msg = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(echo_path),
+        mime_type="image/png",
+        transfer_name="chart.png",
+        total_bytes=echo_path.stat().st_size,
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == []  # echo consumed, never re-dispatched
+
+
+async def test_self_dm_off_textless_attachment_row_dropped(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # Scope guard (#162): dedicated-ID mode keeps its exact current text-only
+    # behavior — a textless attachment row, even from the owner, is dropped.
+    adapter, store, _, engine = make_adapter(tmp_path, session_factory)
+    handle = store.add_handle(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0007.jpg"
+    image_path.write_bytes(b"\xff\xd8\xff\xe0DEDICATED ID")
+    msg = store.add_message(handle_rowid=handle, chat_rowid=None, text=None)
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0007.jpg",
+        total_bytes=image_path.stat().st_size,
+    )
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == []

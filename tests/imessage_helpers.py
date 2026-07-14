@@ -75,11 +75,28 @@ CREATE TABLE chat_handle_join (
     handle_id INTEGER REFERENCES handle (ROWID),
     UNIQUE (chat_id, handle_id)
 );
+CREATE TABLE attachment (
+    ROWID INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
+    guid TEXT UNIQUE NOT NULL,
+    filename TEXT,
+    mime_type TEXT,
+    transfer_name TEXT,
+    total_bytes INTEGER DEFAULT 0
+);
+CREATE TABLE message_attachment_join (
+    message_id INTEGER REFERENCES message (ROWID),
+    attachment_id INTEGER REFERENCES attachment (ROWID),
+    PRIMARY KEY (message_id, attachment_id)
+);
 """
 
 #: ``chat.style`` values macOS writes: 45 = a 1:1 DM chat, 43 = a group chat.
 STYLE_DM = 45
 STYLE_GROUP = 43
+
+#: A minimal-but-real JPEG-shaped byte string sips "produces" in the fixture (#162);
+#: the test boundary is the ``sips`` subprocess call, not the actual image codec.
+FAKE_JPEG_BYTES = b"\xff\xd8\xff\xe0FAKEJPEGDATA"
 
 
 def apple_ns(when: datetime) -> int:
@@ -178,6 +195,41 @@ class ChatDb:
             when=when,
         )
 
+    def add_attachment(
+        self,
+        *,
+        message_rowid: int,
+        filename: str,
+        mime_type: str | None,
+        transfer_name: str | None = None,
+        total_bytes: int = 0,
+    ) -> int:
+        """Join one attachment row onto ``message_rowid`` (a real fixture file).
+
+        ``filename`` should be an absolute path under ``tmp_path`` pointing at
+        bytes the test actually wrote to disk — the central mechanism reads that
+        real file, so the fixture must give it one.
+        """
+        with sqlite3.connect(self.path) as conn:
+            cur = conn.execute(
+                "INSERT INTO attachment (guid, filename, mime_type, "
+                "transfer_name, total_bytes) VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"att-{message_rowid}-{filename}",
+                    filename,
+                    mime_type,
+                    transfer_name,
+                    total_bytes,
+                ),
+            )
+            attachment_rowid = int(cur.lastrowid or 0)
+            conn.execute(
+                "INSERT INTO message_attachment_join (message_id, attachment_id) "
+                "VALUES (?, ?)",
+                (message_rowid, attachment_rowid),
+            )
+            return attachment_rowid
+
 
 class FixtureRunner(ScriptRunner):
     """A ScriptRunner faked at the subprocess seam, with a REAL store behind it.
@@ -192,6 +244,7 @@ class FixtureRunner(ScriptRunner):
     def __init__(self, *osascript_results: ScriptResult) -> None:
         super().__init__()
         self.jxa_calls: list[tuple[str, ...]] = []
+        self.sips_calls: list[tuple[str, ...]] = []
         self._jxa_results = list(osascript_results) or [
             ScriptResult("sent\n", "", 0)
         ]
@@ -208,6 +261,10 @@ class FixtureRunner(ScriptRunner):
             if len(self._jxa_results) > 1:
                 return self._jxa_results.pop(0)
             return self._jxa_results[0]
+        if argv[0] == self.sips_path:
+            self.sips_calls.append(argv)
+            Path(argv[-1]).write_bytes(FAKE_JPEG_BYTES)
+            return ScriptResult("", "", 0)
         raise AssertionError(f"unexpected binary {argv[0]!r}")
 
     @staticmethod
@@ -226,6 +283,7 @@ class FakeEngine:
 
     def __init__(self) -> None:
         self.dispatched: list[tuple[str, str]] = []
+        self.dispatched_attachments: list[tuple[Attachment, ...]] = []
         self.dispatched_guests: list[tuple[str, str, str | None]] = []
         self.cancelled: list[str] = []
 
@@ -239,6 +297,7 @@ class FakeEngine:
         surface: Surface = Surface.DM,
     ) -> None:
         self.dispatched.append((thread_key, text))
+        self.dispatched_attachments.append(attachments)
 
     async def dispatch_guest(
         self,
