@@ -999,8 +999,9 @@ def build_imessage_stack(
         session_factory=session_factory,
         front_desk=front_desk,
     )
-    # The eval-turn fire gate (#167), shared by the adapter (which clears a watch when
-    # a real inbound dispatches its eval) and the fire tool (refuses any other watch).
+    # The eval-turn fire gate (#167): the engine mints a watch's clearance at the eval
+    # turn's start and consumes it at turn end (#178), and the fire tool refuses any
+    # watch it hasn't cleared. Shared by the engine and the fire tool.
     fire_gate = WatchFireGate()
     manager = build_engine(
         settings,
@@ -1027,7 +1028,6 @@ def build_imessage_stack(
         engine=manager,
         session_factory=session_factory,
         io=io,
-        fire_gate=fire_gate,
         owner_handles=settings.imessage_owner_handles,
         guest_ack=settings.guest_ack,
         guest_enabled=settings.guest_enabled,

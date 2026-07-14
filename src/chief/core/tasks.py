@@ -1834,6 +1834,17 @@ class TaskManager:
         return task.tier == "owner"
 
     async def _run_turn(self, task: _RunningTask, turn: Turn) -> None:
+        # #178 (leading edge): a watch eval's fire clearance is minted here, at turn
+        # start, scoped to exactly this turn — NOT at poll-admit. So it is live only
+        # while this eval turn runs (bounded by its own duration), never from admit-time
+        # through any owner turn already in flight or queued ahead of it. Only the
+        # adapter's admit path tags a Turn with ``watch_fire_id``, so this is
+        # security-equivalent to authorizing at admit but without the cross-turn window;
+        # the outer finally consumes it on every exit path.
+        if turn.watch_fire_id is not None and self._watches_service is not None:
+            gate = self._watches_service.fire_gate
+            if gate is not None:
+                gate.authorize(turn.watch_fire_id)
         try:
             if not await self._budget_admits():
                 # paused at budget — skip without spending (owner already nudged)
@@ -1918,7 +1929,7 @@ class TaskManager:
             finally:
                 task.generating = False
         finally:
-            # #178: a watch eval's fire clearance is scoped to exactly this turn —
+            # #178: the clearance minted at turn start is scoped to exactly this turn —
             # consume it on every exit path (fired or not, budget-skipped, errored),
             # so a stale clearance can't be hijacked by later unwatched traffic in
             # this same owner session.

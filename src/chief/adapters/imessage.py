@@ -81,7 +81,7 @@ from ..persistence import watches as watches_repo
 from ..persistence.contacts import get_contact
 from ..tools.apple.doctor import CapabilityHealth
 from ..tools.apple.runner import ScriptRunner
-from ..tools.watches import GhostSendRefused, WatchFireGate
+from ..tools.watches import GhostSendRefused
 from .base import (
     MAX_ATTACHMENT_BYTES,
     MAX_ATTACHMENTS,
@@ -291,11 +291,12 @@ def watch_dispatch_text(
     the eval runs in the owner session where ``create_watch`` is pre-approved, so a
     hijacked turn could otherwise mint its own watch on an attacker handle and fire
     it; the :class:`~chief.tools.watches.WatchFireGate` blocks that by only clearing a
-    watch a real inbound dispatched an eval for (see :meth:`_admit_watched`), scoping
-    that clearance to the eval turn itself (consumed at turn end by
-    :meth:`~chief.core.tasks.TaskManager._run_turn`, #178), and the send seam then
-    re-checks watch authorization as a backstop. A refused ghost-send RAISES rather
-    than dropping silently, so a blocked fire can't read as delivered.
+    watch a real inbound dispatched an eval for. :meth:`_admit_watched` tags that eval
+    turn with the watch id, and :meth:`~chief.core.tasks.TaskManager._run_turn` mints
+    the clearance at the turn's start and consumes it at the turn's end (#178), so it
+    is live only while that eval turn runs. The send seam then re-checks watch
+    authorization as a backstop. A refused ghost-send RAISES rather than dropping
+    silently, so a blocked fire can't read as delivered.
     """
     safe = message.replace("BEGIN UNTRUSTED", "BEGIN_UNTRUSTED").replace(
         "END UNTRUSTED", "END_UNTRUSTED"
@@ -589,7 +590,6 @@ class IMessageAdapter(Adapter):
         memory: MemoryReader | None = None,
         commands: CommandRegistry | None = None,
         self_dm: bool = False,
-        fire_gate: WatchFireGate | None = None,
     ) -> None:
         self._runner = runner
         self._db_path = db_path
@@ -616,9 +616,6 @@ class IMessageAdapter(Adapter):
         self._poll_seconds = poll_seconds
         self._memory = memory
         self._commands = commands or OWNER_COMMANDS
-        #: Cleared-to-fire gate (#167): the adapter authorizes a watch's fire here, so a
-        #: watch minted inside the eval turn (never dispatched) can never reply-send.
-        self._fire_gate = fire_gate
         self._prompted_admission: set[int] = set()
         self._stop = asyncio.Event()
         self._failures = 0
@@ -863,29 +860,18 @@ class IMessageAdapter(Adapter):
             )
         if not matched:
             return False
-        # Drop any clearance a prior eval turn left behind (#167 medium): a watch whose
-        # eval concluded without firing, or a keep_watching watch, must not stay
-        # fireable into a later (possibly hijacked) turn. As of #178 each eval turn
-        # consumes its own clearance at turn end (see TaskManager._run_turn), so this
-        # clear() is now a backstop, not the primary bound. Only the watches THIS
-        # inbound dispatches may fire; a standing watch re-authorizes on its own next
-        # inbound.
-        if self._fire_gate is not None:
-            self._fire_gate.clear()
         attachments = await self._build_attachments(atts_raw)
         for watch in matched:
             logger.info(
                 "watch eval dispatched",
                 extra={"thread_key": sender, "watch_id": watch.id},
             )
-            # Clear THIS watch to fire (#167): reply_to_watch refuses any watch a real
-            # inbound didn't dispatch, so a hijacked eval turn can't mint and fire its
-            # own. Only watches that passed active_watches_for_handle reach here. The
-            # clearance is scoped to the eval turn we dispatch below — it carries the
-            # watch id (#178) and _run_turn consumes it at turn end, so it can't leak
-            # into later unwatched traffic in this same owner session.
-            if self._fire_gate is not None:
-                self._fire_gate.authorize(watch.id)
+            # Tag the eval dispatch with the watch id (#178): the fire clearance is
+            # minted by TaskManager._run_turn at the eval turn's start and consumed at
+            # its end, so it is live ONLY while that turn runs — never from admit-time
+            # through an owner turn queued ahead of it. reply_to_watch still refuses any
+            # watch a real inbound didn't dispatch, so a hijacked turn can't mint and
+            # fire its own; only watches past active_watches_for_handle reach here.
             await self._engine.dispatch(
                 thread_key=self._front_desk,
                 text=watch_dispatch_text(
