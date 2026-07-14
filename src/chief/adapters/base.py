@@ -20,7 +20,7 @@ from ..gate.approvals import ApprovalAction
 from ..memory.store import Fact
 from ..persistence import contacts as contact_repo
 from ..persistence import usage
-from ..persistence.models import Contact, Task
+from ..persistence.models import Contact, Task, Watch
 from ..persistence.rate_limits import check_and_increment
 
 ReadyHook = Callable[[], Awaitable[None]]
@@ -560,6 +560,8 @@ class Engine(Protocol):
     async def route(self, thread_key: str, category: str) -> str: ...
     async def downgrade_live_sessions(self) -> None: ...
     async def composed_skills(self) -> list[str]: ...
+    async def list_watches(self) -> list[Watch]: ...
+    async def cancel_watch(self, watch_id: int) -> str: ...
 
 
 class ApprovalResolver(Protocol):
