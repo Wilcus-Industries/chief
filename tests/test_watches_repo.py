@@ -132,7 +132,7 @@ async def test_active_watches_for_handle_matches_armed_unexpired_after_floor(
         )
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+            session, MOM, arrived_at=now + timedelta(minutes=1)
         )
     assert [w.id for w in matched] == [watch.id]
 
@@ -150,7 +150,7 @@ async def test_active_watches_for_handle_excludes_pre_creation_row(
         )
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, MOM, now=now, arrived_at=now - timedelta(hours=1)
+            session, MOM, arrived_at=now - timedelta(hours=1)
         )
     assert matched == []
 
@@ -168,7 +168,7 @@ async def test_active_watches_for_handle_excludes_expired(
         )
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+            session, MOM, arrived_at=now + timedelta(minutes=1)
         )
     assert matched == []
 
@@ -188,7 +188,7 @@ async def test_active_watches_for_handle_excludes_cancelled(
         await repo.cancel_watch(session, watch.id)
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+            session, MOM, arrived_at=now + timedelta(minutes=1)
         )
     assert matched == []
 
@@ -211,7 +211,7 @@ async def test_active_watches_for_handle_excludes_fired(
         await session.commit()
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, MOM, now=now, arrived_at=now + timedelta(minutes=1)
+            session, MOM, arrived_at=now + timedelta(minutes=1)
         )
     assert matched == []
 
@@ -229,9 +229,127 @@ async def test_active_watches_for_handle_scopes_to_the_handle(
         )
     async with session_factory() as session:
         matched = await repo.active_watches_for_handle(
-            session, OTHER, now=now, arrived_at=now + timedelta(minutes=1)
+            session, OTHER, arrived_at=now + timedelta(minutes=1)
         )
     assert matched == []
+
+
+async def test_active_watches_for_handle_boundary_just_before_and_after_expiry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # expiry a few seconds out (not "now") so ``created_at`` — stamped at insert
+    # time — is safely before both boundary timestamps we check against.
+    expiry = datetime.now(UTC) + timedelta(seconds=10)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=expiry,
+        )
+    async with session_factory() as session:
+        admits = await repo.active_watches_for_handle(
+            session, MOM, arrived_at=expiry - timedelta(seconds=1)
+        )
+    assert [w.id for w in admits] == [watch.id]
+    async with session_factory() as session:
+        rejects = await repo.active_watches_for_handle(
+            session, MOM, arrived_at=expiry + timedelta(seconds=1)
+        )
+    assert rejects == []
+
+
+async def test_active_watches_for_handle_admits_even_after_sweep_flips_state(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Admission is independent of the sweep's timing: a legitimately in-window
+    row still admits even if a later real 'now' already flipped the row to
+    expired (simulating an unlucky race between poll cadence and the sweep)."""
+    expiry = datetime.now(UTC) + timedelta(seconds=10)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=expiry,
+        )
+    async with session_factory() as session:
+        row = await repo.get_watch(session, watch.id)
+        assert row is not None
+        row.state = repo.STATE_EXPIRED
+        await session.commit()
+    async with session_factory() as session:
+        matched = await repo.active_watches_for_handle(
+            session, MOM, arrived_at=expiry - timedelta(seconds=1)
+        )
+    assert [w.id for w in matched] == [watch.id]
+
+
+async def test_sweep_expired_retires_only_armed_watches_past_expiry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        past_armed = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="past armed",
+            expiry=NOW - timedelta(days=1),
+        )
+        future_armed = await repo.create_watch(
+            session,
+            target_handle=OTHER,
+            instruction="future armed",
+            expiry=NOW + timedelta(days=1),
+        )
+        past_cancelled = await repo.create_watch(
+            session,
+            target_handle="+15550000004",
+            instruction="past cancelled",
+            expiry=NOW - timedelta(days=1),
+        )
+        await repo.cancel_watch(session, past_cancelled.id)
+        past_fired = await repo.create_watch(
+            session,
+            target_handle="+15550000005",
+            instruction="past fired",
+            expiry=NOW - timedelta(days=1),
+        )
+        row = await repo.get_watch(session, past_fired.id)
+        assert row is not None
+        row.state = repo.STATE_FIRED
+        await session.commit()
+    async with session_factory() as session:
+        swept = await repo.sweep_expired(session, now=NOW)
+    assert [w.id for w in swept] == [past_armed.id]
+
+    async def _state(session: AsyncSession, watch_id: int) -> str:
+        row = await repo.get_watch(session, watch_id)
+        assert row is not None
+        return row.state
+
+    async with session_factory() as session:
+        assert await _state(session, past_armed.id) == repo.STATE_EXPIRED
+        assert await _state(session, future_armed.id) == repo.STATE_ARMED
+        assert await _state(session, past_cancelled.id) == repo.STATE_CANCELLED
+        assert await _state(session, past_fired.id) == repo.STATE_FIRED
+
+
+async def test_sweep_expired_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=NOW - timedelta(days=1),
+        )
+    async with session_factory() as session:
+        first = await repo.sweep_expired(session, now=NOW)
+    assert [w.id for w in first] == [watch.id]
+    async with session_factory() as session:
+        second = await repo.sweep_expired(session, now=NOW)
+    assert second == []
 
 
 # ---- unbound-watch candidates (#168) ----------------------------------------------
