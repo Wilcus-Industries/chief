@@ -332,3 +332,29 @@ class Schedule(Base):
     predicate: Mapped[str | None] = mapped_column(default=None)  # bash cmd / agent ask
     predicate_type: Mapped[str | None] = mapped_column(default=None)  # "bash" | "agent"
     last_result: Mapped[bool | None] = mapped_column(default=None)  # None ⇒ never run
+
+
+class Watch(Base):
+    """A standing instruction over one iMessage thread (#165, part of PRD #160).
+
+    Owner-managed access + authorization over a normally-inert non-self thread: the
+    owner instructs chief in the self-thread ("if mom texts me today about x, tell
+    her y"), chief resolves the target handle via Contacts and records the
+    instruction, its expiry (a parsed bound, else the 14-day default), and a
+    reporting tone. ``created_at`` is the read-scope floor a later firing milestone
+    will enforce (only messages arriving after it ever admit); this slice only
+    creates, lists, and cancels a watch — nothing fires yet, so ``state`` is either
+    ``armed`` or ``cancelled`` here (``fired``/``expired`` are reserved for that
+    later milestone; ``expired`` is also derived read-only at list time — see
+    :func:`chief.persistence.watches.effective_state`).
+    """
+
+    __tablename__ = "watches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_handle: Mapped[str]  # normalized handle (imessage.normalize_handle)
+    instruction: Mapped[str]
+    tone: Mapped[str] = mapped_column(default="report")  # "report" | "silent"
+    state: Mapped[str] = mapped_column(default="armed")  # armed|fired|expired|cancelled
+    expiry: Mapped[datetime]
+    created_at: Mapped[datetime] = mapped_column(default=_utcnow)

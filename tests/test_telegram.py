@@ -29,7 +29,7 @@ from chief.memory.store import Fact
 from chief.persistence import contacts as contact_repo
 from chief.persistence import usage
 from chief.persistence.contacts import get_or_create_contact
-from chief.persistence.models import Contact, Task
+from chief.persistence.models import Contact, Task, Watch
 
 OWNER_ID = 42
 BOT_ID = 7000
@@ -123,6 +123,12 @@ class FakeEngine:
 
     async def downgrade_live_sessions(self) -> None:
         self.downgraded += 1
+
+    async def list_watches(self) -> list[Watch]:
+        return []
+
+    async def cancel_watch(self, watch_id: int) -> str:
+        return f"Cancelled #{watch_id}."
 
 
 class FakeResolver:

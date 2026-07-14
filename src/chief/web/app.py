@@ -12,6 +12,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 
@@ -47,6 +48,8 @@ from ..client_plane import (
 )
 from ..config import parse_hhmm
 from ..persistence import imessage as imessage_repo
+from ..persistence import watches as watches_repo
+from ..persistence.watches import effective_state as watches_effective_state
 from . import render
 from .auth import MIN_PASSWORD_LENGTH, SESSION_COOKIE, SESSION_MAX_AGE, WebAuth
 from .bridge import BridgeError, SocketBridge
@@ -117,6 +120,29 @@ class IMessagePanel:
 
 
 @dataclass
+class WatchesPanel:
+    """The web side of watches (#165): read-only — manage via chat or /watches."""
+
+    session_factory: async_sessionmaker[AsyncSession]
+
+    async def entries(self) -> list[tuple[str, str, str, str, str]]:
+        """``(target, instruction, expiry, tone, state)`` rows, newest first."""
+        async with self.session_factory() as session:
+            rows = await watches_repo.list_watches(session)
+        now = datetime.now(UTC)
+        return [
+            (
+                w.target_handle,
+                w.instruction,
+                f"{w.expiry:%Y-%m-%d %H:%M} UTC",
+                w.tone,
+                watches_effective_state(w, now=now),
+            )
+            for w in rows
+        ]
+
+
+@dataclass
 class WebDeps:
     """Everything the app serves with — injected, never constructed by routes."""
 
@@ -130,6 +156,8 @@ class WebDeps:
     settings_panel: SettingsPanel | None = None
     #: The iMessage whitelist panel (#156). ``None`` hides that section.
     imessage: IMessagePanel | None = None
+    #: The watches read-only panel (#165). ``None`` hides that section.
+    watches: WatchesPanel | None = None
     #: The health page's pluggable checklist (append to extend the page).
     health: tuple[HealthCheck, ...] | list[HealthCheck] = ()
 
@@ -556,6 +584,9 @@ def build_web_app(deps: WebDeps) -> Starlette:
             imessage_html = render.imessage_section(
                 await deps.imessage.entries(), await deps.imessage.unknown()
             )
+        watches_html = ""
+        if deps.watches is not None:
+            watches_html = render.watches_section(await deps.watches.entries())
         body = render.settings_page_body(
             telegram_connected=secrets.exists("telegram_bot_token"),
             discord_connected=secrets.exists("discord_bot_token"),
@@ -570,6 +601,7 @@ def build_web_app(deps: WebDeps) -> Starlette:
                 )
             },
             imessage_html=imessage_html,
+            watches_html=watches_html,
             error=error,
         )
         return render.page("Settings", body, active="/settings")
