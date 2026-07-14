@@ -1201,6 +1201,50 @@ async def test_self_mode_each_inbound_tags_its_own_watch_evaluation(
     assert engine.dispatched_watch_fire_ids == [mom_watch.id, stranger_watch.id]
 
 
+async def test_self_mode_batch_of_watched_inbounds_each_tags_own_clearance(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#179: two watched inbounds from different senders in ONE poll batch each
+    dispatch an eval tagged with their own watch id, in arrival order. The second
+    inbound's admit does not disturb the first's dispatch/clearance — the adapter
+    holds no fire gate, so a batch can't clobber a sibling's still-pending
+    clearance (it is minted/consumed inside each watch's own eval turn)."""
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    mom_h, mom_c = store.add_handle(MOM), store.add_chat(MOM)
+    stranger_h, stranger_c = store.add_handle(STRANGER), store.add_chat(STRANGER)
+    async with session_factory() as session:
+        mom_watch = await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="reply about dinner",
+            expiry=now + timedelta(days=1),
+        )
+        stranger_watch = await watches_repo.create_watch(
+            session,
+            target_handle=STRANGER,
+            instruction="reply about the delivery",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    # Both watched inbounds land BEFORE a single poll — the whole batch is admitted
+    # in one poll_once, unlike the two-poll sibling test above.
+    store.add_message(
+        handle_rowid=mom_h, chat_rowid=mom_c, text="dinner?",
+        when=now + timedelta(minutes=1),
+    )
+    store.add_message(
+        handle_rowid=stranger_h, chat_rowid=stranger_c, text="delivery is here",
+        when=now + timedelta(minutes=2),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched_watch_fire_ids == [mom_watch.id, stranger_watch.id]
+
+
 async def test_self_mode_pre_creation_row_is_inert(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:

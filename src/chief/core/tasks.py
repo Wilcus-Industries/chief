@@ -1840,7 +1840,9 @@ class TaskManager:
         # through any owner turn already in flight or queued ahead of it. Only the
         # adapter's admit path tags a Turn with ``watch_fire_id``, so this is
         # security-equivalent to authorizing at admit but without the cross-turn window;
-        # the outer finally consumes it on every exit path.
+        # the outer finally consumes it on every exit path. The same turn-scoped
+        # minting closes the sibling race (#179): a sibling eval queued ahead of or
+        # behind this one can't clobber this turn's clearance.
         if turn.watch_fire_id is not None and self._watches_service is not None:
             gate = self._watches_service.fire_gate
             if gate is not None:
