@@ -90,6 +90,23 @@ def test_deep_merge_preserves_sibling_keys(
     assert settings.routing_surface_defaults == {"home": "code", "dm": "research"}
 
 
+def test_imessage_self_dm_overlay_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Self-DM is behavior-only, so the agent's own overlay may flip it on end-to-end
+    # (#161). The base config supplies the owner handle the validator requires.
+    settings = _boot(
+        tmp_path,
+        monkeypatch,
+        base=(
+            "owner_telegram_id: 42\n"
+            "imessage_owner_handles:\n  - '+15550000001'\n"
+        ),
+        overlay="imessage_self_dm: true\n",
+    )
+    assert settings.imessage_self_dm is True
+
+
 def test_screening_enabled_flip_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

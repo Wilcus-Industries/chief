@@ -34,7 +34,7 @@ from chief.obs.audit import AuditLog
 from chief.persistence import imessage as imessage_repo
 from chief.persistence.approvals import list_pending
 from chief.persistence.messages import ROLE_CHIEF, MessageLog
-from chief.persistence.models import MessageLogEntry, PolicyEntry
+from chief.persistence.models import IMessageSend, MessageLogEntry, PolicyEntry
 from chief.tools.apple.runner import OSASCRIPT_PATH, ScriptResult
 from imessage_helpers import FixtureRunner
 
@@ -122,6 +122,83 @@ async def test_thread_lifecycle_is_flat(tmp_path: Path) -> None:
 
     assert await io.create_thread(like_thread_key=MOM, title="ignored") == MOM
     await io.archive_thread(MOM)  # no-op, must not call out
+
+
+# ---- self-DM prefix + send-record (#161) -------------------------------------------
+
+
+def _self_io(
+    runner: FixtureRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> IMessageTaskIO:
+    return IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        self_dm=True,
+        self_handles=frozenset({OWNER}),
+        session_factory=session_factory,
+    )
+
+
+async def test_self_dm_prefixes_self_handle_but_not_others(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+
+    await io.send(OWNER, "your brief")
+    await io.send(MOM, "hi mom")
+
+    assert runner.jxa_calls[0][-2:] == (OWNER, "🤖 your brief")  # prefixed
+    assert runner.jxa_calls[1][-2:] == (MOM, "hi mom")  # non-self untouched
+
+
+async def test_self_dm_records_the_prefixed_send(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+
+    await io.send(OWNER, "reply")
+
+    async with session_factory() as session:
+        rows = list((await session.execute(select(IMessageSend))).scalars())
+    assert [(r.handle, r.body) for r in rows] == [(OWNER, "🤖 reply")]
+
+
+async def test_self_dm_records_a_file_send_by_filename(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+
+    await io.send_file(OWNER, "chart.png", b"x")
+
+    async with session_factory() as session:
+        bodies = [
+            r.body
+            for r in (await session.execute(select(IMessageSend))).scalars()
+        ]
+    assert bodies == ["chart.png"]
+
+
+async def test_self_dm_off_neither_prefixes_nor_records(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        session_factory=session_factory,
+    )
+
+    await io.send(OWNER, "plain")
+
+    assert runner.jxa_calls[0][-2:] == (OWNER, "plain")  # no prefix
+    async with session_factory() as session:
+        rows = list((await session.execute(select(IMessageSend))).scalars())
+    assert rows == []
 
 
 # ---- mirror wrapping ---------------------------------------------------------------

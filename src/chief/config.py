@@ -199,6 +199,7 @@ MERGE_SAFE: frozenset[str] = frozenset(
         "apple_script_timeout_seconds",
         "apple_output_limit",
         "imessage_poll_seconds",
+        "imessage_self_dm",
         "web_fetch_timeout_seconds",
         "web_fetch_max_bytes",
         "web_search_count",
@@ -498,6 +499,14 @@ class Settings(BaseSettings):
     imessage_enabled: bool = False
     imessage_poll_seconds: float = 2.0
     imessage_owner_handles: tuple[str, ...] = ()
+    # imessage_self_dm (#161): default OFF. When on (and imessage_configured), the
+    # owner's own handle round-trips the full owner path (its self-chat received copy
+    # already routes owner-tier), every reply to a self-handle is prefixed "🤖 " and
+    # loop-filtered, and chief's own echoed sends are dropped. It is behavior-only —
+    # it mints no privilege (owner handles are still gated by imessage_owner_handles)
+    # — so it is agent-editable through the self-config overlay, unlike the *_enabled
+    # subsystem flags. It requires at least one owner handle, same as imessage_enabled.
+    imessage_self_dm: bool = False
 
     # Host shell + file workspace (M7, host-native rework), owner-only.
     # shell_enabled wires the in-process bash tool that runs a persistent per-task
@@ -925,20 +934,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _require_owner_handles_for_imessage(self) -> "Settings":
-        """The iMessage adapter needs at least one owner handle (#156).
+        """The iMessage adapter needs at least one owner handle (#156, #161).
 
         The owner's handles seed the whitelist owner-tier, and the first one is
         the adapter's Front Desk — where guest admission/draft cards and poller
         failure alerts land. Enabled with none configured, every card would have
         nowhere to route (mirrors ``_require_front_desk_for_guests``).
+        ``imessage_self_dm`` (#161) equally depends on an owner handle: the
+        self-chat *is* an owner handle, so with none set self-DM has no thread.
         """
-        if self.imessage_enabled and not any(
+        if (self.imessage_enabled or self.imessage_self_dm) and not any(
             handle.strip() for handle in self.imessage_owner_handles
         ):
             raise ValueError(
-                "imessage_enabled requires imessage_owner_handles — the owner's "
-                "handles seed the whitelist and route guest cards and poller "
-                "alerts."
+                "imessage_enabled / imessage_self_dm require imessage_owner_handles"
+                " — the owner's handles seed the whitelist, route guest cards and "
+                "poller alerts, and are the self-DM thread."
             )
         return self
 
