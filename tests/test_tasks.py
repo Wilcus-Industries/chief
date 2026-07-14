@@ -465,25 +465,32 @@ async def test_dispatch_threads_attachments_into_run_turn(
     await mgr.shutdown()
 
 
-async def test_watch_eval_turn_consumes_its_clearance_at_turn_end(
+async def test_watch_eval_turn_mints_clearance_at_start_and_consumes_at_end(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    # #178: a watch-eval turn's fire clearance is scoped to exactly that turn — it is
-    # consumed at turn end even when the eval concludes without firing (FakeSession
-    # never calls reply_to_watch), closing the residual cross-traffic window.
+    # #178: a watch-eval turn's fire clearance is minted by _run_turn at the turn's
+    # start (NOT at poll-admit) and consumed at turn end even when the eval concludes
+    # without firing (FakeSession never calls reply_to_watch). So the clearance is live
+    # ONLY while the eval turn runs — closing both the leading-edge window (before the
+    # turn) and the trailing residual window (after it).
     io = FakeIO()
-    sess = FakeSession(model="m")
     gate = WatchFireGate()
-    gate.authorize(5)
+    seen_during: list[bool] = []
+    sess = FakeSession(
+        model="m", on_start=lambda: seen_during.append(gate.is_authorized(5))
+    )
     svc = WatchService(session_factory=session_factory, fire_gate=gate)
     mgr = _manager(session_factory, io, factory=_one(sess), watches_service=svc)
 
+    # No pre-authorize: the clearance does not exist before the turn runs.
+    assert not gate.is_authorized(5)
     await mgr.dispatch(thread_key="-100:5", text="eval", watch_fire_id=5)
     # The consume runs in _run_turn's outer finally, strictly after the OPEN commit —
     # wait on that observable effect rather than racing the task row.
-    await _until(lambda: not gate.is_authorized(5))
+    await _until(lambda: bool(seen_during) and not gate.is_authorized(5))
 
-    assert not gate.is_authorized(5)
+    assert seen_during == [True]  # authorized while the eval turn was running
+    assert not gate.is_authorized(5)  # consumed at turn end
     await mgr.shutdown()
 
 

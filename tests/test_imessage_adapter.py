@@ -68,7 +68,6 @@ def make_adapter(
     runner: FixtureRunner | None = None,
     self_dm: bool = False,
     io: IMessageTaskIO | None = None,
-    fire_gate: WatchFireGate | None = None,
 ) -> tuple[IMessageAdapter, ChatDb, FixtureRunner, FakeEngine]:
     store = ChatDb(tmp_path / "chat.db")
     runner = runner or FixtureRunner()
@@ -89,7 +88,6 @@ def make_adapter(
         guest_ack="Noted.",
         guest_enabled=guest_enabled,
         self_dm=self_dm,
-        fire_gate=fire_gate,
     )
     return adapter, store, runner, engine
 
@@ -1125,15 +1123,15 @@ async def test_self_mode_watched_handle_oversized_attachment_dropped_dispatch_co
     assert engine.dispatched_attachments == [()]
 
 
-async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
+async def test_self_mode_dispatch_tags_only_the_matched_watch_id(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    """#167 hardening: dispatching a watch's eval clears THAT watch (and only it) to
-    fire, so reply_to_watch can reject any watch a real inbound didn't trigger."""
+    """#167/#178: dispatching a watch's evaluation tags THAT watch (and only it) onto
+    the turn, so _run_turn clears exactly it and reply_to_watch rejects any watch a
+    real inbound didn't trigger."""
     now = datetime.now(UTC)
-    fire_gate = WatchFireGate()
     adapter, store, runner, engine = make_adapter(
-        tmp_path, session_factory, self_dm=True, fire_gate=fire_gate
+        tmp_path, session_factory, self_dm=True
     )
     handle = store.add_handle(MOM)
     chat = store.add_chat(MOM)
@@ -1154,24 +1152,21 @@ async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
     )
     await adapter.poll_once()
 
-    assert fire_gate.is_authorized(watch.id)  # the matched watch is cleared
-    assert not fire_gate.is_authorized(watch.id + 1)  # a would-be minted id is not
-    # #178: the eval dispatch is tagged with the watch id so _run_turn can scope the
-    # clearance to that turn and consume it at turn end.
+    # #178: the dispatch is tagged with the watch id so _run_turn mints the clearance
+    # at turn start and consumes it at turn end — the adapter no longer authorizes at
+    # poll-admit, so no clearance leaks across the queued-ahead window.
     assert engine.dispatched_watch_fire_ids == [watch.id]
 
 
-async def test_self_mode_next_inbound_drops_a_prior_unfired_watchs_clearance(
+async def test_self_mode_each_inbound_tags_its_own_watch_evaluation(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    """#167 medium: a watch whose eval turn ended without firing must not stay
-    fireable. The next real inbound's admit clears every stale clearance and
-    re-authorizes only its own watches, so a later (possibly hijacked) eval turn
-    can't fire the earlier watch."""
+    """#167/#178: each real inbound dispatches a turn tagged with only its own watch
+    id, so no inbound can clear a different watch's fire — the clearance is minted and
+    consumed inside each watch's own turn (see TaskManager._run_turn)."""
     now = datetime.now(UTC)
-    fire_gate = WatchFireGate()
     adapter, store, runner, engine = make_adapter(
-        tmp_path, session_factory, self_dm=True, fire_gate=fire_gate
+        tmp_path, session_factory, self_dm=True
     )
     mom_h, mom_c = store.add_handle(MOM), store.add_chat(MOM)
     stranger_h, stranger_c = store.add_handle(STRANGER), store.add_chat(STRANGER)
@@ -1195,17 +1190,15 @@ async def test_self_mode_next_inbound_drops_a_prior_unfired_watchs_clearance(
         when=now + timedelta(minutes=1),
     )
     await adapter.poll_once()
-    assert fire_gate.is_authorized(mom_watch.id)  # cleared to fire this turn
+    assert engine.dispatched_watch_fire_ids == [mom_watch.id]
 
-    # Mom's eval concluded without firing (nothing consumed the clearance). A later
-    # inbound for a different watch must drop mom's stale clearance.
     store.add_message(
         handle_rowid=stranger_h, chat_rowid=stranger_c, text="delivery is here",
         when=now + timedelta(minutes=2),
     )
     await adapter.poll_once()
-    assert not fire_gate.is_authorized(mom_watch.id)  # stale clearance dropped
-    assert fire_gate.is_authorized(stranger_watch.id)  # only this inbound's watch
+    # The second inbound tags only its own watch — mom's turn was never re-tagged.
+    assert engine.dispatched_watch_fire_ids == [mom_watch.id, stranger_watch.id]
 
 
 async def test_self_mode_pre_creation_row_is_inert(
@@ -1406,7 +1399,6 @@ def _doctor_form_rig(
         self_dm=True,
         runner=runner,
         io=io,
-        fire_gate=fire_gate,
     )
     return adapter, store, runner, engine, fire_gate
 
@@ -1461,6 +1453,9 @@ async def test_doctor_form_round_trip_report_tone(
     filled = tmp_path / "intake_filled.pdf"
     filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
 
+    # #178: the clearance is minted by _run_turn at the eval turn's start; this test
+    # drives reply_to_watch directly (no engine turn), so it authorizes the gate itself.
+    fire_gate.authorize(watch.id)
     out = await svc._build_reply().handler(
         {
             "watch_id": watch.id,
@@ -1529,6 +1524,9 @@ async def test_doctor_form_round_trip_silent_tone(
     filled = tmp_path / "intake2_filled.pdf"
     filled.write_bytes(b"%PDF-1.4\n%filled intake form\n")
 
+    # #178: the clearance is minted by _run_turn at the eval turn's start; this test
+    # drives reply_to_watch directly (no engine turn), so it authorizes the gate itself.
+    fire_gate.authorize(watch.id)
     out = await svc._build_reply().handler(
         {
             "watch_id": watch.id,

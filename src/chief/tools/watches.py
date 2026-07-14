@@ -232,20 +232,17 @@ class WatchFireGate:
     fire it, so the send seam's watch check would authorize chief's own freshly
     minted watch and exfiltrate owner-authored text to an arbitrary handle.
 
-    The adapter :meth:`~chief.adapters.imessage.IMessageAdapter._admit_watched`
-    :meth:`clear`\\ s every prior clearance and then :meth:`authorize`\\ s a fire ONLY
-    for the watch(es) *this* incoming message dispatched an eval for — those already
-    passed the created-before-arrival admission gate. :func:`reply_to_watch` refuses
-    any other ``watch_id`` and :meth:`consume`\\ s a watch's clearance on *every* fire
-    (even ``keep_watching``), so a clearance is single-use: one eval turn, one send.
-
-    A clearance is scoped to its eval turn (#178): the dispatched
-    :class:`~chief.core.tasks.Turn` carries the watch id, and
-    :meth:`~chief.core.tasks.TaskManager._run_turn` :meth:`consume`\\ s it at turn end
-    on every exit path (fired or not, budget-skipped, errored). So a watch whose eval
-    turn ended without firing carries no live clearance into later unwatched traffic in
-    the same owner session — the residual window #178 closes. The adapter's
-    :meth:`clear` on the next inbound stays as a backstop. A watch minted inside the
+    The adapter :meth:`~chief.adapters.imessage.IMessageAdapter._admit_watched` tags the
+    eval :class:`~chief.core.tasks.Turn` it dispatches with the watch id — those watches
+    already passed the created-before-arrival admission gate. A clearance is scoped to
+    its eval turn (#178): :meth:`~chief.core.tasks.TaskManager._run_turn`
+    :meth:`authorize`\\ s the watch at the turn's start and :meth:`consume`\\ s it at
+    the turn's end on every exit path (fired or not, budget-skipped, errored). So a
+    clearance is live ONLY while its eval turn runs — never from admit-time through an
+    owner turn queued ahead of it, and never trailing into later unwatched traffic in
+    the same owner session. :func:`reply_to_watch` refuses any ``watch_id`` this gate
+    hasn't cleared and :meth:`consume`\\ s it on *every* fire (even ``keep_watching``),
+    so a clearance is single-use: one eval turn, one send. A watch minted inside the
     eval turn was never dispatched, so it can never fire. The record is in-process and
     fails closed across a restart (a standing watch simply re-authorizes on its next
     inbound).
@@ -269,15 +266,6 @@ class WatchFireGate:
         its turn.
         """
         self._authorized.discard(watch_id)
-
-    def clear(self) -> None:
-        """Drop every clearance — a new inbound re-authorizes only its own watches.
-
-        A backstop since #178 scoped each clearance to its eval turn (consumed at turn
-        end). Called by the adapter as each real inbound is admitted, so any clearance a
-        prior eval turn somehow left behind can't leak into a later turn.
-        """
-        self._authorized.clear()
 
 
 def _utcnow() -> datetime:
