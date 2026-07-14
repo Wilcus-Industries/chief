@@ -232,3 +232,230 @@ async def test_active_watches_for_handle_scopes_to_the_handle(
             session, OTHER, now=now, arrived_at=now + timedelta(minutes=1)
         )
     assert matched == []
+
+
+# ---- unbound-watch candidates (#168) ----------------------------------------------
+
+
+async def test_create_watch_with_no_target_handle_is_unbound(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="watch for the plumber",
+            expiry=repo.default_expiry(NOW),
+        )
+    assert watch.target_handle is None
+    assert watch.confirmed_at is None
+    assert watch.state == repo.STATE_ARMED
+
+
+async def test_list_unbound_watches_excludes_bound_cancelled_and_expired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        unbound = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="unbound",
+            expiry=repo.default_expiry(NOW),
+        )
+        await repo.create_watch(
+            session,
+            target_handle="+15550000001",
+            instruction="bound",
+            expiry=repo.default_expiry(NOW),
+        )
+        cancelled = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="unbound but cancelled",
+            expiry=repo.default_expiry(NOW),
+        )
+        await repo.cancel_watch(session, cancelled.id)
+        await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="unbound but expired",
+            expiry=NOW - timedelta(days=1),
+        )
+    async with session_factory() as session:
+        rows = await repo.list_unbound_watches(session, now=NOW)
+    assert [w.id for w in rows] == [unbound.id]
+
+
+async def test_get_and_create_candidate_round_trip(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+        assert await repo.get_candidate(session, watch.id, "+15550000009") is None
+        created = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+1 (555) 000-0009", first_seen=NOW
+        )
+    assert created.handle == "+15550000009"
+    assert created.decision == repo.CANDIDATE_PENDING
+    async with session_factory() as session:
+        found = await repo.get_candidate(session, watch.id, "+15550000009")
+    assert found is not None and found.id == created.id
+
+
+async def test_confirm_candidate_yes_binds_the_watch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+        candidate = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    async with session_factory() as session:
+        result = await repo.confirm_candidate(
+            session, candidate.id, confirm=True, now=NOW
+        )
+    assert result is not None
+    bound_watch, decided = result
+    assert bound_watch.target_handle == "+15550000009"
+    assert bound_watch.confirmed_at is not None
+    assert decided.decision == repo.CANDIDATE_CONFIRMED
+    # Field-for-field the same shape as a directly-created bound watch.
+    async with session_factory() as session:
+        directly_created = await repo.create_watch(
+            session,
+            target_handle="+15550000009",
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+    assert bound_watch.state == directly_created.state == repo.STATE_ARMED
+    assert type(bound_watch.target_handle) is type(directly_created.target_handle)
+
+
+async def test_confirm_candidate_no_leaves_target_handle_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+        candidate = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    async with session_factory() as session:
+        result = await repo.confirm_candidate(
+            session, candidate.id, confirm=False, now=NOW
+        )
+    assert result is not None
+    rejected_watch, decided = result
+    assert rejected_watch.target_handle is None
+    assert decided.decision == repo.CANDIDATE_REJECTED
+
+
+async def test_confirm_candidate_returns_none_for_missing_or_already_decided(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        assert await repo.confirm_candidate(session, 999, confirm=True, now=NOW) is None
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+        candidate = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    async with session_factory() as session:
+        await repo.confirm_candidate(session, candidate.id, confirm=True, now=NOW)
+    async with session_factory() as session:
+        assert (
+            await repo.confirm_candidate(session, candidate.id, confirm=True, now=NOW)
+            is None
+        )
+
+
+async def test_confirm_candidate_refuses_once_its_watch_has_expired(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Proves 'watch expiry kills pending candidates' end-to-end: confirm can no
+    longer succeed once the watch it belongs to has expired."""
+    soon = NOW + timedelta(hours=1)
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session, target_handle=None, instruction="x", expiry=soon
+        )
+        candidate = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    later = soon + timedelta(hours=1)
+    async with session_factory() as session:
+        result = await repo.confirm_candidate(
+            session, candidate.id, confirm=True, now=later
+        )
+    assert result is None
+    async with session_factory() as session:
+        row = await repo.get_watch(session, watch.id)
+    assert row is not None and row.target_handle is None
+
+
+async def test_confirm_candidate_refuses_once_its_watch_is_cancelled(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory() as session:
+        watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="x",
+            expiry=repo.default_expiry(NOW),
+        )
+        candidate = await repo.create_candidate(
+            session, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+        await repo.cancel_watch(session, watch.id)
+    async with session_factory() as session:
+        result = await repo.confirm_candidate(
+            session, candidate.id, confirm=True, now=NOW
+        )
+    assert result is None
+
+
+async def test_list_pending_candidates_excludes_expired_watch_candidates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    soon = NOW + timedelta(hours=1)
+    async with session_factory() as session:
+        live_watch = await repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="live",
+            expiry=repo.default_expiry(NOW),
+        )
+        live_candidate = await repo.create_candidate(
+            session, watch_id=live_watch.id, handle="+15550000009", first_seen=NOW
+        )
+        expiring_watch = await repo.create_watch(
+            session, target_handle=None, instruction="expiring", expiry=soon
+        )
+        await repo.create_candidate(
+            session,
+            watch_id=expiring_watch.id,
+            handle="+15550000008",
+            first_seen=NOW,
+        )
+    later = soon + timedelta(hours=1)
+    async with session_factory() as session:
+        pending = await repo.list_pending_candidates(session, now=later)
+    assert [c.id for c in pending] == [live_candidate.id]

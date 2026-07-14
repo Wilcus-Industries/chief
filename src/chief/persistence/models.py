@@ -352,9 +352,39 @@ class Watch(Base):
     __tablename__ = "watches"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    target_handle: Mapped[str]  # normalized handle (imessage.normalize_handle)
+    # None ⇒ unbound: awaiting owner confirmation of an unknown sender (#168).
+    target_handle: Mapped[str | None]  # normalized handle (imessage.normalize_handle)
     instruction: Mapped[str]
     tone: Mapped[str] = mapped_column(default="report")  # "report" | "silent"
     state: Mapped[str] = mapped_column(default="armed")  # armed|fired|expired|cancelled
     expiry: Mapped[datetime]
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    # Set only when bound via a confirmed candidate (#168) — the admission floor a
+    # later dispatch milestone should prefer over created_at when present. None for
+    # a directly-created bound watch (#165 path) — zero behavior change there.
+    confirmed_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class WatchCandidate(Base):
+    """A metadata-only sighting against an unbound watch (#168, part of PRD #160).
+
+    One row per (watch_id, handle): the first time an unknown sender's row is seen
+    while its watch has no target_handle yet, a candidate is recorded and the owner
+    is prompted with handle + timestamp — never content. ``decision`` starts
+    "pending"; confirm_watch_candidate flips it to "confirmed" (and binds
+    watch.target_handle) or "rejected" (the thread stays inert). Never re-prompted
+    once a candidate row exists for that (watch, handle) pair.
+    """
+
+    __tablename__ = "watch_candidates"
+    __table_args__ = (
+        UniqueConstraint("watch_id", "handle", name="uq_watch_candidate_watch_handle"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    watch_id: Mapped[int] = mapped_column(ForeignKey("watches.id"))
+    handle: Mapped[str]
+    first_seen: Mapped[datetime]
+    # pending|confirmed|rejected
+    decision: Mapped[str] = mapped_column(default="pending")
+    decided_at: Mapped[datetime | None] = mapped_column(default=None)
