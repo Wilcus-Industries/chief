@@ -39,6 +39,11 @@ none of this engages and the dedicated-ID behavior above holds byte-for-byte.
 Self-DM media intake (#162) rides this same self-thread gate: an image/PDF sent to
 self is admitted (even textless) and threaded into the turn exactly like the other
 adapters' owner attachments — dedicated-ID mode stays text-only, byte-for-byte.
+
+Self-mode is otherwise as inert as the dedicated-ID posture: any non-self sender —
+including a stale or admin-added guest-tier whitelist row — gets no session, no
+reply, and no card; only the metadata-only ``unknown_senders`` line is written
+(#163).
 """
 
 import asyncio
@@ -641,6 +646,19 @@ class IMessageAdapter(Adapter):
         if not sender or (not text and not atts_raw):
             return
         is_self_row = self._self_dm and sender in self._self_handles
+        if self._self_dm and not is_self_row:
+            # Self-mode posture (#163): every non-self sender is inert, no matter
+            # what the whitelist says — a stale or admin-added guest-tier Contact
+            # row included. No session, no reply, no guest ack, no card; only the
+            # metadata-only sighting lands.
+            async with self._session_factory() as session:
+                await repo.record_unknown_sender(
+                    session,
+                    platform=PLATFORM,
+                    handle=sender,
+                    seen_at=self._row_time(row),
+                )
+            return
         if not text and not is_self_row:
             return  # textless attachment admission is self-thread only (#162)
         if is_self_row:

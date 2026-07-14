@@ -825,3 +825,81 @@ async def test_self_dm_off_textless_attachment_row_dropped(
     await adapter.poll_once()
 
     assert engine.dispatched == []
+
+
+async def test_self_mode_unknown_sender_is_inert_with_one_metadata_line(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    await adapter.prime()
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="secret plans")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert engine.dispatched_guests == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(STRANGER, 1)]
+
+
+async def test_self_mode_whitelisted_guest_is_inert_same_as_unknown(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The central-mechanism case from #163: a stale/admin-added guest-tier
+    # Contact row for MOM must not reach the guest gate once self_dm is on,
+    # even with guest_enabled=True making that gate otherwise reachable.
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, guest_enabled=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await imessage_repo.add_handle(session, handle=MOM, tier="guest")
+    await adapter.prime()
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="dinner friday?")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert engine.dispatched_guests == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+async def test_self_mode_guest_ack_disabled_path_also_stays_silent(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # Same whitelisted-guest setup, but with guest_enabled=False — the
+    # "canned ack" fallback in _on_guest must be equally unreachable in
+    # self-mode, not just the gated `_handle_guest_message` path.
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, guest_enabled=False
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await imessage_repo.add_handle(session, handle=MOM, tier="guest")
+    await adapter.prime()
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="hello?")
+    await adapter.poll_once()
+
+    assert engine.dispatched_guests == []
+    assert runner.jxa_calls == []  # no canned ack sent
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
