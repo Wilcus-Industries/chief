@@ -73,6 +73,49 @@ async def test_settings_page_shows_watch_fields(
     assert "armed" in resp.text
 
 
+async def test_settings_page_shows_expired_fired_and_cancelled_watches(
+    client: httpx.AsyncClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#170: expired (sweep-retired), fired (reserved for #167), and cancelled
+    watches all render on the settings page, not just armed ones."""
+    async with session_factory() as session:
+        expired = await watches_repo.create_watch(
+            session,
+            target_handle="+15550000002",
+            instruction="expired watch",
+            expiry=_FAR_FUTURE,
+        )
+        fired = await watches_repo.create_watch(
+            session,
+            target_handle="+15550000003",
+            instruction="fired watch",
+            expiry=_FAR_FUTURE,
+        )
+        cancelled = await watches_repo.create_watch(
+            session,
+            target_handle="+15550000004",
+            instruction="cancelled watch",
+            expiry=_FAR_FUTURE,
+        )
+        for watch, state in (
+            (expired, watches_repo.STATE_EXPIRED),
+            (fired, watches_repo.STATE_FIRED),
+            (cancelled, watches_repo.STATE_CANCELLED),
+        ):
+            row = await watches_repo.get_watch(session, watch.id)
+            assert row is not None
+            row.state = state
+        await session.commit()
+
+    resp = await client.get("/settings")
+
+    assert resp.status_code == 200
+    assert "expired" in resp.text
+    assert "fired" in resp.text
+    assert "cancelled" in resp.text
+
+
 async def test_panel_hidden_when_imessage_is_off(tmp_path: Path) -> None:
     auth = WebAuth(tmp_path / "secrets2")
     auth.set_password(PASSWORD)

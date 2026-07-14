@@ -1162,6 +1162,129 @@ async def test_self_mode_group_row_never_admitted_despite_watch(
     assert unknown == []  # group rows are skipped wholesale, not even logged
 
 
+# ---- expiry sweep + timestamp-pure admission (#170) -------------------------------
+
+
+async def test_tick_sweep_retires_expired_watch_in_place(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """poll_once's sweep physically flips a past-expiry armed watch to expired in
+    the DB — not merely a computed display value — even with no new messages."""
+    now = datetime.now(UTC)
+    adapter, _store, _runner, _engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now - timedelta(minutes=1),
+        )
+    await adapter.prime()
+
+    await adapter.poll_once()
+
+    async with session_factory() as session:
+        row = await watches_repo.get_watch(session, watch.id)
+    assert row is not None
+    assert row.state == watches_repo.STATE_EXPIRED
+
+
+async def test_row_arriving_after_expiry_is_inert_regardless_of_sweep_timing(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    now = datetime.now(UTC)
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=now + timedelta(seconds=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="one tick after expiry",
+        when=now + timedelta(seconds=2),
+    )
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert runner.jxa_calls == []
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(MOM, 1)]
+
+
+async def test_row_arriving_just_before_expiry_admits_just_after_does_not(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # expiry a few seconds out (not "now") so ``created_at`` — stamped at insert
+    # time — is safely before both boundary timestamps we check against.
+    expiry = datetime.now(UTC) + timedelta(seconds=10)
+    admits_dir = tmp_path / "admits"
+    rejects_dir = tmp_path / "rejects"
+    admits_dir.mkdir()
+    rejects_dir.mkdir()
+
+    # Case 1: arrives just before expiry — admits.
+    adapter1, store1, runner1, engine1 = make_adapter(
+        admits_dir, session_factory, self_dm=True
+    )
+    handle1 = store1.add_handle(MOM)
+    chat1 = store1.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=expiry,
+        )
+    await adapter1.prime()
+    store1.add_message(
+        handle_rowid=handle1,
+        chat_rowid=chat1,
+        text="just before expiry",
+        when=expiry - timedelta(seconds=1),
+    )
+    await adapter1.poll_once()
+    assert len(engine1.dispatched) == 1
+    assert runner1.jxa_calls == []
+
+    # Case 2: arrives just after expiry — does not admit.
+    adapter2, store2, _runner2, engine2 = make_adapter(
+        rejects_dir, session_factory, self_dm=True
+    )
+    handle2 = store2.add_handle(MOM)
+    chat2 = store2.add_chat(MOM)
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="x",
+            expiry=expiry,
+        )
+    await adapter2.prime()
+    store2.add_message(
+        handle_rowid=handle2,
+        chat_rowid=chat2,
+        text="just after expiry",
+        when=expiry + timedelta(seconds=1),
+    )
+    await adapter2.poll_once()
+    assert engine2.dispatched == []
+
+
 # ---- watch-candidate confirm flow (#168, part of PRD #160) ------------------------
 
 

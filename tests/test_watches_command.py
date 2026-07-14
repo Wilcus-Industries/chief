@@ -103,3 +103,19 @@ async def test_watches_cancel_with_bad_id_shows_usage() -> None:
     await REGISTRY.dispatch("watches", ctx)
     assert replies == ["Usage: /watches cancel <id>"]
     assert engine.cancelled_watch_ids == []
+
+
+async def test_watches_bare_shows_expired_fired_and_cancelled_states() -> None:
+    """#170: the sweep-retired ``expired`` state, the reserved-for-#167 ``fired``
+    state, and ``cancelled`` all render through the same listing untouched."""
+    expired = _watch(id=1, state="expired")
+    fired = _watch(id=2, state="fired")
+    cancelled = _watch(id=3, state="cancelled")
+    engine = WatchesFakeEngine([expired, fired, cancelled])
+    ctx, replies = _ctx(engine)
+    await REGISTRY.dispatch("watches", ctx)
+    assert len(replies) == 1
+    text = replies[0]
+    assert "expired" in text
+    assert "fired" in text
+    assert "cancelled" in text
