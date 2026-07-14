@@ -82,7 +82,7 @@ from .tools.routing_admin import RoutingAdminService
 from .tools.schedule import ScheduleBashService, ScheduleService
 from .tools.sheets import mcp as sheets_mcp
 from .tools.shell import ShellService
-from .tools.watches import WatchService
+from .tools.watches import WatchFireGate, WatchSend, WatchService
 from .tools.web import BraveSearcher, WebFetcher, WebService
 from .web.health import HealthCheck, HealthItem
 from .web.wiring import build_web_stack
@@ -542,8 +542,17 @@ def build_engine(
     harness_versioner: Versioner | None = None,
     apple_services: Sequence[AppleService] = (),
     imessage_front_desk: str | None = None,
+    watch_send: WatchSend | None = None,
+    watch_fire_gate: WatchFireGate | None = None,
 ) -> TaskManager:
-    """Build a platform-bound ``TaskManager`` (every query filters by ``platform``)."""
+    """Build a platform-bound ``TaskManager`` (every query filters by ``platform``).
+
+    ``watch_send`` is the seam the fire tool (``reply_to_watch``, #167) sends through —
+    the iMessage stack passes the *mirror* (not its draft gate) so a watch-authorized
+    ghost-send delivers + logs but never parks on a delegation draft card; the guarded
+    inner IO under it stays the authorization control. ``watch_fire_gate`` is the shared
+    eval-turn fire gate the adapter also holds.
+    """
     guest_admin = (
         GuestAdminService(session_factory=session_factory, platform=platform)
         if settings.guest_enabled
@@ -598,11 +607,12 @@ def build_engine(
             session_factory=session_factory,
             owner_tz=settings.owner_tz,
             send=(
-                io
+                watch_send
                 if platform == "imessage" and imessage_front_desk is not None
                 else None
             ),
             front_desk=imessage_front_desk,
+            fire_gate=watch_fire_gate,
         )
         if settings.imessage_configured
         else None
@@ -983,6 +993,9 @@ def build_imessage_stack(
         session_factory=session_factory,
         front_desk=front_desk,
     )
+    # The eval-turn fire gate (#167), shared by the adapter (which clears a watch when
+    # a real inbound dispatches its eval) and the fire tool (refuses any other watch).
+    fire_gate = WatchFireGate()
     manager = build_engine(
         settings,
         platform="imessage",
@@ -997,6 +1010,10 @@ def build_imessage_stack(
         harness_versioner=harness_versioner,
         apple_services=apple_services,
         imessage_front_desk=front_desk,
+        # Fire through the mirror, NOT the draft gate: a watch-authorized ghost-send
+        # must deliver + log, never park on a guest delegation draft card (#167 medium).
+        watch_send=mirror,
+        watch_fire_gate=fire_gate,
     )
     adapter = IMessageAdapter(
         runner=runner,
@@ -1004,6 +1021,7 @@ def build_imessage_stack(
         engine=manager,
         session_factory=session_factory,
         io=io,
+        fire_gate=fire_gate,
         owner_handles=settings.imessage_owner_handles,
         guest_ack=settings.guest_ack,
         guest_enabled=settings.guest_enabled,

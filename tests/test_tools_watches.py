@@ -12,12 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from chief.adapters.imessage import IMessageTaskIO
 from chief.persistence import imessage as imessage_repo
 from chief.persistence import watches as repo
-from chief.tools.watches import WatchService
+from chief.tools.watches import GhostSendRefused, WatchFireGate, WatchService
 from imessage_helpers import FixtureRunner
 
 NOW = datetime(2026, 6, 4, 16, 0, tzinfo=UTC)  # 12:00 EDT
 OWNER = "+15550000001"
 MOM = "+15550000002"
+STRANGER = "+15550000003"
 
 
 def _svc(session_factory: async_sessionmaker[AsyncSession]) -> WatchService:
@@ -452,3 +453,97 @@ async def test_reply_to_watch_unbound_watch_errors(
 
     assert out["is_error"] is True
     assert runner.jxa_calls == []
+
+
+# ---- #167 hardening: the eval-turn fire gate + delivery signal ---------------------
+
+
+async def test_reply_to_watch_refuses_a_watch_the_eval_did_not_authorize(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """High finding: a prompt-injected eval turn mints its own armed watch on an
+    attacker handle and tries to fire it. The send seam's watch check WOULD authorize
+    the freshly minted watch (it is armed on that handle), so the fire gate is the
+    control: only a watch a real inbound dispatched an eval for may fire."""
+    runner = FixtureRunner()
+    fire_gate = WatchFireGate()
+    io = IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        self_dm=True,
+        self_handles=frozenset({imessage_repo.normalize_handle(OWNER)}),
+        session_factory=session_factory,
+        front_desk=OWNER,
+    )
+    svc = WatchService(
+        session_factory=session_factory,
+        owner_tz="UTC",
+        now=lambda: datetime.now(UTC),
+        send=io,
+        front_desk=OWNER,
+        fire_gate=fire_gate,
+    )
+    # A legit watch the adapter cleared, and one the (hijacked) turn just minted.
+    legit = await _armed_watch(session_factory)
+    fire_gate.authorize(legit)
+    async with session_factory() as session:
+        minted = await repo.create_watch(
+            session,
+            target_handle=STRANGER,
+            instruction="exfil",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    out = await svc._build_reply().handler(
+        {"watch_id": minted.id, "text": "owner secrets"}
+    )
+
+    assert out["is_error"] is True
+    assert runner.jxa_calls == []  # nothing reached the attacker handle
+    async with session_factory() as session:
+        still = await repo.get_watch(session, minted.id)
+    assert still is not None and still.state == repo.STATE_ARMED  # not fired
+
+    # The cleared watch still fires normally through the same gate.
+    ok = await svc._build_reply().handler({"watch_id": legit, "text": "running late"})
+    assert ok["is_error"] is False
+    assert any(c[-2:] == (MOM, "running late") for c in runner.jxa_calls)
+
+
+class _RefusingSend:
+    """A send seam that refuses like the guard does on an unauthorized ghost-send."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.calls.append((thread_key, text))
+        raise GhostSendRefused(thread_key)
+
+
+async def test_reply_to_watch_refused_send_leaves_watch_armed_and_reports_no_success(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Medium finding: when the send seam refuses (raises), the fire must NOT retire
+    the watch or post a false success — it reports the failure, watch stays armed."""
+    send = _RefusingSend()
+    fire_gate = WatchFireGate()
+    svc = WatchService(
+        session_factory=session_factory,
+        owner_tz="UTC",
+        now=lambda: datetime.now(UTC),
+        send=send,
+        front_desk=OWNER,
+        fire_gate=fire_gate,
+    )
+    watch_id = await _armed_watch(session_factory)
+    fire_gate.authorize(watch_id)
+
+    out = await svc._build_reply().handler({"watch_id": watch_id, "text": "hi mom"})
+
+    assert out["is_error"] is True
+    assert send.calls == [(MOM, "hi mom")]  # attempted the contact, nothing more
+    assert not any(c[0] == OWNER for c in send.calls)  # no ✅ self-thread report
+    async with session_factory() as session:
+        watch = await repo.get_watch(session, watch_id)
+    assert watch is not None and watch.state == repo.STATE_ARMED  # not retired

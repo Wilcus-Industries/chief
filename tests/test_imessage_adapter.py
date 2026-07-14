@@ -30,6 +30,7 @@ from chief.persistence.models import (
     UnknownSender,
     WatchCandidate,
 )
+from chief.tools.watches import GhostSendRefused, WatchFireGate
 from imessage_helpers import (
     FAKE_JPEG_BYTES,
     STYLE_GROUP,
@@ -66,6 +67,7 @@ def make_adapter(
     runner: FixtureRunner | None = None,
     self_dm: bool = False,
     io: IMessageTaskIO | None = None,
+    fire_gate: WatchFireGate | None = None,
 ) -> tuple[IMessageAdapter, ChatDb, FixtureRunner, FakeEngine]:
     store = ChatDb(tmp_path / "chat.db")
     runner = runner or FixtureRunner()
@@ -86,6 +88,7 @@ def make_adapter(
         guest_ack="Noted.",
         guest_enabled=guest_enabled,
         self_dm=self_dm,
+        fire_gate=fire_gate,
     )
     return adapter, store, runner, engine
 
@@ -995,6 +998,39 @@ async def test_self_mode_watched_handle_dispatches_evaluation_to_self_thread(
     assert unknown == []  # admitted, so no inert metadata line
 
 
+async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """#167 hardening: dispatching a watch's eval clears THAT watch (and only it) to
+    fire, so reply_to_watch can reject any watch a real inbound didn't trigger."""
+    now = datetime.now(UTC)
+    fire_gate = WatchFireGate()
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, fire_gate=fire_gate
+    )
+    handle = store.add_handle(MOM)
+    chat = store.add_chat(MOM)
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=MOM,
+            instruction="reply when she asks about dinner",
+            expiry=now + timedelta(days=1),
+        )
+    await adapter.prime()
+
+    store.add_message(
+        handle_rowid=handle,
+        chat_rowid=chat,
+        text="what time is dinner?",
+        when=now + timedelta(minutes=1),
+    )
+    await adapter.poll_once()
+
+    assert fire_gate.is_authorized(watch.id)  # the matched watch is cleared
+    assert not fire_gate.is_authorized(watch.id + 1)  # a would-be minted id is not
+
+
 async def test_self_mode_pre_creation_row_is_inert(
     session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
@@ -1356,12 +1392,14 @@ async def test_unauthorized_ghost_send_is_refused_logged_and_surfaced(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """AC4: with no authorizing watch, a self-DM send to a non-self handle is
-    refused (nothing reaches that handle), warned, and surfaced to the self-thread."""
+    refused (nothing reaches that handle), warned, surfaced to the self-thread, and
+    RAISES so the caller can't mistake it for a delivery (#167 medium)."""
     runner = FixtureRunner()
     io = _guarded_io(runner, session_factory, tmp_path)
 
-    with caplog.at_level(logging.WARNING):
-        await io.send(STRANGER, "hi")
+    with caplog.at_level(logging.WARNING):  # noqa: SIM117
+        with pytest.raises(GhostSendRefused):
+            await io.send(STRANGER, "hi")
 
     assert not any(c[-2] == STRANGER for c in runner.jxa_calls)  # nothing sent there
     blocked = [c for c in runner.jxa_calls if c[-2] == OWNER]
