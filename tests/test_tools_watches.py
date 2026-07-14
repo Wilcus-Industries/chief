@@ -27,6 +27,8 @@ def test_tool_names_and_server_name() -> None:
         "mcp__chief_watches__create_watch",
         "mcp__chief_watches__list_watches",
         "mcp__chief_watches__cancel_watch",
+        "mcp__chief_watches__list_watch_candidates",
+        "mcp__chief_watches__confirm_watch_candidate",
     }
 
 
@@ -74,15 +76,20 @@ async def test_create_watch_silent_tone_persisted(
     assert row.tone == repo.TONE_SILENT
 
 
-async def test_create_watch_rejects_empty_target_handle(
+async def test_create_watch_without_target_handle_creates_unbound_watch(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """#168: a blank/omitted target_handle is now a deliberate unbound watch —
+    it no longer errors (intentional behavior change from #165)."""
     out = await _svc(session_factory)._build_create().handler(
-        {"target_handle": "", "instruction": "x"}
+        {"target_handle": "", "instruction": "watch for the plumber"}
     )
-    assert out["is_error"] is True
+    assert out["is_error"] is False
+    assert "unknown sender" in out["content"][0]["text"]
     async with session_factory() as s:
-        assert await repo.list_watches(s) == []
+        row = (await repo.list_watches(s))[0]
+    assert row.target_handle is None
+    assert row.instruction == "watch for the plumber"
 
 
 async def test_create_watch_rejects_empty_instruction(
@@ -199,3 +206,108 @@ async def test_cancel_watch_already_cancelled_is_a_no_op_with_clear_message(
     second = await svc._build_cancel().handler({"watch_id": watch_id})
     assert second["is_error"] is False
     assert "nothing to cancel" in second["content"][0]["text"]
+
+
+# ---- unknown-sender confirm flow (#168) -------------------------------------------
+
+
+async def test_list_watch_candidates_empty(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    out = await _svc(session_factory)._build_list_candidates().handler({})
+    assert out["is_error"] is False
+    assert "No pending candidates" in out["content"][0]["text"]
+
+
+async def test_list_watch_candidates_formats_pending_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    svc = _svc(session_factory)
+    await svc._build_create().handler({"instruction": "watch for the plumber"})
+    async with session_factory() as s:
+        watch = (await repo.list_watches(s))[0]
+        candidate = await repo.create_candidate(
+            s, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    out = await svc._build_list_candidates().handler({})
+    assert out["is_error"] is False
+    text = out["content"][0]["text"]
+    assert f"#{candidate.id}" in text
+    assert "+15550000009" in text
+    assert f"watch #{watch.id}" in text
+
+
+async def test_confirm_watch_candidate_yes_binds_and_reports(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    svc = _svc(session_factory)
+    await svc._build_create().handler({"instruction": "watch for the plumber"})
+    async with session_factory() as s:
+        watch = (await repo.list_watches(s))[0]
+        candidate = await repo.create_candidate(
+            s, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    out = await svc._build_confirm_candidate().handler(
+        {"candidate_id": candidate.id, "decision": "yes"}
+    )
+    assert out["is_error"] is False
+    assert f"watch #{watch.id}" in out["content"][0]["text"]
+    assert "+15550000009" in out["content"][0]["text"]
+    async with session_factory() as s:
+        row = await repo.get_watch(s, watch.id)
+    assert row is not None and row.target_handle == "+15550000009"
+
+
+async def test_confirm_watch_candidate_no_rejects(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    svc = _svc(session_factory)
+    await svc._build_create().handler({"instruction": "watch for the plumber"})
+    async with session_factory() as s:
+        watch = (await repo.list_watches(s))[0]
+        candidate = await repo.create_candidate(
+            s, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    out = await svc._build_confirm_candidate().handler(
+        {"candidate_id": candidate.id, "decision": "no"}
+    )
+    assert out["is_error"] is False
+    assert "stays inert" in out["content"][0]["text"]
+    async with session_factory() as s:
+        row = await repo.get_watch(s, watch.id)
+    assert row is not None and row.target_handle is None
+
+
+async def test_confirm_watch_candidate_unknown_id_errors(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    out = await _svc(session_factory)._build_confirm_candidate().handler(
+        {"candidate_id": 999, "decision": "yes"}
+    )
+    assert out["is_error"] is True
+
+
+async def test_confirm_watch_candidate_expired_watch_errors(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    svc = _svc(session_factory)
+    await svc._build_create().handler(
+        {
+            "instruction": "watch for the plumber",
+            "expiry": "2026-06-04T13:00:00",  # 13:00 EDT, 1h after NOW (12:00 EDT)
+        }
+    )
+    async with session_factory() as s:
+        watch = (await repo.list_watches(s))[0]
+        candidate = await repo.create_candidate(
+            s, watch_id=watch.id, handle="+15550000009", first_seen=NOW
+        )
+    later = WatchService(
+        session_factory=session_factory,
+        owner_tz="America/New_York",
+        now=lambda: datetime(2026, 6, 4, 18, 0, tzinfo=UTC),  # past the expiry
+    )
+    out = await later._build_confirm_candidate().handler(
+        {"candidate_id": candidate.id, "decision": "yes"}
+    )
+    assert out["is_error"] is True

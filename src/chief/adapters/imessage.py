@@ -45,7 +45,15 @@ including a stale or admin-added guest-tier whitelist row — gets no session, n
 reply, and no card; only the metadata-only ``unknown_senders`` line is written
 (#163) — unless the handle carries an active armed watch (#166), in which case the
 row is admitted as a report-only evaluation dispatched into the self-thread: the
-verdict reports there and nothing is ever sent to the watched thread.
+verdict reports there and nothing is ever sent to the watched thread. That inert
+path is also where an unbound watch (#168, part of PRD #160,
+:mod:`chief.persistence.watches`) gets its candidate sighting: each unknown
+sender not yet seen for a given unbound watch is recorded as a
+``WatchCandidate`` and prompted to the owner's self-thread (handle + timestamp
+only, never content) via :meth:`IMessageAdapter._maybe_prompt_watch_candidate` —
+confirming one (``confirm_watch_candidate``, :mod:`chief.tools.watches`) binds
+the watch, which then reads as an ordinary armed watch for a later milestone's
+dispatch.
 """
 
 import asyncio
@@ -682,16 +690,16 @@ class IMessageAdapter(Adapter):
             # active armed watch is admitted as a report-only evaluation dispatched
             # into the self-thread. Every other non-self row stays inert (#163) —
             # no session, no reply, no guest ack, no card; only the metadata-only
-            # sighting lands.
+            # sighting lands (plus, #168, a watch-candidate prompt if an unbound
+            # watch is waiting on exactly this kind of sighting).
             if await self._admit_watched(sender, text, row):
                 return
+            seen_at = self._row_time(row)
             async with self._session_factory() as session:
                 await repo.record_unknown_sender(
-                    session,
-                    platform=PLATFORM,
-                    handle=sender,
-                    seen_at=self._row_time(row),
+                    session, platform=PLATFORM, handle=sender, seen_at=seen_at
                 )
+                await self._maybe_prompt_watch_candidate(session, sender, seen_at)
             return
         if not text and not is_self_row:
             return  # textless attachment admission is self-thread only (#162)
@@ -774,6 +782,29 @@ class IMessageAdapter(Adapter):
             return datetime.fromisoformat(str(row.get("timestamp")))
         except ValueError:
             return datetime.now(UTC).replace(tzinfo=None)
+
+    async def _maybe_prompt_watch_candidate(
+        self, session: AsyncSession, sender: str, seen_at: datetime
+    ) -> None:
+        """Surface a metadata-only candidate prompt for each unbound armed watch that
+        hasn't already seen this handle (#168) — handle + timestamp only, content is
+        never read here or anywhere on this path."""
+        if self._front_desk is None:
+            return
+        now = datetime.now(UTC)
+        for watch in await watches_repo.list_unbound_watches(session, now=now):
+            if await watches_repo.get_candidate(session, watch.id, sender) is not None:
+                continue  # already prompted (or decided) for this watch+handle
+            candidate = await watches_repo.create_candidate(
+                session, watch_id=watch.id, handle=sender, first_seen=seen_at
+            )
+            stamp = seen_at.replace(tzinfo=UTC) if seen_at.tzinfo is None else seen_at
+            await self._io.send(
+                self._front_desk,
+                f"🔔 Unknown number {sender} texted at {stamp:%Y-%m-%d %H:%M} UTC — "
+                f'is this who watch #{watch.id} ("{watch.instruction}") is '
+                f"expecting? (candidate #{candidate.id}) Reply yes or no.",
+            )
 
     async def _on_owner(
         self,

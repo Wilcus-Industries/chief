@@ -153,7 +153,8 @@ async def _cmd_watches(ctx: CommandContext) -> None:
         return
     now = datetime.now(UTC)
     lines = [
-        f'#{w.id} {w.target_handle} — "{w.instruction}" '
+        f'#{w.id} {w.target_handle or "(unbound — awaiting confirmation)"} — '
+        f'"{w.instruction}" '
         f"({effective_state(w, now=now)}, expires {w.expiry:%Y-%m-%d %H:%M} UTC, "
         f"{w.tone} tone)"
         for w in watches

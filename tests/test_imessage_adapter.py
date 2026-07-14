@@ -23,7 +23,7 @@ from chief.adapters.imessage import (
 from chief.persistence import imessage as imessage_repo
 from chief.persistence import watches as watches_repo
 from chief.persistence.contacts import get_contact
-from chief.persistence.models import Contact, UnknownSender
+from chief.persistence.models import Contact, UnknownSender, WatchCandidate
 from imessage_helpers import (
     FAKE_JPEG_BYTES,
     STYLE_GROUP,
@@ -1160,3 +1160,139 @@ async def test_self_mode_group_row_never_admitted_despite_watch(
             session, platform=PLATFORM
         )
     assert unknown == []  # group rows are skipped wholesale, not even logged
+
+
+# ---- watch-candidate confirm flow (#168, part of PRD #160) ------------------------
+
+
+async def test_self_mode_new_sender_with_unbound_watch_prompts_and_creates_candidate(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    await adapter.prime()
+
+    async with session_factory() as session:
+        watch = await watches_repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="watch for the plumber",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="secret plans")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert len(runner.jxa_calls) == 1  # exactly one send, to the front desk
+    assert runner.jxa_calls[0][-2] == OWNER
+    prompt = runner.jxa_calls[0][-1]
+    assert STRANGER in prompt
+    assert watch.instruction in prompt
+    assert "secret plans" not in prompt  # never the row's content
+
+    async with session_factory() as session:
+        rows = list((await session.execute(select(WatchCandidate))).scalars())
+    assert len(rows) == 1
+    assert rows[0].watch_id == watch.id
+    assert rows[0].handle == STRANGER
+    assert rows[0].decision == watches_repo.CANDIDATE_PENDING
+
+
+async def test_self_mode_repeat_sender_before_decision_prompts_only_once(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    await adapter.prime()
+
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="watch for the plumber",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="first")
+    await adapter.poll_once()
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="second")
+    await adapter.poll_once()
+
+    assert len(runner.jxa_calls) == 1  # no repeat prompt for the same (watch, handle)
+    async with session_factory() as session:
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert [(u.handle, u.count) for u in unknown] == [(STRANGER, 2)]
+
+
+async def test_self_mode_two_unbound_watches_each_get_a_candidate_and_prompt(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    await adapter.prime()
+
+    async with session_factory() as session:
+        watch_a = await watches_repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="watch a",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+        watch_b = await watches_repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="watch b",
+            expiry=datetime.now(UTC) + timedelta(days=1),
+        )
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="hi")
+    await adapter.poll_once()
+
+    assert len(runner.jxa_calls) == 2  # one prompt per unbound watch
+    async with session_factory() as session:
+        rows = list((await session.execute(select(WatchCandidate))).scalars())
+    assert {r.watch_id for r in rows} == {watch_a.id, watch_b.id}
+    assert all(r.handle == STRANGER for r in rows)
+
+
+async def test_self_mode_expired_unbound_watch_admits_no_new_candidate(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(STRANGER)
+    chat = store.add_chat(STRANGER)
+    await adapter.prime()
+
+    async with session_factory() as session:
+        await watches_repo.create_watch(
+            session,
+            target_handle=None,
+            instruction="expired watch",
+            expiry=datetime.now(UTC) - timedelta(days=1),
+        )
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="hi")
+    await adapter.poll_once()
+
+    assert runner.jxa_calls == []  # only the unknown_senders line, no prompt
+    async with session_factory() as session:
+        rows = list((await session.execute(select(WatchCandidate))).scalars())
+        unknown = await imessage_repo.list_unknown_senders(
+            session, platform=PLATFORM
+        )
+    assert rows == []
+    assert [(u.handle, u.count) for u in unknown] == [(STRANGER, 1)]
