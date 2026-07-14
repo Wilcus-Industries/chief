@@ -21,7 +21,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from . import contacts as contact_repo
-from .models import AdapterCursor, Contact, IMessagePref, UnknownSender
+from .models import (
+    AdapterCursor,
+    Contact,
+    IMessagePref,
+    IMessageSend,
+    UnknownSender,
+)
 
 #: The adapter's platform key (`Contact.platform`, thread queries, the cursor row).
 PLATFORM = "imessage"
@@ -190,6 +196,40 @@ async def mark_contacted(session: AsyncSession, handle: str) -> None:
     else:
         pref.contacted = True
     await session.commit()
+
+
+# ---- self-DM send records (loop-proof echo filter, #161) ---------------------------
+
+
+async def record_send(session: AsyncSession, handle: str, body: str) -> None:
+    """Record one own send to a self-handle (the durable echo-filter half, #161).
+
+    ``body`` is the exact wire text sent (including the "🤖 " prefix; for a bare
+    file send, the filename), so the later store echo can be matched and consumed.
+    """
+    session.add(IMessageSend(handle=normalize_handle(handle), body=body))
+    await session.commit()
+
+
+async def take_send(session: AsyncSession, handle: str, body: str) -> bool:
+    """Consume the oldest recorded send matching ``(handle, body)``; ``True`` if one
+    was found and deleted (one-shot, so a repeated identical send matches once each).
+    """
+    stmt = (
+        select(IMessageSend)
+        .where(
+            IMessageSend.handle == normalize_handle(handle),
+            IMessageSend.body == body,
+        )
+        .order_by(IMessageSend.id)
+        .limit(1)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        return False
+    await session.delete(row)
+    await session.commit()
+    return True
 
 
 # ---- poll cursor -------------------------------------------------------------------
