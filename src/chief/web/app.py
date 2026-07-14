@@ -132,7 +132,7 @@ class WatchesPanel:
         now = datetime.now(UTC)
         return [
             (
-                w.target_handle,
+                w.target_handle or "(unbound — awaiting confirmation)",
                 w.instruction,
                 f"{w.expiry:%Y-%m-%d %H:%M} UTC",
                 w.tone,

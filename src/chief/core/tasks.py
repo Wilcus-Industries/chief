@@ -719,7 +719,7 @@ class TaskManager:
             state = watches_repo.effective_state(watch, now=datetime.now(UTC))
             if state != watches_repo.STATE_ARMED:
                 return f"#{watch_id} is already {state} — nothing to cancel."
-            target_handle = watch.target_handle
+            target_handle = watch.target_handle or "it"
             await watches_repo.cancel_watch(session, watch_id)
         return f"Cancelled #{watch_id} — {target_handle} will never fire."
 

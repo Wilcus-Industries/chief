@@ -1,7 +1,7 @@
-"""chief's watch tools (#165, part of PRD #160) — standing owner instructions.
+"""chief's watch tools (#165/#168, part of PRD #160) — standing owner instructions.
 
 One in-process server (``chief_watches``), owner-only, wired into owner sessions
-whenever the iMessage adapter is configured. Three tools:
+whenever the iMessage adapter is configured. Five tools:
 
 - ``create_watch`` — record a standing instruction over a Contacts-resolved
   handle ("if mom texts me today about x, tell her y"). Contact resolution is
@@ -14,13 +14,24 @@ whenever the iMessage adapter is configured. Three tools:
   it's given. ``expiry`` reuses :func:`chief.core.schedule_time.next_fire`
   (the same ISO/timezone parser ``schedule_once`` uses); omitting it applies
   the 14-day default (:func:`chief.persistence.watches.default_expiry`).
+  ``target_handle`` may be omitted (#168) — the person isn't a known handle
+  yet, so the watch starts unbound and the owner confirms it later via
+  ``confirm_watch_candidate``.
 - ``list_watches`` — every watch with its effective state (an armed watch past
   its expiry reads as ``expired``, per
-  :func:`chief.persistence.watches.effective_state`).
+  :func:`chief.persistence.watches.effective_state`); an unbound watch's target
+  reads as ``(unbound — awaiting confirmation)``.
 - ``cancel_watch`` — flip an armed watch to ``cancelled`` for good; a cancelled
   or already-expired watch can never fire, and cancelling twice is a no-op.
+- ``list_watch_candidates`` (#168) — pending unknown-sender candidates the
+  iMessage adapter surfaced (see :mod:`chief.adapters.imessage`), each tied to
+  the unbound watch it might match.
+- ``confirm_watch_candidate`` (#168) — resolve one: "yes" binds the watch's
+  ``target_handle`` to that candidate's handle (making it an ordinary armed
+  watch, indistinguishable from a directly-created one); "no" rejects it and
+  the sender stays inert.
 
-All three are owner-initiated and reversible-enough (cancel always undoes a watch;
+All five are owner-initiated and reversible-enough (cancel always undoes a watch;
 a wrong-target create is caught by the confirmation echo) → pre-approved, no card,
 the same posture as :class:`~chief.tools.imessage_admin.IMessageAdminService`.
 
@@ -52,11 +63,14 @@ _CREATE_DESCRIPTION = (
     "about dinner, tell her I'll be late'). Resolve the person to a handle with "
     "lookup_contact FIRST — watches only bind to known handles you've resolved, "
     "never bare names or unknown numbers. `target_handle` is that resolved "
-    "handle (E.164 phone or email). `instruction` is what chief should do. "
-    "Omit `expiry` for the default 14-day TTL, or give an ISO-8601 timestamp "
-    "read in the owner's local time otherwise (e.g. wording like 'today' means "
-    "local midnight tonight). `tone` is 'report' (default, tell the owner what "
-    "happened) or 'silent' (act without narrating back)."
+    "handle (E.164 phone or email). Omit `target_handle` only when the person is "
+    "NOT a known contact/handle yet (e.g. an expected text from an unknown "
+    "number) — chief will surface each new sender as a candidate in the "
+    "self-thread for you to confirm before the watch binds. `instruction` is "
+    "what chief should do. Omit `expiry` for the default 14-day TTL, or give an "
+    "ISO-8601 timestamp read in the owner's local time otherwise (e.g. wording "
+    "like 'today' means local midnight tonight). `tone` is 'report' (default, "
+    "tell the owner what happened) or 'silent' (act without narrating back)."
 )
 _LIST_DESCRIPTION = (
     "List every watch — its id, target, instruction, expiry, tone, and current "
@@ -64,6 +78,15 @@ _LIST_DESCRIPTION = (
 )
 _CANCEL_DESCRIPTION = (
     "Cancel a watch by its id (from list_watches) — it will never fire."
+)
+_LIST_CANDIDATES_DESCRIPTION = (
+    "List pending unknown-sender candidates — handle + when first seen, and "
+    "which unbound watch they might match. Use the id with confirm_watch_candidate."
+)
+_CONFIRM_CANDIDATE_DESCRIPTION = (
+    "Confirm or reject a pending unknown-sender candidate (from "
+    "list_watch_candidates). 'yes' binds the watch to that handle; 'no' rejects "
+    "it and the sender stays inert."
 )
 
 _CREATE_SCHEMA: dict[str, Any] = {
@@ -90,12 +113,20 @@ _CREATE_SCHEMA: dict[str, Any] = {
             "description": "'report' (default) or 'silent'.",
         },
     },
-    "required": ["target_handle", "instruction"],
+    "required": ["instruction"],
 }
 _CANCEL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"watch_id": {"type": "integer"}},
     "required": ["watch_id"],
+}
+_CONFIRM_CANDIDATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "candidate_id": {"type": "integer"},
+        "decision": {"type": "string", "enum": ["yes", "no"]},
+    },
+    "required": ["candidate_id", "decision"],
 }
 
 
@@ -125,8 +156,9 @@ def _fmt_local(dt: datetime, tz: tzinfo) -> str:
 
 def _describe(watch: Watch, tz: tzinfo, *, now: datetime) -> str:
     state = repo.effective_state(watch, now=now)
+    target = watch.target_handle or "(unbound — awaiting confirmation)"
     return (
-        f'#{watch.id} {watch.target_handle} — "{watch.instruction}" '
+        f'#{watch.id} {target} — "{watch.instruction}" '
         f"({state}, expires {_fmt_local(watch.expiry, tz)}, {watch.tone} tone)"
     )
 
@@ -148,6 +180,8 @@ class WatchService:
             f"mcp__{n}__create_watch",
             f"mcp__{n}__list_watches",
             f"mcp__{n}__cancel_watch",
+            f"mcp__{n}__list_watch_candidates",
+            f"mcp__{n}__confirm_watch_candidate",
         )
 
     def _tz(self) -> tzinfo:
@@ -160,11 +194,6 @@ class WatchService:
         async def create_watch(args: dict[str, Any]) -> dict[str, Any]:
             target_handle = _opt(args, "target_handle")
             instruction = _opt(args, "instruction")
-            if not target_handle:
-                return _text_result(
-                    "Which handle? Resolve one with lookup_contact first.",
-                    is_error=True,
-                )
             if not instruction:
                 return _text_result(
                     "What should chief do? Give an instruction.", is_error=True
@@ -205,10 +234,19 @@ class WatchService:
                     expiry=expiry,
                     tone=tone,
                 )
-            return _text_result(
-                f"Watching {watch.target_handle} — \"{watch.instruction}\" "
-                f"until {_fmt_local(watch.expiry, tz)}, {watch.tone} tone."
-            )
+            if watch.target_handle:
+                msg = (
+                    f"Watching {watch.target_handle} — \"{watch.instruction}\" "
+                    f"until {_fmt_local(watch.expiry, tz)}, {watch.tone} tone."
+                )
+            else:
+                msg = (
+                    f'Watching for an unknown sender — "{watch.instruction}" '
+                    f"until {_fmt_local(watch.expiry, tz)}, {watch.tone} tone. "
+                    "I'll ask you to confirm the handle in this thread when "
+                    "someone new texts."
+                )
+            return _text_result(msg)
 
         return create_watch
 
@@ -243,7 +281,7 @@ class WatchService:
                     return _text_result(
                         f"#{watch_id} is already {state} — nothing to cancel."
                     )
-                target_handle = watch.target_handle
+                target_handle = watch.target_handle or "it"
                 await repo.cancel_watch(session, watch_id)
             return _text_result(
                 f"Cancelled #{watch_id} — {target_handle} will never fire."
@@ -251,9 +289,72 @@ class WatchService:
 
         return cancel_watch
 
+    def _build_list_candidates(self) -> InProcessTool:
+        factory, tz, now_fn = self.session_factory, self._tz(), self.now
+
+        @tool("list_watch_candidates", _LIST_CANDIDATES_DESCRIPTION, {})
+        async def list_watch_candidates(args: dict[str, Any]) -> dict[str, Any]:
+            async with factory() as session:
+                candidates = await repo.list_pending_candidates(
+                    session, now=now_fn()
+                )
+            if not candidates:
+                return _text_result("No pending candidates.")
+            lines = [
+                f"#{c.id} {c.handle} — for watch #{c.watch_id}, first seen "
+                f"{_fmt_local(c.first_seen, tz)}"
+                for c in candidates
+            ]
+            return _text_result("\n".join(lines))
+
+        return list_watch_candidates
+
+    def _build_confirm_candidate(self) -> InProcessTool:
+        factory, now_fn = self.session_factory, self.now
+
+        @tool(
+            "confirm_watch_candidate",
+            _CONFIRM_CANDIDATE_DESCRIPTION,
+            _CONFIRM_CANDIDATE_SCHEMA,
+        )
+        async def confirm_watch_candidate(args: dict[str, Any]) -> dict[str, Any]:
+            candidate_id = int(args["candidate_id"])
+            decision = str(args.get("decision") or "")
+            if decision not in ("yes", "no"):
+                return _text_result(
+                    "decision must be 'yes' or 'no'.", is_error=True
+                )
+            async with factory() as session:
+                result = await repo.confirm_candidate(
+                    session,
+                    candidate_id,
+                    confirm=(decision == "yes"),
+                    now=now_fn(),
+                )
+            if result is None:
+                return _text_result(
+                    f"No pending candidate #{candidate_id} (missing, already "
+                    "decided, or its watch expired).",
+                    is_error=True,
+                )
+            watch, candidate = result
+            if decision == "yes":
+                return _text_result(
+                    f"Confirmed — watch #{watch.id} now watches {candidate.handle}."
+                )
+            return _text_result(f"Ignored — {candidate.handle} stays inert.")
+
+        return confirm_watch_candidate
+
     def server_config(self) -> InProcessServerConfig:
         """The in-process ``mcp_servers`` entry for the watch tools."""
         return create_sdk_mcp_server(
             self.server_name,
-            tools=[self._build_create(), self._build_list(), self._build_cancel()],
+            tools=[
+                self._build_create(),
+                self._build_list(),
+                self._build_cancel(),
+                self._build_list_candidates(),
+                self._build_confirm_candidate(),
+            ],
         )
