@@ -1,8 +1,8 @@
 """Platform-neutral owner command registry (#129).
 
 Every owner slash-command (``/cancel``, ``/tasks``, ``/close``, ``/rename``,
-``/memory``, ``/forget``, ``/branch``, ``/opus``, ``/sonnet``, ``/route``) is
-defined **once** here, over the
+``/memory``, ``/forget``, ``/branch``, ``/opus``, ``/sonnet``, ``/route``,
+``/watches``) is defined **once** here, over the
 shared :class:`~chief.adapters.base.Engine` / :class:`~chief.adapters.base.MemoryReader`
 interfaces. Each platform adapter (Telegram, Discord, …) parses its native update
 into a :class:`CommandContext` and dispatches through :data:`OWNER_COMMANDS` — a
@@ -14,8 +14,10 @@ This module imports from :mod:`.base`, never the other way — adapters import b
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from ..memory.store import OWNER_NAMESPACE
+from ..persistence.watches import effective_state
 from .base import Engine, MemoryReader, ReplyFn, default_branch_title
 
 
@@ -134,6 +136,31 @@ async def _cmd_route(ctx: CommandContext) -> None:
     await ctx.reply(await ctx.engine.route(ctx.thread_key, ctx.arg))
 
 
+async def _cmd_watches(ctx: CommandContext) -> None:
+    """List watches, or cancel one: ``/watches`` | ``/watches cancel <id>`` (#165)."""
+    action, _, rest = ctx.arg.partition(" ")
+    if action.strip().lower() == "cancel":
+        try:
+            watch_id = int(rest.strip())
+        except ValueError:
+            await ctx.reply("Usage: /watches cancel <id>")
+            return
+        await ctx.reply(await ctx.engine.cancel_watch(watch_id))
+        return
+    watches = await ctx.engine.list_watches()
+    if not watches:
+        await ctx.reply("No watches.")
+        return
+    now = datetime.now(UTC)
+    lines = [
+        f'#{w.id} {w.target_handle} — "{w.instruction}" '
+        f"({effective_state(w, now=now)}, expires {w.expiry:%Y-%m-%d %H:%M} UTC, "
+        f"{w.tone} tone)"
+        for w in watches
+    ]
+    await ctx.reply("\n".join(lines))
+
+
 class CommandRegistry:
     """A platform-neutral table of owner command name → handler (+ description)."""
 
@@ -174,6 +201,7 @@ def owner_registry() -> CommandRegistry:
     registry.register("opus", _cmd_opus, "Escalate this thread to Opus")
     registry.register("sonnet", _cmd_sonnet, "Revert this thread to the default model")
     registry.register("route", _cmd_route, "Pin a routing category: /route <category>")
+    registry.register("watches", _cmd_watches, "List watches, or /watches cancel <id>")
     return registry
 
 
