@@ -87,6 +87,7 @@ from chief.tools.routing_admin import (
 )
 from chief.tools.schedule import ScheduleBashService, ScheduleService
 from chief.tools.shell import ShellService
+from chief.tools.watches import WatchFireGate, WatchService
 
 Factory = Callable[..., SessionProto]
 
@@ -305,6 +306,7 @@ def _manager(
     opus_auto_detect: bool = False,
     is_complex: Callable[..., Any] = _no,
     owner_model_opus: str = "claude-opus-4-8",
+    watches_service: Any = None,
 ) -> TaskManager:
     return TaskManager(
         session_factory=session_factory,
@@ -326,6 +328,7 @@ def _manager(
         opus_auto_detect=opus_auto_detect,
         is_complex=is_complex,
         owner_model_opus=owner_model_opus,
+        watches_service=watches_service,
     )
 
 
@@ -459,6 +462,47 @@ async def test_dispatch_threads_attachments_into_run_turn(
 
     # The owner's media rides the queued Turn through to the session's run_turn.
     assert sess.attachments_seen == [(att,)]
+    await mgr.shutdown()
+
+
+async def test_watch_eval_turn_consumes_its_clearance_at_turn_end(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #178: a watch-eval turn's fire clearance is scoped to exactly that turn — it is
+    # consumed at turn end even when the eval concludes without firing (FakeSession
+    # never calls reply_to_watch), closing the residual cross-traffic window.
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    gate = WatchFireGate()
+    gate.authorize(5)
+    svc = WatchService(session_factory=session_factory, fire_gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess), watches_service=svc)
+
+    await mgr.dispatch(thread_key="-100:5", text="eval", watch_fire_id=5)
+    # The consume runs in _run_turn's outer finally, strictly after the OPEN commit —
+    # wait on that observable effect rather than racing the task row.
+    await _until(lambda: not gate.is_authorized(5))
+
+    assert not gate.is_authorized(5)
+    await mgr.shutdown()
+
+
+async def test_non_eval_turn_leaves_other_watch_clearances_intact(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # #178: an ordinary owner turn carries no watch_fire_id, so it never consumes an
+    # unrelated watch's clearance — consume targets only the turn's own id.
+    io = FakeIO()
+    sess = FakeSession(model="m")
+    gate = WatchFireGate()
+    gate.authorize(7)
+    svc = WatchService(session_factory=session_factory, fire_gate=gate)
+    mgr = _manager(session_factory, io, factory=_one(sess), watches_service=svc)
+
+    await mgr.dispatch(thread_key="-100:5", text="hi")
+    await wait_for_task_open(session_factory, platform="telegram", thread_key="-100:5")
+
+    assert gate.is_authorized(7)
     await mgr.shutdown()
 
 

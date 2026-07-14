@@ -538,6 +538,7 @@ class Engine(Protocol):
         attachments: tuple[Attachment, ...] = (),
         is_general: bool = False,
         surface: Surface = Surface.DM,
+        watch_fire_id: int | None = None,
     ) -> None: ...
     async def dispatch_guest(
         self,

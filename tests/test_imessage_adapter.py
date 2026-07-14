@@ -1156,6 +1156,9 @@ async def test_self_mode_dispatch_clears_only_the_matched_watch_to_fire(
 
     assert fire_gate.is_authorized(watch.id)  # the matched watch is cleared
     assert not fire_gate.is_authorized(watch.id + 1)  # a would-be minted id is not
+    # #178: the eval dispatch is tagged with the watch id so _run_turn can scope the
+    # clearance to that turn and consume it at turn end.
+    assert engine.dispatched_watch_fire_ids == [watch.id]
 
 
 async def test_self_mode_next_inbound_drops_a_prior_unfired_watchs_clearance(
