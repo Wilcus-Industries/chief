@@ -116,7 +116,7 @@ class ChatDb:
         self,
         *,
         handle_rowid: int,
-        chat_rowid: int,
+        chat_rowid: int | None = None,
         text: str | None,
         is_from_me: bool = False,
         when: datetime | None = None,
@@ -138,11 +138,45 @@ class ChatDb:
                 ),
             )
             message_rowid = int(cur.lastrowid or 0)
-            conn.execute(
-                "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
-                (chat_rowid, message_rowid),
-            )
+            # A chat_id-NULL row (no chat_message_join) is what the self-chat's
+            # received copy looks like — the LEFT JOIN still classifies it a DM.
+            if chat_rowid is not None:
+                conn.execute(
+                    "INSERT INTO chat_message_join (chat_id, message_id) "
+                    "VALUES (?, ?)",
+                    (chat_rowid, message_rowid),
+                )
             return message_rowid
+
+    def add_self_text(
+        self,
+        *,
+        handle_rowid: int,
+        chat_rowid: int,
+        text: str,
+        when: datetime | None = None,
+    ) -> int:
+        """Insert the self-chat message *pair* the real Mac writes (#161).
+
+        A message the owner sends to their own number lands as two rows: a sent copy
+        (``is_from_me=1``, ``text=None``, joined to the chat — rig rows 637/638) then
+        a received copy (``is_from_me=0``, the text, *no* chat_message_join so
+        ``chat_id`` is NULL — rig rows 615/616). Returns the received copy's ROWID.
+        """
+        self.add_message(
+            handle_rowid=handle_rowid,
+            chat_rowid=chat_rowid,
+            text=None,
+            is_from_me=True,
+            when=when,
+        )
+        return self.add_message(
+            handle_rowid=handle_rowid,
+            chat_rowid=None,
+            text=text,
+            is_from_me=False,
+            when=when,
+        )
 
 
 class FixtureRunner(ScriptRunner):

@@ -24,17 +24,39 @@ MOM = "+15550000002"
 STRANGER = "+15550000003"
 
 
+def _self_io(
+    runner: FixtureRunner,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> IMessageTaskIO:
+    """A self-DM IMessageTaskIO for the owner handle (prefixes + records sends)."""
+    return IMessageTaskIO(
+        runner,
+        outbox_dir=str(tmp_path / "outbox"),
+        self_dm=True,
+        self_handles=frozenset({imessage_repo.normalize_handle(OWNER)}),
+        session_factory=session_factory,
+    )
+
+
 def make_adapter(
     tmp_path: Path,
     session_factory: async_sessionmaker[AsyncSession],
     *,
     guest_enabled: bool = False,
     runner: FixtureRunner | None = None,
+    self_dm: bool = False,
+    io: IMessageTaskIO | None = None,
 ) -> tuple[IMessageAdapter, ChatDb, FixtureRunner, FakeEngine]:
     store = ChatDb(tmp_path / "chat.db")
     runner = runner or FixtureRunner()
     engine = FakeEngine()
-    io = IMessageTaskIO(runner, outbox_dir=str(tmp_path / "outbox"))
+    if io is None:
+        io = (
+            _self_io(runner, session_factory, tmp_path)
+            if self_dm
+            else IMessageTaskIO(runner, outbox_dir=str(tmp_path / "outbox"))
+        )
     adapter = IMessageAdapter(
         runner=runner,
         db_path=str(store.path),
@@ -44,6 +66,7 @@ def make_adapter(
         owner_handles=(OWNER,),
         guest_ack="Noted.",
         guest_enabled=guest_enabled,
+        self_dm=self_dm,
     )
     return adapter, store, runner, engine
 
@@ -328,3 +351,131 @@ async def test_seeding_upgrades_an_existing_guest_contact_to_owner(
         assert contact is not None and contact.tier == "owner"
         rows = list((await session.execute(select(Contact))).scalars())
     assert len(rows) == 1  # upgraded in place, not duplicated
+
+
+# ---- self-DM mode (#161) -----------------------------------------------------------
+
+
+async def test_self_text_pair_dispatches_exactly_once(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    # The observed self-chat pair: sent copy (filtered by is_from_me) + the
+    # chat_id-NULL received copy (dispatched once).
+    store.add_self_text(handle_rowid=handle, chat_rowid=chat, text="note to self")
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "note to self")]
+
+
+async def test_self_thread_slash_command_dispatches_and_reply_is_prefixed(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, runner, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    store.add_self_text(handle_rowid=handle, chat_rowid=chat, text="/tasks")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []  # a command is not a turn
+    assert runner.jxa_calls[0][-2:] == (OWNER, "🤖 No active tasks.")
+
+
+async def test_bot_prefixed_inbound_is_never_dispatched(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    await adapter.prime()
+
+    # A "🤖 " row with no matching send-record: the stateless prefix skip catches it.
+    store.add_message(handle_rowid=handle, chat_rowid=None, text="🤖 anything")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+
+
+async def test_recorded_send_is_skipped_across_restart(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+    # Record chief's own sends (a text reply and a file), then a fresh adapter
+    # instance (same session_factory + store) must skip their echoed store rows.
+    await io.send(OWNER, "reply")  # records "🤖 reply"
+    await io.send_file(OWNER, "chart.png", b"x")  # records "chart.png"
+
+    store = ChatDb(tmp_path / "chat.db")
+    handle = store.add_handle(OWNER)
+    engine = FakeEngine()
+    adapter = IMessageAdapter(
+        runner=runner,
+        db_path=str(store.path),
+        engine=engine,
+        session_factory=session_factory,
+        io=io,
+        owner_handles=(OWNER,),
+        guest_ack="Noted.",
+        self_dm=True,
+    )
+    await adapter.prime()
+
+    store.add_message(handle_rowid=handle, chat_rowid=None, text="🤖 reply")
+    store.add_message(handle_rowid=handle, chat_rowid=None, text="chart.png")
+    await adapter.poll_once()
+
+    assert engine.dispatched == []  # durable record survives the restart
+
+
+async def test_loop_proof_round_trip(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    runner = FixtureRunner()
+    io = _self_io(runner, session_factory, tmp_path)
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True, runner=runner, io=io
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    store.add_self_text(handle_rowid=handle, chat_rowid=chat, text="hi")
+    await adapter.poll_once()
+    assert engine.dispatched == [(OWNER, "hi")]
+
+    # chief replies; its received-copy echo re-polls to zero further dispatch/sends.
+    await io.send(OWNER, "answer")  # records "🤖 answer"
+    sends_before = len(runner.jxa_calls)
+    store.add_message(handle_rowid=handle, chat_rowid=None, text="🤖 answer")
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "hi")]  # no re-dispatch
+    assert len(runner.jxa_calls) == sends_before  # no further owner-directed send
+
+
+async def test_self_dm_off_still_dispatches_a_bot_prefixed_owner_row(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The flag strictly gates the new behavior: with self_dm off, a whitelisted
+    # owner's "🤖 " row is an ordinary inbound and dispatches (dedicated-ID suite).
+    adapter, store, _, engine = make_adapter(tmp_path, session_factory)
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    store.add_message(handle_rowid=handle, chat_rowid=chat, text="🤖 hi")
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "🤖 hi")]

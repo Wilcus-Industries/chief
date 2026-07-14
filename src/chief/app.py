@@ -929,7 +929,16 @@ def build_imessage_stack(
         timeout=settings.apple_script_timeout_seconds,
         output_limit=settings.apple_output_limit,
     )
-    io = IMessageTaskIO(runner, outbox_dir=IMESSAGE_OUTBOX_DIR)
+    self_handles = frozenset(
+        normalize_handle(handle) for handle in settings.imessage_owner_handles
+    )
+    io = IMessageTaskIO(
+        runner,
+        outbox_dir=IMESSAGE_OUTBOX_DIR,
+        self_dm=settings.imessage_self_dm,
+        self_handles=self_handles,
+        session_factory=session_factory,
+    )
     mirror = MirrorTaskIO(
         io,
         platform="imessage",
@@ -979,6 +988,7 @@ def build_imessage_stack(
         guest_global_rate=settings.guest_global_rate_per_window,
         poll_seconds=settings.imessage_poll_seconds,
         memory=memory,
+        self_dm=settings.imessage_self_dm,
     )
     if foreign_out is not None:
         foreign_out["imessage"] = ForeignPlatform(engine=manager, io=io)

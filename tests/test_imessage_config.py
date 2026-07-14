@@ -67,12 +67,24 @@ def test_poll_seconds_must_be_positive() -> None:
         Settings(**_KW, imessage_poll_seconds=0)
 
 
+def test_self_dm_defaults_off() -> None:
+    assert Settings(**_KW).imessage_self_dm is False  # opt-in behavior flag
+
+
+def test_self_dm_requires_owner_handles() -> None:
+    # The self-chat *is* an owner handle, so self-DM needs at least one configured.
+    with pytest.raises(ValueError, match="imessage_owner_handles"):
+        Settings(**_KW, imessage_self_dm=True)
+
+
 def test_owner_handles_are_overlay_denied_but_cadence_is_merge_safe() -> None:
     # The whitelist's owner tier is an owner-identity key — chief's own overlay
     # must never mint one (#107 fence); the poll cadence is plain behavior.
     assert _overlay_denied("imessage_owner_handles")
     assert _overlay_denied("imessage_enabled")  # via *_enabled
     assert not _overlay_denied("imessage_poll_seconds")
+    # Self-DM is behavior-only (mints no privilege) → agent-editable, not denied.
+    assert not _overlay_denied("imessage_self_dm")
 
 
 # ---- doctor probe ------------------------------------------------------------------
