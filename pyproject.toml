@@ -13,6 +13,8 @@ dependencies = [
     "uvicorn>=0.30",
     # Starlette requires it for any form parsing (the login POST).
     "python-multipart>=0.0.18",
+    # The MCP client seam (HTTP + stdio) speaks through the official SDK.
+    "mcp>=1",
 ]
 
 [project.scripts]

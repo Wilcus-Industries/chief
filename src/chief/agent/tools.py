@@ -54,9 +54,10 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
-        """Add a tool; a duplicate name is a wiring bug, so it raises."""
-        if tool.spec.name in self._tools:
+    def register(self, tool: Tool, *, replace: bool = False) -> None:
+        """Add a tool; a duplicate name is a wiring bug unless ``replace``
+        (MCP reconnects re-register their tools)."""
+        if not replace and tool.spec.name in self._tools:
             raise ValueError(f"duplicate tool name: {tool.spec.name}")
         self._tools[tool.spec.name] = tool
 
