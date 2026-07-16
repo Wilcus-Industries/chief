@@ -9,6 +9,10 @@ workflow; this file covers how code is written.
   descriptive names over abbreviations (`order_count`, not `ordc`). All names, comments,
   and docs in English.
 - **Function length:** keep functions short (~50 lines). If one grows past that, extract a helper.
+- **File length (STRICT):** production files stay **under 200 lines — hard cap**; aim for
+  **under 100**. The cap is CI-enforced by the done-check; tests are exempt. A file may
+  exceed 200 only when splitting is genuinely worse, and must carry a
+  `# styleguide: file-length — <justification>` comment at the top to pass the check.
 - **Files:** keep modules short and single-responsibility. A file should have one clear
   reason to exist; split when it accumulates unrelated concerns.
 - **Self-documenting code:** prefer clear names and small functions over explanatory
