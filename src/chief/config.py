@@ -34,6 +34,7 @@ class Config:
     web_password: str = ""
     skills_dir: Path = Path("skills")
     agents_dir: Path = Path("agents")
+    mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def default_model(self) -> str:
@@ -68,6 +69,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         ),
         skills_dir=Path(_env_or(raw, "skills_dir", "skills")),
         agents_dir=Path(_env_or(raw, "agents_dir", "agents")),
+        mcp_servers=dict(raw.get("mcp_servers") or {}),
     )
 
 

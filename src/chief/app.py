@@ -4,6 +4,7 @@ Tests boot exactly this wiring with only the provider swapped for the
 deterministic fake (the one scripted fake CI allows, PRD #183).
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from chief.cron.timing import parse_quiet_hours
 from chief.cron.tools import register_cron_tools
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools, GatePolicy
+from chief.mcpclient.manager import McpManager, ServerConfig
+from chief.mcpclient.tools import load_self_added, register_mcp_tools
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.persistence.db import init_schema, make_engine, make_session_factory
@@ -41,6 +44,8 @@ from chief.web.app import build_web_app
 from chief.web.auth import Auth
 from chief.web.server import WebServer
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class App:
@@ -56,14 +61,23 @@ class App:
     bus: EventBus
     web_adapter: WebAdapter
     web_server: WebServer | None
+    mcp_manager: McpManager
+    mcp_configs: tuple[ServerConfig, ...]
 
     async def start(self) -> None:
         await self.socket_adapter.start()
         self.cron_service.start()
         if self.web_server is not None:
             await self.web_server.start()
+        for server in self.mcp_configs:
+            try:
+                await self.mcp_manager.connect(server)
+            except Exception:
+                # A dead sidecar must not keep the whole daemon down.
+                logger.exception("mcp server %s failed to connect", server.name)
 
     async def stop(self) -> None:
+        await self.mcp_manager.stop()
         if self.web_server is not None:
             await self.web_server.stop()
         await self.cron_service.stop()
@@ -131,6 +145,16 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     register_selfedit_tools(
         registry, SelfEditPipeline(Path.cwd(), audit, restart_daemon)
     )
+    mcp_manager = McpManager(registry)
+    register_mcp_tools(registry, mcp_manager, audit)
+    mcp_configs = tuple(
+        ServerConfig(
+            name=name,
+            url=entry.get("url"),
+            command=tuple(entry["command"]) if entry.get("command") else None,
+        )
+        for name, entry in config.mcp_servers.items()
+    ) + tuple(load_self_added())
     register_skill_tools(registry, skills)
     register_spawn_tool(
         registry,
@@ -166,4 +190,6 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         bus=bus,
         web_adapter=web_adapter,
         web_server=web_server,
+        mcp_manager=mcp_manager,
+        mcp_configs=mcp_configs,
     )
