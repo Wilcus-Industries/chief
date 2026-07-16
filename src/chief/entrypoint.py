@@ -1,68 +1,64 @@
-"""Process entrypoint: run Alembic migrations then exec the app.
+"""Daemon entrypoint: wire the core together and serve until signalled."""
 
-This module is the launcher wrapper (the ``chief`` script installed by install.sh runs
-it). It runs ``alembic upgrade head`` (fail-loud: non-zero exit + clear log on failure)
-before handing control to the app via ``os.execv``. The app never boots on a
-half-migrated schema.
-
-Invoke::
-
-    python -m chief.entrypoint
-
-Or import and call :func:`migrate_then_exec` directly (used by tests and __main__).
-"""
-
+import asyncio
 import logging
-import os
-import sys
+import signal
 
-from .persistence.db import _run_migrations
+from chief.adapters.socket import SocketAdapter
+from chief.agent.manager import SessionManager
+from chief.agent.prompt import system_prompt
+from chief.agent.tools import ToolRegistry
+from chief.config import Config, load_config
+from chief.dispatch import Dispatcher
+from chief.persistence.db import init_schema, make_engine, make_session_factory
+from chief.persistence.store import MessageStore
+from chief.provider.openrouter import OpenRouterProvider
 
-logger = logging.getLogger("chief.entrypoint")
+logger = logging.getLogger(__name__)
 
 
-def migrate_then_exec(db_path: str, app_argv: list[str]) -> None:
-    """Run ``alembic upgrade head`` then exec the app process.
+async def build_dispatcher(config: Config, store: MessageStore) -> Dispatcher:
+    """Assemble provider, registry, sessions, and dispatcher from config."""
+    provider = OpenRouterProvider(config.openrouter_api_key)
+    registry = ToolRegistry()
+    manager = SessionManager(
+        provider=provider,
+        registry=registry,
+        store=store,
+        default_model=config.default_model,
+        system_prompt=system_prompt(),
+        max_concurrent=config.max_concurrent_sessions,
+    )
+    return Dispatcher(manager)
 
-    On success, replaces the current process with ``app_argv`` via ``os.execv``
-    — this function does not return. On failure, logs a clear error and calls
-    ``sys.exit(1)``; the app is never started.
 
-    Args:
-        db_path: Filesystem path to the SQLite database file.
-        app_argv: The command + arguments to exec on success (e.g.
-            ``[sys.executable, "-m", "chief.app"]``).
-    """
-    try:
-        logger.info("running alembic upgrade head against %s", db_path)
-        _run_migrations(db_path)
-        logger.info("migration complete — starting app")
-    except Exception as exc:
-        logger.error(
-            "migration failed — aborting startup to prevent a half-migrated schema: %s",
-            exc,
-        )
-        sys.exit(1)
+async def amain() -> None:
+    """Run the daemon until SIGINT/SIGTERM."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    )
+    config = load_config()
+    engine = make_engine(config.db_path)
+    await init_schema(engine)
+    store = MessageStore(make_session_factory(engine))
+    dispatcher = await build_dispatcher(config, store)
+    socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
+    dispatcher.register(socket_adapter)
+    await socket_adapter.start()
+    logger.info("chief up — socket at %s", config.socket_path)
 
-    # Flush stdout before execv: os.execv replaces the process image without
-    # flushing Python's internal I/O buffers, so any log line written just before
-    # execv would be silently lost. We flush explicitly so the migration-complete
-    # line is visible in container logs.
-    sys.stdout.flush()
-    os.execv(app_argv[0], app_argv)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    await stop.wait()
+    await socket_adapter.stop()
+    await engine.dispose()
+    logger.info("chief stopped")
 
 
 def main() -> None:
-    """Entrypoint: read DB_PATH from the environment, migrate, then exec the app."""
-    from .obs.logging import configure_logging
-
-    configure_logging()
-
-    # Falls back to data/chief.db — the same default used by config.py / config.yaml
-    # (relative to the repo root, where the chief launcher runs).
-    db_path = os.environ.get("DB_PATH", "data/chief.db")
-    app_argv = [sys.executable, "-m", "chief.app"]
-    migrate_then_exec(db_path, app_argv)
+    asyncio.run(amain())
 
 
 if __name__ == "__main__":
