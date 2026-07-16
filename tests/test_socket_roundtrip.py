@@ -67,10 +67,10 @@ def provider() -> FakeProvider:
 async def connection(
     provider: FakeProvider,
     store: MessageStore,
-    tmp_path: Path,
+    sock_path: Path,
 ) -> AsyncIterator[Streams]:
-    adapter = await start_daemon(provider, store, tmp_path / "chief.sock")
-    reader, writer = await asyncio.open_unix_connection(str(tmp_path / "chief.sock"))
+    adapter = await start_daemon(provider, store, sock_path)
+    reader, writer = await asyncio.open_unix_connection(str(sock_path))
     yield reader, writer
     writer.close()
     await adapter.stop()
@@ -103,14 +103,14 @@ async def test_round_trip_streams_then_finalizes(
 
 
 async def test_round_trip_through_a_tool_call(
-    store: MessageStore, tmp_path: Path
+    store: MessageStore, sock_path: Path
 ) -> None:
     call = ToolCall(id="c1", name="clock", arguments={})
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(call,))], text_turn("it is 12:00")]
     )
-    adapter = await start_daemon(provider, store, tmp_path / "chief.sock")
-    streams = await asyncio.open_unix_connection(str(tmp_path / "chief.sock"))
+    adapter = await start_daemon(provider, store, sock_path)
+    streams = await asyncio.open_unix_connection(str(sock_path))
     try:
         frames = await ask(streams, "what time is it?")
         assert frames[-1]["text"] == "it is 12:00"
