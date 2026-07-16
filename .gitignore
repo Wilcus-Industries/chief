@@ -18,9 +18,6 @@ dist/
 # Secrets — keep dir structure, never the real secret files
 /secrets/*
 !/secrets/README.md
-!/secrets/google_tokens/
-/secrets/google_tokens/*
-!/secrets/google_tokens/.gitkeep
 # Local sqlite databases
 *.db
 .aider*
