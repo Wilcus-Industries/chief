@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -14,7 +14,13 @@ class Base(DeclarativeBase):
     """Declarative base for all chief tables."""
 
 
-class SessionRow(Base):
+class _Stamped:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
+class SessionRow(_Stamped, Base):
     """One conversation thread and its per-thread settings."""
 
     __tablename__ = "sessions"
@@ -22,12 +28,9 @@ class SessionRow(Base):
     thread_key: Mapped[str] = mapped_column(String, primary_key=True)
     channel: Mapped[str] = mapped_column(String)
     model_override: Mapped[str | None] = mapped_column(String, default=None)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow
-    )
 
 
-class MessageRow(Base):
+class MessageRow(_Stamped, Base):
     """One transcript entry, stored as the provider-seam wire dict."""
 
     __tablename__ = "messages"
@@ -35,6 +38,52 @@ class MessageRow(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     thread_key: Mapped[str] = mapped_column(String, index=True)
     message: Mapped[dict[str, object]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow
-    )
+
+
+class MonitorRow(_Stamped, Base):
+    """An agent-created event subscription that wakes a thread when it fires."""
+
+    __tablename__ = "monitors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    description: Mapped[str] = mapped_column(String)
+    watch_channel: Mapped[str] = mapped_column(String)
+    wake_channel: Mapped[str] = mapped_column(String)
+    wake_thread: Mapped[str] = mapped_column(String)
+    predicate: Mapped[dict[str, object]] = mapped_column(JSON)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class ScheduleRow(_Stamped, Base):
+    """A cron/interval schedule that wakes a thread with a prompt."""
+
+    __tablename__ = "schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    description: Mapped[str] = mapped_column(String)
+    spec: Mapped[str] = mapped_column(String)
+    wake_channel: Mapped[str] = mapped_column(String)
+    wake_thread: Mapped[str] = mapped_column(String)
+    prompt: Mapped[str] = mapped_column(String)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class SpendRow(_Stamped, Base):
+    """One turn's dollar cost, for the per-cycle budget."""
+
+    __tablename__ = "spend"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_key: Mapped[str] = mapped_column(String)
+    cost: Mapped[float] = mapped_column(Float)
+
+
+class StrangerRow(_Stamped, Base):
+    """Metadata-only record of a message from an unknown sender (no content)."""
+
+    __tablename__ = "strangers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel: Mapped[str] = mapped_column(String)
+    sender: Mapped[str] = mapped_column(String)
+    thread_key: Mapped[str] = mapped_column(String)

@@ -1,11 +1,16 @@
 """Session manager: one Session per thread, N turns concurrent overall."""
 
 import asyncio
+from collections.abc import Callable
 
 from chief.agent.session import Session
-from chief.agent.tools import ToolRegistry
+from chief.agent.tools import ToolDispatcher
+from chief.budget import Budget
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
+
+# Builds the (possibly gated) tool dispatcher for one session's context.
+ToolsFactory = Callable[[str, str], ToolDispatcher]
 
 
 class SessionManager:
@@ -15,18 +20,22 @@ class SessionManager:
         self,
         *,
         provider: Provider,
-        registry: ToolRegistry,
+        tools_factory: ToolsFactory,
         store: MessageStore,
         default_model: str,
         system_prompt: str,
         max_concurrent: int,
+        budget: Budget | None = None,
+        downgrade_model: str | None = None,
     ) -> None:
         self._provider = provider
-        self._registry = registry
+        self._tools_factory = tools_factory
         self._store = store
         self._default_model = default_model
         self._system_prompt = system_prompt
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._budget = budget
+        self._downgrade_model = downgrade_model
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
 
@@ -42,12 +51,14 @@ class SessionManager:
             session = Session(
                 thread_key=thread_key,
                 provider=self._provider,
-                registry=self._registry,
+                tools=self._tools_factory(thread_key, channel),
                 store=self._store,
                 model=self._default_model,
                 system_prompt=self._system_prompt,
                 history=history,
                 turn_semaphore=self._semaphore,
+                budget=self._budget,
+                downgrade_model=self._downgrade_model,
             )
             self._sessions[thread_key] = session
             return session

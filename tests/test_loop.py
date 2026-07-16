@@ -44,7 +44,7 @@ async def test_text_only_turn_streams_and_returns() -> None:
         provider=provider,
         model="test-model",
         messages=messages,
-        registry=ToolRegistry(),
+        tools=ToolRegistry(),
         on_delta=sink,
     )
     assert result.text == "hello there"
@@ -65,7 +65,7 @@ async def test_tool_call_turn_dispatches_and_loops() -> None:
         provider=provider,
         model="test-model",
         messages=messages,
-        registry=echo_registry(),
+        tools=echo_registry(),
         on_delta=DeltaSink(),
     )
     assert result.text == "done"
@@ -92,7 +92,7 @@ async def test_unknown_tool_result_feeds_back_to_the_model() -> None:
         provider=provider,
         model="test-model",
         messages=messages,
-        registry=ToolRegistry(),
+        tools=ToolRegistry(),
         on_delta=DeltaSink(),
     )
     assert result.text == "recovered"
@@ -109,7 +109,7 @@ async def test_iteration_cap_stops_a_tool_loop_runaway() -> None:
         provider=provider,
         model="test-model",
         messages=[{"role": "user", "content": "go"}],
-        registry=echo_registry(),
+        tools=echo_registry(),
         on_delta=DeltaSink(),
         max_iterations=3,
     )

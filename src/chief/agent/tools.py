@@ -8,6 +8,7 @@ errors come back as model-visible result strings so the loop can self-correct.
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from chief.provider.base import ToolCall, ToolSpec
 
@@ -17,11 +18,34 @@ ToolHandler = Callable[..., Awaitable[str]]
 
 
 @dataclass(frozen=True)
+class ToolContext:
+    """Where a tool call came from; injected into tools that want it."""
+
+    thread_key: str
+    channel: str
+
+
+@dataclass(frozen=True)
 class Tool:
-    """A registered native tool: its spec plus the coroutine that runs it."""
+    """A registered native tool: its spec plus the coroutine that runs it.
+
+    ``wants_context`` handlers receive a ``context`` keyword with the calling
+    session's ToolContext (e.g. so a monitor can wake its own thread).
+    """
 
     spec: ToolSpec
     handler: ToolHandler
+    wants_context: bool = False
+
+
+class ToolDispatcher(Protocol):
+    """What the tool loop needs: specs for the model, dispatch for its calls."""
+
+    def specs(self) -> list[ToolSpec]: ...
+
+    async def dispatch(
+        self, call: ToolCall, context: ToolContext | None = None
+    ) -> str: ...
 
 
 class ToolRegistry:
@@ -40,13 +64,18 @@ class ToolRegistry:
         """All registered tool specs, for the provider call."""
         return [tool.spec for tool in self._tools.values()]
 
-    async def dispatch(self, call: ToolCall) -> str:
+    async def dispatch(
+        self, call: ToolCall, context: ToolContext | None = None
+    ) -> str:
         """Run one tool call; any failure returns an error string result."""
         tool = self._tools.get(call.name)
         if tool is None:
             return f"error: unknown tool '{call.name}'"
+        kwargs = dict(call.arguments)
+        if tool.wants_context:
+            kwargs["context"] = context
         try:
-            return await tool.handler(**call.arguments)
+            return await tool.handler(**kwargs)
         except TypeError as exc:
             return f"error: bad arguments for '{call.name}': {exc}"
         except Exception as exc:
