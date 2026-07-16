@@ -975,22 +975,24 @@ class IMessageAdapter(Adapter):
         if not raw_path:
             return None
         path = Path(str(raw_path)).expanduser()
+        # The store's total_bytes is NOT the on-disk size (observed 320 vs 168 on
+        # the rig), so "did the transfer finish" can't compare against it. A file
+        # already on disk at first read is done (Messages lands them whole); one
+        # that appears mid-retry is accepted once its size holds across attempts.
         data: bytes | None = None
+        previous_size: int | None = None
         for attempt in range(ATTACHMENT_TRANSFER_RETRIES + 1):
             if attempt:
                 await asyncio.sleep(ATTACHMENT_TRANSFER_WAIT)
             try:
                 candidate = path.read_bytes()
             except OSError:
-                continue  # transfer in flight: the file hasn't landed yet
-            if (
-                isinstance(total_bytes, int)
-                and total_bytes > 0
-                and len(candidate) < total_bytes
-            ):
-                continue  # transfer in flight: the file is still being written
-            data = candidate
-            break
+                previous_size = None  # transfer in flight: nothing on disk yet
+                continue
+            if attempt == 0 or len(candidate) == previous_size:
+                data = candidate
+                break
+            previous_size = len(candidate)  # late-landing file: let it settle
         if data is None:
             logger.warning(
                 "imessage attachment never finished transferring: %s", path

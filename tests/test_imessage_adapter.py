@@ -747,7 +747,8 @@ async def test_self_dm_attachment_transferring_late_still_dispatches(
     assert len(engine.dispatched_attachments) == 1
     (att,) = engine.dispatched_attachments[0]
     assert att.data == jpeg_bytes
-    assert len(sleeps) == 2
+    # missing → partial → full → size-settle confirmation: three waits.
+    assert len(sleeps) == 3
 
 
 async def test_self_dm_attachment_never_transferring_drops_without_dispatch(
