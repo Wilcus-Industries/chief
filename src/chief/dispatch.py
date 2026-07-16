@@ -18,9 +18,10 @@ from chief.strangers import StrangerLog
 
 
 class CommandRunner(Protocol):
-    """Slash-command hook: returns the reply, or None if not a command."""
+    """Slash-command hook: a string answers deterministically, a Message
+    rewrites the turn (skill invocation), None means not a command."""
 
-    async def run(self, message: Message) -> str | None: ...
+    async def run(self, message: Message) -> str | Message | None: ...
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +70,12 @@ class Dispatcher:
                 await self._strangers.log(message)
             return
         if self._commands is not None:
-            reply = await self._commands.run(message)
-            if reply is not None:
-                await self.adapter(message.channel).send(message.thread_key, reply)
+            outcome = await self._commands.run(message)
+            if isinstance(outcome, str):
+                await self.adapter(message.channel).send(message.thread_key, outcome)
                 return
+            if isinstance(outcome, Message):
+                message = outcome
         if self._bus is not None and message.sender == OWNER:
             await self._bus.publish(
                 Event(
