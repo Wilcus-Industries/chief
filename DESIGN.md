@@ -70,9 +70,12 @@ own thread or spawn a fresh one.
 
 ### Model configuration
 
-Config sets default models per role (main agent, cheap judgments, compaction). The
-agent can switch its own model per task via a tool ("this needs a bigger model"); the
-owner can override per-thread. Budget makes runaway spend visible and capped.
+No preset roles. Config ships with exactly one key: `default: <model>`. The agent
+extends it on its own — inventing roles ("compaction", "cheap-judgment", whatever it
+finds useful) via self-config. It can switch its own model per task via a tool ("this
+needs a bigger model"); the owner can override per-thread. The budget cap is set
+during bootstrap on every platform — runaway spend is bounded before the agent makes
+its first call.
 
 ### Events + monitors + cron
 
