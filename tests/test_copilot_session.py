@@ -8,7 +8,7 @@ runtime. This is the twin of ``tests/test_session.py`` (the claude-agent-sdk map
 """
 
 import asyncio
-import logging
+import base64
 import os
 import subprocess
 import sys
@@ -105,6 +105,7 @@ class FakeCopilotSession:
         self._script = script
         self._handler: Callable[[SessionEvent], None] | None = None
         self.sent: list[str] = []
+        self.sent_attachments: list[Any] = []
         self.model_set: str | None = None
         self.aborted = False
         self.disconnected = False
@@ -115,6 +116,7 @@ class FakeCopilotSession:
 
     async def send(self, prompt: str, *, attachments: Any = None) -> str:
         self.sent.append(prompt)
+        self.sent_attachments.append(attachments)
         assert self._handler is not None
         for data in self._script:
             self._handler(_event(data))
@@ -617,20 +619,39 @@ async def test_set_model_before_connect_uses_new_model_on_create() -> None:
     assert client.create_kwargs["model"] == "claude-sonnet-4.5"
 
 
-async def test_attachments_are_dropped_with_warning_this_slice(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # Text-only slice: attachments don't break the turn but are logged as dropped (#72).
+async def test_attachments_forward_as_blob_attachments() -> None:
+    # #164 gate finding: image turns must reach the model, not drop — each chief
+    # Attachment maps to an SDK inline-base64 blob attachment.
     backend, _client, session = _backend_with([_msg("ok"), SessionIdleData()])
     task = backend.create_session(model="auto")
-    att = Attachment(media_type="image/png", data=b"\x89PNG")
+    att = Attachment(
+        media_type="image/png", data=b"\x89PNG", filename="photo.png"
+    )
 
-    with caplog.at_level(logging.WARNING):
-        events = [event async for event in task.run_turn("what is this?", (att,))]
+    events = [event async for event in task.run_turn("what is this?", (att,))]
 
     assert events == [_done(), Final(text="ok")]
     assert session.sent == ["what is this?"]
-    assert any("attachment" in r.message.lower() for r in caplog.records)
+    assert session.sent_attachments == [
+        [
+            {
+                "type": "blob",
+                "mimeType": "image/png",
+                "data": base64.b64encode(b"\x89PNG").decode("ascii"),
+                "displayName": "photo.png",
+                "byteLength": 4,
+            }
+        ]
+    ]
+
+
+async def test_text_only_turn_sends_no_attachments() -> None:
+    backend, _client, session = _backend_with([_msg("ok"), SessionIdleData()])
+    task = backend.create_session(model="auto")
+
+    [event async for event in task.run_turn("plain text")]
+
+    assert session.sent_attachments == [None]
 
 
 # --- Category-routed subagents + skill directories (#87) ---------------------------

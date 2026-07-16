@@ -75,6 +75,7 @@ gate callbacks — they are re-supplied on **every** connect (create and resume)
 """
 
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -584,19 +585,29 @@ class CopilotTaskSession:
         """
         await self._ensure_connected()
         assert self._session is not None  # set by _ensure_connected
-        if attachments:
-            # This slice is text-only; attachment/image forwarding is a later #72 slice
-            # (the SDK's send() takes attachments, PDFs are pre-extracted upstream).
-            logger.warning(
-                "CopilotTaskSession dropped %d attachment(s) — not wired yet (#72)",
-                len(attachments),
-            )
+        # Images ride as inline-base64 blob attachments (#164 gate finding); PDFs
+        # are still pre-extracted to text upstream (#81), so what reaches here is
+        # exactly what the model should see natively.
+        sdk_attachments = (
+            [
+                {
+                    "type": "blob",
+                    "mimeType": att.media_type,
+                    "data": base64.b64encode(att.data).decode("ascii"),
+                    "byteLength": len(att.data),
+                }
+                | ({"displayName": att.filename} if att.filename else {})
+                for att in attachments
+            ]
+            if attachments
+            else None
+        )
         self._queue = asyncio.Queue()
         self.last_cost_usd = 0.0  # this turn's spend only; the engine sums per turn
         self.last_served_model = None  # this turn's served model; reset each turn
         self.last_premium_requests = {}  # this turn's raw quota counts; reset each turn
         text_blocks_seen = 0
-        await self._session.send(text)
+        await self._session.send(text, attachments=sdk_attachments)
         while True:
             data = (await self._queue.get()).data
             if isinstance(data, SessionIdleData):
