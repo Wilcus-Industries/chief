@@ -13,7 +13,7 @@
 # `downgrade` (used when the budget is exhausted) and `cheap-judgment`
 # (monitor model-predicates).
 models:
-  default: anthropic/claude-sonnet-4.5
+  default: qwen/qwen3-coder
 
 db_path: data/chief.db
 socket_path: data/chief.sock

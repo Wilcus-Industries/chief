@@ -18,7 +18,7 @@ class Config:
     """Runtime configuration for the daemon."""
 
     models: dict[str, str] = field(
-        default_factory=lambda: {"default": "anthropic/claude-sonnet-4.5"}
+        default_factory=lambda: {"default": "qwen/qwen3-coder"}
     )
     db_path: Path = Path("data/chief.db")
     socket_path: Path = Path("data/chief.sock")
