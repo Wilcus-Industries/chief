@@ -5,7 +5,10 @@ description = "Self-editing agent harness with package-based capabilities."
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
-    "sqlalchemy>=2",
+    # The [asyncio] extra force-depends on greenlet (no platform marker);
+    # SQLAlchemy's own greenlet dep is conditional and skips some interpreters
+    # (e.g. CPython 3.14), which left the async engine unbootable there.
+    "sqlalchemy[asyncio]>=2",
     "aiosqlite>=0.20",
     "pyyaml>=6",
     "croniter>=3",
