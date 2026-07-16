@@ -85,6 +85,25 @@ async def test_agent_creates_a_monitor_and_it_fires(tmp_path: Path) -> None:
         await shutdown(app, streams)
 
 
+async def test_agent_can_list_bundled_packages(tmp_path: Path) -> None:
+    call = ToolCall(id="c1", name="list_packages", arguments={})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("here they are")]
+    )
+    config = make_config(tmp_path, gate_approved=("list_packages",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "what packages can you install?", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "here they are"
+        result = provider.calls[1][-1]
+        assert result["role"] == "tool"
+        assert "build-imessage" in result["content"]
+        assert "screening" in result["content"]
+    finally:
+        await shutdown(app, streams)
+
+
 async def test_gray_tool_raises_an_approval_card_first_answer_wins(
     tmp_path: Path,
 ) -> None:

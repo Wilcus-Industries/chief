@@ -1,0 +1,8 @@
+name: screening
+description: Injection screen for untrusted inbound content (prompt policy).
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/screening
+config_keys: []
+secrets: []
