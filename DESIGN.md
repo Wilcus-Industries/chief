@@ -19,8 +19,8 @@ comes as packages. Linux gets the same core, just without the macOS defaults.
 ## Principles
 
 1. **Minimal core.** The core owns: the agent loop, sessions, the event bus,
-   monitors/cron, the gate, budget, audit, memory, persistence, and a small adapter
-   interface. Everything else is a package.
+   monitors/cron, the gate, budget, audit, persistence, and a small adapter
+   interface. Everything else — including memory — is a package.
 2. **Channels are dumb pipes.** An adapter delivers inbound `Message`s and exposes
    `send`. No per-channel features in core — no watches, no admission state machines,
    no group-chat branches.
@@ -42,8 +42,9 @@ comes as packages. Linux gets the same core, just without the macOS defaults.
   fight the self-edit vision.
 - Same repo, replaces `src/chief` immediately. Name stays **chief**. Keep the
   installer story, STYLEGUIDE, and toolchain (`uv run pytest`, `ruff`, `mypy`).
-- Fresh SQLite schema (no Alembic baggage carried over). The markdown memory dir and
-  its git history port over as-is. Old tasks/contacts/watches start empty.
+- Fresh SQLite schema (no Alembic baggage carried over). Old tasks/contacts/watches
+  start empty. The existing markdown memory dir imports into the memory package
+  (below) once one is installed.
 
 ## Core
 
@@ -127,13 +128,21 @@ pointer plus a few bundled defaults.
 **Two kinds:**
 
 1. **Install packages** — wire up existing capability (Google MCP sidecars, browser,
-   push notifications, injection screening).
+   push notifications, injection screening, memory systems).
 2. **BUILD-\* skills** — guide the agent to *write real code* (e.g. a new channel
    adapter) into the harness dir, loaded only after the guarded pipeline passes.
 
 **Dependency trees:** manifests declare dependencies; the **screening package**
 (cheap-model injection screen on untrusted content) is a dependency of every
 public-facing package — including iMessage, so it installs by default on macOS.
+
+### Memory as a package
+
+Core ships no memory system. A memory package brings its own tools (recall/save) and
+prompt/skill instructions via the manifest — no special seam in core. First package:
+today's markdown-files-plus-git store (the existing memory dir imports straight into
+it). Alternatives (vector stores, DB-backed, hosted) can ship as competing packages;
+the owner picks one at onboarding.
 
 ### BUILD-IMESSAGE (the archetype)
 
