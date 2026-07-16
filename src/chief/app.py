@@ -41,7 +41,7 @@ from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import restart_daemon
-from chief.selfedit.tools import register_selfedit_tools
+from chief.selfedit.tools import register_install_tool, register_selfedit_tools
 from chief.skills import SkillLibrary, register_skill_tools
 from chief.strangers import StrangerLog
 from chief.subagents import AgentRegistry, register_spawn_tool
@@ -112,9 +112,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     )
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
-    register_selfedit_tools(
-        registry, SelfEditPipeline(Path.cwd(), audit, restart_daemon)
-    )
+    selfedit_pipeline = SelfEditPipeline(Path.cwd(), audit, restart_daemon)
+    register_selfedit_tools(registry, selfedit_pipeline)
     mcp_manager = McpManager(registry)
     register_mcp_tools(registry, mcp_manager, audit)
     mcp_configs = tuple(
@@ -126,11 +125,9 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         for name, entry in config.mcp_servers.items()
     ) + tuple(load_self_added())
     register_skill_tools(registry, skills)
-    register_package_tools(
-        registry,
-        PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
-        config.packages_repo,
-    )
+    package_library = PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR))
+    register_package_tools(registry, package_library, config.packages_repo)
+    register_install_tool(registry, selfedit_pipeline, package_library)
     register_spawn_tool(
         registry,
         AgentRegistry(config.agents_dir),

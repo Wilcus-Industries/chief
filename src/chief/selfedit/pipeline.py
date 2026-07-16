@@ -12,7 +12,8 @@ contents and rationales cannot inject commands.
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,25 +57,56 @@ class SelfEditPipeline:
         for path in files:
             if reason := _reject_path(path):
                 return f"error: {reason}"
+
+        async def write() -> None:
+            for path, content in files.items():
+                target = self._root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+
+        return await self._guarded(write, rationale, list(files))
+
+    async def install(
+        self, scripts: list[Path], env: dict[str, str], rationale: str
+    ) -> str:
+        """Run package install scripts, in order, under the same seatbelt.
+
+        Each script is a package's own ``install.sh`` — trusted, deterministic
+        bytes (copy skill dirs verbatim, set config keys, wire MCP). They run
+        as one guarded mutation: a single done-check, merge, and restart, so
+        the whole install is one approval and rolls back as a unit (issue
+        #185). ``env`` (e.g. ``IMESSAGE_HANDLES``) is passed to every script.
+        """
+
+        async def run() -> None:
+            for script in scripts:
+                await self._run_installer(script, env)
+
+        return await self._guarded(run, rationale, [str(s) for s in scripts])
+
+    async def _guarded(
+        self,
+        mutate: Callable[[], Awaitable[None]],
+        rationale: str,
+        audit_files: list[str],
+    ) -> str:
+        """The shared seatbelt: branch, mutate, done-check, merge or revert."""
         if await self._dirty():
             return "error: working tree is dirty; refusing to self-edit"
         base = (await self._git("rev-parse", "HEAD")).strip()
         branch = f"selfedit-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
         await self._git("checkout", "-b", branch)
         try:
-            for path, content in files.items():
-                target = self._root / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
+            await mutate()
             await self._git("add", "-A")
-            await self._git("commit", "-m", f"self-edit: {rationale}")
+            await self._git("commit", "--allow-empty", "-m", f"self-edit: {rationale}")
             failure = await self._run_checks()
         except Exception:
             await self._abandon(branch, base)
             raise
         if failure is not None:
             await self._abandon(branch, base)
-            self._audit.record("self_edit", outcome="check_failed", files=list(files))
+            self._audit.record("self_edit", outcome="check_failed", files=audit_files)
             return f"error: done-check failed, edit reverted\n{failure}"
         await self._git("checkout", "-")
         await self._git("merge", "--ff-only", branch)
@@ -82,11 +114,26 @@ class SelfEditPipeline:
         marker = {"rollback_to": base, "rationale": rationale}
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
         self._audit.record(
-            "self_edit", outcome="merged", files=list(files), rationale=rationale
+            "self_edit", outcome="merged", files=audit_files, rationale=rationale
         )
         logger.info("self-edit merged (%s); restarting", rationale)
         self._restart()
         return "self-edit applied; restarting into the new code"
+
+    async def _run_installer(self, script: Path, env: dict[str, str]) -> None:
+        """Run one install.sh with the given params (arg list, no shell)."""
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            str(self._root / script),
+            cwd=self._root,
+            env={**os.environ, **env},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await process.communicate()
+        if process.returncode != 0:
+            tail = output.decode(errors="replace")[-4000:]
+            raise RuntimeError(f"installer {script} failed:\n{tail}")
 
     async def _run_checks(self) -> str | None:
         """Run every check command; return combined output on first failure."""
@@ -106,6 +153,11 @@ class SelfEditPipeline:
         await self._git("checkout", "-")
         await self._git("branch", "-D", branch)
         await self._git("reset", "--hard", base)
+        # A mutation that raised mid-run (e.g. an installer that copied a
+        # skill, then aborted) leaves untracked files reset --hard won't
+        # touch. The seatbelt entry guaranteed a clean tree, so clean -fd
+        # only removes those; -x is omitted so gitignored config/data stay.
+        await self._git("clean", "-fd")
 
     async def _dirty(self) -> bool:
         return bool((await self._git("status", "--porcelain")).strip())

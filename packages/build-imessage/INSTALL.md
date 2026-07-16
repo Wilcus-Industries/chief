@@ -32,38 +32,36 @@ stay airtight.
 
 ## Steps
 
+Gather the parameters first (steps 1–3), run the deterministic install once
+(step 4), then do the interactive and customizable parts (steps 5–8).
+
 1. **Ask the owner which setup they want** (explain the two above):
    same-account self-DM (default) or a dedicated Apple ID. This decides what
-   `owner_handles` means in the config step, and how you verify at the end.
-2. Copy `skills/build-imessage/SKILL.md` from this package into the core
-   skills directory as `skills/build-imessage/SKILL.md` via `self_edit`.
-3. Ask the owner for the handle(s), exactly as Messages shows them, e.g.
+   `owner_handles` means, and how you verify at the end.
+2. Ask the owner for the handle(s), exactly as Messages shows them, e.g.
    `+15551234567` — for self-DM their **own** number/email (the self-chat id +
    send target); for a dedicated ID the **owner's phone** (the sender).
-4. Ask the owner to pick a notify tier (explain the trade-offs, see the
+3. Ask the owner to pick a notify tier (explain the trade-offs, see the
    build-imessage skill):
    - **notify-all** — every third-party text wakes you (most expensive);
    - **notify-whitelist** — only listed handles wake you, the rest are logged;
    - **no-notify** — nothing wakes you; you read on demand or via your own
      monitors.
    On notify-all, offer the optional cheap-model screen ("worth waking?").
+4. Run `install_package` with name `build-imessage` and
+   `env: {"IMESSAGE_HANDLES": "<the handle(s) from step 2, comma-separated>"}`.
+   This copies the skill verbatim and sets `imessage.enabled: true` +
+   `imessage.owner_handles` deterministically, then restarts into the adapter.
+   (`screening` installs with it as a dependency.) Do **not** hand-edit these.
 5. Walk the owner through granting **Full Disk Access** to the daemon's host
    process (System Settings → Privacy & Security → Full Disk Access — add the
    terminal/launchd binary that runs chief), needed to read
    `~/Library/Messages/chat.db`.
-6. Set the config via `self_edit` on `config.yaml` (`owner_handles` per the
-   mode chosen in step 1):
-
-   ```yaml
-   imessage:
-     enabled: true
-     owner_handles: ["+15551234567"]
-   ```
-
-   The self-edit restart loads the adapter.
-7. Create the tier's monitor (see the build-imessage skill for the exact
-   predicate shapes). No monitor for no-notify.
-8. First outbound send triggers a macOS **Automation → Messages** prompt; tell
+6. Create the tier's monitor — this is the **customizable** piece, not baked
+   into install.sh. Build it from the sample predicate shapes in the
+   build-imessage skill, adapted to the owner's tier and whitelist. No monitor
+   for no-notify.
+7. First outbound send triggers a macOS **Automation → Messages** prompt; tell
    the owner to approve it. Verify per mode: for self-DM, have the owner text
    their **own** self-chat; for a dedicated ID, have them text the dedicated
    account from their phone. Confirm your reply (prefixed 🤖) arrives.
