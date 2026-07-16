@@ -5,11 +5,13 @@ burning money. No model call is ever involved.
 """
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
 from chief.cron.service import CronService
 from chief.monitors.service import MonitorService
+from chief.skills import SkillLibrary
 
 CommandHandler = Callable[[str, Message], Awaitable[str]]
 
@@ -22,10 +24,12 @@ class CommandSet:
         manager: SessionManager,
         monitors: MonitorService,
         cron: CronService,
+        skills: SkillLibrary | None = None,
     ) -> None:
         self._manager = manager
         self._monitors = monitors
         self._cron = cron
+        self._skills = skills
         self._commands: dict[str, CommandHandler] = {
             "help": self._help,
             "monitors": self._list_monitors,
@@ -36,15 +40,26 @@ class CommandSet:
     def register(self, name: str, handler: CommandHandler) -> None:
         self._commands[name] = handler
 
-    async def run(self, message: Message) -> str | None:
-        """Handle a "/command args" message; None means not a command."""
+    async def run(self, message: Message) -> str | Message | None:
+        """Handle a "/command args" message.
+
+        Returns a string to answer deterministically, a rewritten Message to
+        run as a turn (/skill-name invocation), or None when the text isn't
+        a command at all.
+        """
         if not message.text.startswith("/"):
             return None
         name, _, args = message.text[1:].partition(" ")
         handler = self._commands.get(name)
-        if handler is None:
-            return f"unknown command /{name} — try /help"
-        return await handler(args.strip(), message)
+        if handler is not None:
+            return await handler(args.strip(), message)
+        if self._skills is not None and (skill := self._skills.get(name)) is not None:
+            text = (
+                f"[skill invoked: /{name}]\n\n{skill.body()}\n\n"
+                f"Arguments: {args.strip() or '(none)'}"
+            )
+            return replace(message, text=text)
+        return f"unknown command /{name} — try /help"
 
     async def _help(self, args: str, message: Message) -> str:
         names = ", ".join(f"/{n}" for n in sorted(self._commands))

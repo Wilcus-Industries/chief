@@ -32,6 +32,8 @@ class Config:
     web_host: str = "127.0.0.1"
     web_port: int = 8130
     web_password: str = ""
+    skills_dir: Path = Path("skills")
+    agents_dir: Path = Path("agents")
 
     @property
     def default_model(self) -> str:
@@ -64,6 +66,8 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         web_password=os.environ.get(
             "CHIEF_WEB_PASSWORD", _read_secret(Path("secrets/web_password"))
         ),
+        skills_dir=Path(_env_or(raw, "skills_dir", "skills")),
+        agents_dir=Path(_env_or(raw, "agents_dir", "agents")),
     )
 
 

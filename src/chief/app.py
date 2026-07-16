@@ -33,7 +33,9 @@ from chief.provider.openrouter import OpenRouterProvider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import restart_daemon
 from chief.selfedit.tools import register_selfedit_tools
+from chief.skills import SkillLibrary, register_skill_tools
 from chief.strangers import StrangerLog
+from chief.subagents import AgentRegistry, register_spawn_tool
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
@@ -100,7 +102,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
             registry=registry, policy=policy, audit=audit, context=context, ask=ask
         )
 
-    prompt = system_prompt()
+    skills = SkillLibrary(config.skills_dir)
+    prompt = system_prompt() + skills.prompt_lines()
     if not await store.has_sessions():
         prompt += ONBOARDING_SUFFIX
     manager = SessionManager(
@@ -128,7 +131,17 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     register_selfedit_tools(
         registry, SelfEditPipeline(Path.cwd(), audit, restart_daemon)
     )
-    dispatcher.set_commands(CommandSet(manager, monitor_service, cron_service))
+    register_skill_tools(registry, skills)
+    register_spawn_tool(
+        registry,
+        AgentRegistry(config.agents_dir),
+        provider,
+        config.default_model,
+        budget,
+    )
+    dispatcher.set_commands(
+        CommandSet(manager, monitor_service, cron_service, skills=skills)
+    )
 
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
     dispatcher.register(socket_adapter)

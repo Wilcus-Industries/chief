@@ -61,7 +61,7 @@ async def test_unknown_command_points_to_help(
 async def test_help_lists_commands(engine: AsyncEngine, store: MessageStore) -> None:
     commands, *_ = make_commands(FakeProvider([]), store, make_session_factory(engine))
     reply = await commands.run(msg("/help"))
-    assert reply is not None
+    assert isinstance(reply, str)
     for name in ("/help", "/monitors", "/schedules", "/model"):
         assert name in reply
 
@@ -89,8 +89,8 @@ async def test_monitors_and_schedules_listing(
     )
     monitors_reply = await commands.run(msg("/monitors"))
     schedules_reply = await commands.run(msg("/schedules"))
-    assert monitors_reply is not None and "urgent watcher" in monitors_reply
-    assert schedules_reply is not None and "daily checkin" in schedules_reply
+    assert isinstance(monitors_reply, str) and "urgent watcher" in monitors_reply
+    assert isinstance(schedules_reply, str) and "daily checkin" in schedules_reply
 
 
 async def test_model_command_shows_and_sets_with_persistence(
