@@ -18,6 +18,26 @@ from chief.install.service import ServiceManager
 from chief.install.units import default_runner
 from chief.install.wizard import WizardIO, run_wizard
 
+DEFAULT_CONFIG = Path("config.yaml")
+DEFAULT_CONFIG_TEMPLATE = Path("config.default.yaml")
+
+
+def ensure_config(
+    config_path: Path = DEFAULT_CONFIG,
+    template: Path = DEFAULT_CONFIG_TEMPLATE,
+) -> bool:
+    """Seed config.yaml from the tracked template on first run.
+
+    config.yaml is install-local state (gitignored): the wizard writes the
+    budget cap into it in place, and if it were tracked that edit would leave
+    the tree permanently dirty — which the self-edit pipeline refuses to run
+    against. Returns True when a fresh copy was made.
+    """
+    if config_path.exists() or not template.exists():
+        return False
+    config_path.write_text(template.read_text())
+    return True
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -55,9 +75,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
     command: str = args.command
     if command == "wizard":
+        ensure_config()
         result = run_wizard(
             secrets_dir=Path("secrets"),
-            config_path=Path("config.yaml"),
+            config_path=DEFAULT_CONFIG,
             io=WizardIO(),
             interactive=not args.non_interactive,
             env=os.environ,

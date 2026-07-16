@@ -1,4 +1,8 @@
-# Non-secret core configuration (committed). Secrets live in secrets/ or env — never
+# Non-secret core configuration TEMPLATE (committed). The first-run wizard copies
+# this to config.yaml, which is install-local state (gitignored) — the wizard and
+# self-edit write config.yaml in place, and a tracked copy would leave the tree
+# permanently dirty, which the self-edit pipeline refuses to run against. Edit the
+# live install's config.yaml, not this file. Secrets live in secrets/ or env — never
 # here. Core ships a deliberately small set of keys; packages bring their own.
 #
 # Env overrides: CHIEF_DB_PATH, CHIEF_SOCKET_PATH, CHIEF_MAX_CONCURRENT_SESSIONS,

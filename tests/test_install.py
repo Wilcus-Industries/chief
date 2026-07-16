@@ -4,12 +4,32 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from chief.install.commands import ensure_config
 from chief.install.lifecycle import uninstall, update
 from chief.install.service import ServiceManager
 from chief.install.units import default_path_env, launchd_plist, systemd_unit
 from chief.install.wizard import WizardIO, run_wizard
 
 CONFIG = "budget:\n  cap_usd: 0\n  warn_ratio: 0.8\n"
+
+
+def test_ensure_config_creates_from_template_when_missing(tmp_path: Path) -> None:
+    template = tmp_path / "config.default.yaml"
+    template.write_text(CONFIG)
+    config = tmp_path / "config.yaml"
+    assert ensure_config(config, template) is True
+    assert config.read_text() == CONFIG
+
+
+def test_ensure_config_keeps_existing_config(tmp_path: Path) -> None:
+    # config.yaml is install-local state: the wizard edits it in place, so a
+    # re-run must never clobber the owner's configured values.
+    template = tmp_path / "config.default.yaml"
+    template.write_text(CONFIG)
+    config = tmp_path / "config.yaml"
+    config.write_text("budget:\n  cap_usd: 25\n")
+    assert ensure_config(config, template) is False
+    assert "cap_usd: 25" in config.read_text()
 
 
 def make_io(
