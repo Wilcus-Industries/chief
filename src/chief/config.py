@@ -90,6 +90,28 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     )
 
 
+def merge_config(updates: dict[str, Any], path: Path = Path("config.yaml")) -> None:
+    """Deep-merge ``updates`` into config.yaml, creating it if absent.
+
+    The deterministic config-writer package install scripts call (issue #185)
+    so standard keys are set byte-exactly instead of retyped by the model.
+    Nested mappings merge key-by-key; every other value is replaced.
+    """
+    raw = (yaml.safe_load(path.read_text()) if path.exists() else {}) or {}
+    path.write_text(yaml.safe_dump(_deep_merge(raw, updates), sort_keys=False))
+
+
+def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _env_or(raw: dict[str, Any], key: str, default: Any) -> Any:
     return os.environ.get(f"CHIEF_{key.upper()}", raw.get(key, default))
 
