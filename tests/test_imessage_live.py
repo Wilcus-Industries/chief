@@ -41,6 +41,15 @@ The non-self silence test additionally needs ``CHIEF_IMESSAGE_SECOND_HANDLE``
 bound to it), a human ready to text from that device when prompted (hence
 ``-s``), and ``CHIEF_DB_PATH`` if chief's own sqlite is not at the default
 ``~/.local/share/chief/data/chief.db``.
+
+**Watches e2e gate (#171)** — the ``test_watch_*`` / ``test_nonwatched_*``
+cases prove PRD #160's central mechanism with the same envs and the same human
+on the second device: a watch set *conversationally* in the self-thread, the
+real engine judging a real trigger text's relevance, a real Messages send
+landing at the second handle, and the fire-report (or, silent-tone, its
+absence) in the self-thread — plus the send seam refusing a non-watched text.
+They run in definition order and leave no armed watch behind; each prints what
+to text from the second device and when.
 """
 
 import asyncio
@@ -430,3 +439,182 @@ async def test_nonself_text_is_silent_with_one_metadata_row() -> None:
     recorded_rows = json.loads(recorded.stdout or "[]")
     assert recorded_rows, "no unknown_senders metadata row was written"
     assert int(recorded_rows[0]["count"]) > baseline
+
+
+# --- Watches e2e gate (#171): real second-handle scenario ------------------------
+
+NEEDS_SECOND = pytest.mark.skipif(
+    not SECOND_HANDLE,
+    reason="set CHIEF_IMESSAGE_SECOND_HANDLE to a non-owner handle a human can "
+    "text from",
+)
+
+WATCH_TIMEOUT = pytest.mark.timeout(900)
+
+
+def _norm_second() -> str:
+    from chief.persistence.imessage import normalize_handle
+
+    return normalize_handle(SECOND_HANDLE)
+
+
+async def _watch_states(runner: ScriptRunner) -> list[dict[str, object]]:
+    """All watches bound to the second handle, from chief's own sqlite."""
+    result = await runner.run_sqlite(
+        CHIEF_DB,
+        "SELECT id, state, tone FROM watches "
+        f"WHERE target_handle = '{_sq(_norm_second())}' ORDER BY id;",
+    )
+    assert result.ok, result.stderr
+    return list(json.loads(result.stdout or "[]"))
+
+
+async def _await_watch_state(
+    runner: ScriptRunner, state: str, *, tone: str | None = None
+) -> dict[str, object]:
+    """Poll until a watch on the second handle reaches ``state`` (newest wins)."""
+    deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
+    while asyncio.get_running_loop().time() < deadline:
+        for row in reversed(await _watch_states(runner)):
+            if row["state"] == state and (tone is None or row["tone"] == tone):
+                return row
+        await asyncio.sleep(2)
+    raise AssertionError(
+        f"no watch on {SECOND_HANDLE} reached state {state!r} within "
+        f"{REPLY_TIMEOUT:.0f}s"
+    )
+
+
+async def _outbound_to_second(
+    runner: ScriptRunner, after_rowid: int, pattern: str | None = None
+) -> list[dict[str, object]]:
+    """Real sends that landed at the second handle after ``after_rowid``."""
+    result = await runner.run_sqlite(
+        CHAT_DB,
+        "SELECT message.ROWID AS rowid, message.text AS text FROM message "
+        "JOIN handle ON message.handle_id = handle.ROWID "
+        f"WHERE message.ROWID > {int(after_rowid)} AND message.is_from_me = 1 "
+        f"AND handle.id = '{_sq(SECOND_HANDLE)}' ORDER BY message.ROWID ASC;",
+    )
+    assert result.ok, result.stderr
+    rows = json.loads(result.stdout or "[]")
+    if pattern is None:
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if row["text"] and re.search(pattern, str(row["text"]), re.IGNORECASE)
+    ]
+
+
+async def _await_outbound_to_second(
+    runner: ScriptRunner, after_rowid: int, pattern: str
+) -> None:
+    deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
+    while asyncio.get_running_loop().time() < deadline:
+        if await _outbound_to_second(runner, after_rowid, pattern):
+            return
+        await asyncio.sleep(2)
+    raise AssertionError(
+        f"no send matching {pattern!r} landed at {SECOND_HANDLE} within "
+        f"{REPLY_TIMEOUT:.0f}s"
+    )
+
+
+def _prompt_human(instruction: str) -> None:
+    print(f"\n>>> NOW: {instruction} (waiting up to {REPLY_TIMEOUT:.0f}s)...",
+          flush=True)
+
+
+@WATCH_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+@NEEDS_SECOND
+async def test_watch_set_in_thread_fires_send_and_reports() -> None:
+    """#171 AC 1: watch set conversationally → trigger from the second handle →
+    the real engine judges relevance → a real send lands there → fire-report in
+    the self-thread → the watch retires."""
+    runner = _runner()
+    head = await _store_head(runner)
+    token = f"KIWI-{uuid.uuid4().hex[:6].upper()}"
+
+    await _send_as_phone(
+        runner,
+        f"Set a watch on {SECOND_HANDLE} for their next message about the test "
+        f"package. When it fires, reply to them with exactly the words "
+        f"'delivery confirmed {token}' and report back to me here. "
+        f"One hour is plenty.",
+    )
+    await _await_watch_state(runner, "armed")
+
+    _prompt_human(
+        f"text from {SECOND_HANDLE}: 'the test package just arrived!'"
+    )
+    await _await_outbound_to_second(runner, head, re.escape(token))
+    await _await_bot_echo(runner, head, rf"{re.escape(token)}|watch|sent")
+
+    fired = await _await_watch_state(runner, "fired")
+    assert fired["tone"] == "report"
+
+
+@WATCH_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+@NEEDS_SECOND
+async def test_silent_watch_ignores_irrelevant_and_fires_quiet() -> None:
+    """#171 AC 2: an irrelevant trigger produces no send; the relevant one fires
+    a real send with **no** self-thread report (silent tone)."""
+    runner = _runner()
+    head = await _store_head(runner)
+    token = f"LIME-{uuid.uuid4().hex[:6].upper()}"
+
+    await _send_as_phone(
+        runner,
+        f"Set a watch on {SECOND_HANDLE} for their next message about the blue "
+        f"umbrella. When it fires, reply to them with exactly the words "
+        f"'umbrella ready {token}'. Execute silently — no report back to me. "
+        f"One hour is plenty.",
+    )
+    await _await_watch_state(runner, "armed", tone="silent")
+
+    _prompt_human(f"text from {SECOND_HANDLE}: 'what should we eat tonight?'")
+    trigger_head = await _store_head(runner)
+    await asyncio.sleep(LOOP_GRACE * 3)
+    assert await _outbound_to_second(runner, head) == [], (
+        "an irrelevant trigger produced a send"
+    )
+
+    _prompt_human(f"text from {SECOND_HANDLE}: 'is the blue umbrella ready?'")
+    await _await_outbound_to_second(runner, trigger_head, re.escape(token))
+    await asyncio.sleep(LOOP_GRACE)
+    assert await _bot_echo_rows(runner, trigger_head, re.escape(token)) == [], (
+        "a silent-tone fire posted a self-thread report"
+    )
+    fired = await _await_watch_state(runner, "fired", tone="silent")
+    assert fired["state"] == "fired"
+
+
+@WATCH_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+@NEEDS_SECOND
+async def test_nonwatched_send_attempt_is_refused_live() -> None:
+    """#171 AC 3: with no armed watch, asking chief to text the second handle is
+    refused at the send seam and surfaced; nothing lands at the handle."""
+    runner = _runner()
+    assert not [
+        row for row in await _watch_states(runner) if row["state"] == "armed"
+    ], "precondition: no armed watch may exist on the second handle"
+    head = await _store_head(runner)
+    token = f"PLUM-{uuid.uuid4().hex[:6].upper()}"
+
+    await _send_as_phone(
+        runner,
+        f"Text {SECOND_HANDLE} right now saying 'hi from chief {token}'.",
+    )
+
+    await _await_bot_echo(runner, head, r".")  # some reply surfaced the outcome
+    await asyncio.sleep(LOOP_GRACE)
+    assert await _outbound_to_second(runner, head) == [], (
+        "a non-watched send reached the second handle"
+    )
