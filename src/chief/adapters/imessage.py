@@ -6,14 +6,16 @@ chat.db and a fake send runner.
 
 Inbound is a poll loop over ``chat.db`` (read-only sqlite) with a persisted
 rowid cursor — restarts neither replay old texts nor drop ones that arrived
-while down. Self-DM posture: handles in ``owner_handles`` map to sender
-``owner``; every other sender is delivered as-is (the dispatcher logs it as
-a stranger and publishes it for monitors — notify tiers are agent policy,
-built with monitors by the build-imessage package, never code here).
-Replies to owner handles carry BOT_PREFIX: the received copy of chief's own
-send re-enters the store as an inbound row, and the prefix is the echo
-filter that keeps it from dispatching. Outbound goes through Messages via
-a fixed JXA script; handle and text travel as argv, never spliced in.
+while down. Same-account self-DM posture: chief runs on the owner's own
+Apple ID, so the owner's self-chat texts carry ``is_from_me = 1``. A row is
+delivered when it is a real inbound (``is_from_me = 0``) OR it sits in the
+owner's self-chat (scoped by ``chat.chat_identifier IN owner_handles``, which
+keeps every other conversation out); self-chat rows map to sender ``owner``,
+strangers pass through as-is (notify tiers are package policy, never code).
+Replies to owner handles carry BOT_PREFIX: chief's own send re-enters as an
+``is_from_me = 1`` self-chat row, and the prefix is the sole echo filter
+keeping it from re-dispatching. Outbound goes through Messages via a fixed
+JXA script; handle and text travel as argv, never spliced in.
 """
 
 import asyncio
@@ -44,21 +46,30 @@ SEND_TEXT_SCRIPT = (
     "}"
 )
 
-# New, real, direct texts from other people past the cursor: is_from_me = 0
-# keeps chief's sent copies out, associated_message_type = 0 drops tapbacks
-# and edits, and the chat join skips group rows wholesale. Parameters are
-# int-bound — no message text ever reaches this SQL.
+# Candidate rows past the cursor. A row qualifies when it is a real inbound
+# text (is_from_me = 0) OR it lives in the owner's self-chat
+# (chat.chat_identifier IN owner_handles) — that scope is what lets the owner
+# DM their own assistant from their own Apple ID without leaking their other
+# conversations, since owner->friend sends carry the friend's chat, not the
+# owner's. associated_message_type = 0 drops tapbacks/edits; the chat joins
+# expose group/room flags plus self-chat membership. Handles bind as
+# parameters ({scope} is only placeholder count) — no text reaches this SQL.
 POLL_QUERY = (
     "SELECT message.ROWID AS rowid, handle.id AS sender, message.text AS text, "
+    "message.is_from_me AS from_me, "
     "MAX(CASE WHEN chat.style IS NOT NULL AND chat.style != 45 "
     "THEN 1 ELSE 0 END) AS in_group, "
-    "MAX(CASE WHEN chat.room_name IS NOT NULL THEN 1 ELSE 0 END) AS has_room "
+    "MAX(CASE WHEN chat.room_name IS NOT NULL THEN 1 ELSE 0 END) AS has_room, "
+    "MAX(CASE WHEN self_chat.mid IS NOT NULL THEN 1 ELSE 0 END) AS in_self "
     "FROM message JOIN handle ON message.handle_id = handle.ROWID "
     "LEFT JOIN chat_message_join ON chat_message_join.message_id = message.ROWID "
     "LEFT JOIN chat ON chat.ROWID = chat_message_join.chat_id "
-    "WHERE message.ROWID > ? AND message.is_from_me = 0 "
-    "AND message.associated_message_type = 0 "
+    "LEFT JOIN (SELECT j.message_id AS mid FROM chat_message_join j "
+    "JOIN chat c ON c.ROWID = j.chat_id WHERE c.chat_identifier IN ({scope})) "
+    "self_chat ON self_chat.mid = message.ROWID "
+    "WHERE message.ROWID > ? AND message.associated_message_type = 0 "
     "AND message.text IS NOT NULL AND message.text != '' "
+    "AND (message.is_from_me = 0 OR self_chat.mid IS NOT NULL) "
     "GROUP BY message.ROWID ORDER BY message.ROWID ASC LIMIT ?"
 )
 HEAD_QUERY = "SELECT COALESCE(MAX(ROWID), 0) FROM message"
@@ -133,13 +144,15 @@ class IMessageAdapter(Adapter):
     async def poll_once(self) -> None:
         """One poll tick: deliver new rows, advance the cursor."""
         rows = await asyncio.to_thread(self._fetch, self._cursor)
-        for rowid, sender, text, in_group, has_room in rows:
+        for rowid, sender, text, from_me, in_group, has_room, in_self in rows:
             self._cursor = rowid
             if in_group or has_room:
                 continue
             if text.startswith(BOT_PREFIX):
                 continue  # chief's own reply echoing back through the store
-            mapped = "owner" if sender in self._owner_handles else sender
+            if from_me and not in_self:
+                continue  # owner->friend sent copy: not the self-chat
+            mapped = "owner" if (in_self or sender in self._owner_handles) else sender
             await self._on_message(
                 Message(
                     channel=self.name,
@@ -151,12 +164,19 @@ class IMessageAdapter(Adapter):
         if rows:
             self._save_cursor()
 
-    def _fetch(self, after: int) -> list[tuple[int, str, str, int, int]]:
+    def _fetch(self, after: int) -> list[tuple[int, str, str, int, int, int, int]]:
+        handles = tuple(self._owner_handles)
+        scope = ",".join("?" for _ in handles) if handles else "NULL"
+        query = POLL_QUERY.format(scope=scope)
+        params: tuple[object, ...] = (*handles, after, POLL_BATCH_LIMIT)
         conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
-            cur = conn.execute(POLL_QUERY, (after, POLL_BATCH_LIMIT))
+            cur = conn.execute(query, params)
             return [
-                (int(r[0]), str(r[1]), str(r[2]), int(r[3]), int(r[4]))
+                (
+                    int(r[0]), str(r[1]), str(r[2]), int(r[3]),
+                    int(r[4]), int(r[5]), int(r[6]),
+                )
                 for r in cur.fetchall()
             ]
         finally:
