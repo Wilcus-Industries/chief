@@ -167,7 +167,7 @@ build-gating unknowns (auth, gate, usage) are verified. Remaining "Still to veri
 | Guest times | Always owner TZ, timezone stated explicitly |
 | Opus escalation | Always owner-approved: command pre-approves, auto-detect asks |
 | Skill authoring | chief self-deploys skills/subagents as files (no card); source edits ship via an owner-approved restart card *(reversal — see Self-management)* |
-| Acting-as identity | Transparent — assistant signature on outgoing email/messages |
+| Acting-as identity | Transparent — assistant signature on outgoing email/messages; iMessage self-DM ghost-writes as the owner only on a watch's per-instruction authority |
 | Encryption at rest | Secrets = `0600` files in the secrets dir; transcripts/memory via host perms + backups |
 | Memory mgmt | `/memory`, `/forget` + direct file edit; auto-notify on save |
 | Blocklist | Owner block/mute; chief self-blocks only on clear abuse (notifies owner) |
@@ -804,9 +804,22 @@ surface is **tokenless** — authenticated by the `0600` socket, always the owne
   flat sessions, not owner task-topics.
 - **Group chats: mention-activated** — chief stays quiet in groups until `@mentioned`.
 
-**iMessage (PRD #156, macOS-only, opt-in).** chief has a phone number people just text,
-built on a **dedicated Apple ID**: the Messages account signed in on chief's Mac mini
-*is* chief's identity — it texts as itself, never ghost-writes as the owner. Inbound is
+**iMessage (PRD #156, macOS-only, opt-in).** chief has a phone number people just text.
+Two postures share the same adapter, selected by `imessage_self_dm`:
+
+- **Dedicated-ID (default, flag off).** The Messages account signed in on chief's Mac
+  *is* chief's identity — it texts as itself, never ghost-writes as the owner.
+- **Self-DM (#159/#160, flag on).** The Mac is signed into the **owner's own Apple
+  ID**; the owner talks to chief in the *self-chat* (texting their own number), and
+  chief's replies land there prefixed `🤖 ` — the owner-visible "this is chief, not
+  you" marker and half of the echo filter that breaks the self-chat reply loop (the
+  other half is the durable `imessage_sends` record consumed when a send re-polls).
+  In this posture chief's sends *are* technically the owner's account speaking, so
+  outbound is fenced: to the self-thread, always; to anyone else, **only** via an
+  owner-created watch's authorized fire (PRD #160) — the send seam refuses everything
+  else. Media rides the self-thread both ways (#162/#169).
+
+In both postures, inbound is
 a poll loop in the adapter's run loop over the local Messages store (the #155 read
 layer, persisted cursor so restarts neither replay nor drop); outbound is OS automation
 on the ScriptRunner seam (fixed JXA, data as argv). The **whitelist is the event
@@ -830,6 +843,29 @@ receive at, grant the terminal running chief Full Disk Access **and** Automation
 Messages (`check_apple_health` walks through both), then set `imessage_enabled: true` +
 `imessage_owner_handles` in `config.yaml` and restart. Text it from the owner's phone
 to verify.
+
+*Self-DM setup (config-only, #164):* when the Mac's Messages.app is already signed into
+the **owner's own** Apple ID, no account work is needed — the walk-through is pure
+config:
+
+1. **Prereqs (as above):** Full Disk Access + Automation → Messages granted to the
+   process running chief; Messages signed in and receiving at the owner's handles.
+2. **`config.yaml`:**
+   ```yaml
+   imessage_enabled: true
+   imessage_owner_handles: ["+15551234567", "owner@icloud.com"]  # E.164 + Apple ID email
+   imessage_self_dm: true
+   ```
+   Every handle the self-chat can arrive from must be listed — the self-chat *is* an
+   owner handle (boot fails otherwise, by design).
+3. **Restart:** `chief stop && chief start` (config is read at boot).
+4. **Verify:** text yourself from the phone — the reply arrives `🤖 `-prefixed in the
+   same thread and provokes no further replies. `/health` shows the adapter green.
+5. **Gate (optional, burns model turns):** on the rig,
+   `CHIEF_IMESSAGE_LIVE=1 CHIEF_IMESSAGE_E2E=1 CHIEF_IMESSAGE_TEST_HANDLE=<own number>
+   uv run pytest tests/test_imessage_live.py -s` runs the live e2e proof
+   (reply/loop-proof, photo + PDF, non-self silence — the last needs
+   `CHIEF_IMESSAGE_SECOND_HANDLE` and a human on that device).
 
 **Incoming media:** **images** (native Claude vision) and **documents/PDFs** (downloaded to
 the workspace, parsed/summarized). **Voice notes deferred** — STT isn't covered by Max
@@ -921,9 +957,13 @@ preferences → memory.*)
    holds the request, and **follows up async in the guest's DM** once the owner decides
    (even hours later) — never pencils in a tentative slot.
 
-**Acting-as identity: transparent.** When chief sends email/messages on the owner's behalf,
-it sends from the owner's address but with a light assistant signature ("— sent by Will's
-assistant"). Honest about being an assistant; sets recipient expectations.
+**Acting-as identity: transparent, posture-dependent.** When chief sends email/messages on
+the owner's behalf, it sends from the owner's address but with a light assistant signature
+("— sent by Will's assistant"). Honest about being an assistant; sets recipient
+expectations. iMessage self-DM mode (#159/#160) is the deliberate exception: inside the
+owner's own self-chat the `🤖 ` prefix is the signature, and a watch-authorized fire to a
+third party ghost-writes **as the owner, on the owner's explicit per-watch instruction**
+— never spontaneously (the send seam refuses any non-self send no watch authorizes).
 
 ## Tech / toolchain
 

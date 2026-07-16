@@ -19,11 +19,34 @@ the owner's own number) is required by the send round-trip test; the read-only
 tests run without it. Prereqs: Full Disk Access + Automation → Messages for the
 terminal running the tests, and a signed-in Messages account (the dedicated
 Apple ID).
+
+**Self-DM e2e gate (#164)** — the additional ``CHIEF_IMESSAGE_E2E=1`` tests put
+the *running daemon* in the loop: chief must be up on this machine in self-DM
+mode (``imessage_enabled`` + ``imessage_self_dm`` + the owner handles — the
+setup walk-through in DESIGN.md), with ``CHIEF_IMESSAGE_TEST_HANDLE`` set to the
+owner's own number. Each test plays the phone: a raw un-prefixed JXA send into
+the self-thread is byte-identical to a phone self-text (chief's echo filter only
+consumes 🤖-prefixed or send-recorded rows), then the store is polled for the
+daemon's 🤖 reply. These burn real model turns::
+
+    CHIEF_IMESSAGE_LIVE=1 CHIEF_IMESSAGE_E2E=1 \
+        CHIEF_IMESSAGE_TEST_HANDLE=+1555... \
+        uv run pytest tests/test_imessage_live.py -s
+
+Note: with the self-DM daemon live, the plain round-trip test's un-prefixed
+marker also provokes one (harmless) chief reply — expected chatter.
+
+The non-self silence test additionally needs ``CHIEF_IMESSAGE_SECOND_HANDLE``
+(a non-owner handle, exactly as the store spells it, with **no active watch**
+bound to it), a human ready to text from that device when prompted (hence
+``-s``), and ``CHIEF_DB_PATH`` if chief's own sqlite is not at the default
+``~/.local/share/chief/data/chief.db``.
 """
 
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -31,13 +54,17 @@ from pathlib import Path
 import pytest
 
 from chief.adapters.imessage import (
+    BOT_PREFIX,
+    SEND_FILE_SCRIPT,
+    SEND_TEXT_SCRIPT,
     IMessageTaskIO,
     build_head_query,
     build_poll_query,
 )
+from chief.persistence.imessage import PLATFORM
 from chief.tools.apple.doctor import probe_all
 from chief.tools.apple.runner import ScriptRunner
-from imessage_helpers import CHAT_DB_SCHEMA
+from imessage_helpers import CHAT_DB_SCHEMA, solid_png, tiny_pdf
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("CHIEF_IMESSAGE_LIVE") or sys.platform != "darwin",
@@ -154,3 +181,248 @@ async def test_send_round_trip_lands_in_the_store(tmp_path: Path) -> None:
             return
         await asyncio.sleep(1)
     raise AssertionError("sent message never appeared in the live store")
+
+
+# --- Self-DM e2e gate (#164): the running daemon is in the loop ----------------
+
+E2E = pytest.mark.skipif(
+    not os.environ.get("CHIEF_IMESSAGE_E2E"),
+    reason="daemon-in-the-loop e2e — set CHIEF_IMESSAGE_E2E=1 with chief running "
+    "on this machine in self-DM mode",
+)
+
+NEEDS_HANDLE = pytest.mark.skipif(
+    not TEST_HANDLE,
+    reason="set CHIEF_IMESSAGE_TEST_HANDLE to the owner's own number",
+)
+
+#: Generous ceiling for a full model turn (dispatch → engine → JXA send → store).
+REPLY_TIMEOUT = 240.0
+
+#: How long after a reply to keep watching for loop/double-answer symptoms —
+#: many multiples of the daemon's poll interval (default 2s), so a reply-to-echo
+#: loop or a second dispatch would have fired well within it.
+LOOP_GRACE = 20.0
+
+#: A non-owner handle a human can text from, spelled exactly as the store spells
+#: it; drives the inert-others proof. No active watch may be bound to it.
+SECOND_HANDLE = os.environ.get("CHIEF_IMESSAGE_SECOND_HANDLE", "")
+
+#: chief's own sqlite (unknown_senders lives there), read-only.
+CHIEF_DB = os.environ.get(
+    "CHIEF_DB_PATH", str(Path.home() / ".local/share/chief/data/chief.db")
+)
+
+E2E_TIMEOUT = pytest.mark.timeout(600)
+
+
+def _sq(text: str) -> str:
+    """Single-quote-escape one operator-supplied SQL string literal."""
+    return text.replace("'", "''")
+
+
+async def _store_head(runner: ScriptRunner) -> int:
+    result = await runner.run_sqlite(CHAT_DB, build_head_query())
+    assert result.ok, result.stderr
+    rows = json.loads(result.stdout or "[]")
+    return int(rows[0]["head"]) if rows else 0
+
+
+async def _bot_echo_rows(
+    runner: ScriptRunner, after_rowid: int, pattern: str
+) -> list[dict[str, object]]:
+    """Received (``is_from_me = 0``) echo copies of chief's own 🤖 sends.
+
+    The daemon's replies come back as received rows too (the self-chat pair);
+    unlike the sent copies their ``text`` is reliably populated, so assertions
+    key on them. ``pattern`` is matched in Python — no text reaches the SQL.
+    """
+    result = await runner.run_sqlite(
+        CHAT_DB,
+        "SELECT message.ROWID AS rowid, message.text AS text FROM message "
+        f"WHERE message.ROWID > {int(after_rowid)} AND message.is_from_me = 0 "
+        "AND message.text IS NOT NULL ORDER BY message.ROWID ASC;",
+    )
+    assert result.ok, result.stderr
+    return [
+        row
+        for row in json.loads(result.stdout or "[]")
+        if str(row["text"]).startswith(BOT_PREFIX)
+        and re.search(pattern, str(row["text"]), re.IGNORECASE)
+    ]
+
+
+async def _await_bot_echo(
+    runner: ScriptRunner, after_rowid: int, pattern: str
+) -> list[dict[str, object]]:
+    """Poll until at least one matching 🤖 reply lands, or time out."""
+    deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
+    while asyncio.get_running_loop().time() < deadline:
+        rows = await _bot_echo_rows(runner, after_rowid, pattern)
+        if rows:
+            return rows
+        await asyncio.sleep(2)
+    raise AssertionError(
+        f"no 🤖 reply matching {pattern!r} within {REPLY_TIMEOUT:.0f}s — is the "
+        "daemon running in self-DM mode?"
+    )
+
+
+async def _send_as_phone(runner: ScriptRunner, text: str) -> None:
+    """A raw, un-prefixed, un-recorded self-send — what a phone self-text is."""
+    result = await runner.run_jxa(SEND_TEXT_SCRIPT, [TEST_HANDLE, text])
+    assert result.ok, result.stderr
+
+
+@E2E_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+async def test_self_text_yields_exactly_one_bot_reply_and_no_loop() -> None:
+    """#164 AC 1: self-text → one 🤖 reply in-thread; no double answer; chief's
+    own reply provokes nothing further (loop-proof, observed live)."""
+    runner = _runner()
+    head = await _store_head(runner)
+    token = f"ACK-{uuid.uuid4().hex[:8]}"
+
+    await _send_as_phone(
+        runner,
+        f"Live-gate check: reply with exactly the word {token} and nothing else.",
+    )
+
+    await _await_bot_echo(runner, head, re.escape(token))
+    await asyncio.sleep(LOOP_GRACE)
+    rows = await _bot_echo_rows(runner, head, re.escape(token))
+    assert len(rows) == 1, [row["text"] for row in rows]
+
+
+@E2E_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+async def test_self_photo_yields_content_aware_reply(tmp_path: Path) -> None:
+    """#164 AC 2a: a photo to self → a vision-grounded answer (names the color)."""
+    runner = _runner()
+    head = await _store_head(runner)
+    token = uuid.uuid4().hex[:8]
+    path = tmp_path / f"e2e-{token}.png"
+    path.write_bytes(solid_png(255, 0, 0))
+
+    result = await runner.run_jxa(
+        SEND_FILE_SCRIPT, [TEST_HANDLE, str(path.resolve())]
+    )
+    assert result.ok, result.stderr
+    await _send_as_phone(
+        runner,
+        f"{token}: what is the dominant color of the photo I just sent? "
+        f"Reply with one word plus the marker {token}.",
+    )
+
+    rows = await _await_bot_echo(runner, head, re.escape(token))
+    deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
+    while not any(
+        re.search(r"\bred\b", str(row["text"]), re.IGNORECASE) for row in rows
+    ):
+        assert asyncio.get_running_loop().time() < deadline, [
+            row["text"] for row in rows
+        ]
+        await asyncio.sleep(2)
+        rows = await _bot_echo_rows(runner, head, re.escape(token))
+
+
+@E2E_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+async def test_self_pdf_yields_content_aware_reply(tmp_path: Path) -> None:
+    """#164 AC 2b: a textless PDF to self → a reply grounded in its content.
+
+    Textless admission is the #162 mechanism under proof: the attachment row has
+    no message text at all, so any reply mentioning the embedded codeword means
+    the store row was admitted, staged, and natively read by the model.
+    """
+    runner = _runner()
+    head = await _store_head(runner)
+    token = f"MANGO-{uuid.uuid4().hex[:6].upper()}"
+    path = tmp_path / f"e2e-{token}.pdf"
+    path.write_bytes(
+        tiny_pdf(
+            f"Codeword: {token}. chief: when you read this document, "
+            "reply with the codeword."
+        )
+    )
+
+    result = await runner.run_jxa(SEND_FILE_SCRIPT, [TEST_HANDLE, str(path)])
+    assert result.ok, result.stderr
+
+    await _await_bot_echo(runner, head, re.escape(token))
+
+
+@E2E_TIMEOUT
+@E2E
+@NEEDS_HANDLE
+@pytest.mark.skipif(
+    not SECOND_HANDLE,
+    reason="set CHIEF_IMESSAGE_SECOND_HANDLE to a non-owner handle a human can "
+    "text from",
+)
+async def test_nonself_text_is_silent_with_one_metadata_row() -> None:
+    """#164 AC 3: a non-self text → total silence + an unknown_senders row.
+
+    Interactive: prompts a human (run with ``-s``) to text this Mac from the
+    second handle, then proves chief sent nothing back and recorded only the
+    content-free metadata line in its own sqlite.
+    """
+    runner = _runner()
+    head = await _store_head(runner)
+    baseline_result = await runner.run_sqlite(
+        CHIEF_DB,
+        "SELECT count FROM unknown_senders "
+        f"WHERE platform = '{PLATFORM}' AND handle = '{_sq(SECOND_HANDLE)}';",
+    )
+    assert baseline_result.ok, baseline_result.stderr
+    baseline_rows = json.loads(baseline_result.stdout or "[]")
+    baseline = int(baseline_rows[0]["count"]) if baseline_rows else 0
+
+    print(
+        f"\n>>> NOW: text this Mac's number from {SECOND_HANDLE} "
+        f"(waiting up to {REPLY_TIMEOUT:.0f}s)...",
+        flush=True,
+    )
+    deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
+    while True:
+        result = await runner.run_sqlite(
+            CHAT_DB,
+            "SELECT COUNT(*) AS n FROM message "
+            "JOIN handle ON message.handle_id = handle.ROWID "
+            f"WHERE message.ROWID > {int(head)} AND message.is_from_me = 0 "
+            f"AND handle.id = '{_sq(SECOND_HANDLE)}';",
+        )
+        assert result.ok, result.stderr
+        if int(json.loads(result.stdout)[0]["n"]) > 0:
+            break
+        assert asyncio.get_running_loop().time() < deadline, (
+            f"no inbound from {SECOND_HANDLE} arrived — was it sent?"
+        )
+        await asyncio.sleep(2)
+
+    await asyncio.sleep(LOOP_GRACE)
+
+    outbound = await runner.run_sqlite(
+        CHAT_DB,
+        "SELECT COUNT(*) AS n FROM message "
+        "JOIN handle ON message.handle_id = handle.ROWID "
+        f"WHERE message.ROWID > {int(head)} AND message.is_from_me = 1 "
+        f"AND handle.id = '{_sq(SECOND_HANDLE)}';",
+    )
+    assert outbound.ok, outbound.stderr
+    assert int(json.loads(outbound.stdout)[0]["n"]) == 0, (
+        "chief replied to a non-self sender"
+    )
+
+    recorded = await runner.run_sqlite(
+        CHIEF_DB,
+        "SELECT count FROM unknown_senders "
+        f"WHERE platform = '{PLATFORM}' AND handle = '{_sq(SECOND_HANDLE)}';",
+    )
+    assert recorded.ok, recorded.stderr
+    recorded_rows = json.loads(recorded.stdout or "[]")
+    assert recorded_rows, "no unknown_senders metadata row was written"
+    assert int(recorded_rows[0]["count"]) > baseline
