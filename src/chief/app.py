@@ -5,6 +5,7 @@ deterministic fake (the one scripted fake CI allows, PRD #183).
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -29,6 +30,9 @@ from chief.persistence.db import init_schema, make_engine, make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
+from chief.selfedit.pipeline import SelfEditPipeline
+from chief.selfedit.recovery import restart_daemon
+from chief.selfedit.tools import register_selfedit_tools
 from chief.strangers import StrangerLog
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
@@ -121,6 +125,9 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     )
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
+    register_selfedit_tools(
+        registry, SelfEditPipeline(Path.cwd(), audit, restart_daemon)
+    )
     dispatcher.set_commands(CommandSet(manager, monitor_service, cron_service))
 
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
