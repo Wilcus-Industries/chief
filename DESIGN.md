@@ -59,8 +59,10 @@ The agent loop is ours, built on a provider seam:
   deltas stream out to the session's adapter.
 - **Session persistence/resume** — conversation state survives daemon restart.
 - **Context compaction** — auto-summarize long threads to stay in window.
-- **MCP client (HTTP)** — speaks MCP to external servers (e.g. the Google/Playwright
-  docker sidecars). In-process tools register through a small native tool interface.
+- **MCP client (HTTP + stdio)** — speaks MCP to external servers: HTTP for the
+  docker sidecars (Google, Playwright), stdio for the wider ecosystem (the daemon
+  spawns and supervises server child processes — lifecycle, restart on crash).
+  In-process tools register through a small native tool interface.
 
 ### Sessions
 
@@ -76,6 +78,25 @@ finds useful) via self-config. It can switch its own model per task via a tool (
 needs a bigger model"); the owner can override per-thread. The budget cap is set
 during bootstrap on every platform — runaway spend is bounded before the agent makes
 its first call.
+
+### Skills, subagents, commands
+
+- **Skills** use the public Anthropic SKILL.md convention (dir with SKILL.md
+  frontmatter + body, optional scripts/resources) — models already know it, and
+  existing open skills drop into chief-packages unmodified. Loading is **progressive
+  disclosure**: the system prompt carries name + description one-liners only; the
+  agent pulls a skill's full body via tool call when relevant.
+- **Subagents: full registry.** Named agent definitions (custom system prompt, tool
+  allowlist, optional model) live in the harness dir; packages can ship agents; the
+  agent can author its own (self-edit pipeline applies). A spawn tool runs a
+  sub-session with its own tool loop and returns the final result to the parent.
+- **Owner commands.** A tiny core slash-command set (/tasks, /cancel, /model, …) is
+  parsed before agent dispatch on every adapter — a deterministic escape hatch when a
+  session is wedged or burning money. /skill-name invokes a skill directly; natural
+  language works everywhere too.
+- **Self-added MCP servers.** The agent may wire in a new MCP server outside any
+  package (url or command + rationale) behind an approval card; once approved it is
+  recorded via config self-edit and the audit log.
 
 ### Events + monitors + cron
 
