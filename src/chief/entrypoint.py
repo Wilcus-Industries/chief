@@ -5,8 +5,6 @@ import logging
 import signal
 from pathlib import Path
 
-from chief.app import build_app
-from chief.config import load_config
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
 
 logger = logging.getLogger(__name__)
@@ -18,8 +16,14 @@ async def amain() -> None:
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     repo_root = Path.cwd()
-    config = load_config()
     try:
+        # Imported inside the seatbelt: a self-edit that breaks chief.app's
+        # import (yet somehow passes the done-check) still rolls back instead
+        # of crashing before main() runs.
+        from chief.app import build_app
+        from chief.config import load_config
+
+        config = load_config()
         app = await build_app(config)
         await app.start()
     except Exception:
