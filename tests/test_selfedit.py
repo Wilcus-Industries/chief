@@ -112,6 +112,40 @@ def test_rollback_if_marked_resets_and_reexecs(repo: Path) -> None:
     assert rollback_if_marked(repo) is False
 
 
+async def test_boot_failure_after_selfedit_rolls_back(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash during boot (incl. a broken import) rolls back and re-execs.
+
+    ``build_app`` is imported inside ``amain``'s try, so an ``ImportError``
+    from a self-edit that breaks ``chief.app`` follows the same rollback path
+    as a runtime failure — it never escapes the seatbelt.
+    """
+    import chief.app
+    import chief.entrypoint
+
+    base = git(repo, "rev-parse", "HEAD").strip()
+    (repo / "greeting.txt").write_text("bad code\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "self-edit: bad")
+    (repo / MARKER_NAME).write_text(json.dumps({"rollback_to": base}))
+
+    async def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boot exploded")
+
+    restarted = RestartSpy()
+    monkeypatch.setattr(chief.app, "build_app", boom)
+    monkeypatch.setattr(chief.entrypoint, "restart_daemon", restarted)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(RuntimeError):
+        await chief.entrypoint.amain()
+
+    assert (repo / "greeting.txt").read_text() == "hello\n"
+    assert not (repo / MARKER_NAME).exists()
+    assert restarted.called
+
+
 def test_clear_marker_declares_health(repo: Path) -> None:
     (repo / MARKER_NAME).write_text(json.dumps({"rollback_to": "x"}))
     clear_marker(repo)
