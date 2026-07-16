@@ -161,7 +161,13 @@ async def test_doctor_probes_both_imessage_capabilities() -> None:
     reason="set CHIEF_IMESSAGE_TEST_HANDLE to a handle this Mac may text",
 )
 async def test_send_round_trip_lands_in_the_store(tmp_path: Path) -> None:
-    """A real send, asserted by reading the sent row back out of the store."""
+    """A real send, asserted by reading the marker back out of the store.
+
+    In a self-chat (the handle is the account's own number) the *sent* copy's
+    ``text`` is often NULL and the marker text lives on the pair's received copy
+    (#164 rig finding), so the read-back matches the marker on either copy
+    rather than requiring ``is_from_me = 1``.
+    """
     marker = f"chief live-test {uuid.uuid4().hex[:8]}"
     io = IMessageTaskIO(_runner(), outbox_dir=str(tmp_path / "outbox"))
 
@@ -175,9 +181,7 @@ async def test_send_round_trip_lands_in_the_store(tmp_path: Path) -> None:
             f"WHERE text = '{marker}' LIMIT 1;",
         )
         assert result.ok, result.stderr
-        rows = json.loads(result.stdout or "[]")
-        if rows:
-            assert rows[0]["is_from_me"] == 1
+        if json.loads(result.stdout or "[]"):
             return
         await asyncio.sleep(1)
     raise AssertionError("sent message never appeared in the live store")

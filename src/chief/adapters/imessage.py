@@ -124,6 +124,17 @@ BOT_PREFIX = "🤖 "
 #: everything else `is_supported_media` allows passes through unchanged.
 HEIC_MIME_TYPES = frozenset({"image/heic", "image/heif"})
 
+#: An attachment's store row lands before iCloud finishes writing its file to
+#: disk (#164 live finding), so a missing or short-of-``total_bytes`` file means
+#: "transfer in flight", not "gone" — the load retries this many times, waiting
+#: this long between attempts, before dropping the attachment.
+ATTACHMENT_TRANSFER_RETRIES = 5
+ATTACHMENT_TRANSFER_WAIT = 2.0
+
+#: Messages stores a U+FFFC object-replacement placeholder as the *text* of an
+#: attachment-bearing row; it is not a caption and must read as textless (#164).
+OBJECT_REPLACEMENT_CHAR = "￼"
+
 #: Rows pulled per poll tick — bounds one tick's work; the cursor picks up the rest.
 POLL_BATCH_LIMIT = 200
 
@@ -764,7 +775,9 @@ class IMessageAdapter(Adapter):
         if row.get("in_group") or row.get("has_room"):
             return  # DMs only in v1: group threads are never read, logged, or answered
         sender = repo.normalize_handle(str(row.get("sender") or ""))
-        text = str(row.get("text") or "")
+        text = str(row.get("text") or "").replace(OBJECT_REPLACEMENT_CHAR, "")
+        if not text.strip():
+            text = ""
         if not sender or (not text and not atts_raw):
             return
         is_self_row = self._self_dm and sender in self._self_handles
@@ -962,10 +975,26 @@ class IMessageAdapter(Adapter):
         if not raw_path:
             return None
         path = Path(str(raw_path)).expanduser()
-        try:
-            data = path.read_bytes()
-        except OSError:
-            logger.warning("imessage attachment unreadable: %s", path)
+        data: bytes | None = None
+        for attempt in range(ATTACHMENT_TRANSFER_RETRIES + 1):
+            if attempt:
+                await asyncio.sleep(ATTACHMENT_TRANSFER_WAIT)
+            try:
+                candidate = path.read_bytes()
+            except OSError:
+                continue  # transfer in flight: the file hasn't landed yet
+            if (
+                isinstance(total_bytes, int)
+                and total_bytes > 0
+                and len(candidate) < total_bytes
+            ):
+                continue  # transfer in flight: the file is still being written
+            data = candidate
+            break
+        if data is None:
+            logger.warning(
+                "imessage attachment never finished transferring: %s", path
+            )
             return None
         if len(data) > MAX_ATTACHMENT_BYTES:
             return None
