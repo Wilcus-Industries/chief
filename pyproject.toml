@@ -39,9 +39,6 @@ packages = ["src/chief"]
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
-# docker/mcp-* are standalone vendored MCP server images linted inside their images;
-# vendor/ holds upstream submodules we package as-is.
-extend-exclude = ["docker", "vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -50,7 +47,6 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 packages = ["chief"]
 strict = true
-exclude = ['^docker/', '^vendor/']
 
 # pyyaml ships no inline stubs for the bare `import yaml` module name;
 # croniter ships no py.typed at all.
