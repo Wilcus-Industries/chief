@@ -56,6 +56,43 @@ class SkillLibrary:
         )
 
 
+def validate(root: Path) -> list[str]:
+    """Return the well-formedness problems of every SKILL.md under root.
+
+    Empty means each SKILL.md has YAML frontmatter with a non-empty name
+    and description, plus a non-empty body. The self-edit done-check calls
+    this, so a bogus write (a placeholder ``...`` body, missing metadata) is
+    rolled back rather than merged (issue #186).
+    """
+    problems: list[str] = []
+    for skill_file in sorted(root.glob("*/SKILL.md")):
+        problems.extend(_validate_skill(skill_file))
+    return problems
+
+
+def _validate_skill(skill_file: Path) -> list[str]:
+    text = skill_file.read_text()
+    if not text.startswith("---"):
+        return [f"{skill_file}: missing YAML frontmatter"]
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return [f"{skill_file}: frontmatter has no closing '---'"]
+    try:
+        meta = yaml.safe_load(parts[1])
+    except yaml.YAMLError as exc:
+        return [f"{skill_file}: frontmatter is not valid yaml ({exc})"]
+    if not isinstance(meta, dict):
+        return [f"{skill_file}: frontmatter is not a mapping"]
+    problems = []
+    if not str(meta.get("name") or "").strip():
+        problems.append(f"{skill_file}: frontmatter missing 'name'")
+    if not str(meta.get("description") or "").strip():
+        problems.append(f"{skill_file}: frontmatter missing 'description'")
+    if not parts[2].strip():
+        problems.append(f"{skill_file}: empty body")
+    return problems
+
+
 def _parse(skill_file: Path) -> Skill | None:
     text = skill_file.read_text()
     if not text.startswith("---"):

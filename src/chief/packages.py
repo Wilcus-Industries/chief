@@ -83,6 +83,35 @@ class PackageLibrary:
         return order
 
 
+def validate(roots: tuple[Path, ...]) -> list[str]:
+    """Return the well-formedness problems of every manifest under roots.
+
+    Empty means each manifest.yaml parses to a mapping with a non-empty name
+    and description. Runs in the self-edit done-check alongside skill
+    validation so a broken manifest is rolled back, not merged (issue #186).
+    """
+    problems: list[str] = []
+    for root in roots:
+        for manifest in sorted(root.glob("*/manifest.yaml")):
+            problems.extend(_validate_manifest(manifest))
+    return problems
+
+
+def _validate_manifest(manifest: Path) -> list[str]:
+    try:
+        meta = yaml.safe_load(manifest.read_text())
+    except yaml.YAMLError as exc:
+        return [f"{manifest}: not valid yaml ({exc})"]
+    if not isinstance(meta, dict):
+        return [f"{manifest}: not a mapping"]
+    problems = []
+    if not str(meta.get("name") or "").strip():
+        problems.append(f"{manifest}: missing 'name'")
+    if not str(meta.get("description") or "").strip():
+        problems.append(f"{manifest}: missing 'description'")
+    return problems
+
+
 def _parse(manifest: Path) -> Package | None:
     try:
         meta = yaml.safe_load(manifest.read_text()) or {}
