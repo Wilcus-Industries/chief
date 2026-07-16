@@ -6,11 +6,15 @@ previous S0→M13 design entirely. The old tree lives in git history (`git show
 
 ## Vision
 
-One general agent harness on a Mac mini. Input channels are dumb pipes; capabilities
-are installable packages; the agent configures — and *builds* — its own integrations.
-Nothing channel-specific is hardcoded into the core. When the agent needs to watch a
-channel, it puts a monitor on it; when it needs a new channel, it builds an adapter
-from a package skill.
+One general agent harness on an always-on box — Linux or macOS, no platform assumed.
+Input channels are dumb pipes; capabilities are installable packages; the agent
+configures — and *builds* — its own integrations. Nothing channel-specific is
+hardcoded into the core. When the agent needs to watch a channel, it puts a monitor
+on it; when it needs a new channel, it builds an adapter from a package skill.
+
+macOS boxes (e.g. the Mac mini this instance runs on) get a few extra defaults —
+the iMessage adapter and the screening package it depends on; everything else Apple
+comes as packages. Linux gets the same core, just without the macOS defaults.
 
 ## Principles
 
