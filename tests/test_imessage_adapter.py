@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from chief.adapters.base import MAX_ATTACHMENT_BYTES
 from chief.adapters.imessage import (
+    ATTACHMENT_TRANSFER_RETRIES,
     PLATFORM,
     IMessageAdapter,
     IMessageTaskIO,
@@ -700,6 +701,90 @@ async def test_plugin_payload_attachment_skipped(
 
     assert engine.dispatched == [(OWNER, "check this link")]
     assert engine.dispatched_attachments == [()]
+
+
+async def test_self_dm_attachment_transferring_late_still_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#164 live finding: the store row lands before iCloud finishes writing the
+    attachment file; the poll must wait the transfer out, not drop the photo. The
+    real row also carries U+FFFC placeholder text, which must read as textless
+    rather than dispatching as a junk caption."""
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    image_path = tmp_path / "IMG_0009.jpg"  # transfer in flight: no file yet
+    jpeg_bytes = b"\xff\xd8\xff\xe0LATE"
+    msg = store.add_message(handle_rowid=handle, chat_rowid=chat, text="￼")
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(image_path),
+        mime_type="image/jpeg",
+        transfer_name="IMG_0009.jpg",
+        total_bytes=len(jpeg_bytes),
+    )
+
+    sleeps: list[float] = []
+
+    async def finish_transfer(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            image_path.write_bytes(jpeg_bytes[:2])  # partial write — keep waiting
+        if len(sleeps) == 2:
+            image_path.write_bytes(jpeg_bytes)
+
+    monkeypatch.setattr("asyncio.sleep", finish_transfer)
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == [(OWNER, "")]
+    assert len(engine.dispatched_attachments) == 1
+    (att,) = engine.dispatched_attachments[0]
+    assert att.data == jpeg_bytes
+    assert len(sleeps) == 2
+
+
+async def test_self_dm_attachment_never_transferring_drops_without_dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transfer that never lands is bounded: retries stop, and the U+FFFC-only
+    row dispatches nothing (same posture as the oversized textless drop)."""
+    adapter, store, _, engine = make_adapter(
+        tmp_path, session_factory, self_dm=True
+    )
+    handle = store.add_handle(OWNER)
+    chat = store.add_chat(OWNER)
+    await adapter.prime()
+
+    msg = store.add_message(handle_rowid=handle, chat_rowid=chat, text="￼")
+    store.add_attachment(
+        message_rowid=msg,
+        filename=str(tmp_path / "IMG_0010.jpg"),  # never written
+        mime_type="image/jpeg",
+        transfer_name="IMG_0010.jpg",
+        total_bytes=4,
+    )
+
+    sleeps: list[float] = []
+
+    async def count_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", count_sleep)
+
+    await adapter.poll_once()
+
+    assert engine.dispatched == []
+    assert engine.dispatched_attachments == []
+    assert len(sleeps) == ATTACHMENT_TRANSFER_RETRIES
 
 
 async def test_self_dm_attachment_over_size_cap_dropped(
