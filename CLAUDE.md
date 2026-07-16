@@ -11,20 +11,21 @@ this. Only add a rule here when it differs from, or isn't covered by, the global
 
 ## Run story (host-native)
 
-Core runs natively on this machine — no core container. Fresh-machine setup is the
-one-liner (`bootstrap.sh` → `install.sh`, README.md); from a clone, `./install.sh`
-does prereqs, scaffold, deps, migrations, the first-run wizard (web password + model
-auth — no platform tokens), the `chief` launcher, and the autostart service
-(`--google` / `--playwright` add the MCP sidecars; `--no-service` / `--no-launch` /
+Core runs natively on this machine — no containers, no migrations (the schema is
+created at boot). Fresh-machine setup is the one-liner (`bootstrap.sh` →
+`install.sh`, README.md); from a clone, `./install.sh` does prereqs, scaffold,
+deps, the first-run wizard (web password, OpenRouter key, monthly budget cap),
+the `chief` launcher, and the autostart service (`--no-service` / `--no-launch` /
 `--non-interactive` for automation; re-runs are idempotent). Run in the foreground
 with `chief run` or `uv run python -m chief.entrypoint`; lifecycle via
 `chief start|stop|status|update|uninstall` — releases are git tags, and `update`
-pins to the newest. Sidecars: `docker compose --profile google up -d`.
-Attach the terminal client with `uv run chief-cli` (`--socket` overrides
-`settings.socket_path`); it is only a client, so quitting it leaves the daemon running.
-The web UI (#153) serves in-process at `http://127.0.0.1:8130` by default (`web_*`
-settings; `web_lan_enabled` opens it to the LAN) — owner-password cockpit, server-
-rendered htmx + SSE, no Node toolchain.
+pins to the newest. Attach the plain-REPL socket client with `uv run chief-cli`
+(`--socket` overrides `socket_path`); it is only a client, so quitting it leaves
+the daemon running. The web UI serves in-process at `http://127.0.0.1:8130`
+(`web_*` config keys) — owner-password chat + approvals + monitors, server-
+rendered, fail-closed without a password. Capabilities beyond core (channels,
+Google, memory) are packages the agent installs in chat (`packages/` bundled,
+more from the chief-packages repo).
 
 ## Definition of done
 

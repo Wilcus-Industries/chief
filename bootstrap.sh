@@ -4,8 +4,8 @@
 # Takes a fresh Mac or Debian-family Linux machine to chatting with chief in the
 # browser: installs the prerequisites (Homebrew-first on macOS, apt on Linux),
 # clones the repo to a standard location at the latest tagged release, and hands
-# off to install.sh (wizard, deps, migrations, launcher, autostart service,
-# launch). Re-runs are idempotent: an existing clone is updated, never destroyed.
+# off to install.sh (wizard, deps, launcher, autostart service, launch).
+# Re-runs are idempotent: an existing clone is updated, never destroyed.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/CrazyWillBear/chief/main/bootstrap.sh | bash
@@ -15,12 +15,11 @@
 #   --ref TAG          install a specific tag instead of the latest release
 #   --no-service       skip the autostart service
 #   --no-launch        do not start the daemon / open the browser at the end
-#   --non-interactive  no prompts (env: CHIEF_OWNER_PASSWORD, CHIEF_OPENROUTER_KEY)
-#   --google           also start the Google MCP sidecars
-#   --playwright       also start the browser sidecar
+#   --non-interactive  no prompts (env: CHIEF_OWNER_PASSWORD,
+#                      CHIEF_OPENROUTER_KEY, CHIEF_BUDGET_CAP)
 #
-# Model auth is required to chat: a GitHub Copilot subscription (the free tier
-# works, with limits) OR an OpenRouter API key. The wizard walks either path.
+# Model auth is required to chat: an OpenRouter API key
+# (https://openrouter.ai/settings/keys). The wizard walks you through it.
 
 set -euo pipefail
 
@@ -35,17 +34,6 @@ fail() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() { sed -n '2,23p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true; }
-
-# Prompt on the controlling terminal (curl|bash leaves stdin on the pipe).
-# Prints the reply; prints nothing when there is no terminal to ask.
-ask_tty() {
-  local reply=""
-  if [ -r /dev/tty ]; then
-    printf '%s' "$1" > /dev/tty
-    IFS= read -r reply < /dev/tty || reply=""
-  fi
-  printf '%s' "$reply"
-}
 
 detect_os() {
   case "$(uname -s)" in
@@ -129,57 +117,6 @@ ensure_uv() {
   ok "uv"
 }
 
-docker_ready() { have docker && docker compose version >/dev/null 2>&1; }
-
-# Docker is required for the MCP sidecars, but its absence guides + re-checks
-# rather than aborting (PRD #154): core boots without it, and the web UI is the
-# day-one channel either way.
-ensure_docker() {
-  local os="$1"
-  if docker_ready; then
-    ok "docker + compose"
-    return
-  fi
-  case "$os" in
-    darwin)
-      miss "docker not found — Docker Desktop is needed for the MCP sidecars"
-      echo "  install it: https://docs.docker.com/desktop/setup/install/mac-install/"
-      echo "  then start Docker Desktop once so the docker CLI lands on PATH."
-      if [ ! -r /dev/tty ]; then
-        miss "no terminal to prompt on — continuing without docker"
-        return
-      fi
-      local reply
-      while ! docker_ready; do
-        reply="$(ask_tty '  press Enter to re-check, or type skip to continue without docker: ')"
-        if [ "$reply" = "skip" ]; then
-          miss "continuing without docker — sidecars stay off until it is installed"
-          return
-        fi
-      done
-      ok "docker + compose"
-      ;;
-    debian)
-      say "installing docker (apt)"
-      if apt_install docker.io docker-compose-v2 \
-        || apt_install docker.io docker-compose-plugin; then
-        :
-      fi
-      if docker_ready; then
-        ok "docker + compose"
-        if ! docker info >/dev/null 2>&1; then
-          miss "docker installed but not reachable — you may need: sudo usermod -aG docker \$USER (then log out and back in) before starting sidecars"
-        fi
-      else
-        miss "docker could not be installed automatically — install it later for the sidecars (https://docs.docker.com/engine/install/)"
-      fi
-      ;;
-    *)
-      miss "docker not found — install docker + compose v2 for the MCP sidecars (https://docs.docker.com)"
-      ;;
-  esac
-}
-
 # Clone (or update) the repo and pin it to a release tag. Never destroys local
 # state: a dirty tree skips the checkout with a warning.
 fetch_repo() {
@@ -206,7 +143,6 @@ fetch_repo() {
   else
     miss "no release tags yet — using the default branch tip"
   fi
-  git -C "$dir" submodule update --init --recursive
 }
 
 main() {
@@ -216,7 +152,7 @@ main() {
     case "$1" in
       --dir) dir="$2"; shift ;;
       --ref) ref="$2"; shift ;;
-      --no-service|--no-launch|--non-interactive|--google|--playwright)
+      --no-service|--no-launch|--non-interactive)
         install_flags="$install_flags $1"
         ;;
       -h|--help) usage; exit 0 ;;
@@ -226,8 +162,8 @@ main() {
   done
 
   say "chief — one-line install"
-  echo "  to chat you will need model auth: a GitHub Copilot subscription"
-  echo "  (free tier works) or an OpenRouter API key. The wizard walks you through it."
+  echo "  to chat you will need an OpenRouter API key"
+  echo "  (https://openrouter.ai/settings/keys). The wizard walks you through it."
 
   local os
   os="$(detect_os)"
@@ -236,14 +172,13 @@ main() {
       fail "unsupported OS ($(uname -s)) — chief installs on macOS and Debian-family Linux"
       ;;
     linux-other)
-      miss "non-Debian Linux — best effort: git, uv, and docker must already be installed"
+      miss "non-Debian Linux — best effort: git and uv must already be installed"
       ;;
     darwin) ensure_brew ;;
   esac
 
   ensure_git "$os"
   ensure_uv "$os"
-  ensure_docker "$os"
   fetch_repo "$dir" "$ref"
 
   say "handing off to install.sh"
