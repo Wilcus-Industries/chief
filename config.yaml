@@ -30,3 +30,16 @@ budget:
 # "HH:MM-HH:MM" (may span midnight) — schedule fires inside the window are
 # deferred to its end. Empty = no quiet hours.
 quiet_hours: ""
+
+# Packages: bundled defaults live in packages_dir; more come from the public
+# chief-packages repo (cloned into data/packages by the install-package skill).
+packages_dir: packages
+packages_repo: https://github.com/CrazyWillBear/chief-packages
+
+# iMessage adapter (macOS only; configured by the build-imessage package).
+# owner_handles: the self-chat handle(s) — owner texts run turns, everyone
+# else is logged + published for monitors.
+imessage:
+  enabled: false
+  owner_handles: []
+  poll_seconds: 2

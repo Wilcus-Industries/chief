@@ -82,6 +82,28 @@ async def test_stranger_is_logged_and_never_answered(
     assert rows[0].sender == "unknown-5551234"
 
 
+async def test_stranger_is_published_for_monitors_but_runs_no_turn(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    bus = EventBus()
+    seen: list[Event] = []
+
+    async def collector(event: Event) -> None:
+        seen.append(event)
+
+    bus.subscribe(collector)
+    strangers = StrangerLog(make_session_factory(engine))
+    provider = FakeProvider([])
+    dispatcher = Dispatcher(
+        make_manager(provider, store), bus=bus, strangers=strangers
+    )
+    dispatcher.register(RecordingAdapter())
+    await dispatcher.handle(owner_message("watch me", sender="+15559998888"))
+    assert provider.calls == []
+    assert [e.payload["sender"] for e in seen] == ["+15559998888"]
+    assert seen[0].payload["text"] == "watch me"
+
+
 async def test_owner_message_is_published_system_wake_is_not(
     store: MessageStore,
 ) -> None:

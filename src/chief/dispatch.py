@@ -2,7 +2,8 @@
 
 Inbound order: approval answers are consumed first (a turn blocked on an
 approval card would deadlock behind the session lock otherwise), strangers
-are logged and dropped, owner messages go on the event bus and run a turn.
+are logged and published to the bus but never run a turn, owner messages
+go on the event bus and run a turn.
 ``system`` senders (monitor/cron wakes) run a turn but are never published —
 that would let monitors trigger themselves.
 """
@@ -68,6 +69,9 @@ class Dispatcher:
         if message.sender not in (OWNER, SYSTEM):
             if self._strangers is not None:
                 await self._strangers.log(message)
+            # Published (never dispatched) so monitors can implement notify
+            # policy — e.g. an iMessage whitelist tier — as agent policy.
+            await self._publish(message)
             return
         if self._commands is not None:
             outcome = await self._commands.run(message)
@@ -76,19 +80,24 @@ class Dispatcher:
                 return
             if isinstance(outcome, Message):
                 message = outcome
-        if self._bus is not None and message.sender == OWNER:
-            await self._bus.publish(
-                Event(
-                    type="message.inbound",
-                    channel=message.channel,
-                    payload={
-                        "thread_key": message.thread_key,
-                        "sender": message.sender,
-                        "text": message.text,
-                    },
-                )
-            )
+        if message.sender == OWNER:
+            await self._publish(message)
         await self._run_turn(message)
+
+    async def _publish(self, message: Message) -> None:
+        if self._bus is None:
+            return
+        await self._bus.publish(
+            Event(
+                type="message.inbound",
+                channel=message.channel,
+                payload={
+                    "thread_key": message.thread_key,
+                    "sender": message.sender,
+                    "text": message.text,
+                },
+            )
+        )
 
     async def _run_turn(self, message: Message) -> None:
         adapter = self.adapter(message.channel)

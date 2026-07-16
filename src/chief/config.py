@@ -35,6 +35,14 @@ class Config:
     skills_dir: Path = Path("skills")
     agents_dir: Path = Path("agents")
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    packages_dir: Path = Path("packages")
+    packages_repo: str = "https://github.com/CrazyWillBear/chief-packages"
+    imessage_enabled: bool = False
+    imessage_owner_handles: tuple[str, ...] = ()
+    imessage_db_path: Path = field(
+        default_factory=lambda: Path.home() / "Library/Messages/chat.db"
+    )
+    imessage_poll_seconds: float = 2.0
 
     @property
     def default_model(self) -> str:
@@ -49,6 +57,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     models = dict(Config().models) | dict(raw.get("models") or {})
     gate = raw.get("gate") or {}
     budget = raw.get("budget") or {}
+    imessage = raw.get("imessage") or {}
     return Config(
         models=models,
         db_path=Path(_env_or(raw, "db_path", "data/chief.db")),
@@ -70,6 +79,14 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         skills_dir=Path(_env_or(raw, "skills_dir", "skills")),
         agents_dir=Path(_env_or(raw, "agents_dir", "agents")),
         mcp_servers=dict(raw.get("mcp_servers") or {}),
+        packages_dir=Path(_env_or(raw, "packages_dir", "packages")),
+        packages_repo=str(_env_or(raw, "packages_repo", Config().packages_repo)),
+        imessage_enabled=bool(imessage.get("enabled", False)),
+        imessage_owner_handles=tuple(imessage.get("owner_handles") or ()),
+        imessage_db_path=Path(
+            imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
+        ),
+        imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
     )
 
 

@@ -5,11 +5,10 @@ deterministic fake (the one scripted fake CI allows, PRD #183).
 """
 
 import logging
-from dataclasses import dataclass
+import sys
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import AsyncEngine
-
+from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
@@ -23,12 +22,18 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.cron.tools import register_cron_tools
+from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools, GatePolicy
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.mcpclient.tools import load_self_added, register_mcp_tools
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.monitors.tools import register_monitor_tools
+from chief.packages import (
+    CLONED_PACKAGES_DIR,
+    PackageLibrary,
+    register_package_tools,
+)
 from chief.persistence.db import init_schema, make_engine, make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
@@ -46,44 +51,7 @@ from chief.web.server import WebServer
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class App:
-    """The assembled daemon and its lifecycle."""
-
-    config: Config
-    engine: AsyncEngine
-    store: MessageStore
-    dispatcher: Dispatcher
-    socket_adapter: SocketAdapter
-    monitor_service: MonitorService
-    cron_service: CronService
-    bus: EventBus
-    web_adapter: WebAdapter
-    web_server: WebServer | None
-    mcp_manager: McpManager
-    mcp_configs: tuple[ServerConfig, ...]
-
-    async def start(self) -> None:
-        await self.socket_adapter.start()
-        self.cron_service.start()
-        if self.web_server is not None:
-            await self.web_server.start()
-        for server in self.mcp_configs:
-            try:
-                await self.mcp_manager.connect(server)
-            except Exception:
-                # A dead sidecar must not keep the whole daemon down.
-                logger.exception("mcp server %s failed to connect", server.name)
-
-    async def stop(self) -> None:
-        await self.mcp_manager.stop()
-        if self.web_server is not None:
-            await self.web_server.stop()
-        await self.cron_service.stop()
-        await self.web_adapter.stop()
-        await self.socket_adapter.stop()
-        await self.engine.dispose()
+__all__ = ["App", "build_app"]
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -156,6 +124,11 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         for name, entry in config.mcp_servers.items()
     ) + tuple(load_self_added())
     register_skill_tools(registry, skills)
+    register_package_tools(
+        registry,
+        PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
+        config.packages_repo,
+    )
     register_spawn_tool(
         registry,
         AgentRegistry(config.agents_dir),
@@ -169,6 +142,17 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
 
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
     dispatcher.register(socket_adapter)
+
+    imessage_adapter: IMessageAdapter | None = None
+    if config.imessage_enabled and sys.platform == "darwin":
+        imessage_adapter = IMessageAdapter(
+            dispatcher.handle,
+            db_path=config.imessage_db_path,
+            cursor_path=config.db_path.parent / "imessage_cursor",
+            owner_handles=config.imessage_owner_handles,
+            poll_seconds=config.imessage_poll_seconds,
+        )
+        dispatcher.register(imessage_adapter)
 
     web_adapter = WebAdapter()
     dispatcher.register(web_adapter)
@@ -192,4 +176,5 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         web_server=web_server,
         mcp_manager=mcp_manager,
         mcp_configs=mcp_configs,
+        imessage_adapter=imessage_adapter,
     )
