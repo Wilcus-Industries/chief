@@ -8,6 +8,7 @@ dependencies = [
     "sqlalchemy>=2",
     "aiosqlite>=0.20",
     "pyyaml>=6",
+    "croniter>=3",
 ]
 
 [project.scripts]
@@ -45,9 +46,10 @@ packages = ["chief"]
 strict = true
 exclude = ['^docker/', '^vendor/']
 
-# pyyaml ships no inline stubs for the bare `import yaml` module name.
+# pyyaml ships no inline stubs for the bare `import yaml` module name;
+# croniter ships no py.typed at all.
 [[tool.mypy.overrides]]
-module = ["yaml"]
+module = ["yaml", "croniter.*", "croniter"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

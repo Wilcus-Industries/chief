@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from chief.agent.tools import ToolRegistry
+from chief.agent.tools import ToolDispatcher
 from chief.provider.base import Completion, Provider, TextDelta, ToolCall, Usage
 
 OnDelta = Callable[[str], Awaitable[None]]
@@ -21,10 +21,15 @@ MAX_ITERATIONS = 25
 
 @dataclass(frozen=True)
 class TurnResult:
-    """Outcome of one full turn: final assistant text plus summed usage."""
+    """Outcome of one full turn: final assistant text plus summed usage.
+
+    ``notice`` carries an out-of-band owner message (e.g. a budget warning)
+    the adapter should deliver after the reply.
+    """
 
     text: str
     usage: Usage = Usage()
+    notice: str | None = None
 
 
 async def run_turn(
@@ -32,20 +37,20 @@ async def run_turn(
     provider: Provider,
     model: str,
     messages: list[dict[str, Any]],
-    registry: ToolRegistry,
+    tools: ToolDispatcher,
     on_delta: OnDelta,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
     usage = Usage()
     for _ in range(max_iterations):
-        completion = await _stream_once(provider, model, messages, registry, on_delta)
+        completion = await _stream_once(provider, model, messages, tools, on_delta)
         usage = usage + completion.usage
         messages.append(_assistant_message(completion))
         if not completion.tool_calls:
             return TurnResult(text=completion.text, usage=usage)
         for call in completion.tool_calls:
-            result = await registry.dispatch(call)
+            result = await tools.dispatch(call)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )
@@ -58,11 +63,11 @@ async def _stream_once(
     provider: Provider,
     model: str,
     messages: list[dict[str, Any]],
-    registry: ToolRegistry,
+    tools: ToolDispatcher,
     on_delta: OnDelta,
 ) -> Completion:
     completion: Completion | None = None
-    stream = provider.stream(model=model, messages=messages, tools=registry.specs())
+    stream = provider.stream(model=model, messages=messages, tools=tools.specs())
     async for event in stream:
         if isinstance(event, TextDelta):
             await on_delta(event.text)

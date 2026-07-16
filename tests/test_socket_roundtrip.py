@@ -45,7 +45,7 @@ async def start_daemon(
 ) -> SocketAdapter:
     manager = SessionManager(
         provider=provider,
-        registry=clock_registry(),
+        tools_factory=lambda thread, channel: clock_registry(),
         store=store,
         default_model="test-model",
         system_prompt="test system prompt",

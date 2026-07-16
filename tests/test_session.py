@@ -18,7 +18,7 @@ def make_manager(
 ) -> SessionManager:
     return SessionManager(
         provider=provider,
-        registry=ToolRegistry(),
+        tools_factory=lambda thread, channel: ToolRegistry(),
         store=store,
         default_model="test-model",
         system_prompt="test system prompt",
