@@ -15,11 +15,11 @@ from .fakes import FakeProvider, text_turn
 Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 
 
-def make_config(tmp_path: Path, **overrides: Any) -> Config:
+def make_config(tmp_path: Path, sock: Path, **overrides: Any) -> Config:
     return Config(
         models={"default": "test-model"},
         db_path=tmp_path / "chief.db",
-        socket_path=tmp_path / "chief.sock",
+        socket_path=sock,
         **overrides,
     )
 
@@ -51,7 +51,9 @@ async def read_finals(streams: Streams, count: int) -> list[dict[str, Any]]:
     return finals
 
 
-async def test_agent_creates_a_monitor_and_it_fires(tmp_path: Path) -> None:
+async def test_agent_creates_a_monitor_and_it_fires(
+    tmp_path: Path, sock_path: Path
+) -> None:
     create = ToolCall(
         id="c1",
         name="create_monitor",
@@ -65,7 +67,7 @@ async def test_agent_creates_a_monitor_and_it_fires(tmp_path: Path) -> None:
             text_turn("hello from t2"),
         ]
     )
-    config = make_config(tmp_path, gate_approved=("create_monitor",))
+    config = make_config(tmp_path, sock_path, gate_approved=("create_monitor",))
     app, streams = await boot(config, provider)
     try:
         send_frame(streams, "watch this channel for urgent stuff", thread="t1")
@@ -85,12 +87,14 @@ async def test_agent_creates_a_monitor_and_it_fires(tmp_path: Path) -> None:
         await shutdown(app, streams)
 
 
-async def test_agent_can_list_bundled_packages(tmp_path: Path) -> None:
+async def test_agent_can_list_bundled_packages(
+    tmp_path: Path, sock_path: Path
+) -> None:
     call = ToolCall(id="c1", name="list_packages", arguments={})
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(call,))], text_turn("here they are")]
     )
-    config = make_config(tmp_path, gate_approved=("list_packages",))
+    config = make_config(tmp_path, sock_path, gate_approved=("list_packages",))
     app, streams = await boot(config, provider)
     try:
         send_frame(streams, "what packages can you install?", thread="t1")
@@ -105,7 +109,7 @@ async def test_agent_can_list_bundled_packages(tmp_path: Path) -> None:
 
 
 async def test_gray_tool_raises_an_approval_card_first_answer_wins(
-    tmp_path: Path,
+    tmp_path: Path, sock_path: Path
 ) -> None:
     create = ToolCall(
         id="c1",
@@ -119,7 +123,7 @@ async def test_gray_tool_raises_an_approval_card_first_answer_wins(
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(create,))], text_turn("scheduled")]
     )
-    app, streams = await boot(make_config(tmp_path), provider)
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
     try:
         send_frame(streams, "remind me daily", thread="t1")
         card = (await read_finals(streams, 1))[0]
@@ -134,7 +138,9 @@ async def test_gray_tool_raises_an_approval_card_first_answer_wins(
         await shutdown(app, streams)
 
 
-async def test_denied_card_blocks_the_tool(tmp_path: Path) -> None:
+async def test_denied_card_blocks_the_tool(
+    tmp_path: Path, sock_path: Path
+) -> None:
     create = ToolCall(
         id="c1",
         name="create_schedule",
@@ -143,7 +149,7 @@ async def test_denied_card_blocks_the_tool(tmp_path: Path) -> None:
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(create,))], text_turn("understood, denied")]
     )
-    app, streams = await boot(make_config(tmp_path), provider)
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
     try:
         send_frame(streams, "remind me", thread="t1")
         await read_finals(streams, 1)  # the card
