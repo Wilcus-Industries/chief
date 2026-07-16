@@ -1,0 +1,49 @@
+# Non-secret core configuration TEMPLATE (committed). The first-run wizard copies
+# this to config.yaml, which is install-local state (gitignored) — the wizard and
+# self-edit write config.yaml in place, and a tracked copy would leave the tree
+# permanently dirty, which the self-edit pipeline refuses to run against. Edit the
+# live install's config.yaml, not this file. Secrets live in secrets/ or env — never
+# here. Core ships a deliberately small set of keys; packages bring their own.
+#
+# Env overrides: CHIEF_DB_PATH, CHIEF_SOCKET_PATH, CHIEF_MAX_CONCURRENT_SESSIONS,
+# OPENROUTER_API_KEY (or secrets/openrouter_api_key).
+
+# Model roles. Core ships exactly one — the agent invents further roles via
+# self-config. Two optional roles are honored when present, never required:
+# `downgrade` (used when the budget is exhausted) and `cheap-judgment`
+# (monitor model-predicates).
+models:
+  default: anthropic/claude-sonnet-4.5
+
+db_path: data/chief.db
+socket_path: data/chief.sock
+max_concurrent_sessions: 4
+
+# Tool gate lists (code-enforced). Tools on neither list raise an approval
+# card on the session's surface; unanswered cards deny after 10 minutes.
+gate:
+  never: []
+  approved: []
+
+# OpenRouter dollars per calendar month. cap_usd 0 = unlimited (bootstrap
+# sets a real cap); crossing warn_ratio notifies the owner.
+budget:
+  cap_usd: 0
+  warn_ratio: 0.8
+
+# "HH:MM-HH:MM" (may span midnight) — schedule fires inside the window are
+# deferred to its end. Empty = no quiet hours.
+quiet_hours: ""
+
+# Packages: bundled defaults live in packages_dir; more come from the public
+# chief-packages repo (cloned into data/packages by the install-package skill).
+packages_dir: packages
+packages_repo: https://github.com/CrazyWillBear/chief-packages
+
+# iMessage adapter (macOS only; configured by the build-imessage package).
+# owner_handles: the self-chat handle(s) — owner texts run turns, everyone
+# else is logged + published for monitors.
+imessage:
+  enabled: false
+  owner_handles: []
+  poll_seconds: 2

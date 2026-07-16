@@ -23,3 +23,6 @@ dist/
 .aider*
 # Local backups — memory dumps + .claude credential backups, never publish
 /backups/
+
+# Install-local config (seeded from config.default.yaml by the wizard).
+/config.yaml
