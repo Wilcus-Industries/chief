@@ -9,6 +9,10 @@ dependencies = [
     "aiosqlite>=0.20",
     "pyyaml>=6",
     "croniter>=3",
+    "starlette>=0.47",
+    "uvicorn>=0.30",
+    # Starlette requires it for any form parsing (the login POST).
+    "python-multipart>=0.0.18",
 ]
 
 [project.scripts]

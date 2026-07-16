@@ -48,12 +48,13 @@ class SessionManager:
                 return session
             await self._store.ensure_session(thread_key, channel)
             history = await self._store.load(thread_key)
+            override = await self._store.model_override(thread_key)
             session = Session(
                 thread_key=thread_key,
                 provider=self._provider,
                 tools=self._tools_factory(thread_key, channel),
                 store=self._store,
-                model=self._default_model,
+                model=override or self._default_model,
                 system_prompt=self._system_prompt,
                 history=history,
                 turn_semaphore=self._semaphore,
@@ -62,3 +63,9 @@ class SessionManager:
             )
             self._sessions[thread_key] = session
             return session
+
+    async def set_model(self, thread_key: str, channel: str, model: str) -> None:
+        """Owner per-thread model override: live session + persisted row."""
+        session = await self.get_or_create(thread_key, channel)
+        session.model = model
+        await self._store.set_model_override(thread_key, model)

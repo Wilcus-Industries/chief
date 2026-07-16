@@ -8,12 +8,19 @@ that would let monitors trigger themselves.
 """
 
 import logging
+from typing import Protocol
 
 from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.strangers import StrangerLog
+
+
+class CommandRunner(Protocol):
+    """Slash-command hook: returns the reply, or None if not a command."""
+
+    async def run(self, message: Message) -> str | None: ...
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +44,11 @@ class Dispatcher:
         self._approvals = approvals
         self._strangers = strangers
         self._adapters: dict[str, Adapter] = {}
+        self._commands: CommandRunner | None = None
+
+    def set_commands(self, commands: CommandRunner) -> None:
+        """Attach the slash-command set (built after the dispatcher exists)."""
+        self._commands = commands
 
     def register(self, adapter: Adapter) -> None:
         """Make an adapter reachable for outbound sends on its channel."""
@@ -56,6 +68,11 @@ class Dispatcher:
             if self._strangers is not None:
                 await self._strangers.log(message)
             return
+        if self._commands is not None:
+            reply = await self._commands.run(message)
+            if reply is not None:
+                await self.adapter(message.channel).send(message.thread_key, reply)
+                return
         if self._bus is not None and message.sender == OWNER:
             await self._bus.publish(
                 Event(
