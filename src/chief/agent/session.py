@@ -9,6 +9,7 @@ import asyncio
 from dataclasses import replace
 from typing import Any
 
+from chief.agent.compaction import Compactor
 from chief.agent.loop import OnDelta, TurnResult, run_turn
 from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget, BudgetState, BudgetStatus
@@ -32,6 +33,7 @@ class Session:
         turn_semaphore: asyncio.Semaphore,
         budget: Budget | None = None,
         downgrade_model: str | None = None,
+        compactor: Compactor | None = None,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -44,6 +46,7 @@ class Session:
         self._semaphore = turn_semaphore
         self._budget = budget
         self._downgrade_model = downgrade_model
+        self._compactor = compactor
 
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
@@ -62,6 +65,7 @@ class Session:
             if self._downgrade_model is None:
                 return await self._refuse_over_budget(user_text, status)
             model = self._downgrade_model
+        await self._maybe_compact()
         transcript = [
             {"role": "system", "content": self._system_prompt},
             *self._messages,
@@ -79,6 +83,16 @@ class Session:
             [{"role": "user", "content": user_text}, *transcript[baseline:]]
         )
         return await self._settle_budget(result, status)
+
+    async def _maybe_compact(self) -> None:
+        """Fold old history into a note when the transcript outgrows the
+        window; the persisted transcript is truncated to match."""
+        if self._compactor is None:
+            return
+        compacted = await self._compactor.compact(self._messages)
+        if compacted is not None:
+            self._messages = compacted
+            await self._store.replace(self.thread_key, compacted)
 
     async def _refuse_over_budget(
         self, user_text: str, status: BudgetStatus

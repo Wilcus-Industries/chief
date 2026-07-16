@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MessageRow, SessionRow
@@ -44,6 +44,18 @@ class MessageStore:
     async def append(self, thread_key: str, messages: list[dict[str, Any]]) -> None:
         """Persist new transcript entries for a thread."""
         async with self._factory() as db:
+            for message in messages:
+                db.add(MessageRow(thread_key=thread_key, message=message))
+            await db.commit()
+
+    async def replace(
+        self, thread_key: str, messages: list[dict[str, Any]]
+    ) -> None:
+        """Swap a thread's whole persisted transcript (compaction), one commit."""
+        async with self._factory() as db:
+            await db.execute(
+                delete(MessageRow).where(MessageRow.thread_key == thread_key)
+            )
             for message in messages:
                 db.add(MessageRow(thread_key=thread_key, message=message))
             await db.commit()
