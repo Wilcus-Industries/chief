@@ -1,40 +1,17 @@
 [project]
 name = "chief"
-version = "0.1.4"
-description = "Personal AI assistant on the GitHub Copilot SDK."
+version = "0.2.0"
+description = "Self-editing agent harness with package-based capabilities."
 requires-python = ">=3.12"
 dependencies = [
-    # Upper bound is load-bearing (#102): core/copilot_tools.py rides the undocumented
-    # dict contract of convert_mcp_call_tool_result, source-verified against 1.x only.
-    # tests/test_copilot_tools.py pins that shape — re-verify before widening this.
-    #
-    # Two more private seams ride this pin, and a bump *within* <2 can break either
-    # silently (#112). Re-check both before bumping, not just before widening:
-    #   * client._cli_process — the spawned-CLI handle, pinned by
-    #     test_sdk_force_stop_kills_a_spawned_cli_process.
-    #   * force_stop's kill-without-graceful-wait contract, mirrored by the
-    #     _WedgedRuntimeClient fake in tests/test_copilot_session.py.
-    # The real end-to-end chain behind them runs only under CHIEF_COPILOT_LIVE=1
-    # (tests/test_copilot_backend_live.py), so the done-check will not catch a drift.
-    "github-copilot-sdk>=1,<2",
-    "python-telegram-bot>=21",
+    "httpx>=0.28",
     "sqlalchemy>=2",
     "aiosqlite>=0.20",
-    "pydantic-settings>=2",
     "pyyaml>=6",
-    "discord-py>=2",
-    "croniter>=3",
-    "httpx>=0.28",
-    "alembic>=1.18.4",
-    "pypdf>=6.14.2",
-    "textual>=8,<9",
-    "starlette>=1.3.1",
-    "uvicorn>=0.51.0",
-    "python-multipart>=0.0.32",
 ]
 
 [project.scripts]
-chief-cli = "chief.cli.main:main"
+chief-cli = "chief.cli:main"
 
 [dependency-groups]
 dev = [
@@ -42,15 +19,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "pytest-timeout>=2.4.0",
-    # Host-only OAuth helper (chief.tools.google.auth). Not a runtime dep — the core
-    # container reaches Google through the MCP servers, not this script.
-    "google-auth-oauthlib>=1.2",
-    # Test-only (#88): the Google-MCP injection / Sheets row-1 security suites drive the
-    # vendored docker/mcp-* servers in-process, which import ``mcp``. Dev group ONLY —
-    # the core reaches those servers over HTTP, never imports this package at runtime.
-    "mcp>=1",
-    "playwright>=1.61.0",
+    "pytest-timeout>=2.4",
 ]
 
 [build-system]
@@ -59,22 +28,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chief"]
-# Include the Alembic config and migration scripts so they are bundled inside
-# the wheel (and thus present in the Docker image after `uv sync`). Without
-# this, migrate-on-start fails in the container because the files are absent.
-include = [
-    "src/chief/alembic.ini",
-    "src/chief/alembic/**",
-]
 
 [tool.ruff]
 target-version = "py312"
 src = ["src", "tests"]
-# docker/mcp-*/server.py are standalone vendored MCP server images with their own
-# requirements (googleapiclient, weasyprint, mcp-google-sheets) — not part of the chief
-# package and not installed in this venv, so they are linted/typed inside their images.
-# vendor/ holds the anthropics/skills submodule (M10) — upstream code we package as-is,
-# not ours to lint or type.
+# docker/mcp-* are standalone vendored MCP server images linted inside their images;
+# vendor/ holds upstream submodules we package as-is.
 extend-exclude = ["docker", "vendor"]
 
 [tool.ruff.lint]
@@ -84,39 +43,15 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 packages = ["chief"]
 strict = true
-# Skip the vendored MCP server images and the anthropics/skills submodule (see the ruff
-# note above) when invoked as `mypy .` — upstream code, not part of the chief package.
 exclude = ['^docker/', '^vendor/']
 
-# google-auth-oauthlib ships no py.typed; the Google OAuth helper imports it lazily.
-[[tool.mypy.overrides]]
-module = ["google_auth_oauthlib.*"]
-ignore_missing_imports = true
-
-# croniter ships no py.typed; used by chief.core.schedule_time for cron next-fire.
-[[tool.mypy.overrides]]
-module = ["croniter.*"]
-ignore_missing_imports = true
-
-# pyyaml ships no inline stubs for the bare `import yaml` module name (only for
-# `yaml.*` submodules); used by chief.core.subagents to parse on-disk subagent
-# frontmatter (#105) and by chief.config to load the self_config.yaml overlay (#107).
+# pyyaml ships no inline stubs for the bare `import yaml` module name.
 [[tool.mypy.overrides]]
 module = ["yaml"]
-ignore_missing_imports = true
-
-# ``mcp`` (+ its starlette transitive) is now a dev-group dependency (#88 relit the
-# Google-MCP injection / Sheets row-1 security suites, which import it to drive the
-# vendored docker/mcp-* servers in-process). Neither ships complete inline types for
-# every submodule those guarded imports touch, so keep ignoring missing imports rather
-# than let a partial-typing gap in a test-only dependency fail the type-check.
-[[tool.mypy.overrides]]
-module = ["mcp", "mcp.*", "starlette", "starlette.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# Guardrail: every real test is sub-second; a hung test fails fast instead of
-# blocking the ~10 min approval fail-closed timeout.
+# Guardrail: every real test is sub-second; a hung test fails fast.
 timeout = 30
