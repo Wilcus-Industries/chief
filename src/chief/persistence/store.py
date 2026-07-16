@@ -21,6 +21,26 @@ class MessageStore:
                 db.add(SessionRow(thread_key=thread_key, channel=channel))
                 await db.commit()
 
+    async def has_sessions(self) -> bool:
+        """Whether any thread has ever existed (false = fresh install)."""
+        async with self._factory() as db:
+            row = await db.scalar(select(SessionRow.thread_key).limit(1))
+            return row is not None
+
+    async def model_override(self, thread_key: str) -> str | None:
+        """The owner's per-thread model override, if any."""
+        async with self._factory() as db:
+            row = await db.get(SessionRow, thread_key)
+            return row.model_override if row else None
+
+    async def set_model_override(self, thread_key: str, model: str) -> None:
+        """Persist the owner's per-thread model override."""
+        async with self._factory() as db:
+            row = await db.get(SessionRow, thread_key)
+            if row is not None:
+                row.model_override = model
+                await db.commit()
+
     async def append(self, thread_key: str, messages: list[dict[str, Any]]) -> None:
         """Persist new transcript entries for a thread."""
         async with self._factory() as db:

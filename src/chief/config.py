@@ -29,6 +29,9 @@ class Config:
     budget_cap_usd: float = 0.0
     budget_warn_ratio: float = 0.8
     quiet_hours: str = ""
+    web_host: str = "127.0.0.1"
+    web_port: int = 8130
+    web_password: str = ""
 
     @property
     def default_model(self) -> str:
@@ -56,6 +59,11 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         budget_cap_usd=float(budget.get("cap_usd", 0.0)),
         budget_warn_ratio=float(budget.get("warn_ratio", 0.8)),
         quiet_hours=str(raw.get("quiet_hours") or ""),
+        web_host=str(_env_or(raw, "web_host", "127.0.0.1")),
+        web_port=int(_env_or(raw, "web_port", 8130)),
+        web_password=os.environ.get(
+            "CHIEF_WEB_PASSWORD", _read_secret(Path("secrets/web_password"))
+        ),
     )
 
 

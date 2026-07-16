@@ -14,6 +14,14 @@ DEFAULT_SYSTEM_PROMPT = (
 
 SYSTEM_PROMPT_PATH = Path("data/system.md")
 
+# Appended on a fresh install: the first conversation *is* onboarding.
+ONBOARDING_SUFFIX = (
+    "\n\nThis is a fresh install and this first conversation is onboarding: "
+    "introduce yourself briefly, mention the owner can create monitors and "
+    "recurring schedules by asking, and offer to help set up additional "
+    "channels or packages."
+)
+
 
 def system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
     """The current system prompt: the editable file if present, else default."""
