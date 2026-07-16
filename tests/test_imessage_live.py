@@ -508,16 +508,23 @@ async def _outbound_to_second(
 
 
 async def _await_outbound_to_second(
-    runner: ScriptRunner, after_rowid: int, pattern: str
+    runner: ScriptRunner, after_rowid: int, pattern: str | None = None
 ) -> None:
+    """Wait until a real send lands at the second handle.
+
+    Asserted by row EXISTENCE, not text: when the second handle is an alias of
+    the owner's own Apple ID (the common single-account rig), the sent copy pairs
+    like a self-chat and its ``text`` is NULL, so the ghost-send's content can't
+    be read back off the outbound row. The exact reply content is proven instead
+    by the self-thread fire-report (report tone) — see the report-tone test.
+    """
     deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT
     while asyncio.get_running_loop().time() < deadline:
         if await _outbound_to_second(runner, after_rowid, pattern):
             return
         await asyncio.sleep(2)
     raise AssertionError(
-        f"no send matching {pattern!r} landed at {SECOND_HANDLE} within "
-        f"{REPLY_TIMEOUT:.0f}s"
+        f"no send landed at {SECOND_HANDLE} within {REPLY_TIMEOUT:.0f}s"
     )
 
 
@@ -550,8 +557,14 @@ async def test_watch_set_in_thread_fires_send_and_reports() -> None:
     _prompt_human(
         f"text from {SECOND_HANDLE}: 'the test package just arrived!'"
     )
-    await _await_outbound_to_second(runner, head, re.escape(token))
-    await _await_bot_echo(runner, head, rf"{re.escape(token)}|watch|sent")
+    # A real send addressed to the second handle lands in the store...
+    await _await_outbound_to_second(runner, head)
+    # ...and the report-tone fire-report proves the exact reply chief sent AND
+    # names the recipient — the content check the null-text outbound row can't give.
+    report = await _await_bot_echo(runner, head, re.escape(token))
+    assert any(SECOND_HANDLE in str(row["text"]) for row in report), (
+        "the fire-report names the recipient handle"
+    )
 
     fired = await _await_watch_state(runner, "fired")
     assert fired["tone"] == "report"
@@ -585,9 +598,12 @@ async def test_silent_watch_ignores_irrelevant_and_fires_quiet() -> None:
     )
 
     _prompt_human(f"text from {SECOND_HANDLE}: 'is the blue umbrella ready?'")
-    await _await_outbound_to_second(runner, trigger_head, re.escape(token))
+    # A real send lands at the handle (content unverifiable here: silent tone
+    # posts no report, and the self-aliased outbound row's text is NULL).
+    await _await_outbound_to_second(runner, trigger_head)
     await asyncio.sleep(LOOP_GRACE)
-    assert await _bot_echo_rows(runner, trigger_head, re.escape(token)) == [], (
+    # Silent tone: no "✅ Replied …" fire-report in the self-thread.
+    assert await _bot_echo_rows(runner, trigger_head, r"Replied to") == [], (
         "a silent-tone fire posted a self-thread report"
     )
     fired = await _await_watch_state(runner, "fired", tone="silent")
