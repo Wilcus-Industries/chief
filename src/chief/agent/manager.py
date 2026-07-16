@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Callable
 
+from chief.agent.compaction import Compactor
 from chief.agent.session import Session
 from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget
@@ -27,6 +28,7 @@ class SessionManager:
         max_concurrent: int,
         budget: Budget | None = None,
         downgrade_model: str | None = None,
+        compactor: Compactor | None = None,
     ) -> None:
         self._provider = provider
         self._tools_factory = tools_factory
@@ -36,6 +38,7 @@ class SessionManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._budget = budget
         self._downgrade_model = downgrade_model
+        self._compactor = compactor
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
 
@@ -60,6 +63,7 @@ class SessionManager:
                 turn_semaphore=self._semaphore,
                 budget=self._budget,
                 downgrade_model=self._downgrade_model,
+                compactor=self._compactor,
             )
             self._sessions[thread_key] = session
             return session

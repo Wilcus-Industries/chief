@@ -10,6 +10,7 @@ from pathlib import Path
 
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
+from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
 from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
@@ -97,6 +98,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         max_concurrent=config.max_concurrent_sessions,
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
+        compactor=Compactor(provider, config.default_model),
     )
     dispatcher = Dispatcher(
         manager, bus=bus, approvals=approvals, strangers=StrangerLog(factory)
