@@ -5,6 +5,10 @@ description: Edit your own config, prompts, skills, and source safely.
 
 # Editing yourself
 
+Before editing, read `docs/ARCHITECTURE.md` — it maps where your sessions,
+config, prompt, tools, commands, and packages live, with recipes for the common
+self-changes. It saves you re-deriving the layout every time.
+
 You can change your own files — config, system prompt, skills, and source code —
 with two tools:
 

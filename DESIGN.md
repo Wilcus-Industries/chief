@@ -193,9 +193,10 @@ changes go through: branch → done-check green → restart into new code → he
 auto-rollback on failure. No human review required; the audit log records everything.
 
 The default native tool set is deliberately small — `self_edit`, `read_file`, `grep`,
-`install_package`, `load_skill`, `monitor`, `schedule`, `spawn_agent` — with the
-create/list/delete verbs folded into one action argument on `monitor`/`schedule`.
-Everything channel- or capability-specific arrives as package-registered tools.
+`install_package`, `load_skill`, `session`, `monitor`, `schedule`, `spawn_agent` — with
+the create/list/delete verbs folded into one action argument on
+`session`/`monitor`/`schedule`. Everything channel- or capability-specific arrives as
+package-registered tools.
 
 ## Bootstrap & onboarding
 
