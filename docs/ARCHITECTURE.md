@@ -14,8 +14,11 @@ rewrite it — `self_edit` replaces whole files.
   `src/chief/persistence/store.py`. `SessionManager`
   (`src/chief/agent/manager.py`) wraps the store with an in-memory live-session
   cache.
-- **Config keys** — `src/chief/config.py` (the `Config` dataclass + its env/TOML
-  loader). Add a key here; MCP servers are just the `mcp_servers` key.
+- **Config keys** — `src/chief/config.py` (the `Config` dataclass + its
+  env/YAML loader, which reads `config.yaml`). Add a new key here. The MCP
+  server list, though, is a *runtime value*: `load_config` always fills
+  `mcp_servers` from the `mcp_servers` key in `config.yaml`, so that is the
+  file you edit to add a server (see the recipe), not the dataclass default.
 - **System prompt** — assembled in `src/chief/agent/prompt.py` (`system_prompt`
   + `ONBOARDING_SUFFIX`); skill one-liners are appended in
   `chief.app._build_prompt`.
@@ -59,6 +62,8 @@ the turn, so it is the safe place to mutate the thread you are in (unlike the
 `src/chief/persistence/models.py` only for a schema change.
 
 **Add an MCP server.** No tool for this — it is config. `self_edit` the
-`mcp_servers` key in `src/chief/config.py` (a `url` for HTTP, or a `command`
-argv list for stdio). The next restart connects it; its tools appear as
-`mcp_<name>_<tool>`. (See the self-edit skill for the seatbelt details.)
+`mcp_servers` key in `config.yaml` (a `url` for HTTP, or a `command` argv list
+for stdio) — editing the dataclass default in `config.py` is a silent no-op,
+since `load_config` always reads the value from `config.yaml`. The next restart
+connects it; its tools appear as `mcp_<name>_<tool>`. (See the self-edit skill
+for the seatbelt details.)

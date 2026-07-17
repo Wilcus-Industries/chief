@@ -82,6 +82,12 @@ class Session:
         self._origin_channel = origin_channel
         self._read_soul = soul_reader or read_soul
 
+    @property
+    def busy(self) -> bool:
+        """True while a turn is in flight (the per-thread lock is held for the
+        whole of ``run_turn``)."""
+        return self._lock.locked()
+
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 

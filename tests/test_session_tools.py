@@ -114,6 +114,37 @@ async def test_clear_own_thread_refused(
     assert await store.load("cli:self") == [{"role": "user", "content": "hi"}]
 
 
+async def test_delete_busy_other_thread_refused(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    await store.ensure_session("cli:busy", "cli")
+    await store.append("cli:busy", [{"role": "user", "content": "hi"}])
+    registry, manager = make_registry(store)
+    session = await manager.get_or_create("cli:busy", "cli")
+    async with session._lock:  # a turn holds this lock for its whole duration
+        result = await registry.dispatch(
+            call("delete", thread_key="cli:busy"), context=CTX
+        )
+    assert result.startswith("error")
+    assert await store.channel("cli:busy") == "cli"
+    assert await store.load("cli:busy") == [{"role": "user", "content": "hi"}]
+
+
+async def test_clear_busy_other_thread_refused(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    await store.ensure_session("cli:busy", "cli")
+    await store.append("cli:busy", [{"role": "user", "content": "hi"}])
+    registry, manager = make_registry(store)
+    session = await manager.get_or_create("cli:busy", "cli")
+    async with session._lock:  # a turn holds this lock for its whole duration
+        result = await registry.dispatch(
+            call("clear", thread_key="cli:busy"), context=CTX
+        )
+    assert result.startswith("error")
+    assert await store.load("cli:busy") == [{"role": "user", "content": "hi"}]
+
+
 async def test_delete_requires_thread_key(
     engine: AsyncEngine, store: MessageStore
 ) -> None:

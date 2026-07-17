@@ -10,11 +10,11 @@ _SPEC = ToolSpec(
         "Manage the threads (sessions) this daemon knows about. "
         "action=list takes nothing and reports every thread. "
         "action=create needs `thread_key` (plus optional `channel`, defaulting "
-        "to this thread's channel); it registers the row so a monitor or "
-        "schedule can wake it, without starting a live session. "
+        "to this thread's channel); it pre-registers the thread row so it shows "
+        "up in list and the web cockpit, without starting a live session. "
         "action=delete needs `thread_key` and removes the thread entirely. "
         "action=clear needs `thread_key` and wipes its transcript, keeping the "
-        "row. delete/clear refuse your own thread — use /prune or /clear."
+        "row. delete/clear refuse your own thread and any thread mid-turn."
     ),
     parameters={
         "type": "object",
@@ -32,6 +32,11 @@ _SPEC = ToolSpec(
         "required": ["action"],
     },
 )
+
+
+def _busy_error(thread_key: str) -> str:
+    """Refusal string when a delete/clear targets a thread mid-turn."""
+    return f"error: session '{thread_key}' is mid-turn; try again once idle"
 
 
 def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> None:
@@ -55,10 +60,12 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
     async def _delete(context: ToolContext, thread_key: str) -> str:
         if thread_key == context.thread_key:
             return (
-                "error: refusing to delete the thread you are mid-turn in — it "
-                "races the in-flight transcript commit. Use the /prune owner "
-                "command, which runs before the turn."
+                "error: the thread you are mid-turn in can't self-delete — it "
+                "races the in-flight transcript commit; the owner must remove "
+                "it (or clear it with the /clear command)."
             )
+        if manager.is_busy(thread_key):
+            return _busy_error(thread_key)
         await manager.delete(thread_key)
         return f"session '{thread_key}' deleted"
 
@@ -69,6 +76,8 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
                 "races the in-flight transcript commit. Use the /clear owner "
                 "command, which runs before the turn."
             )
+        if manager.is_busy(thread_key):
+            return _busy_error(thread_key)
         await manager.clear(thread_key)
         return f"session '{thread_key}' cleared"
 
