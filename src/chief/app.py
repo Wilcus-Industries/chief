@@ -30,11 +30,8 @@ from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.mcpclient.tools import load_self_added, register_mcp_tools
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.monitors.tools import register_monitor_tools
-from chief.packages import (
-    CLONED_PACKAGES_DIR,
-    PackageLibrary,
-    register_package_tools,
-)
+from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
+from chief.packages_tools import register_package_tools
 from chief.persistence.db import init_schema, make_engine, make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
@@ -136,7 +133,9 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         for name, entry in config.mcp_servers.items()
     ) + tuple(load_self_added())
     register_skill_tools(registry, skills)
-    package_library = PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR))
+    package_library = PackageLibrary(
+        (config.packages_dir, CLONED_PACKAGES_DIR), skills_root=config.skills_dir
+    )
     register_package_tools(registry, package_library, config.packages_repo)
     register_install_tool(registry, selfedit_pipeline, package_library)
     register_spawn_tool(
