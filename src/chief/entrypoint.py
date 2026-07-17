@@ -5,6 +5,7 @@ import logging
 import signal
 from pathlib import Path
 
+from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,14 @@ async def amain() -> None:
         from chief.config import load_config
 
         config = load_config()
+        # One daemon per data dir: a stray second instance would double-poll
+        # chat.db and answer every iMessage twice. Held for the whole process.
+        _lock = acquire_instance_lock(config.db_path.parent / "chief.lock")
         app = await build_app(config)
         await app.start()
+    except AlreadyRunning:
+        logger.error("another chief instance is already running — refusing to start")
+        raise SystemExit(1) from None
     except Exception:
         # A failed boot right after a self-edit rolls back and re-execs.
         if rollback_if_marked(repo_root):

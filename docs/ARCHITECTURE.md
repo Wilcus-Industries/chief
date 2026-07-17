@@ -39,7 +39,9 @@ rewrite it — `self_edit` replaces whole files.
   branch → done-check → restart; `recovery.py` handles restart/rollback).
 - **Boot wiring** — `src/chief/app.py` (`build_app`, the table of contents) with
   the infrastructure phases (persistence, gate, MCP, adapters) in
-  `src/chief/wiring.py`.
+  `src/chief/wiring.py`. The entrypoint (`src/chief/entrypoint.py`) takes a
+  single-instance `flock` (`src/chief/instance_lock.py`) before `build_app` so a
+  stray second daemon can't double-poll `chat.db` and double-answer.
 
 ## Recipes
 
