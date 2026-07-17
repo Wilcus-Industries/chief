@@ -54,6 +54,10 @@ body{
   letter-spacing:.08em;}
 #buflist li.unread .name::after{content:" \\25CF"; color:var(--aqua);
   font-size:10px;}
+#buflist .kill{color:var(--faint); font-size:13px; line-height:1;
+  padding:0 .15rem; border-radius:2px; opacity:0;}
+#buflist li:hover .kill{opacity:.7;}
+#buflist .kill:hover{opacity:1; color:var(--red); background:var(--bg3);}
 #newbuf{
   margin:.5rem; padding:.45rem; font:inherit; text-align:left;
   background:transparent; color:var(--aqua); border:1px dashed var(--bg3);

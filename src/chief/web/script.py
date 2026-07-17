@@ -27,9 +27,23 @@ function renderBuffers(){
       (unread.has(s.thread) ? "unread" : "");
     li.append(span("idx", i), span("name", label(s.thread)));
     if (s.channel !== "web") li.append(span("badge", s.channel));
+    if (s.channel === "web" && s.thread !== "web:main"){
+      const x = span("kill", "\\u00d7"); x.title = "delete buffer";
+      x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
+      li.append(x);
+    }
     li.onclick = () => switchTo(s.thread);
     list.appendChild(li);
   });
+}
+
+async function delBuf(tk){
+  await fetch("/delete", {method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({thread: tk})});
+  unread.delete(tk);
+  if (state.current === tk) await switchTo("web:main");
+  await loadSessions();
 }
 
 function setStatus(tk){

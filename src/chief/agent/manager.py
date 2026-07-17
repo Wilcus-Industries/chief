@@ -76,3 +76,17 @@ class SessionManager:
         session = await self.get_or_create(thread_key, channel)
         session.model = model
         await self._store.set_model_override(thread_key, model)
+
+    async def clear(self, thread_key: str) -> None:
+        """Wipe a thread's transcript and drop its cached live session.
+
+        Dropping the cache is the point: the DB wipe alone is cosmetic while a
+        loaded ``Session`` still holds the old history in memory.
+        """
+        await self._store.clear(thread_key)
+        self._sessions.pop(thread_key, None)
+
+    async def delete(self, thread_key: str) -> None:
+        """Delete a thread entirely and drop its cached live session."""
+        await self._store.delete_session(thread_key)
+        self._sessions.pop(thread_key, None)

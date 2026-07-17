@@ -7,6 +7,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
+from chief.agent.manager import SessionManager
+from chief.agent.tools import ToolRegistry
 from chief.bus import EventBus
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.persistence.db import make_session_factory
@@ -47,8 +49,16 @@ def web(engine: AsyncEngine) -> WebParts:
         ModelJudge(FakeProvider([]), "m"),
     )
     store = MessageStore(factory)
+    manager = SessionManager(
+        provider=FakeProvider([]),
+        tools_factory=lambda thread, channel: ToolRegistry(),
+        store=store,
+        default_model="default-model",
+        system_prompt="s",
+        max_concurrent=4,
+    )
     app = build_web_app(
-        Auth("hunter2"), adapter, handle, monitors, store, _palette
+        Auth("hunter2"), adapter, handle, monitors, store, _palette, manager
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
@@ -191,6 +201,41 @@ async def test_commands_route_returns_palette(web: WebParts) -> None:
     client, *_ = web
     await login(client)
     assert (await client.get("/commands")).json() == ["/help", "/model", "/monitors"]
+
+
+async def test_delete_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    response = await client.post("/delete", json={"thread": "web:scratch"})
+    assert response.status_code == 401
+
+
+async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
+    client, _, _, store = web
+    await login(client)
+    await store.ensure_session("web:scratch", "web")
+    await store.append("web:scratch", [{"role": "user", "content": "hi"}])
+
+    response = await client.post("/delete", json={"thread": "web:scratch"})
+    assert response.status_code == 200
+
+    threads = {s["thread"] for s in await store.list_sessions()}
+    assert "web:scratch" not in threads
+
+
+async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None:
+    client, _, _, store = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.ensure_session("imessage:+1", "imessage")
+
+    primary = await client.post("/delete", json={"thread": "web:main"})
+    assert primary.status_code == 400
+    assert (
+        await client.post("/delete", json={"thread": "imessage:+1"})
+    ).status_code == 400
+
+    threads = {s["thread"] for s in await store.list_sessions()}
+    assert {"web:main", "imessage:+1"} <= threads
 
 
 async def test_assets_are_served(web: WebParts) -> None:

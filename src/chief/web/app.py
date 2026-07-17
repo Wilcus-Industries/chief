@@ -18,6 +18,7 @@ from starlette.routing import Route
 
 from chief.adapters.base import Message
 from chief.adapters.socket import HandleMessage
+from chief.agent.manager import SessionManager
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.web.adapter import WebAdapter
@@ -35,11 +36,13 @@ def build_web_app(
     monitors: MonitorService,
     store: MessageStore,
     palette: Callable[[], list[str]],
+    manager: SessionManager,
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
     ``palette`` yields the current ``/command`` names for input completion;
-    ``store`` backs the session list and per-thread transcript history.
+    ``store`` backs the session list and per-thread transcript history;
+    ``manager`` deletes buffers (row + live session) for the sidebar × control.
     """
 
     def unauthorized() -> Response:
@@ -92,6 +95,16 @@ def build_web_app(
             return JSONResponse([])
         return JSONResponse(render_transcript(await store.load(thread)))
 
+    async def delete(request: Request) -> Response:
+        if not auth.is_authed(request):
+            return unauthorized()
+        thread = str((await request.json()).get("thread", ""))
+        # Only disposable web scratch buffers; never the primary or a real channel.
+        if not thread.startswith("web:") or thread == "web:main":
+            return PlainTextResponse("cannot delete this buffer", status_code=400)
+        await manager.delete(thread)
+        return PlainTextResponse("", status_code=200)
+
     async def commands(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
@@ -136,6 +149,7 @@ def build_web_app(
             Route("/login", login, methods=["POST"]),
             Route("/send", send, methods=["POST"]),
             Route("/sessions", sessions),
+            Route("/delete", delete, methods=["POST"]),
             Route("/history", history),
             Route("/commands", commands),
             Route("/events", events),
