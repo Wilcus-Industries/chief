@@ -30,6 +30,7 @@ class SessionManager:
         downgrade_model: str | None = None,
         compactor: Compactor | None = None,
         restart_gate: RestartGate | None = None,
+        soul_reader: Callable[[], str] | None = None,
     ) -> None:
         self._provider = provider
         self._tools_factory = tools_factory
@@ -41,6 +42,7 @@ class SessionManager:
         self._downgrade_model = downgrade_model
         self._compactor = compactor
         self._restart_gate = restart_gate
+        self._soul_reader = soul_reader
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
 
@@ -69,6 +71,7 @@ class SessionManager:
                 compactor=self._compactor,
                 restart_gate=self._restart_gate,
                 origin_channel=origin,
+                soul_reader=self._soul_reader,
             )
             self._sessions[thread_key] = session
             return session

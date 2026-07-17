@@ -17,7 +17,10 @@ async def noop_delta(text: str) -> None:
 
 
 def make_manager(
-    provider: FakeProvider, store: MessageStore, max_concurrent: int = 4
+    provider: FakeProvider,
+    store: MessageStore,
+    max_concurrent: int = 4,
+    soul_reader: Any = None,
 ) -> SessionManager:
     return SessionManager(
         provider=provider,
@@ -26,6 +29,9 @@ def make_manager(
         default_model="test-model",
         system_prompt="test system prompt",
         max_concurrent=max_concurrent,
+        # Default to no soul so prompt assertions don't depend on a real
+        # data/memory/Soul.md under the test's cwd.
+        soul_reader=soul_reader or (lambda: ""),
     )
 
 
@@ -48,6 +54,26 @@ async def test_turn_persists_transcript_and_injects_system_prompt(
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
+
+
+async def test_soul_leads_the_prompt_and_is_read_each_turn(
+    store: MessageStore,
+) -> None:
+    # The soul is inlined at the very top, ahead of the base prompt and the
+    # origin-channel note, and re-read every turn so edits apply immediately.
+    souls = iter(["I am v1.", "I am v2."])
+    provider = FakeProvider([text_turn("a"), text_turn("b")])
+    manager = make_manager(provider, store, soul_reader=lambda: next(souls))
+    session = await manager.get_or_create("cli:t", "cli")
+
+    await session.run_turn("one", noop_delta)
+    first = provider.calls[0][0]["content"]
+    assert first.startswith("I am v1.\n\ntest system prompt")
+    assert "over the 'cli' channel" in first
+
+    await session.run_turn("two", noop_delta)
+    second = provider.calls[1][0]["content"]
+    assert second.startswith("I am v2.\n\ntest system prompt")
 
 
 async def test_restart_resumes_history_from_disk(store: MessageStore) -> None:
