@@ -6,11 +6,13 @@ before each turn and recorded after.
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Protocol
 
 from chief.agent.compaction import Compactor
 from chief.agent.loop import OnDelta, TurnResult, run_turn
+from chief.agent.prompt import read_soul
 from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget, BudgetState, BudgetStatus
 from chief.persistence.store import MessageStore
@@ -62,6 +64,7 @@ class Session:
         compactor: Compactor | None = None,
         restart_gate: RestartGate | None = None,
         origin_channel: str | None = None,
+        soul_reader: Callable[[], str] | None = None,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -77,6 +80,7 @@ class Session:
         self._compactor = compactor
         self._gate: RestartGate = restart_gate or _NullGate()
         self._origin_channel = origin_channel
+        self._read_soul = soul_reader or read_soul
 
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
@@ -124,15 +128,19 @@ class Session:
         return await self._settle_budget(result, status)
 
     def _system_content(self) -> str:
-        """Prompt + a call-time note of the thread's origin channel, so the
-        agent knows which device it's speaking through. Injected here (never
-        persisted) like the rest of the prompt."""
-        if not self._origin_channel:
-            return self._system_prompt
-        return (
-            f"{self._system_prompt}\n\nYou are talking with the owner over "
-            f"the '{self._origin_channel}' channel."
-        )
+        """The full system prompt, assembled at call time (never persisted): the
+        owner's soul at the top (read fresh each turn, so soul edits apply
+        immediately), then the base prompt, then a note of the thread's origin
+        channel so the agent knows which device it's speaking through."""
+        prompt = self._system_prompt
+        if soul := self._read_soul():
+            prompt = f"{soul}\n\n{prompt}"
+        if self._origin_channel:
+            prompt = (
+                f"{prompt}\n\nYou are talking with the owner over "
+                f"the '{self._origin_channel}' channel."
+            )
+        return prompt
 
     async def _maybe_compact(self) -> None:
         """Fold old history into a note when the transcript outgrows the
