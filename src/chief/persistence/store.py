@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MessageRow, SessionRow
@@ -26,6 +26,40 @@ class MessageStore:
         async with self._factory() as db:
             row = await db.scalar(select(SessionRow.thread_key).limit(1))
             return row is not None
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """Every thread with its channel, model, message count and last activity.
+
+        Newest activity first — the web cockpit's buffer list. A thread with no
+        messages yet falls back to its own creation time so it still sorts.
+        """
+        async with self._factory() as db:
+            rows = await db.execute(
+                select(
+                    SessionRow.thread_key,
+                    SessionRow.channel,
+                    SessionRow.model_override,
+                    SessionRow.created_at,
+                    func.count(MessageRow.id),
+                    func.max(MessageRow.created_at),
+                )
+                .outerjoin(
+                    MessageRow, MessageRow.thread_key == SessionRow.thread_key
+                )
+                .group_by(SessionRow.thread_key)
+            )
+            sessions = [
+                {
+                    "thread": thread_key,
+                    "channel": channel,
+                    "model": model,
+                    "count": count,
+                    "last": (last or created).isoformat(),
+                }
+                for thread_key, channel, model, created, count, last in rows
+            ]
+        sessions.sort(key=lambda item: item["last"], reverse=True)
+        return sessions
 
     async def model_override(self, thread_key: str) -> str | None:
         """The owner's per-thread model override, if any."""

@@ -148,9 +148,10 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         config.default_model,
         budget,
     )
-    dispatcher.set_commands(
-        CommandSet(manager, monitor_service, cron_service, skills=skills)
+    command_set = CommandSet(
+        manager, monitor_service, cron_service, skills=skills
     )
+    dispatcher.set_commands(command_set)
 
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
     dispatcher.register(socket_adapter)
@@ -175,6 +176,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
             web_adapter,
             dispatcher.handle,
             monitor_service,
+            store,
+            command_set.palette,
         )
         web_server = WebServer(web_app, config.web_host, config.web_port)
 
