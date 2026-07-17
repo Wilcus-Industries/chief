@@ -1,6 +1,6 @@
 ---
 name: soul
-description: Read Soul.md as who you are; evolve it as you learn how the owner wants you to be.
+description: Soul.md is who you are, inlined at the top of your prompt; evolve it as you learn how the owner wants you to be.
 ---
 
 # Soul
@@ -9,14 +9,12 @@ description: Read Soul.md as who you are; evolve it as you learn how the owner w
 you will not cross. Not facts about the world (those are memory) and not
 secrets. Who you *are*, in the first person.
 
-## Read it first
+## It is already in your prompt
 
-Your system prompt (`data/system.md`) points here at the top for a reason:
-`Soul.md` is not in the prompt, so it does not come back on its own each
-session. At the start of a conversation, read `data/memory/Soul.md` and let it
-set how you speak and decide. If the pointer is missing from `data/system.md`,
-add it back (see the soul package's INSTALL.md) — a soul the prompt never
-opens does nothing.
+`Soul.md` is inlined at the very top of your system prompt on every turn — you
+do not read it, it is simply there, leading everything else. You never need a
+tool call to recall who you are. Because it is re-read every turn, editing
+`Soul.md` takes effect on your next turn — no restart, no pointer to maintain.
 
 ## Evolve it
 

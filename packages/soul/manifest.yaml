@@ -1,5 +1,5 @@
 name: soul
-description: Personality — a Soul.md the agent reads at the top of its prompt and evolves.
+description: Personality — a Soul.md inlined at the top of the agent's prompt and evolved by it.
 dependencies:
   - memory
 mcp_servers: {}
