@@ -107,6 +107,19 @@ async def test_lingering_marker_does_not_block_next_selfedit(
     assert (repo / "greeting.txt").read_text() == "v3\n"
 
 
+async def test_marker_plus_real_dirt_still_refuses(
+    repo: Path, tmp_path: Path
+) -> None:
+    # The marker is ignored, but a genuinely dirty tree alongside it must still
+    # refuse — the filter must not blanket-pass whenever the marker is present.
+    (repo / MARKER_NAME).write_text('{"rollback_to": "x"}')
+    (repo / "greeting.txt").write_text("uncommitted change\n")
+    pipeline, restart = make_pipeline(repo, tmp_path, "true")
+    result = await pipeline.apply({"greeting.txt": "x"}, "r")
+    assert result == "error: working tree is dirty; refusing to self-edit"
+    assert not restart.called
+
+
 @pytest.mark.parametrize(
     "path",
     ["/etc/passwd", "../outside.txt", "secrets/openrouter_api_key", "data/chief.db"],

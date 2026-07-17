@@ -16,7 +16,7 @@ dist/
 # Runtime data (host-native): sqlite, audit log, memory, workspace, screenshots
 /data/
 # Self-edit rollback marker — runtime state, survives restart, never committed.
-.selfedit-pending.json
+/.selfedit-pending.json
 # Secrets — keep dir structure, never the real secret files
 /secrets/*
 !/secrets/README.md
