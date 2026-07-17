@@ -107,9 +107,11 @@ class CommandSet:
             for row in await self._store.list_sessions()
             if row["channel"] == "web" and row["thread"] != "web:main"
         ]
-        for thread_key in targets:
-            await self._manager.delete(thread_key)
-        return f"pruned {len(targets)} web buffer(s)"
+        pruned = sum([await self._manager.delete(t) for t in targets])
+        skipped = len(targets) - pruned
+        if skipped:
+            return f"pruned {pruned} web buffer(s), skipped {skipped} mid-turn"
+        return f"pruned {pruned} web buffer(s)"
 
     async def _model(self, args: str, message: Message) -> str:
         session = await self._manager.get_or_create(

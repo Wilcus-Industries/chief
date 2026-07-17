@@ -153,6 +153,25 @@ async def test_prune_deletes_web_scratch_buffers_only(
     assert await manager.get_or_create("web:scratch", "web") is not scratch
 
 
+async def test_prune_skips_a_busy_buffer(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    commands, manager, *_ = make_commands(FakeProvider([]), store, factory)
+    for thread_key in ("web:scratch", "web:busy"):
+        await store.ensure_session(thread_key, "web")
+    busy = await manager.get_or_create("web:busy", "web")
+
+    async with busy.lock:  # web:busy is mid-turn — prune must leave it
+        reply = await commands.run(msg("/prune"))
+
+    assert isinstance(reply, str)
+    assert "pruned 1" in reply and "skipped 1" in reply
+    threads = {s["thread"] for s in await store.list_sessions()}
+    assert "web:busy" in threads
+    assert "web:scratch" not in threads
+
+
 async def test_dispatcher_answers_commands_without_a_turn(
     engine: AsyncEngine, store: MessageStore
 ) -> None:

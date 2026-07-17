@@ -179,3 +179,43 @@ async def test_get_or_create_returns_the_same_session(store: MessageStore) -> No
     a = await manager.get_or_create("cli:t", "cli")
     b = await manager.get_or_create("cli:t", "cli")
     assert a is b
+
+
+async def test_delete_refuses_and_preserves_a_busy_thread(store: MessageStore) -> None:
+    # The guard now lives in the manager: driving delete directly with the real
+    # session lock held must leave the row and transcript untouched.
+    manager = make_manager(FakeProvider([]), store)
+    await store.ensure_session("cli:busy", "cli")
+    await store.append("cli:busy", [{"role": "user", "content": "hi"}])
+    session = await manager.get_or_create("cli:busy", "cli")
+    async with session.lock:  # a turn holds this for its whole duration
+        assert await manager.delete("cli:busy") is False
+    assert await store.channel("cli:busy") == "cli"
+    assert await store.load("cli:busy") == [{"role": "user", "content": "hi"}]
+
+
+async def test_clear_refuses_and_preserves_a_busy_thread(store: MessageStore) -> None:
+    manager = make_manager(FakeProvider([]), store)
+    await store.ensure_session("cli:busy", "cli")
+    await store.append("cli:busy", [{"role": "user", "content": "hi"}])
+    session = await manager.get_or_create("cli:busy", "cli")
+    async with session.lock:
+        assert await manager.clear("cli:busy") is False
+    assert await store.load("cli:busy") == [{"role": "user", "content": "hi"}]
+
+
+async def test_delete_and_clear_wipe_an_idle_thread(store: MessageStore) -> None:
+    manager = make_manager(FakeProvider([]), store)
+    await store.ensure_session("cli:a", "cli")
+    await store.ensure_session("cli:b", "cli")
+    await store.append("cli:b", [{"role": "user", "content": "hi"}])
+    # Cache both live so the busy guard's lock path (not the no-session path) runs.
+    await manager.get_or_create("cli:a", "cli")
+    await manager.get_or_create("cli:b", "cli")
+
+    assert await manager.delete("cli:a") is True
+    assert await store.channel("cli:a") is None
+
+    assert await manager.clear("cli:b") is True
+    assert await store.load("cli:b") == []
+    assert await store.channel("cli:b") == "cli"

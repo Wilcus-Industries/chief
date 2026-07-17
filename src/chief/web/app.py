@@ -102,7 +102,8 @@ def build_web_app(
         # Only disposable web scratch buffers; never the primary or a real channel.
         if not thread.startswith("web:") or thread == "web:main":
             return PlainTextResponse("cannot delete this buffer", status_code=400)
-        await manager.delete(thread)
+        if not await manager.delete(thread):
+            return PlainTextResponse("buffer is mid-turn", status_code=409)
         return PlainTextResponse("", status_code=200)
 
     async def commands(request: Request) -> Response:

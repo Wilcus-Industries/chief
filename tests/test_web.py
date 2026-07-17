@@ -34,7 +34,9 @@ def _palette() -> list[str]:
     return ["/help", "/model", "/monitors"]
 
 
-WebParts = tuple[httpx.AsyncClient, WebAdapter, MonitorService, MessageStore]
+WebParts = tuple[
+    httpx.AsyncClient, WebAdapter, MonitorService, MessageStore, SessionManager
+]
 
 
 @pytest.fixture
@@ -63,7 +65,7 @@ def web(engine: AsyncEngine) -> WebParts:
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
     )
-    return client, adapter, monitors, store
+    return client, adapter, monitors, store, manager
 
 
 async def login(client: httpx.AsyncClient) -> None:
@@ -134,7 +136,7 @@ async def test_events_requires_auth(web: WebParts) -> None:
 
 
 async def test_monitor_list_route(web: WebParts) -> None:
-    client, _, monitors, _store = web
+    client, _, monitors, _store, _ = web
     await login(client)
     assert (await client.get("/monitors")).text == "none"
     await monitors.create(
@@ -153,7 +155,7 @@ async def test_sessions_requires_auth(web: WebParts) -> None:
 
 
 async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
-    client, _, _, store = web
+    client, _, _, store, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append("web:main", [{"role": "user", "content": "hi"}])
@@ -167,7 +169,7 @@ async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
 
 
 async def test_history_renders_owner_and_chief_rows(web: WebParts) -> None:
-    client, _, _, store = web
+    client, _, _, store, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -210,7 +212,7 @@ async def test_delete_requires_auth(web: WebParts) -> None:
 
 
 async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
-    client, _, _, store = web
+    client, _, _, store, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -222,8 +224,21 @@ async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
     assert "web:scratch" not in threads
 
 
+async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
+    client, _, _, store, manager = web
+    await login(client)
+    await store.ensure_session("web:scratch", "web")
+    await store.append("web:scratch", [{"role": "user", "content": "hi"}])
+    session = await manager.get_or_create("web:scratch", "web")
+    async with session.lock:  # a turn holds this for its whole duration
+        response = await client.post("/delete", json={"thread": "web:scratch"})
+    assert response.status_code == 409
+    threads = {s["thread"] for s in await store.list_sessions()}
+    assert "web:scratch" in threads
+
+
 async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None:
-    client, _, _, store = web
+    client, _, _, store, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.ensure_session("imessage:+1", "imessage")

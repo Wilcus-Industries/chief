@@ -64,9 +64,8 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
                 "races the in-flight transcript commit; the owner must remove "
                 "it (or clear it with the /clear command)."
             )
-        if manager.is_busy(thread_key):
+        if not await manager.delete(thread_key):
             return _busy_error(thread_key)
-        await manager.delete(thread_key)
         return f"session '{thread_key}' deleted"
 
     async def _clear(context: ToolContext, thread_key: str) -> str:
@@ -76,9 +75,8 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
                 "races the in-flight transcript commit. Use the /clear owner "
                 "command, which runs before the turn."
             )
-        if manager.is_busy(thread_key):
+        if not await manager.clear(thread_key):
             return _busy_error(thread_key)
-        await manager.clear(thread_key)
         return f"session '{thread_key}' cleared"
 
     async def session(
