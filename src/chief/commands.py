@@ -40,6 +40,17 @@ class CommandSet:
     def register(self, name: str, handler: CommandHandler) -> None:
         self._commands[name] = handler
 
+    def palette(self) -> list[str]:
+        """Every invocable name as ``/name`` — built-ins plus loadable skills.
+
+        Feeds the web UI's completion menu; skills are live-scanned so newly
+        installed ones show up without a restart.
+        """
+        names = set(self._commands)
+        if self._skills is not None:
+            names.update(skill.name for skill in self._skills.scan())
+        return sorted(f"/{name}" for name in names)
+
     async def run(self, message: Message) -> str | Message | None:
         """Handle a "/command args" message.
 
