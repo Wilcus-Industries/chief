@@ -31,6 +31,7 @@ from chief.adapters.imessage_store import (
     POLL_QUERY,
     text_of,
 )
+from chief.selfedit.recovery import RestartBoundary
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class IMessageAdapter(Adapter):
         owner_handles: tuple[str, ...],
         poll_seconds: float = 2.0,
         run_jxa: RunJxa = _run_jxa_subprocess,
+        restart: RestartBoundary | None = None,
     ) -> None:
         self._on_message = on_message
         self._db_path = db_path
@@ -84,6 +86,7 @@ class IMessageAdapter(Adapter):
         self._owner_handles = frozenset(owner_handles)
         self._poll_seconds = poll_seconds
         self._run_jxa = run_jxa
+        self._restart = restart
         self._cursor = 0
         self._task: asyncio.Task[None] | None = None
 
@@ -118,29 +121,44 @@ class IMessageAdapter(Adapter):
             await asyncio.sleep(self._poll_seconds)
 
     async def poll_once(self) -> None:
-        """One poll tick: deliver new rows, advance the cursor."""
+        """One poll tick: deliver new rows, persisting the cursor after each.
+
+        The cursor is saved (and any pending self-edit restart fired) per row,
+        after that row's turn has committed and its reply sent — so a self-edit
+        row can't execv before its cursor is durable and get re-polled, which
+        would make chief answer twice (the double-send bug)."""
         rows = await asyncio.to_thread(self._fetch, self._cursor)
         for rowid, sender, text, from_me, in_group, has_room, in_self in rows:
             self._cursor = rowid
-            if in_group or has_room:
-                continue
-            if not text:
-                continue  # attachment-only row: attributedBody held no text
-            if text.startswith(BOT_PREFIX):
-                continue  # chief's own reply echoing back through the store
-            if from_me and not in_self:
-                continue  # owner->friend sent copy: not the self-chat
-            mapped = "owner" if (in_self or sender in self._owner_handles) else sender
-            await self._on_message(
-                Message(
-                    channel=self.name,
-                    sender=mapped,
-                    thread_key=sender,
-                    text=text,
-                )
-            )
-        if rows:
+            message = self._map(sender, text, from_me, in_group, has_room, in_self)
+            if message is not None:
+                await self._on_message(message)
             self._save_cursor()
+            if self._restart is not None:
+                await self._restart.fire_if_requested()
+
+    def _map(
+        self,
+        sender: str,
+        text: str,
+        from_me: int,
+        in_group: int,
+        has_room: int,
+        in_self: int,
+    ) -> Message | None:
+        """Turn a polled row into a deliverable Message, or None to skip it."""
+        if in_group or has_room:
+            return None
+        if not text:
+            return None  # attachment-only row: attributedBody held no text
+        if text.startswith(BOT_PREFIX):
+            return None  # chief's own reply echoing back through the store
+        if from_me and not in_self:
+            return None  # owner->friend sent copy: not the self-chat
+        mapped = "owner" if (in_self or sender in self._owner_handles) else sender
+        return Message(
+            channel=self.name, sender=mapped, thread_key=sender, text=text
+        )
 
     def _fetch(self, after: int) -> list[tuple[int, str, str, int, int, int, int]]:
         handles = tuple(self._owner_handles)

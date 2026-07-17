@@ -61,6 +61,7 @@ class Session:
         downgrade_model: str | None = None,
         compactor: Compactor | None = None,
         restart_gate: RestartGate | None = None,
+        origin_channel: str | None = None,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -75,6 +76,7 @@ class Session:
         self._downgrade_model = downgrade_model
         self._compactor = compactor
         self._gate: RestartGate = restart_gate or _NullGate()
+        self._origin_channel = origin_channel
 
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
@@ -85,17 +87,15 @@ class Session:
         async with self._lock:
             async with self._semaphore:
                 # Held new turns wait here while a restart drains; active ones
-                # are tracked so the restart waits for this turn to commit.
+                # are tracked so the restart waits for this turn to commit. The
+                # restart itself fires at the outermost boundary (dispatcher /
+                # imessage poll) once the reply — and the inbound cursor — are
+                # durable too, never here where the reply is still un-sent.
                 await self._gate.enter_turn()
                 try:
-                    result = await self._one_turn(user_text, on_delta)
+                    return await self._one_turn(user_text, on_delta)
                 finally:
                     self._gate.leave_turn()
-                # Fire only after leaving (this turn no longer counts as active)
-                # and committing, so the drain sees it done and the transcript
-                # is on disk before os.execv.
-                await self._gate.fire_if_requested()
-                return result
 
     async def _one_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         model = self.model
@@ -106,7 +106,7 @@ class Session:
             model = self._downgrade_model
         await self._maybe_compact()
         transcript = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": self._system_content()},
             *self._messages,
             {"role": "user", "content": user_text},
         ]
@@ -122,6 +122,17 @@ class Session:
             [{"role": "user", "content": user_text}, *transcript[baseline:]]
         )
         return await self._settle_budget(result, status)
+
+    def _system_content(self) -> str:
+        """Prompt + a call-time note of the thread's origin channel, so the
+        agent knows which device it's speaking through. Injected here (never
+        persisted) like the rest of the prompt."""
+        if not self._origin_channel:
+            return self._system_prompt
+        return (
+            f"{self._system_prompt}\n\nYou are talking with the owner over "
+            f"the '{self._origin_channel}' channel."
+        )
 
     async def _maybe_compact(self) -> None:
         """Fold old history into a note when the transcript outgrows the
