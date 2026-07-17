@@ -1,14 +1,22 @@
-"""HTML for the web UI. Server-rendered, zero build step, no external assets."""
+"""HTML shells for the web UI. Server-rendered; CSS/JS served from /app.*."""
 
 LOGIN_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>chief</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0}
-form{display:flex;gap:.5rem}input,button{font-size:1rem;padding:.5rem}
-.err{color:#b00}
+:root{color-scheme:dark}
+body{background:#1d2021;color:#ebdbb2;margin:0;height:100vh;
+  font:15px/1.5 ui-monospace,"DejaVu Sans Mono","SFMono-Regular",Menlo,monospace;
+  display:grid;place-items:center}
+form{display:flex;gap:.5rem;align-items:center}
+.sigil{color:#fe8019}
+input,button{font:inherit;padding:.5rem .7rem;background:#282828;color:#ebdbb2;
+  border:1px solid #3c3836;border-radius:2px}
+button{color:#1d2021;background:#fe8019;border-color:#fe8019;cursor:pointer}
+.err{color:#fb4934;margin-left:.5rem}
 </style></head><body>
 <form method="post" action="/login">
+  <span class="sigil">chief login&gt;</span>
   <input type="password" name="password" placeholder="owner password" autofocus>
   <button>enter</button>{error}
 </form>
@@ -17,52 +25,34 @@ form{display:flex;gap:.5rem}input,button{font-size:1rem;padding:.5rem}
 CHAT_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>chief</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:system-ui;margin:0;display:flex;flex-direction:column;height:100vh}
-#log{flex:1;overflow-y:auto;padding:1rem;white-space:pre-wrap}
-.msg{margin:.4rem 0;padding:.5rem .8rem;border-radius:.6rem;max-width:60rem}
-.me{background:#dde8ff}.agent{background:#eee}
-form{display:flex;gap:.5rem;padding:.8rem;border-top:1px solid #ccc}
-input[name=text]{flex:1;font-size:1rem;padding:.5rem}
-#side{font-size:.85rem;color:#555;padding:.3rem 1rem;border-top:1px solid #eee}
-</style></head><body>
-<div id="log"></div>
-<div id="side">monitors: <span id="monitors">…</span></div>
-<form id="f">
-<input name="text" placeholder="message chief" autocomplete="off" autofocus>
-<button>send</button></form>
-<script>
-const log = document.getElementById("log");
-let live = null;
-function add(cls, text){
-  const d = document.createElement("div");
-  d.className = "msg " + cls; d.textContent = text;
-  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
-}
-const es = new EventSource("/events");
-es.onmessage = (e) => {
-  const f = JSON.parse(e.data);
-  if (f.type === "delta"){
-    if (!live) live = add("agent", "");
-    live.textContent += f.text;
-  } else if (f.type === "final"){
-    if (live){ live.textContent = f.text; live = null; }
-    else add("agent", f.text);
-  }
-};
-document.getElementById("f").onsubmit = async (e) => {
-  e.preventDefault();
-  const input = e.target.elements.text;
-  if (!input.value.trim()) return;
-  add("me", input.value);
-  await fetch("/send", {method:"POST",
-    headers:{"content-type":"application/json"},
-    body: JSON.stringify({thread:"main", text: input.value})});
-  input.value = "";
-};
-async function refreshMonitors(){
-  const r = await fetch("/monitors");
-  document.getElementById("monitors").textContent = await r.text();
-}
-refreshMonitors(); setInterval(refreshMonitors, 10000);
-</script></body></html>"""
+<link rel="stylesheet" href="/app.css">
+</head><body>
+<header id="statusbar">
+  <span class="seg brand">chief</span>
+  <span class="seg" id="conn"><i class="dot"></i
+    ><span id="conn-label">connecting</span></span>
+  <span class="seg buf" id="buf-seg">&mdash;</span>
+  <span class="seg" id="model-seg">model &mdash;</span>
+  <span class="seg grow"></span>
+  <span class="seg" id="mon-seg">mon &hellip;</span>
+</header>
+<div id="main">
+  <nav id="buffers">
+    <div class="panel-label">buffers</div>
+    <ul id="buflist"></ul>
+    <button id="newbuf">+ new</button>
+  </nav>
+  <section id="pane">
+    <div id="log"></div>
+    <div id="readonly" hidden>attached read-only &mdash; this conversation
+      lives on another channel.</div>
+    <form id="f" autocomplete="off">
+      <span class="sigil" id="sigil">owner&gt;</span>
+      <input id="input" name="text"
+        placeholder="message chief   &middot;   / for commands" autofocus>
+      <ul id="complete" hidden></ul>
+    </form>
+  </section>
+</div>
+<script src="/app.js"></script>
+</body></html>"""
