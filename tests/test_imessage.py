@@ -8,11 +8,23 @@ from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
 
 OWNER = "+15550001111"
 
+# A real streamtyped attributedBody blob from a macOS chat.db (is_from_me=1,
+# text column NULL). Decodes to "I’ll take the edi too" (curly apostrophe).
+SELF_DM_BODY = bytes.fromhex(
+    "040b73747265616d747970656481e803840140848484124e534174747269627574"
+    "6564537472696e67008484084e534f626a656374008592848484084e5353747269"
+    "6e67019484012b1749e280996c6c2074616b65207468652065646920746f6f8684"
+    "0269490115928484840c4e5344696374696f6e617279009484016901928496961d"
+    "5f5f6b494d4d657373616765506172744174747269627574654e616d6586928484"
+    "84084e534e756d626572008484074e5356616c7565009484012a84999900868686"
+)
+
 SCHEMA = """
 CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
 CREATE TABLE message (
     ROWID INTEGER PRIMARY KEY, handle_id INTEGER, text TEXT,
-    is_from_me INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0
+    is_from_me INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
+    attributedBody BLOB
 );
 CREATE TABLE chat (
     ROWID INTEGER PRIMARY KEY, style INTEGER, room_name TEXT,
@@ -39,10 +51,12 @@ class FakeStore:
         tapback: int = 0,
         group: bool = False,
         chat: str | None = None,
+        body: bytes | None = None,
     ) -> None:
         """Insert one message, optionally in a direct chat (``chat`` =
         the chat_identifier) or a group. ``chat`` models the self-chat
-        when it equals an owner handle."""
+        when it equals an owner handle. ``body`` sets attributedBody — how
+        modern macOS stores the owner's own sends, with ``text`` left empty."""
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 "SELECT ROWID FROM handle WHERE id = ?", (sender,)
@@ -56,8 +70,8 @@ class FakeStore:
             )
             msg_id = conn.execute(
                 "INSERT INTO message (handle_id, text, is_from_me, "
-                "associated_message_type) VALUES (?, ?, ?, ?)",
-                (handle_id, text, from_me, tapback),
+                "associated_message_type, attributedBody) VALUES (?, ?, ?, ?, ?)",
+                (handle_id, text or None, from_me, tapback, body),
             ).lastrowid
             chat_id: int | None = None
             if group:
@@ -153,6 +167,20 @@ async def test_owner_self_dm_from_me_delivered(tmp_path: Path) -> None:
     await adapter.poll_once()
     assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
         ("owner", OWNER, "note to self"),
+    ]
+
+
+async def test_self_dm_body_in_attributedbody_is_decoded(tmp_path: Path) -> None:
+    """The owner's own sends store their text only in attributedBody (text
+    NULL). A real self-DM blob must decode and dispatch, not get dropped."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(
+        OWNER, "", from_me=1, chat=OWNER, body=SELF_DM_BODY
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    assert [(m.sender, m.text) for m in harness.delivered] == [
+        ("owner", "I’ll take the edi too"),
     ]
 
 
