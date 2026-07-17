@@ -47,7 +47,7 @@ from chief.strangers import StrangerLog
 from chief.subagents import AgentRegistry, register_spawn_tool
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
-from chief.web.auth import Auth
+from chief.web.auth import Auth, load_or_create_secret
 from chief.web.server import WebServer
 
 logger = logging.getLogger(__name__)
@@ -171,7 +171,10 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     web_server: WebServer | None = None
     if config.web_password:
         web_app = build_web_app(
-            Auth(config.web_password), web_adapter, dispatcher.handle, monitor_service
+            Auth(config.web_password, load_or_create_secret()),
+            web_adapter,
+            dispatcher.handle,
+            monitor_service,
         )
         web_server = WebServer(web_app, config.web_host, config.web_port)
 
