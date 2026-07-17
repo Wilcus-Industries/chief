@@ -26,7 +26,7 @@ CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
 CREATE TABLE message (
     ROWID INTEGER PRIMARY KEY, handle_id INTEGER, text TEXT,
     is_from_me INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
-    attributedBody BLOB
+    attributedBody BLOB, date INTEGER DEFAULT 0
 );
 CREATE TABLE chat (
     ROWID INTEGER PRIMARY KEY, style INTEGER, room_name TEXT,
@@ -54,11 +54,13 @@ class FakeStore:
         group: bool = False,
         chat: str | None = None,
         body: bytes | None = None,
+        date: int = 0,
     ) -> None:
         """Insert one message, optionally in a direct chat (``chat`` =
         the chat_identifier) or a group. ``chat`` models the self-chat
         when it equals an owner handle. ``body`` sets attributedBody — how
-        modern macOS stores the owner's own sends, with ``text`` left empty."""
+        modern macOS stores the owner's own sends, with ``text`` left empty.
+        ``date`` is the row's ns timestamp, used for twin dedup."""
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 "SELECT ROWID FROM handle WHERE id = ?", (sender,)
@@ -72,8 +74,9 @@ class FakeStore:
             )
             msg_id = conn.execute(
                 "INSERT INTO message (handle_id, text, is_from_me, "
-                "associated_message_type, attributedBody) VALUES (?, ?, ?, ?, ?)",
-                (handle_id, text or None, from_me, tapback, body),
+                "associated_message_type, attributedBody, date) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (handle_id, text or None, from_me, tapback, body, date),
             ).lastrowid
             chat_id: int | None = None
             if group:
@@ -191,6 +194,32 @@ async def test_self_dm_body_in_attributedbody_is_decoded(tmp_path: Path) -> None
     assert [(m.sender, m.text) for m in harness.delivered] == [
         ("owner", "I’ll take the edi too"),
     ]
+
+
+async def test_owner_self_dm_twin_delivered_once(tmp_path: Path) -> None:
+    """macOS records one owner self-DM as a twin: an is_from_me=1 row and an
+    is_from_me=0 row, same text, same self-chat, same instant (different guids).
+    Only one turn may run — else chief answers the one message twice."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "ping", from_me=0, chat=OWNER, date=100)
+    harness.store.add_message(OWNER, "ping", from_me=1, chat=OWNER, date=100)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    assert [(m.sender, m.text) for m in harness.delivered] == [("owner", "ping")]
+
+
+async def test_owner_repeats_text_after_window_delivers_both(
+    tmp_path: Path,
+) -> None:
+    """Dedup is time-bounded: the owner legitimately sending the same text
+    again well after the twin window must still run a second turn."""
+    harness = Harness(tmp_path)
+    later = 10_000_000_000  # 10s in ns, past the dedup window
+    harness.store.add_message(OWNER, "ok", from_me=1, chat=OWNER, date=0)
+    harness.store.add_message(OWNER, "ok", from_me=1, chat=OWNER, date=later)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    assert [m.text for m in harness.delivered] == ["ok", "ok"]
 
 
 async def test_self_chat_scope_does_not_leak_other_conversations(

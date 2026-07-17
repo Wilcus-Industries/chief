@@ -1,3 +1,4 @@
+# styleguide: file-length — self-DM posture + twin dedup earn the extra line.
 """iMessage adapter: a dumb pipe over the local Messages store, macOS-only.
 
 Registration is guarded by ``sys.platform == "darwin"`` in app wiring; the
@@ -6,16 +7,16 @@ chat.db and a fake send runner.
 
 Inbound is a poll loop over ``chat.db`` (read-only sqlite) with a persisted
 rowid cursor — restarts neither replay old texts nor drop ones that arrived
-while down. Same-account self-DM posture: chief runs on the owner's own
-Apple ID, so the owner's self-chat texts carry ``is_from_me = 1``. A row is
-delivered when it is a real inbound (``is_from_me = 0``) OR it sits in the
-owner's self-chat (scoped by ``chat.chat_identifier IN owner_handles``, which
-keeps every other conversation out); self-chat rows map to sender ``owner``,
-strangers pass through as-is (notify tiers are package policy, never code).
-Replies to owner handles carry BOT_PREFIX: chief's own send re-enters as an
-``is_from_me = 1`` self-chat row, and the prefix is the sole echo filter
-keeping it from re-dispatching. Outbound goes through Messages via a fixed
-JXA script; handle and text travel as argv, never spliced in.
+while down. Same-account self-DM posture: chief runs on the owner's own Apple
+ID, so self-chat texts carry ``is_from_me = 1``. A row is delivered when it is
+a real inbound (``is_from_me = 0``) OR sits in the owner's self-chat (scoped by
+``chat.chat_identifier IN owner_handles``, keeping other conversations out);
+self-chat rows map to sender ``owner``, strangers pass through as-is. Replies
+to owner handles carry BOT_PREFIX: chief's own send re-enters as an
+``is_from_me = 1`` self-chat row, the prefix its sole echo filter. macOS also
+records one self-DM as several twin rows (same text); RecentDedup collapses
+them to one turn. Outbound goes through Messages via a fixed JXA script; handle
+and text travel as argv, never spliced in.
 """
 
 import asyncio
@@ -29,6 +30,7 @@ from chief.adapters.imessage_store import (
     HEAD_QUERY,
     POLL_BATCH_LIMIT,
     POLL_QUERY,
+    RecentDedup,
     text_of,
 )
 from chief.selfedit.recovery import RestartBoundary
@@ -88,6 +90,7 @@ class IMessageAdapter(Adapter):
         self._run_jxa = run_jxa
         self._restart = restart
         self._cursor = 0
+        self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -124,14 +127,15 @@ class IMessageAdapter(Adapter):
         """One poll tick: deliver new rows, persisting the cursor after each.
 
         The cursor is saved (and any pending self-edit restart fired) per row,
-        after that row's turn has committed and its reply sent — so a self-edit
-        row can't execv before its cursor is durable and get re-polled, which
-        would make chief answer twice (the double-send bug)."""
+        after its turn committed and reply sent — so a self-edit row can't execv
+        before its cursor is durable, get re-polled, and answer twice."""
         rows = await asyncio.to_thread(self._fetch, self._cursor)
-        for rowid, sender, text, from_me, in_group, has_room, in_self in rows:
+        for rowid, sender, text, from_me, in_group, has_room, in_self, date in rows:
             self._cursor = rowid
             message = self._map(sender, text, from_me, in_group, has_room, in_self)
-            if message is not None:
+            if message is not None and not self._dedup.is_duplicate(
+                (message.sender, message.text), date
+            ):
                 await self._on_message(message)
             self._save_cursor()
             if self._restart is not None:
@@ -160,7 +164,9 @@ class IMessageAdapter(Adapter):
             channel=self.name, sender=mapped, thread_key=sender, text=text
         )
 
-    def _fetch(self, after: int) -> list[tuple[int, str, str, int, int, int, int]]:
+    def _fetch(
+        self, after: int
+    ) -> list[tuple[int, str, str, int, int, int, int, int]]:
         handles = tuple(self._owner_handles)
         scope = ",".join("?" for _ in handles) if handles else "NULL"
         query = POLL_QUERY.format(scope=scope)
@@ -171,7 +177,7 @@ class IMessageAdapter(Adapter):
             return [
                 (
                     int(r[0]), str(r[1]), text_of(r[2], r[7]), int(r[3]),
-                    int(r[4]), int(r[5]), int(r[6]),
+                    int(r[4]), int(r[5]), int(r[6]), int(r[8]),
                 )
                 for r in cur.fetchall()
             ]
