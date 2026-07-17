@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deterministic install for the soul package: copy the skill verbatim and seed
-# a starter Soul.md. No prompt wiring here or in INSTALL.md — the prompt loader
-# (chief.agent.prompt.system_prompt) inlines data/memory/Soul.md at the top of
-# every build on its own, so seeding the file is the whole install.
+# a starter Soul.md. No prompt wiring here or in INSTALL.md — the session inlines
+# data/memory/Soul.md (via chief.agent.prompt.read_soul) at the top of the prompt
+# every turn on its own, so seeding the file is the whole install.
 #
 # Depends on the memory package: Soul.md lives in that store (data/memory/) and
 # is versioned by the same git repo. Runs inside the self-edit seatbelt; paths

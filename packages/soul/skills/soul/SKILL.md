@@ -11,10 +11,10 @@ secrets. Who you *are*, in the first person.
 
 ## It is already in your prompt
 
-`Soul.md` is inlined at the very top of your system prompt on every build — you
+`Soul.md` is inlined at the very top of your system prompt on every turn — you
 do not read it, it is simply there, leading everything else. You never need a
-tool call to recall who you are. Because it is read fresh each build, editing
-`Soul.md` takes effect next turn; there is no pointer to maintain.
+tool call to recall who you are. Because it is re-read every turn, editing
+`Soul.md` takes effect on your next turn — no restart, no pointer to maintain.
 
 ## Evolve it
 
