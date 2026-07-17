@@ -25,13 +25,12 @@ from chief.cron.timing import parse_quiet_hours
 from chief.cron.tools import register_cron_tools
 from chief.daemon import App
 from chief.dispatch import Dispatcher
+from chief.filetools import register_file_tools
 from chief.gate import GatedTools, GatePolicy, load_approved, save_approved
 from chief.mcpclient.manager import McpManager, ServerConfig
-from chief.mcpclient.tools import load_self_added, register_mcp_tools
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
-from chief.packages_tools import register_package_tools
 from chief.persistence.db import init_schema, make_engine, make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
@@ -123,8 +122,10 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     register_cron_tools(registry, cron_service)
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), audit, restart_controller.request)
     register_selfedit_tools(registry, selfedit_pipeline)
+    register_file_tools(registry, Path.cwd())
+    # MCP servers are pure config: the agent adds one by self_edit-ing the
+    # `mcp_servers` config key, and it connects on the next boot.
     mcp_manager = McpManager(registry)
-    register_mcp_tools(registry, mcp_manager, audit)
     mcp_configs = tuple(
         ServerConfig(
             name=name,
@@ -132,12 +133,11 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
             command=tuple(entry["command"]) if entry.get("command") else None,
         )
         for name, entry in config.mcp_servers.items()
-    ) + tuple(load_self_added())
-    register_skill_tools(registry, skills)
-    package_library = PackageLibrary(
-        (config.packages_dir, CLONED_PACKAGES_DIR), skills_root=config.skills_dir
     )
-    register_package_tools(registry, package_library, config.packages_repo)
+    register_skill_tools(registry, skills)
+    # Package discovery is skill-driven: the agent reads manifests with
+    # read_file/grep, then install_package runs the gated installer.
+    package_library = PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR))
     register_install_tool(registry, selfedit_pipeline, package_library)
     register_spawn_tool(
         registry,

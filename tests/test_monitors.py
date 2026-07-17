@@ -147,30 +147,41 @@ async def test_monitor_tools_create_list_delete(engine: AsyncEngine) -> None:
     created = await registry.dispatch(
         ToolCall(
             id="1",
-            name="create_monitor",
-            arguments={"description": "urgent watcher", "pattern": "urgent"},
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "urgent watcher",
+                "pattern": "urgent",
+            },
         ),
         context,
     )
     assert created == "monitor #1 created"
     listing = await registry.dispatch(
-        ToolCall(id="2", name="list_monitors", arguments={})
+        ToolCall(id="2", name="monitor", arguments={"action": "list"})
     )
     assert "urgent watcher" in listing
     assert "cli:home" in listing
     both = await registry.dispatch(
         ToolCall(
             id="3",
-            name="create_monitor",
-            arguments={"description": "bad", "pattern": "x", "instruction": "y"},
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "bad",
+                "pattern": "x",
+                "instruction": "y",
+            },
         ),
         context,
     )
     assert both.startswith("error: give exactly one")
     deleted = await registry.dispatch(
-        ToolCall(id="4", name="delete_monitor", arguments={"monitor_id": 1})
+        ToolCall(
+            id="4", name="monitor", arguments={"action": "delete", "monitor_id": 1}
+        )
     )
     assert deleted == "monitor #1 deleted"
     assert await registry.dispatch(
-        ToolCall(id="5", name="list_monitors", arguments={})
+        ToolCall(id="5", name="monitor", arguments={"action": "list"})
     ) == "no monitors"

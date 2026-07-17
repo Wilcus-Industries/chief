@@ -41,11 +41,8 @@ class Package:
 class PackageLibrary:
     """Scans package roots and resolves dependency-ordered installs."""
 
-    def __init__(
-        self, roots: tuple[Path, ...], skills_root: Path = Path("skills")
-    ) -> None:
+    def __init__(self, roots: tuple[Path, ...]) -> None:
         self._roots = roots
-        self._skills_root = skills_root
 
     def scan(self) -> list[Package]:
         packages: dict[str, Package] = {}
@@ -59,17 +56,6 @@ class PackageLibrary:
 
     def get(self, name: str) -> Package | None:
         return next((p for p in self.scan() if p.name == name), None)
-
-    def is_installed(self, package: Package) -> bool:
-        """Derived install state — no registry exists; install lands on disk.
-
-        True when every skill dir the manifest declares is present under
-        ``skills_root``. A package that declares no skills reads as not
-        installed (nothing on disk to detect).
-        """
-        return bool(package.skills) and all(
-            (self._skills_root / Path(s).name).is_dir() for s in package.skills
-        )
 
     def install_order(self, name: str) -> list[Package]:
         """The package plus its dependency tree, dependencies first."""

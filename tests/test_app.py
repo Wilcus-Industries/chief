@@ -57,8 +57,12 @@ async def test_agent_creates_a_monitor_and_it_fires(
 ) -> None:
     create = ToolCall(
         id="c1",
-        name="create_monitor",
-        arguments={"description": "urgent watcher", "pattern": "urgent"},
+        name="monitor",
+        arguments={
+            "action": "create",
+            "description": "urgent watcher",
+            "pattern": "urgent",
+        },
     )
     provider = FakeProvider(
         [
@@ -67,7 +71,7 @@ async def test_agent_creates_a_monitor_and_it_fires(
             text_turn("monitor woke me, on it"),
         ]
     )
-    config = make_config(tmp_path, sock_path, gate_approved=("create_monitor",))
+    config = make_config(tmp_path, sock_path, gate_approved=("monitor",))
     app, streams = await boot(config, provider)
     try:
         send_frame(streams, "watch this channel for urgent stuff", thread="t1")
@@ -97,19 +101,24 @@ async def test_agent_creates_a_monitor_and_it_fires(
         await shutdown(app, streams)
 
 
-async def test_agent_can_list_bundled_packages(
+async def test_agent_reads_a_bundled_package_manifest(
     tmp_path: Path, sock_path: Path
 ) -> None:
-    call = ToolCall(id="c1", name="list_packages", arguments={})
-    provider = FakeProvider(
-        [[Completion(text="", tool_calls=(call,))], text_turn("here they are")]
+    # Discovery is read-tool driven now: read_file is read_only, so it needs
+    # no approval, and it reaches the bundled manifests under packages/.
+    call = ToolCall(
+        id="c1",
+        name="read_file",
+        arguments={"path": "packages/build-imessage/manifest.yaml"},
     )
-    config = make_config(tmp_path, sock_path, gate_approved=("list_packages",))
-    app, streams = await boot(config, provider)
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("read the manifest")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
     try:
-        send_frame(streams, "what packages can you install?", thread="t1")
+        send_frame(streams, "what does build-imessage need?", thread="t1")
         final = (await read_finals(streams, 1))[0]
-        assert final["text"] == "here they are"
+        assert final["text"] == "read the manifest"
         result = provider.calls[1][-1]
         assert result["role"] == "tool"
         assert "build-imessage" in result["content"]
@@ -123,8 +132,9 @@ async def test_gray_tool_raises_an_approval_card_first_answer_wins(
 ) -> None:
     create = ToolCall(
         id="c1",
-        name="create_schedule",
+        name="schedule",
         arguments={
+            "action": "create",
             "description": "daily checkin",
             "spec": "0 9 * * *",
             "prompt": "say hi",
@@ -137,7 +147,7 @@ async def test_gray_tool_raises_an_approval_card_first_answer_wins(
     try:
         send_frame(streams, "remind me daily", thread="t1")
         card = (await read_finals(streams, 1))[0]
-        assert "approve tool call create_schedule" in card["text"]
+        assert "approve tool call schedule" in card["text"]
         send_frame(streams, "yes", thread="t1")
         final = (await read_finals(streams, 1))[0]
         assert final["text"] == "scheduled"
@@ -153,8 +163,13 @@ async def test_denied_card_blocks_the_tool(
 ) -> None:
     create = ToolCall(
         id="c1",
-        name="create_schedule",
-        arguments={"description": "d", "spec": "@every 60", "prompt": "p"},
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "d",
+            "spec": "@every 60",
+            "prompt": "p",
+        },
     )
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(create,))], text_turn("understood, denied")]

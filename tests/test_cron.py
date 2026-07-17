@@ -6,9 +6,12 @@ from datetime import UTC, datetime, time
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
+from chief.agent.tools import ToolContext, ToolRegistry
 from chief.cron.service import CronService
 from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
+from chief.cron.tools import register_cron_tools
 from chief.persistence.db import make_session_factory
+from chief.provider.base import ToolCall
 
 NOON = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
@@ -97,3 +100,50 @@ async def test_deleted_schedule_stops_firing(engine: AsyncEngine) -> None:
     await asyncio.sleep(0.15)
     await service.stop()
     assert wake.messages == []
+
+
+async def test_schedule_tool_create_list_delete(engine: AsyncEngine) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    created = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="schedule",
+            arguments={
+                "action": "create",
+                "description": "daily standup",
+                "spec": "0 9 * * *",
+                "prompt": "post standup",
+            },
+        ),
+        context,
+    )
+    assert created == "schedule #1 created"
+    listing = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={"action": "list"})
+    )
+    assert "daily standup" in listing
+    assert "cli:home" in listing
+    incomplete = await registry.dispatch(
+        ToolCall(
+            id="3",
+            name="schedule",
+            arguments={"action": "create", "description": "x"},
+        ),
+        context,
+    )
+    assert incomplete.startswith("error: create needs")
+    deleted = await registry.dispatch(
+        ToolCall(
+            id="4", name="schedule", arguments={"action": "delete", "schedule_id": 1}
+        )
+    )
+    assert deleted == "schedule #1 deleted"
+    assert await registry.dispatch(
+        ToolCall(id="5", name="schedule", arguments={"action": "list"})
+    ) == "no schedules"
