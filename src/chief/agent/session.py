@@ -88,6 +88,11 @@ class Session:
         whole of ``run_turn``)."""
         return self._lock.locked()
 
+    @property
+    def lock(self) -> asyncio.Lock:
+        """The per-turn lock; a wipe holds it so no turn starts mid-write."""
+        return self._lock
+
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
