@@ -1,0 +1,9 @@
+name: soul
+description: Personality — a Soul.md the agent reads at the top of its prompt and evolves.
+dependencies:
+  - memory
+mcp_servers: {}
+skills:
+  - skills/soul
+config_keys: []
+secrets: []
