@@ -42,11 +42,20 @@ class RestartSpy:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A clean git repo seeded with the real packages/ and skills/ trees."""
+    """A clean pre-install git repo: the real packages/ plus an empty skills/.
+
+    skills/ is seeded as a fixed placeholder, NOT copied from the live tree.
+    It is the mutable *output* of an install: during a real install's done-check
+    the just-copied package sits committed in skills/ (pipeline commits before
+    checking), so a fixture mirroring the live tree baked that package into its
+    baseline and the rollback assertions (skills/<pkg> absent) failed — the
+    #185 first-run bug where installing any skill-package broke its own check.
+    """
     root = tmp_path / "repo"
     root.mkdir()
     _copytree(REAL_REPO / "packages", root / "packages")
-    _copytree(REAL_REPO / "skills", root / "skills")
+    (root / "skills").mkdir()
+    (root / "skills" / "README.md").write_text("skills\n")
     (root / "config.yaml").write_text("")
     (root / ".gitignore").write_text("config.yaml\ndata/\n")
     _make_uv_shim(root / "bin")
@@ -82,6 +91,24 @@ def _pipeline(repo: Path, tmp_path: Path, check: str = "true") -> SelfEditPipeli
 
 def _install_env(repo: Path, **extra: str) -> dict[str, str]:
     return {"PATH": f"{repo / 'bin'}:{os.environ['PATH']}", **extra}
+
+
+# --- fixture hermeticity ----------------------------------------------------
+
+
+def test_fixture_baseline_has_no_preinstalled_packages(repo: Path) -> None:
+    """The fixture must seed skills/ independently of the live working tree.
+
+    Guards the #185 first-run bug: when a real install runs the done-check,
+    skills/ holds the just-copied package (committed before the check). A
+    fixture that mirrored that tree baked the package into its baseline, so the
+    rollback assertions below (skills/<pkg> absent after a failed install) saw a
+    pre-existing file and failed — installing any skill-package broke its own
+    done-check. The package sources live under packages/; skills/ starts clean.
+    """
+    for pkg in ("build-imessage", "screening"):
+        assert (repo / "packages" / pkg).is_dir()
+        assert not (repo / "skills" / pkg).exists()
 
 
 # --- merge_config / config_apply -------------------------------------------
