@@ -1,12 +1,15 @@
 """Sessions: serial turn queue, persistence, restart resume, concurrency cap."""
 
 import asyncio
+from typing import Any
 
 from chief.agent.manager import SessionManager
-from chief.agent.tools import ToolRegistry
+from chief.agent.tools import Tool, ToolRegistry
 from chief.persistence.store import MessageStore
+from chief.provider.base import ToolSpec
+from chief.selfedit.recovery import RestartController
 
-from .fakes import FakeProvider, text_turn
+from .fakes import FakeProvider, text_turn, tool_turn
 
 
 async def noop_delta(text: str) -> None:
@@ -86,6 +89,51 @@ async def test_semaphore_caps_concurrent_turns_across_threads(
     provider.gate.set()
     await asyncio.gather(task_one, task_two)
     assert len(provider.calls) == 2
+
+
+async def test_restart_fires_after_turn_commits(store: MessageStore) -> None:
+    """A tool that requests a restart (like self_edit / install_package) must
+    not lose its turn: the transcript is committed to the store BEFORE the
+    restart fires, so the exchange survives the os.execv and the agent doesn't
+    reboot amnesiac and re-ask (the install-loop bug)."""
+    events: list[str] = []
+    controller = RestartController(lambda: events.append("restart"))
+
+    registry = ToolRegistry()
+
+    async def fake_self_edit() -> str:
+        controller.request()
+        return "self-edit applied; restarting"
+
+    registry.register(
+        Tool(ToolSpec(name="self_edit", description="", parameters={}), fake_self_edit)
+    )
+
+    original_append = store.append
+
+    async def traced_append(thread_key: str, messages: list[dict[str, Any]]) -> None:
+        events.append("commit")
+        await original_append(thread_key, messages)
+
+    store.append = traced_append  # type: ignore[method-assign]
+
+    provider = FakeProvider([tool_turn("self_edit", {}), text_turn("done, back soon")])
+    manager = SessionManager(
+        provider=provider,
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="test-model",
+        system_prompt="test system prompt",
+        max_concurrent=4,
+        after_commit=controller.fire_if_requested,
+    )
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("install imessage", noop_delta)
+
+    assert events == ["commit", "restart"]
+    saved = await store.load("cli:t")
+    assert saved[0] == {"role": "user", "content": "install imessage"}
+    assert saved[-1] == {"role": "assistant", "content": "done, back soon"}
 
 
 async def test_get_or_create_returns_the_same_session(store: MessageStore) -> None:

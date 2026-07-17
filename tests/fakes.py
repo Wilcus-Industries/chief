@@ -8,7 +8,13 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from chief.provider.base import Completion, ProviderEvent, TextDelta, ToolSpec
+from chief.provider.base import (
+    Completion,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+)
 
 
 class FakeProvider:
@@ -39,6 +45,17 @@ def text_turn(text: str) -> list[ProviderEvent]:
     """Script entry for a plain streamed text reply."""
     deltas: list[ProviderEvent] = [TextDelta(c) for c in _split(text)]
     return [*deltas, Completion(text=text)]
+
+
+def tool_turn(
+    name: str, arguments: dict[str, Any], call_id: str = "call-1"
+) -> list[ProviderEvent]:
+    """Script entry: the model requests one tool call and no text."""
+    return [
+        Completion(
+            text="", tool_calls=(ToolCall(id=call_id, name=name, arguments=arguments),)
+        )
+    ]
 
 
 def _split(text: str) -> list[str]:

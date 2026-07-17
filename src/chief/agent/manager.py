@@ -29,6 +29,7 @@ class SessionManager:
         budget: Budget | None = None,
         downgrade_model: str | None = None,
         compactor: Compactor | None = None,
+        after_commit: Callable[[], None] | None = None,
     ) -> None:
         self._provider = provider
         self._tools_factory = tools_factory
@@ -39,6 +40,7 @@ class SessionManager:
         self._budget = budget
         self._downgrade_model = downgrade_model
         self._compactor = compactor
+        self._after_commit = after_commit
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
 
@@ -64,6 +66,7 @@ class SessionManager:
                 budget=self._budget,
                 downgrade_model=self._downgrade_model,
                 compactor=self._compactor,
+                after_commit=self._after_commit,
             )
             self._sessions[thread_key] = session
             return session

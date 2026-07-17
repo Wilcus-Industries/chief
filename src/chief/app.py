@@ -40,7 +40,7 @@ from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.selfedit.pipeline import SelfEditPipeline
-from chief.selfedit.recovery import restart_daemon
+from chief.selfedit.recovery import RestartController
 from chief.selfedit.tools import register_install_tool, register_selfedit_tools
 from chief.skills import SkillLibrary, register_skill_tools
 from chief.strangers import StrangerLog
@@ -102,6 +102,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     prompt = system_prompt() + skills.prompt_lines()
     if not await store.has_sessions():
         prompt += ONBOARDING_SUFFIX
+    restart_controller = RestartController()
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
@@ -112,6 +113,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
         compactor=Compactor(provider, config.default_model),
+        after_commit=restart_controller.fire_if_requested,
     )
     dispatcher = Dispatcher(
         manager, bus=bus, approvals=approvals, strangers=StrangerLog(factory)
@@ -125,7 +127,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     )
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
-    selfedit_pipeline = SelfEditPipeline(Path.cwd(), audit, restart_daemon)
+    selfedit_pipeline = SelfEditPipeline(Path.cwd(), audit, restart_controller.request)
     register_selfedit_tools(registry, selfedit_pipeline)
     mcp_manager = McpManager(registry)
     register_mcp_tools(registry, mcp_manager, audit)
