@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from typing import Any
 
 from chief.agent.compaction import Compactor
 from chief.agent.session import RestartGate, Session
@@ -75,6 +76,15 @@ class SessionManager:
             )
             self._sessions[thread_key] = session
             return session
+
+    async def create(self, thread_key: str, channel: str) -> None:
+        """Register a thread (so a monitor/schedule can wake it) without a live
+        session."""
+        await self._store.ensure_session(thread_key, channel)
+
+    async def list_sessions(self) -> list[dict[str, Any]]:
+        """Every known thread — the agent's own `session` list tool."""
+        return await self._store.list_sessions()
 
     async def set_model(self, thread_key: str, channel: str, model: str) -> None:
         """Owner per-thread model override: live session + persisted row."""
