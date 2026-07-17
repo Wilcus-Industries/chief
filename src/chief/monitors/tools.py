@@ -1,19 +1,24 @@
-"""Native tools for the agent to manage its own monitors."""
+"""Native tool for the agent to manage its own monitors."""
+
+from typing import Any
 
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.monitors.service import MonitorService
 from chief.provider.base import ToolSpec
 
-_CREATE_SPEC = ToolSpec(
-    name="create_monitor",
+_SPEC = ToolSpec(
+    name="monitor",
     description=(
-        "Watch a channel's inbound events and wake this thread when one "
-        "matches. Give exactly one of `pattern` (regex over the event text, "
-        "cheap) or `instruction` (a small-model yes/no judgment)."
+        "Manage monitors that watch a channel and wake this thread on a match. "
+        "action=create needs `description` and exactly one of `pattern` (regex "
+        "over event text, cheap) or `instruction` (a small-model yes/no), plus "
+        "optional `watch_channel` (defaults to this thread's channel). "
+        "action=list takes nothing. action=delete needs `monitor_id`."
     ),
     parameters={
         "type": "object",
         "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "delete"]},
             "description": {"type": "string"},
             "pattern": {"type": "string"},
             "instruction": {"type": "string"},
@@ -21,41 +26,27 @@ _CREATE_SPEC = ToolSpec(
                 "type": "string",
                 "description": "channel to watch; defaults to this thread's channel",
             },
+            "monitor_id": {"type": "integer"},
         },
-        "required": ["description"],
-    },
-)
-
-_LIST_SPEC = ToolSpec(
-    name="list_monitors",
-    description="List all active monitors.",
-    parameters={"type": "object", "properties": {}},
-    read_only=True,
-)
-
-_DELETE_SPEC = ToolSpec(
-    name="delete_monitor",
-    description="Delete a monitor by id.",
-    parameters={
-        "type": "object",
-        "properties": {"monitor_id": {"type": "integer"}},
-        "required": ["monitor_id"],
+        "required": ["action"],
     },
 )
 
 
 def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> None:
-    """Expose create/list/delete monitor tools backed by the service."""
+    """Expose the monitor tool (create/list/delete) backed by the service."""
 
-    async def create_monitor(
-        description: str,
-        context: ToolContext | None = None,
-        pattern: str | None = None,
-        instruction: str | None = None,
-        watch_channel: str | None = None,
+    async def _create(
+        context: ToolContext | None,
+        description: str | None,
+        pattern: str | None,
+        instruction: str | None,
+        watch_channel: str | None,
     ) -> str:
         if context is None:
-            return "error: create_monitor needs a session context"
+            return "error: create needs a session context"
+        if not description:
+            return "error: create needs a description"
         if (pattern is None) == (instruction is None):
             return "error: give exactly one of pattern or instruction"
         predicate = (
@@ -72,7 +63,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         )
         return f"monitor #{monitor_id} created"
 
-    async def list_monitors() -> str:
+    async def _list() -> str:
         rows = await service.list_enabled()
         if not rows:
             return "no monitors"
@@ -81,10 +72,30 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             for r in rows
         )
 
-    async def delete_monitor(monitor_id: int) -> str:
-        deleted = await service.delete(monitor_id)
-        return f"monitor #{monitor_id} deleted" if deleted else "error: no such monitor"
+    async def monitor(
+        action: str,
+        context: ToolContext | None = None,
+        description: str | None = None,
+        pattern: str | None = None,
+        instruction: str | None = None,
+        watch_channel: str | None = None,
+        monitor_id: Any = None,
+    ) -> str:
+        if action == "create":
+            return await _create(
+                context, description, pattern, instruction, watch_channel
+            )
+        if action == "list":
+            return await _list()
+        if action == "delete":
+            if not isinstance(monitor_id, int):
+                return "error: delete needs monitor_id"
+            deleted = await service.delete(monitor_id)
+            return (
+                f"monitor #{monitor_id} deleted"
+                if deleted
+                else "error: no such monitor"
+            )
+        return f"error: unknown action '{action}'"
 
-    registry.register(Tool(_CREATE_SPEC, create_monitor, wants_context=True))
-    registry.register(Tool(_LIST_SPEC, list_monitors))
-    registry.register(Tool(_DELETE_SPEC, delete_monitor))
+    registry.register(Tool(_SPEC, monitor, wants_context=True))

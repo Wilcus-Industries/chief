@@ -13,11 +13,17 @@ retype a skill file yourself — that is exactly what the tool exists to prevent
 
 Recipe:
 
-1. Call `list_packages` to see what is available. If the package the owner
-   wants is not listed, clone the packages repo (URL in the tool output) into
-   `data/packages/` first, then list again.
-2. Call `package_info` with the package name. It returns the dependency-ordered
-   install list (dependencies first), the manifest, and the INSTALL.md.
+1. Discover what is available with `read_file`/`grep` — there is no package-list
+   tool. Bundled packages live under `packages/`, cloned ones under
+   `data/packages/`; each is a dir with a `manifest.yaml`. `grep` for
+   `"description:"` under those roots (or `read_file` a specific
+   `manifest.yaml`) to see names and one-liners. If the package the owner wants
+   is not there, clone the packages repo
+   (`https://github.com/CrazyWillBear/chief-packages`) into `data/packages/`
+   first, then look again.
+2. `read_file` the package's `manifest.yaml` (dependencies, mcp_servers, skills,
+   config_keys, secrets) and its `INSTALL.md`. Dependencies install first — the
+   `install_package` tool resolves and orders the whole tree for you.
 3. Read the INSTALL.md. Anything it marks as a question — setup mode, handles,
    notify tier, secrets — gather from the owner **first**, conversationally,
    before running anything. A public-facing package always pulls in `screening`
