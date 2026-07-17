@@ -10,6 +10,7 @@ from chief.adapters.base import Message
 from chief.bus import EventBus
 from chief.monitors.service import ModelJudge, MonitorService
 from chief.persistence.db import make_session_factory
+from chief.persistence.store import MessageStore
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
@@ -27,24 +28,32 @@ async def _no_wake(message: Message) -> None:
     raise AssertionError("unexpected wake")
 
 
-WebParts = tuple[httpx.AsyncClient, WebAdapter, MonitorService]
+def _palette() -> list[str]:
+    return ["/help", "/model", "/monitors"]
+
+
+WebParts = tuple[httpx.AsyncClient, WebAdapter, MonitorService, MessageStore]
 
 
 @pytest.fixture
 def web(engine: AsyncEngine) -> WebParts:
     HANDLED.clear()
     adapter = WebAdapter()
+    factory = make_session_factory(engine)
     monitors = MonitorService(
-        make_session_factory(engine),
+        factory,
         EventBus(),
         _no_wake,
         ModelJudge(FakeProvider([]), "m"),
     )
-    app = build_web_app(Auth("hunter2"), adapter, handle, monitors)
+    store = MessageStore(factory)
+    app = build_web_app(
+        Auth("hunter2"), adapter, handle, monitors, store, _palette
+    )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
     )
-    return client, adapter, monitors
+    return client, adapter, monitors, store
 
 
 async def login(client: httpx.AsyncClient) -> None:
@@ -115,7 +124,7 @@ async def test_events_requires_auth(web: WebParts) -> None:
 
 
 async def test_monitor_list_route(web: WebParts) -> None:
-    client, _, monitors = web
+    client, _, monitors, _store = web
     await login(client)
     assert (await client.get("/monitors")).text == "none"
     await monitors.create(
@@ -126,3 +135,69 @@ async def test_monitor_list_route(web: WebParts) -> None:
         predicate={"kind": "code", "field": "text", "pattern": "x"},
     )
     assert "urgent watcher" in (await client.get("/monitors")).text
+
+
+async def test_sessions_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    assert (await client.get("/sessions")).status_code == 401
+
+
+async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
+    client, _, _, store = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.append("web:main", [{"role": "user", "content": "hi"}])
+    await store.ensure_session("imessage:+1", "imessage")
+
+    data = (await client.get("/sessions")).json()
+    by_thread = {s["thread"]: s for s in data}
+    assert by_thread["web:main"]["channel"] == "web"
+    assert by_thread["web:main"]["count"] == 1
+    assert by_thread["imessage:+1"]["channel"] == "imessage"
+
+
+async def test_history_renders_owner_and_chief_rows(web: WebParts) -> None:
+    client, _, _, store = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.append(
+        "web:main",
+        [
+            {"role": "system", "content": "prompt"},
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "tool_use", "id": "1", "name": "x", "input": {}},
+                ],
+            },
+        ],
+    )
+    rows = (await client.get("/history?thread=web:main")).json()
+    assert rows == [
+        {"role": "owner", "text": "hi"},
+        {"role": "chief", "text": "hello"},
+    ]
+
+
+async def test_history_without_thread_is_empty(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    assert (await client.get("/history")).json() == []
+
+
+async def test_commands_route_returns_palette(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    assert (await client.get("/commands")).json() == ["/help", "/model", "/monitors"]
+
+
+async def test_assets_are_served(web: WebParts) -> None:
+    client, *_ = web
+    css = await client.get("/app.css")
+    assert css.headers["content-type"].startswith("text/css")
+    assert "--orange" in css.text
+    js = await client.get("/app.js")
+    assert "javascript" in js.headers["content-type"]
+    assert "EventSource" in js.text
