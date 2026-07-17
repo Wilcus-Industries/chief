@@ -11,6 +11,7 @@ from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
 from chief.cron.service import CronService
 from chief.monitors.service import MonitorService
+from chief.persistence.store import MessageStore
 from chief.skills import SkillLibrary
 
 CommandHandler = Callable[[str, Message], Awaitable[str]]
@@ -24,17 +25,21 @@ class CommandSet:
         manager: SessionManager,
         monitors: MonitorService,
         cron: CronService,
+        store: MessageStore,
         skills: SkillLibrary | None = None,
     ) -> None:
         self._manager = manager
         self._monitors = monitors
         self._cron = cron
+        self._store = store
         self._skills = skills
         self._commands: dict[str, CommandHandler] = {
             "help": self._help,
             "monitors": self._list_monitors,
             "schedules": self._list_schedules,
             "model": self._model,
+            "clear": self._clear,
+            "prune": self._prune,
         }
 
     def register(self, name: str, handler: CommandHandler) -> None:
@@ -89,6 +94,22 @@ class CommandSet:
         if not rows:
             return "no schedules"
         return "\n".join(f"#{r.id} [{r.spec}] {r.description}" for r in rows)
+
+    async def _clear(self, args: str, message: Message) -> str:
+        """Wipe THIS thread's transcript and reset its live session."""
+        await self._manager.clear(message.thread_key)
+        return "cleared this thread's history"
+
+    async def _prune(self, args: str, message: Message) -> str:
+        """Delete the disposable web scratch buffers, keeping real channels."""
+        targets = [
+            row["thread"]
+            for row in await self._store.list_sessions()
+            if row["channel"] == "web" and row["thread"] != "web:main"
+        ]
+        for thread_key in targets:
+            await self._manager.delete(thread_key)
+        return f"pruned {len(targets)} web buffer(s)"
 
     async def _model(self, args: str, message: Message) -> str:
         session = await self._manager.get_or_create(

@@ -32,7 +32,7 @@ def make_commands(
         factory, EventBus(), _no_wake, ModelJudge(FakeProvider([]), "m")
     )
     cron = CronService(factory, _no_wake)
-    commands = CommandSet(manager, monitors, cron)
+    commands = CommandSet(manager, monitors, cron, store=store)
     return commands, manager, monitors, cron
 
 
@@ -109,6 +109,48 @@ async def test_model_command_shows_and_sets_with_persistence(
     commands2, manager2, *_ = make_commands(provider, store, factory)
     resumed = await manager2.get_or_create("cli:t", "cli")
     assert resumed.model == "big/model"
+
+
+async def test_clear_wipes_transcript_and_resets_live_session(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    commands, manager, *_ = make_commands(FakeProvider([]), store, factory)
+    await store.ensure_session("cli:t", "cli")
+    await store.append("cli:t", [{"role": "user", "content": "hi"}])
+    session = await manager.get_or_create("cli:t", "cli")  # cache it live
+
+    reply = await commands.run(msg("/clear"))
+
+    assert isinstance(reply, str) and "clear" in reply.lower()
+    assert await store.load("cli:t") == []  # transcript gone, row kept
+    assert await store.list_sessions()  # session row survives
+    # the live session is dropped so the next turn reloads empty history
+    assert await manager.get_or_create("cli:t", "cli") is not session
+
+
+async def test_prune_deletes_web_scratch_buffers_only(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    commands, manager, *_ = make_commands(FakeProvider([]), store, factory)
+    for thread_key, channel in (
+        ("web:main", "web"),
+        ("web:scratch", "web"),
+        ("web:notes", "web"),
+        ("imessage:+1", "imessage"),
+        ("cli:t", "cli"),
+    ):
+        await store.ensure_session(thread_key, channel)
+    scratch = await manager.get_or_create("web:scratch", "web")  # cache it live
+
+    reply = await commands.run(msg("/prune"))
+
+    assert isinstance(reply, str) and "2" in reply
+    threads = {s["thread"] for s in await store.list_sessions()}
+    assert threads == {"web:main", "imessage:+1", "cli:t"}
+    # a live scratch session is dropped along with its row
+    assert await manager.get_or_create("web:scratch", "web") is not scratch
 
 
 async def test_dispatcher_answers_commands_without_a_turn(

@@ -94,6 +94,21 @@ class MessageStore:
                 db.add(MessageRow(thread_key=thread_key, message=message))
             await db.commit()
 
+    async def clear(self, thread_key: str) -> None:
+        """Wipe a thread's transcript but keep its session row (``/clear``)."""
+        await self.replace(thread_key, [])
+
+    async def delete_session(self, thread_key: str) -> None:
+        """Delete a thread's session row and its whole transcript (prune)."""
+        async with self._factory() as db:
+            await db.execute(
+                delete(MessageRow).where(MessageRow.thread_key == thread_key)
+            )
+            await db.execute(
+                delete(SessionRow).where(SessionRow.thread_key == thread_key)
+            )
+            await db.commit()
+
     async def load(self, thread_key: str) -> list[dict[str, Any]]:
         """Reload a thread's transcript in insertion order (restart resume)."""
         async with self._factory() as db:

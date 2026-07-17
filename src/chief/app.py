@@ -147,7 +147,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         budget,
     )
     command_set = CommandSet(
-        manager, monitor_service, cron_service, skills=skills
+        manager, monitor_service, cron_service, store, skills=skills
     )
     dispatcher.set_commands(command_set)
 
@@ -176,6 +176,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
             monitor_service,
             store,
             command_set.palette,
+            manager,
         )
         web_server = WebServer(web_app, config.web_host, config.web_port)
 

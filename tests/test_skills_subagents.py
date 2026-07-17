@@ -66,7 +66,7 @@ async def test_slash_skill_rewrites_the_turn(tmp_path: Path) -> None:
     from chief.commands import CommandSet
 
     library = make_skills(tmp_path)
-    commands = CommandSet(None, None, None, skills=library)  # type: ignore[arg-type]
+    commands = CommandSet(None, None, None, None, skills=library)  # type: ignore[arg-type]
     message = Message(
         channel="cli", sender="owner", thread_key="cli:t", text="/greet Alice"
     )
