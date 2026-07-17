@@ -1,5 +1,6 @@
 """Self-edit pipeline: seatbelt behavior over a real (temporary) git repo."""
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -8,7 +9,12 @@ import pytest
 
 from chief.audit import AuditLog
 from chief.selfedit.pipeline import SelfEditPipeline
-from chief.selfedit.recovery import MARKER_NAME, clear_marker, rollback_if_marked
+from chief.selfedit.recovery import (
+    MARKER_NAME,
+    RestartController,
+    clear_marker,
+    rollback_if_marked,
+)
 from chief.selfedit.tools import register_selfedit_tools
 
 
@@ -151,6 +157,53 @@ def test_clear_marker_declares_health(repo: Path) -> None:
     clear_marker(repo)
     assert not (repo / MARKER_NAME).exists()
     clear_marker(repo)  # idempotent when absent
+
+
+async def test_restart_controller_drains_active_turns_before_firing() -> None:
+    """A restart requested mid-turn waits for every active turn to leave (i.e.
+    commit) before exec'ing, so a concurrent turn is never killed uncommitted."""
+    fired: list[bool] = []
+    controller = RestartController(lambda: fired.append(True))
+
+    await controller.enter_turn()  # a concurrent turn is running
+    controller.request()  # a self-edit merges mid-flight
+    fire = asyncio.create_task(controller.fire_if_requested())
+    await asyncio.sleep(0.01)
+    assert not fired  # still draining: the other turn hasn't committed
+
+    controller.leave_turn()  # the concurrent turn commits and leaves
+    await asyncio.wait_for(fire, 1)
+    assert fired == [True]
+
+
+async def test_restart_controller_holds_new_turns_once_requested() -> None:
+    """Once a restart is pending, new turns are held at the admission gate so
+    the drain can reach zero instead of chasing fresh arrivals forever."""
+    controller = RestartController(lambda: None)
+    controller.request()
+    entering = asyncio.create_task(controller.enter_turn())
+    await asyncio.sleep(0.01)
+    assert not entering.done()  # held, not admitted
+    entering.cancel()
+
+
+async def test_restart_controller_times_out_a_stuck_turn() -> None:
+    """A turn that never leaves must not wedge the restart: after the drain
+    timeout the daemon restarts anyway (the edit already merged)."""
+    fired: list[bool] = []
+    controller = RestartController(lambda: fired.append(True), drain_timeout=0.02)
+    await controller.enter_turn()  # a turn that will never commit
+    controller.request()
+    await asyncio.wait_for(controller.fire_if_requested(), 1)
+    assert fired == [True]
+
+
+async def test_restart_controller_noop_without_request() -> None:
+    """No restart requested → fire_if_requested is a cheap no-op."""
+    fired: list[bool] = []
+    controller = RestartController(lambda: fired.append(True))
+    await controller.fire_if_requested()
+    assert fired == []
 
 
 async def test_tool_validates_its_arguments(repo: Path, tmp_path: Path) -> None:

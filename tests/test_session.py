@@ -125,7 +125,7 @@ async def test_restart_fires_after_turn_commits(store: MessageStore) -> None:
         default_model="test-model",
         system_prompt="test system prompt",
         max_concurrent=4,
-        after_commit=controller.fire_if_requested,
+        restart_gate=controller,
     )
     session = await manager.get_or_create("cli:t", "cli")
     await session.run_turn("install imessage", noop_delta)

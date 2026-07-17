@@ -90,12 +90,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
             )
 
         return GatedTools(
-            registry=registry,
-            policy=policy,
-            audit=audit,
-            context=context,
-            ask=ask,
-            on_always=allow_always,
+            registry=registry, policy=policy, audit=audit,
+            context=context, ask=ask, on_always=allow_always,
         )
 
     skills = SkillLibrary(config.skills_dir)
@@ -113,7 +109,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
         compactor=Compactor(provider, config.default_model),
-        after_commit=restart_controller.fire_if_requested,
+        restart_gate=restart_controller,
     )
     dispatcher = Dispatcher(
         manager, bus=bus, approvals=approvals, strangers=StrangerLog(factory)

@@ -6,9 +6,8 @@ before each turn and recorded after.
 """
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import replace
-from typing import Any
+from typing import Any, Protocol
 
 from chief.agent.compaction import Compactor
 from chief.agent.loop import OnDelta, TurnResult, run_turn
@@ -16,6 +15,32 @@ from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget, BudgetState, BudgetStatus
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
+
+
+class RestartGate(Protocol):
+    """Brackets a turn so a pending self-edit restart drains it before exec.
+
+    ``enter_turn`` blocks while a restart is pending and otherwise registers
+    the turn as active; ``leave_turn`` deregisters it; ``fire_if_requested``
+    restarts (never returning) once the turn has committed. See
+    ``chief.selfedit.recovery.RestartController``.
+    """
+
+    async def enter_turn(self) -> None: ...
+
+    def leave_turn(self) -> None: ...
+
+    async def fire_if_requested(self) -> None: ...
+
+
+class _NullGate:
+    """No-op gate for sessions with no restart coordinator (tests, non-daemon)."""
+
+    async def enter_turn(self) -> None: ...
+
+    def leave_turn(self) -> None: ...
+
+    async def fire_if_requested(self) -> None: ...
 
 
 class Session:
@@ -35,7 +60,7 @@ class Session:
         budget: Budget | None = None,
         downgrade_model: str | None = None,
         compactor: Compactor | None = None,
-        after_commit: Callable[[], None] | None = None,
+        restart_gate: RestartGate | None = None,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -49,7 +74,7 @@ class Session:
         self._budget = budget
         self._downgrade_model = downgrade_model
         self._compactor = compactor
-        self._after_commit = after_commit or (lambda: None)
+        self._gate: RestartGate = restart_gate or _NullGate()
 
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
@@ -59,7 +84,18 @@ class Session:
         """
         async with self._lock:
             async with self._semaphore:
-                return await self._one_turn(user_text, on_delta)
+                # Held new turns wait here while a restart drains; active ones
+                # are tracked so the restart waits for this turn to commit.
+                await self._gate.enter_turn()
+                try:
+                    result = await self._one_turn(user_text, on_delta)
+                finally:
+                    self._gate.leave_turn()
+                # Fire only after leaving (this turn no longer counts as active)
+                # and committing, so the drain sees it done and the transcript
+                # is on disk before os.execv.
+                await self._gate.fire_if_requested()
+                return result
 
     async def _one_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         model = self.model
@@ -85,11 +121,7 @@ class Session:
         await self._commit(
             [{"role": "user", "content": user_text}, *transcript[baseline:]]
         )
-        settled = await self._settle_budget(result, status)
-        # A self-edit tool requests a restart mid-turn; fire it only now, with
-        # the transcript already persisted, so the exchange survives os.execv.
-        self._after_commit()
-        return settled
+        return await self._settle_budget(result, status)
 
     async def _maybe_compact(self) -> None:
         """Fold old history into a note when the transcript outgrows the
