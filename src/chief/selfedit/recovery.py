@@ -10,11 +10,38 @@ import logging
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 MARKER_NAME = ".selfedit-pending.json"
+
+
+class RestartController:
+    """Defers a self-edit restart until the running turn has committed.
+
+    The self-edit pipeline runs *inside* a turn. If it called os.execv the
+    instant the check went green, the process would vanish before the session
+    persisted the turn — so the very exchange that asked for the edit (an
+    install Q&A, say) would be lost, and the daemon would reboot with no memory
+    of it and re-ask the same questions in a loop. Instead the pipeline calls
+    ``request`` mid-turn and the session calls ``fire_if_requested`` right after
+    it commits, so the transcript is on disk before the restart.
+    """
+
+    def __init__(self, restart: Callable[[], None] | None = None) -> None:
+        self._restart = restart if restart is not None else restart_daemon
+        self._requested = False
+
+    def request(self) -> None:
+        """Mark a restart due once the current turn commits (pipeline side)."""
+        self._requested = True
+
+    def fire_if_requested(self) -> None:
+        """Restart if one was requested (os.execv — does not return)."""
+        if self._requested:
+            self._restart()
 
 
 def clear_marker(repo_root: Path) -> None:

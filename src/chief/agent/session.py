@@ -6,6 +6,7 @@ before each turn and recorded after.
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -34,6 +35,7 @@ class Session:
         budget: Budget | None = None,
         downgrade_model: str | None = None,
         compactor: Compactor | None = None,
+        after_commit: Callable[[], None] | None = None,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -47,6 +49,7 @@ class Session:
         self._budget = budget
         self._downgrade_model = downgrade_model
         self._compactor = compactor
+        self._after_commit = after_commit or (lambda: None)
 
     async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
@@ -82,7 +85,11 @@ class Session:
         await self._commit(
             [{"role": "user", "content": user_text}, *transcript[baseline:]]
         )
-        return await self._settle_budget(result, status)
+        settled = await self._settle_budget(result, status)
+        # A self-edit tool requests a restart mid-turn; fire it only now, with
+        # the transcript already persisted, so the exchange survives os.execv.
+        self._after_commit()
+        return settled
 
     async def _maybe_compact(self) -> None:
         """Fold old history into a note when the transcript outgrows the
