@@ -94,9 +94,9 @@ its first call.
   parsed before agent dispatch on every adapter — a deterministic escape hatch when a
   session is wedged or burning money. /skill-name invokes a skill directly; natural
   language works everywhere too.
-- **Self-added MCP servers.** The agent may wire in a new MCP server outside any
-  package (url or command + rationale) behind an approval card; once approved it is
-  recorded via config self-edit and the audit log.
+- **MCP servers are config.** There is no add-server tool: the agent wires in a new
+  server (url or command) by self-editing the `mcp_servers` config key, and the manager
+  connects it on the next boot — the same seatbelt and audit trail as any self-edit.
 
 ### Events + monitors + cron
 
@@ -186,9 +186,16 @@ auto-rolls back. Same seatbelt as source self-edit.
 
 ## Self-edit
 
-The agent edits its own config, system prompt, skills, and source code. Source
+The agent edits its own config, system prompt, skills, and source code. It reads
+first with the read-only `read_file` / `grep` tools (these also drive package
+discovery — there is no list-packages tool), then writes with `self_edit`. Source
 changes go through: branch → done-check green → restart into new code → healthcheck →
 auto-rollback on failure. No human review required; the audit log records everything.
+
+The default native tool set is deliberately small — `self_edit`, `read_file`, `grep`,
+`install_package`, `load_skill`, `monitor`, `schedule`, `spawn_agent` — with the
+create/list/delete verbs folded into one action argument on `monitor`/`schedule`.
+Everything channel- or capability-specific arrives as package-registered tools.
 
 ## Bootstrap & onboarding
 

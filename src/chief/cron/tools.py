@@ -1,59 +1,50 @@
-"""Native tools for the agent to manage its own schedules."""
+"""Native tool for the agent to manage its own schedules."""
+
+from typing import Any
 
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.cron.service import CronService
 from chief.provider.base import ToolSpec
 
-_CREATE_SPEC = ToolSpec(
-    name="create_schedule",
+_SPEC = ToolSpec(
+    name="schedule",
     description=(
-        "Create a recurring schedule that wakes this thread with a prompt. "
-        "`spec` is 5-field cron (e.g. '0 9 * * *') or '@every <seconds>'. "
-        "Fires landing in quiet hours are deferred to the window's end."
+        "Manage recurring schedules that wake this thread with a prompt. "
+        "action=create needs `description`, `spec` (5-field cron like "
+        "'0 9 * * *' or '@every <seconds>'), and `prompt` (what to do each "
+        "fire); fires landing in quiet hours defer to the window's end. "
+        "action=list takes nothing. action=delete needs `schedule_id`."
     ),
     parameters={
         "type": "object",
         "properties": {
+            "action": {"type": "string", "enum": ["create", "list", "delete"]},
             "description": {"type": "string"},
             "spec": {"type": "string"},
             "prompt": {
                 "type": "string",
                 "description": "what to do each time it fires",
             },
+            "schedule_id": {"type": "integer"},
         },
-        "required": ["description", "spec", "prompt"],
-    },
-)
-
-_LIST_SPEC = ToolSpec(
-    name="list_schedules",
-    description="List all active schedules.",
-    parameters={"type": "object", "properties": {}},
-    read_only=True,
-)
-
-_DELETE_SPEC = ToolSpec(
-    name="delete_schedule",
-    description="Delete a schedule by id.",
-    parameters={
-        "type": "object",
-        "properties": {"schedule_id": {"type": "integer"}},
-        "required": ["schedule_id"],
+        "required": ["action"],
     },
 )
 
 
 def register_cron_tools(registry: ToolRegistry, service: CronService) -> None:
-    """Expose create/list/delete schedule tools backed by the service."""
+    """Expose the schedule tool (create/list/delete) backed by the service."""
 
-    async def create_schedule(
-        description: str,
-        spec: str,
-        prompt: str,
-        context: ToolContext | None = None,
+    async def _create(
+        context: ToolContext | None,
+        description: str | None,
+        spec: str | None,
+        prompt: str | None,
     ) -> str:
         if context is None:
-            return "error: create_schedule needs a session context"
+            return "error: create needs a session context"
+        if not (description and spec and prompt):
+            return "error: create needs description, spec, and prompt"
         schedule_id = await service.create(
             description=description,
             spec=spec,
@@ -63,7 +54,7 @@ def register_cron_tools(registry: ToolRegistry, service: CronService) -> None:
         )
         return f"schedule #{schedule_id} created"
 
-    async def list_schedules() -> str:
+    async def _list() -> str:
         rows = await service.list_enabled()
         if not rows:
             return "no schedules"
@@ -72,12 +63,27 @@ def register_cron_tools(registry: ToolRegistry, service: CronService) -> None:
             for r in rows
         )
 
-    async def delete_schedule(schedule_id: int) -> str:
-        deleted = await service.delete(schedule_id)
-        return (
-            f"schedule #{schedule_id} deleted" if deleted else "error: no such schedule"
-        )
+    async def schedule(
+        action: str,
+        context: ToolContext | None = None,
+        description: str | None = None,
+        spec: str | None = None,
+        prompt: str | None = None,
+        schedule_id: Any = None,
+    ) -> str:
+        if action == "create":
+            return await _create(context, description, spec, prompt)
+        if action == "list":
+            return await _list()
+        if action == "delete":
+            if not isinstance(schedule_id, int):
+                return "error: delete needs schedule_id"
+            deleted = await service.delete(schedule_id)
+            return (
+                f"schedule #{schedule_id} deleted"
+                if deleted
+                else "error: no such schedule"
+            )
+        return f"error: unknown action '{action}'"
 
-    registry.register(Tool(_CREATE_SPEC, create_schedule, wants_context=True))
-    registry.register(Tool(_LIST_SPEC, list_schedules))
-    registry.register(Tool(_DELETE_SPEC, delete_schedule))
+    registry.register(Tool(_SPEC, schedule, wants_context=True))
