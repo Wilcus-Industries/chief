@@ -167,3 +167,22 @@ def test_bundled_build_imessage_depends_on_screening() -> None:
     assert package is not None
     assert "Full Disk Access" in package.install_md()
     assert "skills/build-imessage" in package.skills
+
+
+def test_bundled_memory_ships_skill_no_deps() -> None:
+    library = PackageLibrary((REPO_PACKAGES,))
+    package = library.get("memory")
+    assert package is not None
+    assert package.dependencies == ()
+    assert "skills/memory" in package.skills
+    assert "MEMORY.md" in package.install_md()
+
+
+def test_bundled_soul_depends_on_memory() -> None:
+    library = PackageLibrary((REPO_PACKAGES,))
+    order = [p.name for p in library.install_order("soul")]
+    assert order == ["memory", "soul"]
+    package = library.get("soul")
+    assert package is not None
+    assert "skills/soul" in package.skills
+    assert "Soul.md" in package.install_md()
