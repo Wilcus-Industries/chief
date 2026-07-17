@@ -92,6 +92,21 @@ async def test_dirty_tree_refuses(repo: Path, tmp_path: Path) -> None:
     assert not restart.called
 
 
+async def test_lingering_marker_does_not_block_next_selfedit(
+    repo: Path, tmp_path: Path
+) -> None:
+    # A merged self-edit leaves the rollback marker behind; if boot never
+    # clears it (recovery skipped, crash), it stays untracked in the tree.
+    # The pipeline must not treat its own marker as "dirty" and wedge every
+    # future self-edit — the exact state that stranded the mini.
+    pipeline, _ = make_pipeline(repo, tmp_path, "true")
+    await pipeline.apply({"greeting.txt": "v2\n"}, "first")
+    assert (repo / MARKER_NAME).exists()
+    result = await pipeline.apply({"greeting.txt": "v3\n"}, "second")
+    assert "restarting" in result
+    assert (repo / "greeting.txt").read_text() == "v3\n"
+
+
 @pytest.mark.parametrize(
     "path",
     ["/etc/passwd", "../outside.txt", "secrets/openrouter_api_key", "data/chief.db"],
