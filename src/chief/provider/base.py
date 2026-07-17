@@ -18,11 +18,17 @@ class ProviderError(RuntimeError):
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Declaration of a callable tool: name, description, JSON-schema params."""
+    """Declaration of a callable tool: name, description, JSON-schema params.
+
+    ``read_only`` marks a pure read — no filesystem, network, state, or send.
+    The gate auto-approves these so they never raise an approval card (#187);
+    it must stay false for anything that mutates or reaches outward.
+    """
 
     name: str
     description: str
     parameters: dict[str, Any]
+    read_only: bool = False
 
 
 @dataclass(frozen=True)

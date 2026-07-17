@@ -134,6 +134,7 @@ _LIST_SPEC = ToolSpec(
     name="list_packages",
     description="List installable packages (bundled plus any cloned repo).",
     parameters={"type": "object", "properties": {}},
+    read_only=True,
 )
 
 _INFO_SPEC = ToolSpec(
@@ -147,6 +148,7 @@ _INFO_SPEC = ToolSpec(
         "properties": {"name": {"type": "string"}},
         "required": ["name"],
     },
+    read_only=True,
 )
 
 

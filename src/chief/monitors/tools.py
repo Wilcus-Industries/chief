@@ -30,6 +30,7 @@ _LIST_SPEC = ToolSpec(
     name="list_monitors",
     description="List all active monitors.",
     parameters={"type": "object", "properties": {}},
+    read_only=True,
 )
 
 _DELETE_SPEC = ToolSpec(

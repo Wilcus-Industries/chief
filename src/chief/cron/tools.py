@@ -29,6 +29,7 @@ _LIST_SPEC = ToolSpec(
     name="list_schedules",
     description="List all active schedules.",
     parameters={"type": "object", "properties": {}},
+    read_only=True,
 )
 
 _DELETE_SPEC = ToolSpec(

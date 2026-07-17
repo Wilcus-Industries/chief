@@ -14,7 +14,7 @@ from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
 from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
-from chief.approvals import ApprovalBroker
+from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.budget import Budget
 from chief.bus import EventBus
@@ -25,7 +25,7 @@ from chief.cron.timing import parse_quiet_hours
 from chief.cron.tools import register_cron_tools
 from chief.daemon import App
 from chief.dispatch import Dispatcher
-from chief.gate import GatedTools, GatePolicy
+from chief.gate import GatedTools, GatePolicy, load_approved, save_approved
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.mcpclient.tools import load_self_added, register_mcp_tools
 from chief.monitors.service import ModelJudge, MonitorService
@@ -64,9 +64,17 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     provider = provider or OpenRouterProvider(config.openrouter_api_key)
 
     audit = AuditLog(config.db_path.parent / "audit.jsonl")
+    config_approved = set(config.gate_approved)
+    approved_path = config.db_path.parent / "gate_approved.json"
     policy = GatePolicy(
-        never=frozenset(config.gate_never), approved=frozenset(config.gate_approved)
+        never=frozenset(config.gate_never),
+        approved=config_approved | load_approved(approved_path),
     )
+
+    def allow_always(tool_name: str) -> None:
+        policy.allow_always(tool_name)
+        save_approved(policy.approved - config_approved, approved_path)
+
     approvals = ApprovalBroker()
     budget = Budget(factory, config.budget_cap_usd, config.budget_warn_ratio)
     bus = EventBus()
@@ -75,14 +83,19 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)
 
-        async def ask(ctx: ToolContext, question: str) -> bool:
+        async def ask(ctx: ToolContext, question: str) -> Approval:
             send = dispatcher.adapter(ctx.channel).send
             return await approvals.ask(
                 ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
             )
 
         return GatedTools(
-            registry=registry, policy=policy, audit=audit, context=context, ask=ask
+            registry=registry,
+            policy=policy,
+            audit=audit,
+            context=context,
+            ask=ask,
+            on_always=allow_always,
         )
 
     skills = SkillLibrary(config.skills_dir)
