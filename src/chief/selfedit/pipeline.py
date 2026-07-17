@@ -160,7 +160,14 @@ class SelfEditPipeline:
         await self._git("clean", "-fd")
 
     async def _dirty(self) -> bool:
-        return bool((await self._git("status", "--porcelain")).strip())
+        # The rollback marker is the pipeline's own runtime state, written
+        # post-merge and normally cleared on the next healthy boot. If it
+        # lingers (recovery skipped, crash), it must not count as "dirty" and
+        # refuse every future self-edit — the state that stranded the mini.
+        # `.gitignore` also lists it so human `git status` stays clean; this
+        # filter makes the guard robust even without that entry.
+        lines = (await self._git("status", "--porcelain")).splitlines()
+        return any(line[3:].strip() != MARKER_NAME for line in lines if line.strip())
 
     async def _git(self, *args: str) -> str:
         process = await asyncio.create_subprocess_exec(
