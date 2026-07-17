@@ -1,10 +1,12 @@
 """iMessage adapter over a fake chat.db: cursor, mapping, echo, send."""
 
 import sqlite3
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from chief.adapters.base import Message
 from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
+from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
 
@@ -106,10 +108,16 @@ class Harness:
         self.delivered: list[Message] = []
         self.jxa_calls: list[tuple[str, tuple[str, ...]]] = []
         self.cursor_path = tmp_path / "cursor"
+        self.restart: RestartBoundary | None = None
+        # Optional hook run inside on_message — a self-edit turn requesting a
+        # restart is modelled by having it call ``controller.request()``.
+        self.on_deliver: Callable[[Message], Awaitable[None]] | None = None
 
     def adapter(self) -> IMessageAdapter:
         async def on_message(message: Message) -> None:
             self.delivered.append(message)
+            if self.on_deliver is not None:
+                await self.on_deliver(message)
 
         async def run_jxa(script: str, argv: tuple[str, ...]) -> str:
             self.jxa_calls.append((script, argv))
@@ -121,6 +129,7 @@ class Harness:
             cursor_path=self.cursor_path,
             owner_handles=(OWNER,),
             run_jxa=run_jxa,
+            restart=self.restart,
         )
 
 
@@ -214,6 +223,43 @@ async def test_cursor_persists_across_restarts(tmp_path: Path) -> None:
     harness.store.add_message(OWNER, "second")
     await reborn.poll_once()
     assert [m.text for m in harness.delivered] == ["first", "second"]
+
+
+async def test_selfedit_row_saves_cursor_before_restart_no_double_send(
+    tmp_path: Path,
+) -> None:
+    """A self-edit row execs a restart. The cursor must be persisted BEFORE the
+    execv, so re-polling after the (fake) restart does NOT re-deliver the row —
+    otherwise chief answers the same message a second time (the double-send)."""
+    harness = Harness(tmp_path)
+    cursor_at_restart: list[str] = []
+    controller = RestartController(
+        lambda: cursor_at_restart.append(harness.cursor_path.read_text())
+    )
+    harness.restart = controller
+
+    async def request_restart(message: Message) -> None:
+        controller.request()
+
+    harness.on_deliver = request_restart
+    harness.store.add_message(OWNER, "self-edit please", from_me=1, chat=OWNER)
+
+    adapter = harness.adapter()
+    await adapter.poll_once()
+
+    # Delivered once; the cursor was already durable when the restart fired.
+    assert [m.text for m in harness.delivered] == ["self-edit please"]
+    assert cursor_at_restart == [harness.cursor_path.read_text()]
+    assert harness.cursor_path.read_text() != "0"
+
+    # A fresh adapter (the reboot) resumes from the saved cursor: no re-poll.
+    harness.restart = None
+    harness.on_deliver = None
+    reborn = harness.adapter()
+    await reborn.start()
+    await reborn.stop()
+    await reborn.poll_once()
+    assert [m.text for m in harness.delivered] == ["self-edit please"]
 
 
 async def test_send_prefixes_owner_threads_only(tmp_path: Path) -> None:

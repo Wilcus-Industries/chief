@@ -109,7 +109,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         restart_gate=restart_controller,
     )
     dispatcher = Dispatcher(
-        manager, bus=bus, approvals=approvals, strangers=StrangerLog(factory)
+        manager, bus=bus, approvals=approvals,
+        strangers=StrangerLog(factory), restart=restart_controller,
     )
     judge = ModelJudge(
         provider, config.models.get("cheap-judgment", config.default_model)
@@ -156,11 +157,13 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     imessage_adapter: IMessageAdapter | None = None
     if config.imessage_enabled and sys.platform == "darwin":
         imessage_adapter = IMessageAdapter(
-            dispatcher.handle,
+            # fire_restart=False: adapter fires it after its cursor is durable.
+            lambda m: dispatcher.handle(m, fire_restart=False),
             db_path=config.imessage_db_path,
             cursor_path=config.db_path.parent / "imessage_cursor",
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
+            restart=restart_controller,
         )
         dispatcher.register(imessage_adapter)
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from chief.app import App, build_app
+from chief.bus import Event
 from chief.config import Config
 from chief.provider.base import Completion, ToolCall
 
@@ -64,7 +65,6 @@ async def test_agent_creates_a_monitor_and_it_fires(
             [Completion(text="", tool_calls=(create,))],
             text_turn("watching for urgent messages"),
             text_turn("monitor woke me, on it"),
-            text_turn("hello from t2"),
         ]
     )
     config = make_config(tmp_path, sock_path, gate_approved=("create_monitor",))
@@ -77,12 +77,22 @@ async def test_agent_creates_a_monitor_and_it_fires(
         assert len(monitors) == 1
         assert monitors[0].wake_thread == "cli:t1"
 
-        # An urgent message on another thread wakes t1 through the monitor.
-        send_frame(streams, "URGENT: the roof is leaking", thread="t2")
-        finals = await read_finals(streams, 2)
-        by_thread = {f["thread"]: f["text"] for f in finals}
-        assert by_thread["cli:t1"] == "monitor woke me, on it"
-        assert by_thread["cli:t2"] == "hello from t2"
+        # A stranger's urgent message on the watched channel wakes t1 through
+        # the monitor. (Owner messages already dispatch, so monitors skip them.)
+        await app.bus.publish(
+            Event(
+                type="message.inbound",
+                channel="cli",
+                payload={
+                    "thread_key": "cli:stranger",
+                    "sender": "+15559998888",
+                    "text": "URGENT: the roof is leaking",
+                },
+            )
+        )
+        final = (await read_finals(streams, 1))[0]
+        assert final["thread"] == "cli:t1"
+        assert final["text"] == "monitor woke me, on it"
     finally:
         await shutdown(app, streams)
 

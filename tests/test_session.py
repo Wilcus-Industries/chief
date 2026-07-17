@@ -37,7 +37,12 @@ async def test_turn_persists_transcript_and_injects_system_prompt(
     session = await manager.get_or_create("cli:t", "cli")
     result = await session.run_turn("hello", noop_delta)
     assert result.text == "hi there"
-    assert provider.calls[0][0] == {"role": "system", "content": "test system prompt"}
+    system = provider.calls[0][0]
+    assert system["role"] == "system"
+    # The prompt is injected, and names the thread's origin channel so the
+    # agent knows which device it's speaking through.
+    assert system["content"].startswith("test system prompt")
+    assert "over the 'cli' channel" in system["content"]
     saved = await store.load("cli:t")
     assert saved == [
         {"role": "user", "content": "hello"},
@@ -91,11 +96,13 @@ async def test_semaphore_caps_concurrent_turns_across_threads(
     assert len(provider.calls) == 2
 
 
-async def test_restart_fires_after_turn_commits(store: MessageStore) -> None:
-    """A tool that requests a restart (like self_edit / install_package) must
-    not lose its turn: the transcript is committed to the store BEFORE the
-    restart fires, so the exchange survives the os.execv and the agent doesn't
-    reboot amnesiac and re-ask (the install-loop bug)."""
+async def test_run_turn_commits_but_does_not_fire_restart(
+    store: MessageStore,
+) -> None:
+    """run_turn must commit the transcript but NOT execv: the restart fires at
+    the outermost boundary (dispatcher / imessage poll) once the reply — and
+    any inbound cursor — is durable. Firing inside the turn would preempt the
+    un-sent reply and, on imessage, re-poll the row (the double-send bug)."""
     events: list[str] = []
     controller = RestartController(lambda: events.append("restart"))
 
@@ -130,10 +137,14 @@ async def test_restart_fires_after_turn_commits(store: MessageStore) -> None:
     session = await manager.get_or_create("cli:t", "cli")
     await session.run_turn("install imessage", noop_delta)
 
-    assert events == ["commit", "restart"]
+    # Committed, but the restart is only requested — not fired here.
+    assert events == ["commit"]
     saved = await store.load("cli:t")
     assert saved[0] == {"role": "user", "content": "install imessage"}
     assert saved[-1] == {"role": "assistant", "content": "done, back soon"}
+    # The pending restart fires once the boundary owner calls it.
+    await controller.fire_if_requested()
+    assert events == ["commit", "restart"]
 
 
 async def test_get_or_create_returns_the_same_session(store: MessageStore) -> None:

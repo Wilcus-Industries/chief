@@ -61,6 +61,12 @@ class MessageStore:
         sessions.sort(key=lambda item: item["last"], reverse=True)
         return sessions
 
+    async def channel(self, thread_key: str) -> str | None:
+        """The thread's origin channel — the first device that spoke on it."""
+        async with self._factory() as db:
+            row = await db.get(SessionRow, thread_key)
+            return row.channel if row else None
+
     async def model_override(self, thread_key: str) -> str | None:
         """The owner's per-thread model override, if any."""
         async with self._factory() as db:

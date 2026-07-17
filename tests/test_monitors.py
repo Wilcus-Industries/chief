@@ -23,11 +23,14 @@ class WakeSink:
         self.messages.append(message)
 
 
-def inbound(text: str, channel: str = "cli") -> Event:
+STRANGER = "+15559998888"
+
+
+def inbound(text: str, channel: str = "cli", sender: str = STRANGER) -> Event:
     return Event(
         type="message.inbound",
         channel=channel,
-        payload={"thread_key": f"{channel}:x", "sender": "owner", "text": text},
+        payload={"thread_key": f"{channel}:x", "sender": sender, "text": text},
     )
 
 
@@ -61,6 +64,27 @@ async def test_code_predicate_fires_and_wakes_its_thread(
     assert woken.sender == "system"
     assert f"monitor #{monitor_id}" in woken.text
     assert "URGENT" in woken.text
+
+
+async def test_owner_events_are_skipped_strangers_still_fire(
+    engine: AsyncEngine,
+) -> None:
+    """Owner messages already dispatch a turn on every channel, so a monitor
+    firing on them would double-wake the agent — the service skips them. A
+    stranger's matching message (published, never dispatched) still fires."""
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    await service.create(
+        description="watch for urgent",
+        watch_channel="imessage",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        predicate=CODE_PREDICATE,
+    )
+    await bus.publish(inbound("urgent!", channel="imessage", sender="owner"))
+    assert wake.messages == []
+    await bus.publish(inbound("urgent!", channel="imessage"))
+    assert len(wake.messages) == 1
 
 
 async def test_monitor_ignores_other_channels(engine: AsyncEngine) -> None:

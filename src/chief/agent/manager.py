@@ -54,6 +54,7 @@ class SessionManager:
             await self._store.ensure_session(thread_key, channel)
             history = await self._store.load(thread_key)
             override = await self._store.model_override(thread_key)
+            origin = await self._store.channel(thread_key)
             session = Session(
                 thread_key=thread_key,
                 provider=self._provider,
@@ -67,6 +68,7 @@ class SessionManager:
                 downgrade_model=self._downgrade_model,
                 compactor=self._compactor,
                 restart_gate=self._restart_gate,
+                origin_channel=origin,
             )
             self._sessions[thread_key] = session
             return session

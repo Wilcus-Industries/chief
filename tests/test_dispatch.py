@@ -6,15 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
-from chief.agent.tools import ToolRegistry
+from chief.agent.tools import Tool, ToolRegistry
 from chief.approvals import Approval, ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.provider.base import ToolSpec
+from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
 
-from .fakes import FakeProvider, text_turn
+from .fakes import FakeProvider, text_turn, tool_turn
 
 
 class RecordingAdapter(Adapter):
@@ -102,6 +104,43 @@ async def test_stranger_is_published_for_monitors_but_runs_no_turn(
     assert provider.calls == []
     assert [e.payload["sender"] for e in seen] == ["+15559998888"]
     assert seen[0].payload["text"] == "watch me"
+
+
+async def test_selfedit_turn_fires_restart_after_reply_sent(
+    store: MessageStore,
+) -> None:
+    """A self-edit turn requests a restart mid-turn; the dispatcher fires the
+    execv only after the reply has been sent, so the reply is never lost."""
+    adapter = RecordingAdapter()
+    fired: list[list[tuple[str, str]]] = []
+    controller = RestartController(lambda: fired.append(list(adapter.sent)))
+
+    registry = ToolRegistry()
+
+    async def fake_self_edit() -> str:
+        controller.request()
+        return "restarting"
+
+    registry.register(
+        Tool(ToolSpec(name="self_edit", description="", parameters={}), fake_self_edit)
+    )
+    provider = FakeProvider([tool_turn("self_edit", {}), text_turn("done")])
+    manager = SessionManager(
+        provider=provider,
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+        restart_gate=controller,
+    )
+    dispatcher = Dispatcher(manager, restart=controller)
+    dispatcher.register(adapter)
+
+    await dispatcher.handle(owner_message("self-edit please"))
+
+    # Restart fired exactly once, and the reply was already sent when it did.
+    assert fired == [[("cli:t", "done")]]
 
 
 async def test_owner_message_is_published_system_wake_is_not(

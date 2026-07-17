@@ -15,6 +15,7 @@ from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
+from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
 
 
@@ -40,11 +41,13 @@ class Dispatcher:
         bus: EventBus | None = None,
         approvals: ApprovalBroker | None = None,
         strangers: StrangerLog | None = None,
+        restart: RestartBoundary | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
         self._approvals = approvals
         self._strangers = strangers
+        self._restart = restart
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
 
@@ -60,8 +63,13 @@ class Dispatcher:
         """The adapter serving a channel (KeyError on unknown = wiring bug)."""
         return self._adapters[channel]
 
-    async def handle(self, message: Message) -> None:
-        """Run one turn for an inbound message and send the reply back."""
+    async def handle(self, message: Message, *, fire_restart: bool = True) -> None:
+        """Run one turn for an inbound message and send the reply back.
+
+        A self-edit turn requests a restart mid-turn; the execv fires here,
+        *after* the reply is sent, so it's never lost. ``fire_restart=False``
+        defers that to the caller (imessage, which must persist its inbound
+        cursor first — else the row re-polls and chief answers twice)."""
         if self._approvals and self._approvals.resolve(
             message.thread_key, message.text
         ):
@@ -83,6 +91,8 @@ class Dispatcher:
         if message.sender == OWNER:
             await self._publish(message)
         await self._run_turn(message)
+        if fire_restart and self._restart is not None:
+            await self._restart.fire_if_requested()
 
     async def _publish(self, message: Message) -> None:
         if self._bus is None:

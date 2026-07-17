@@ -100,6 +100,11 @@ class MonitorService:
             return True
 
     async def _on_event(self, event: Event) -> None:
+        # Owner messages already dispatch a turn on every channel, so a monitor
+        # firing on them would double-wake the agent. Strangers (published but
+        # never dispatched) are the intended trigger.
+        if event.payload.get("sender") == "owner":
+            return
         for monitor in await self.list_enabled():
             if monitor.watch_channel != event.channel:
                 continue

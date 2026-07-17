@@ -13,6 +13,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,14 @@ MARKER_NAME = ".selfedit-pending.json"
 # How long to let in-flight turns commit before restarting anyway. A stuck
 # turn must not wedge the restart forever; a self-edit already merged.
 DRAIN_TIMEOUT_SECONDS = 30.0
+
+
+class RestartBoundary(Protocol):
+    """The outermost side-effect boundary a caller fires after a turn's reply
+    (and any cursor) is durable, so a pending self-edit execs last. Satisfied
+    by ``RestartController``; a no-op elsewhere."""
+
+    async def fire_if_requested(self) -> None: ...
 
 
 class RestartController:
