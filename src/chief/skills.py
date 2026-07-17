@@ -113,6 +113,7 @@ _LOAD_SPEC = ToolSpec(
         "properties": {"name": {"type": "string"}},
         "required": ["name"],
     },
+    read_only=True,
 )
 
 

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.agent.tools import ToolRegistry
-from chief.approvals import ApprovalBroker
+from chief.approvals import Approval, ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
 from chief.persistence.db import make_session_factory
@@ -61,7 +61,7 @@ async def test_approval_answer_is_consumed_not_dispatched(
     )
     await asyncio.sleep(0.01)
     await dispatcher.handle(owner_message("yes"))
-    assert await card is True
+    assert await card is Approval.ONCE
     assert provider.calls == []  # the yes never became a turn
 
 
