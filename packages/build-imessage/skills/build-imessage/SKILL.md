@@ -38,7 +38,7 @@ double-fires on messages that already ran a turn.
 - **notify-all + cheap screen**: same, but a `model` predicate instead:
   instruction like "Sender is not the owner and this message is worth waking
   the owner's agent for (time-sensitive, important, or actionable). Ignore
-  chatter." — runs on the cheap-judgment role.
+  chatter." — runs on the default_classifier role.
 - **notify-whitelist**: code predicate on `sender` with pattern
   `^(\+15550001111|friend@example\.com)$` — regex-escape the handles.
 - **no-notify**: no monitor.
