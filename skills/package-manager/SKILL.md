@@ -6,14 +6,15 @@ description: Find, install, and uninstall capability packages (document-driven).
 # Managing packages
 
 A package is a directory with a `manifest.yaml`, an `INSTALL.md`, an
-`UNINSTALL.md`, and usually a `skills/` dir. Discovery is a small Bash CLI;
-install and uninstall are **document-driven** — you follow the package's own
-`INSTALL.md` / `UNINSTALL.md` using your file tools (`read_file`, `write_file`,
-`edit_file`) and `restart`. There is no install/uninstall tool.
+`UNINSTALL.md`, and usually a `skills/` dir. Discovery is a small CLI you run
+through the `shell` tool; install and uninstall are **document-driven** — you
+follow the package's own `INSTALL.md` / `UNINSTALL.md` using your file tools
+(`read_file`, `write_file`, `edit_file`), the `shell` tool, and `restart`. There
+is no install/uninstall tool.
 
 ## Discover — `chief-pkg`
 
-Run it via Bash:
+Run it with the `shell` tool (its cwd is the repo root):
 
 - `chief-pkg list` — every available package (bundled + cloned).
 - `chief-pkg search <query>` — match by name/description.
@@ -31,10 +32,10 @@ collision.
 2. `read_file` its `manifest.yaml` (skills, config_keys, secrets) and its
    `INSTALL.md`. Gather anything the INSTALL.md marks as a **question** (handles,
    tiers, secrets) from the owner first, conversationally.
-3. Do the INSTALL.md's steps with your file tools: `write_file`/`edit_file` to
-   place skill files and set config keys, run any build script it names via
-   Bash. For `secrets`, ask the owner to place each file under `secrets/`
-   themselves — never have them paste secret values into chat.
+3. Do the INSTALL.md's steps: `write_file`/`edit_file` to place skill files and
+   set config keys, run any build script it names with the `shell` tool. For
+   `secrets`, ask the owner to place each file under `secrets/` themselves —
+   never have them paste secret values into chat.
 4. Record the install in `data/installed.yaml` (`write_file`/`edit_file`): a
    `<name>: {source: bundled|cloned, commit: <origin commit>}` entry. `chief-pkg
    --installed` reads this.

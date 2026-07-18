@@ -32,11 +32,15 @@ file before you change it.
   `register_native_tools` in `src/chief/toolset.py` and wired at boot in
   `src/chief/app.py` (`build_app`). Each tool's spec + handler lives with its
   feature (e.g. `src/chief/monitors/tools.py`, `src/chief/agent/session_tools.py`).
+  The host `shell` tool is `src/chief/shelltool.py` (surface) over
+  `src/chief/shellhost.py` + `src/chief/shellframe.py` (the persistent-shell driver);
+  `ShellService` is owned by `App` and closed at shutdown.
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py`
   (`/help`, `/clear`, `/prune`, `/model`, …). These run *before* a turn.
 - **Packages** — bundled under `packages/`, cloned ones under `data/packages/`;
-  loader is `src/chief/packages.py`. Discover with the `chief-pkg` Bash CLI
-  (`src/chief/pkgcli.py`: `list` / `search`, `--installed`). Install/uninstall
+  loader is `src/chief/packages.py`. Discover with the `chief-pkg` CLI run through
+  the `shell` tool (`src/chief/pkgcli.py`: `list` / `search`, `--installed`).
+  Install/uninstall
   are document-driven — follow the package's `INSTALL.md` / `UNINSTALL.md` with
   your file tools, record installs in `data/installed.yaml`, then `restart`.
 - **Restart pipeline (the self-edit seatbelt)** — `src/chief/selfedit/`

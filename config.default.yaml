@@ -44,6 +44,14 @@ quiet_hours: ""
 packages_dir: packages
 packages_repo: https://github.com/CrazyWillBear/chief-packages
 
+# The host `shell` tool. It runs commands on the owner's machine (the gate still
+# asks before each one until "always allow"ed). timeout_seconds bounds one command
+# before it is killed; output_limit caps captured stdout/stderr (bytes) before
+# truncation. Persistent per-thread state (cwd, env) is lost only on a restart.
+shell:
+  timeout_seconds: 120
+  output_limit: 30000
+
 # iMessage adapter (macOS only; configured by the build-imessage package).
 # owner_handles: the self-chat handle(s) — owner texts run turns, everyone
 # else is logged + published for monitors.

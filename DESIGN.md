@@ -187,13 +187,14 @@ auto-rolls back. Same seatbelt as source self-edit.
 ## Self-edit
 
 The agent edits its own config, system prompt, skills, and source code. It reads
-first with the read-only `read_file` / `grep` tools (these also drive package
-discovery — there is no list-packages tool), then writes with `self_edit`. Source
+first with the read-only `read_file` / `grep` tools (package discovery is the
+`chief-pkg` CLI run through the `shell` tool), then writes with `self_edit`. Source
 changes go through: branch → done-check green → restart into new code → healthcheck →
 auto-rollback on failure. No human review required; the audit log records everything.
 
 The default native tool set is deliberately small — `self_edit`, `read_file`, `grep`,
-`install_package`, `load_skill`, `session`, `monitor`, `schedule`, `spawn_agent` — with
+`shell`, `install_package`, `load_skill`, `session`, `monitor`, `schedule`,
+`spawn_agent` — with
 the create/list/delete verbs folded into one action argument on
 `session`/`monitor`/`schedule`. Everything channel- or capability-specific arrives as
 package-registered tools.
