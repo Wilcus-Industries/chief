@@ -116,6 +116,9 @@ class Classifier:
                 return label
         raise ClassifierError(f"classifier '{name}' returned no valid label")
 
+    def definition(self, name: str) -> ClassifierDef | None:
+        return self._registry.get(name)
+
 
 def _match_label(reply: str, labels: tuple[str, ...]) -> str | None:
     norm = reply.strip().upper()
