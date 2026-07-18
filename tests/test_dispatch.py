@@ -1,6 +1,7 @@
 """Dispatcher routing: approvals first, strangers dropped, bus publishing."""
 
 import asyncio
+from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -12,7 +13,7 @@ from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
-from chief.provider.base import ToolSpec
+from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
 
@@ -141,6 +142,48 @@ async def test_selfedit_turn_fires_restart_after_reply_sent(
 
     # Restart fired exactly once, and the reply was already sent when it did.
     assert fired == [[("cli:t", "done")]]
+
+
+class _DownProvider:
+    """A backend whose every turn fails with a loud ProviderError."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+
+    async def stream(self, **_: object) -> AsyncIterator[ProviderEvent]:
+        raise ProviderError(self._message)
+        yield  # pragma: no cover - marks this coroutine an async generator
+
+
+class _BoomProvider:
+    """A backend that fails with a non-provider exception (a real bug)."""
+
+    async def stream(self, **_: object) -> AsyncIterator[ProviderEvent]:
+        raise RuntimeError("kaboom: a secret traceback detail")
+        yield  # pragma: no cover - marks this coroutine an async generator
+
+
+async def test_provider_error_message_is_surfaced_to_owner(
+    store: MessageStore,
+) -> None:
+    provider = _DownProvider("backend unreachable (http://proxy/v1, model m)")
+    dispatcher = Dispatcher(make_manager(provider, store))  # type: ignore[arg-type]
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    await dispatcher.handle(owner_message("hi"))
+    assert adapter.sent == [("cli:t", "error: backend unreachable "
+                             "(http://proxy/v1, model m)")]
+
+
+async def test_other_exceptions_keep_the_generic_text(store: MessageStore) -> None:
+    dispatcher = Dispatcher(make_manager(_BoomProvider(), store))  # type: ignore[arg-type]
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    await dispatcher.handle(owner_message("hi"))
+    # The traceback detail never leaks; the owner gets the generic string.
+    assert adapter.sent == [
+        ("cli:t", "error: something went wrong running that turn")
+    ]
 
 
 async def test_owner_message_is_published_system_wake_is_not(

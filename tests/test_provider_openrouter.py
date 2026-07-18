@@ -121,6 +121,20 @@ async def test_http_error_raises_provider_error() -> None:
         await collect(provider)
 
 
+async def test_connection_error_wraps_as_loud_provider_error() -> None:
+    # A down backend must fail LOUD as a ProviderError carrying base_url/model
+    # context — never a raw httpx error that leaks past the dispatch handler.
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenRouterProvider(
+        "k", base_url="http://127.0.0.1:8000/v1", client=client
+    )
+    with pytest.raises(ProviderError, match="unreachable.*8000"):
+        await collect(provider)
+
+
 async def test_base_url_override_targets_local_proxy() -> None:
     requests: list[httpx.Request] = []
 
