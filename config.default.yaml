@@ -6,7 +6,7 @@
 # ships a deliberately small set of keys; packages bring their own.
 #
 # Env overrides: CHIEF_DB_PATH, CHIEF_SOCKET_PATH, CHIEF_MAX_CONCURRENT_SESSIONS,
-# OPENROUTER_API_KEY (or secrets/openrouter_api_key).
+# OPENROUTER_API_KEY (or secrets/openrouter_api_key), CHIEF_PROVIDER_BASE_URL.
 
 # Model roles. Core ships exactly one — the agent invents further roles via
 # self-config. Two optional roles are honored when present, never required:
@@ -14,6 +14,18 @@
 # (monitor model-predicates).
 models:
   default: qwen/qwen3-coder
+
+# OpenAI-compatible endpoint the provider streams from. Default = OpenRouter.
+# To drive a Claude SUBSCRIPTION via OAuth instead of per-token API billing,
+# run an OpenAI-compat proxy in front of an authenticated `claude` CLI (e.g.
+# github.com/schmarta/claude-code-openai-server) in BARE MODEL mode, then:
+#   provider_base_url: http://127.0.0.1:8000/v1
+#   models.default: <bare model name the proxy exposes, e.g. claude-sonnet-4.5>
+#   secrets/openrouter_api_key: the proxy's CCI_API_KEY (sent as the bearer)
+# Caveats: (1) ToS — a subscription powering an always-on daemon is heavier
+# repurposing than interactive Claude Code; higher account risk. (2) The proxy
+# reports no dollar cost, so budget.cap_usd below is inert against it.
+provider_base_url: https://openrouter.ai/api/v1
 
 db_path: data/chief.db
 socket_path: data/chief.sock

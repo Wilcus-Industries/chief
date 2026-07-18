@@ -40,6 +40,24 @@ def test_env_overrides_yaml(
     assert config.openrouter_api_key == "sk-env"
 
 
+def test_provider_base_url_defaults_to_openrouter(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.provider_base_url == "https://openrouter.ai/api/v1"
+
+
+def test_provider_base_url_override_for_local_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Pointing the base_url at a local OpenAI-compatible server (e.g. the
+    # claude-code-openai-server subscription proxy) is the whole integration.
+    path = tmp_path / "config.yaml"
+    path.write_text("provider_base_url: http://127.0.0.1:8000/v1\n")
+    config = load_config(path)
+    assert config.provider_base_url == "http://127.0.0.1:8000/v1"
+    monkeypatch.setenv("CHIEF_PROVIDER_BASE_URL", "http://127.0.0.1:9999/v1")
+    assert load_config(path).provider_base_url == "http://127.0.0.1:9999/v1"
+
+
 def test_extra_model_roles_survive_alongside_default(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("models:\n  default: test/model\n  compaction: test/cheap\n")
