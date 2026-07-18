@@ -1,8 +1,0 @@
-name: memory
-description: Long-term memory — a git-backed markdown store the agent recalls and saves to.
-dependencies: []
-mcp_servers: {}
-skills:
-  - skills/memory
-config_keys: []
-secrets: []

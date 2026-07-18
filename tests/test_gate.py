@@ -36,6 +36,14 @@ def test_allow_always_promotes_to_approved() -> None:
     assert policy.decide("gray") is Decision.APPROVED
 
 
+def test_star_wildcard_approves_every_tool() -> None:
+    policy = GatePolicy(never=frozenset({"rm_rf"}), approved={"*"})
+    assert policy.decide("anything") is Decision.APPROVED
+    assert policy.decide("write_file") is Decision.APPROVED
+    # never still wins over the wildcard.
+    assert policy.decide("rm_rf") is Decision.NEVER
+
+
 def make_gated(
     tmp_path: Path,
     answer: Approval,

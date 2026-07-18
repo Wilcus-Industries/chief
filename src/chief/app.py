@@ -25,7 +25,6 @@ from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
 from chief.monitors.service import ModelJudge, MonitorService
-from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
@@ -122,7 +121,6 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     core = await _build_agent_core(config, provider, store, factory, gate, skills)
 
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
-    package_library = PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR))
     register_native_tools(
         core.registry,
         manager=core.manager,
@@ -130,7 +128,6 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         cron_service=core.cron,
         selfedit_pipeline=selfedit_pipeline,
         skills=skills,
-        package_library=package_library,
         provider=provider,
         agents_dir=config.agents_dir,
         default_model=config.default_model,

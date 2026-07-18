@@ -1,9 +1,9 @@
 # Non-secret core configuration TEMPLATE (committed). The first-run wizard copies
 # this to config.yaml, which is install-local state (gitignored) — the wizard and
-# self-edit write config.yaml in place, and a tracked copy would leave the tree
-# permanently dirty, which the self-edit pipeline refuses to run against. Edit the
-# live install's config.yaml, not this file. Secrets live in secrets/ or env — never
-# here. Core ships a deliberately small set of keys; packages bring their own.
+# the agent (via edit_file + restart) write config.yaml in place. It stays out of
+# the tracked tree, so restarts never commit it. Edit the live install's
+# config.yaml, not this file. Secrets live in secrets/ or env — never here. Core
+# ships a deliberately small set of keys; packages bring their own.
 #
 # Env overrides: CHIEF_DB_PATH, CHIEF_SOCKET_PATH, CHIEF_MAX_CONCURRENT_SESSIONS,
 # OPENROUTER_API_KEY (or secrets/openrouter_api_key).
@@ -20,7 +20,9 @@ socket_path: data/chief.sock
 max_concurrent_sessions: 4
 
 # Tool gate lists (code-enforced). Tools on neither list raise an approval
-# card on the session's surface; unanswered cards deny after 10 minutes.
+# card on the session's surface; unanswered cards deny after 10 minutes. A "*"
+# in `approved` auto-approves EVERY tool (the "full permissions" switch);
+# `never` always wins over it. Keep gates on until behavioral guardrails land.
 gate:
   never: []
   approved: []
@@ -36,7 +38,9 @@ budget:
 quiet_hours: ""
 
 # Packages: bundled defaults live in packages_dir; more come from the public
-# chief-packages repo (cloned into data/packages by the install-package skill).
+# chief-packages repo (cloned into data/packages by the chief-pkg CLI on first
+# run). Discover with `chief-pkg list`/`search`; install/uninstall are
+# document-driven (see the package-manager skill).
 packages_dir: packages
 packages_repo: https://github.com/CrazyWillBear/chief-packages
 

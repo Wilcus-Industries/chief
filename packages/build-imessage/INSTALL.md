@@ -48,11 +48,18 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    - **no-notify** — nothing wakes you; you read on demand or via your own
      monitors.
    On notify-all, offer the optional cheap-model screen ("worth waking?").
-4. Run `install_package` with name `build-imessage` and
-   `env: {"IMESSAGE_HANDLES": "<the handle(s) from step 2, comma-separated>"}`.
-   This copies the skill verbatim and sets `imessage.enabled: true` +
-   `imessage.owner_handles` deterministically, then restarts into the adapter.
-   (`screening` installs with it as a dependency.) Do **not** hand-edit these.
+4. Install `screening` first (it is a prerequisite for any public-facing
+   package) — follow `packages/screening/INSTALL.md`. Then place this package's
+   skill and set its config, deterministically:
+   - Copy the skill: run `IMESSAGE_HANDLES="<handle(s), comma-separated>" bash
+     packages/build-imessage/install.sh` via Bash. It copies the skill verbatim
+     and sets `imessage.enabled: true` + `imessage.owner_handles` (via
+     `chief.config_apply`). Or do the same by hand with your file tools —
+     never leave `owner_handles` malformed.
+   - Record both installs in `data/installed.yaml` (`screening` and
+     `build-imessage`, `source: bundled`).
+   - `restart` — one guarded commit brings the skill + config live and boots
+     the adapter.
 5. Walk the owner through granting **Full Disk Access** to the daemon's host
    process (System Settings → Privacy & Security → Full Disk Access — add the
    terminal/launchd binary that runs chief), needed to read

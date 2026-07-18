@@ -2,8 +2,10 @@
 
 You (chief) can edit your own source. Before you do, read this: it names where
 each capability lives so you change the right file instead of re-deriving the
-layout every time. Paths are relative to the repo root. Read a file before you
-rewrite it — `self_edit` replaces whole files.
+layout every time. Paths are relative to the repo root. Edit with `write_file` /
+`edit_file` (they reach the whole filesystem, no carve-outs), then `restart` to
+run the done-check and — on green — commit and reboot into the change. Read a
+file before you change it.
 
 ## Where things live
 
@@ -32,11 +34,15 @@ rewrite it — `self_edit` replaces whole files.
   feature (e.g. `src/chief/monitors/tools.py`, `src/chief/agent/session_tools.py`).
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py`
   (`/help`, `/clear`, `/prune`, `/model`, …). These run *before* a turn.
-- **Packages** — bundled under `packages/`; loader is `src/chief/packages.py`.
-  A package is discovered by reading its `manifest.yaml`, then installed via the
-  gated `install_package` tool.
-- **Self-edit pipeline** — `src/chief/selfedit/` (`pipeline.py` runs the guarded
-  branch → done-check → restart; `recovery.py` handles restart/rollback).
+- **Packages** — bundled under `packages/`, cloned ones under `data/packages/`;
+  loader is `src/chief/packages.py`. Discover with the `chief-pkg` Bash CLI
+  (`src/chief/pkgcli.py`: `list` / `search`, `--installed`). Install/uninstall
+  are document-driven — follow the package's `INSTALL.md` / `UNINSTALL.md` with
+  your file tools, record installs in `data/installed.yaml`, then `restart`.
+- **Restart pipeline (the self-edit seatbelt)** — `src/chief/selfedit/`
+  (`pipeline.py` runs the done-check against your working tree, commits + writes
+  the rollback marker on green, keeps your edits on red; `recovery.py` handles
+  restart/rollback). The `restart` tool is your only way to make edits live.
 - **Boot wiring** — `src/chief/app.py` (`build_app`, the table of contents) with
   the infrastructure phases (persistence, gate, MCP, adapters) in
   `src/chief/wiring.py`. The entrypoint (`src/chief/entrypoint.py`) takes a
@@ -63,9 +69,9 @@ the turn, so it is the safe place to mutate the thread you are in (unlike the
 (`src/chief/agent/manager.py`) if a tool or command needs it. Adjust
 `src/chief/persistence/models.py` only for a schema change.
 
-**Add an MCP server.** No tool for this — it is config. `self_edit` the
+**Add an MCP server.** No tool for this — it is config. `edit_file` the
 `mcp_servers` key in `config.yaml` (a `url` for HTTP, or a `command` argv list
 for stdio) — editing the dataclass default in `config.py` is a silent no-op,
-since `load_config` always reads the value from `config.yaml`. The next restart
-connects it; its tools appear as `mcp_<name>_<tool>`. (See the self-edit skill
-for the seatbelt details.)
+since `load_config` always reads the value from `config.yaml` — then `restart`.
+The next boot connects it; its tools appear as `mcp_<name>_<tool>`. (See the
+self-edit skill for the seatbelt details.)

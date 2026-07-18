@@ -31,7 +31,9 @@ class GatePolicy:
 
     ``approved`` is a live set — an "always allow" answer adds to it so the
     tool stops asking for the rest of the process (and is persisted so it
-    survives a restart).
+    survives a restart). A ``"*"`` entry in ``approved`` matches every tool
+    name (the config-driven "all tools" switch); ``never`` still takes
+    precedence over it.
     """
 
     never: frozenset[str] = frozenset()
@@ -40,7 +42,7 @@ class GatePolicy:
     def decide(self, tool_name: str) -> Decision:
         if tool_name in self.never:
             return Decision.NEVER
-        if tool_name in self.approved:
+        if "*" in self.approved or tool_name in self.approved:
             return Decision.APPROVED
         return Decision.ASK
 
