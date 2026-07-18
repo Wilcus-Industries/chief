@@ -70,6 +70,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
                 "instruction": instruction,
             }
         else:
+            assert classifier is not None  # the exactly-one check guarantees it
             definition = service.classifier_def(classifier)
             if definition is None:
                 return f"error: unknown classifier '{classifier}'"
