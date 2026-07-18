@@ -90,6 +90,13 @@ its first call.
   allowlist, optional model) live in the harness dir; packages can ship agents; the
   agent can author its own (self-edit pipeline applies). A spawn tool runs a
   sub-session with its own tool loop and returns the final result to the parent.
+- **Classifiers: internal categorical-label primitive.** Named definitions
+  (frontmatter: name, description, labels, optional model; body: the classification
+  prompt) live in the classifiers dir; the agent self-authors them via the self-edit
+  pipeline exactly like subagents. A `classify` call maps text to exactly one declared
+  label — case/whitespace tolerant, retrying twice more before raising. The model
+  resolves frontmatter → the `default_classifier` role → the default model. There is
+  **no** agent-facing tool: it is an internal seam core services (e.g. monitors) call.
 - **Owner commands.** A tiny core slash-command set (/tasks, /cancel, /model, …) is
   parsed before agent dispatch on every adapter — a deterministic escape hatch when a
   session is wedged or burning money. /skill-name invokes a skill directly; natural
@@ -101,8 +108,10 @@ its first call.
 ### Events + monitors + cron
 
 - Adapters publish every inbound event to an **event bus**.
-- A **monitor** is a subscription with a predicate — code match (cheap) or
-  small-model judgment — that wakes the agent when it fires.
+- A **monitor** is a subscription with a predicate that wakes the agent when it
+  fires. Its tool exposes three forms: a **code/regex** match (cheap), an
+  **instruction** (a yes/no judgment via the built-in wake-judge classifier), and a
+  named **classifier** + fire label (fires when that classifier returns the label).
 - **Cron/interval** schedules remain for time-based work (recurring errands,
   reminders, web checks), with quiet-hours deferral.
 - The old "watches" feature is gone; the agent creates monitors on channels itself.
