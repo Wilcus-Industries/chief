@@ -28,7 +28,6 @@ from chief.monitors.service import ModelJudge, MonitorService
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
-from chief.provider.openrouter import OpenRouterProvider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
@@ -41,6 +40,7 @@ from chief.wiring import (
     build_gate,
     build_mcp,
     build_persistence,
+    build_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,10 +113,8 @@ async def _build_agent_core(
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
-    """Assemble every core service; ``provider`` overrides OpenRouter (tests)."""
-    provider = provider or OpenRouterProvider(
-        config.openrouter_api_key, base_url=config.provider_base_url
-    )
+    """Assemble every core service; ``provider`` overrides the built one (tests)."""
+    provider = provider or build_provider(config)
     engine, factory, store = await build_persistence(config)
     gate = build_gate(config)
     skills = SkillLibrary(config.skills_dir)

@@ -15,6 +15,7 @@ from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
+from chief.provider.base import ProviderError
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
 
@@ -120,7 +121,14 @@ class Dispatcher:
 
         try:
             result = await session.run_turn(message.text, on_delta)
+        except ProviderError as exc:
+            # A backend failure is the owner's to see (e.g. proxy down, bad
+            # key): surface its message so it's actionable, not a dead end.
+            logger.exception("turn failed for thread %s", message.thread_key)
+            await adapter.send(message.thread_key, f"error: {exc}")
+            return
         except Exception:
+            # Any other failure may carry internals — keep the generic text.
             logger.exception("turn failed for thread %s", message.thread_key)
             await adapter.send(
                 message.thread_key, "error: something went wrong running that turn"

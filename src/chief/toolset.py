@@ -1,7 +1,8 @@
 """Assemble chief's default native toolset onto a ToolRegistry.
 
 One place wires every in-process tool the agent gets at boot: the
-self-management tools (``session``/``monitor``/``schedule``), the file tools
+self-management tools (``session``/``switch_model``/``monitor``/``schedule``),
+the file tools
 (``read_file``/``grep``/``write_file``/``edit_file``), the guarded ``restart``,
 skills, and subagent spawn. Package discovery is the ``chief-pkg`` Bash CLI and
 install is document-driven, so neither is a native tool. Channel- and
@@ -12,6 +13,7 @@ the always-on core set.
 from pathlib import Path
 
 from chief.agent.manager import SessionManager
+from chief.agent.model_tools import register_switch_model_tool
 from chief.agent.session_tools import register_session_tools
 from chief.agent.tools import ToolRegistry
 from chief.budget import Budget
@@ -47,6 +49,7 @@ def register_native_tools(
     ``agents_dir`` seeds the subagent registry for ``spawn_agent``.
     """
     register_session_tools(registry, manager)
+    register_switch_model_tool(registry, manager)
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
     register_file_tools(registry, root)

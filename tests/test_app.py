@@ -6,10 +6,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from chief.app import App, build_app
 from chief.bus import Event
-from chief.config import Config
+from chief.config import AliasSpec, BackendSpec, Config
 from chief.provider.base import Completion, ToolCall
+from chief.provider.openrouter import OpenRouterProvider
+from chief.provider.router import RouterProvider
+from chief.wiring import build_provider
 
 from .fakes import FakeProvider, text_turn
 
@@ -50,6 +55,52 @@ async def read_finals(streams: Streams, count: int) -> list[dict[str, Any]]:
         if frame["type"] == "final":
             finals.append(frame)
     return finals
+
+
+def test_build_provider_empty_config_is_plain_openrouter() -> None:
+    provider = build_provider(Config(openrouter_api_key="k"))
+    assert isinstance(provider, OpenRouterProvider)
+
+
+def test_build_provider_assembles_a_router_when_backends_configured() -> None:
+    config = Config(
+        provider_backends={
+            "proxy": BackendSpec(base_url="http://127.0.0.1:8000/v1", api_key="x")
+        },
+        provider_aliases={"opus": AliasSpec(backend="proxy", model="claude-opus-4-8")},
+    )
+    assert isinstance(build_provider(config), RouterProvider)
+
+
+def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
+    config = Config(
+        provider_backends={
+            "proxy": BackendSpec(base_url="http://127.0.0.1:8000/v1", api_key="x")
+        },
+        provider_aliases={"opus": AliasSpec(backend="typo", model="m")},
+    )
+    with pytest.raises(ValueError, match="opus.*typo"):
+        build_provider(config)
+
+
+async def test_switch_model_is_gated_and_persists_the_override(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    switch = ToolCall(id="c1", name="switch_model", arguments={"model": "opus"})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(switch,))], text_turn("switched")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        send_frame(streams, "use opus please", thread="t1")
+        card = (await read_finals(streams, 1))[0]
+        assert "approve tool call switch_model" in card["text"]
+        send_frame(streams, "yes", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "switched"
+        assert await app.store.model_override("cli:t1") == "opus"
+    finally:
+        await shutdown(app, streams)
 
 
 async def test_agent_creates_a_monitor_and_it_fires(
