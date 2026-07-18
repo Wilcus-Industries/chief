@@ -54,8 +54,27 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    - Copy the skill: run `IMESSAGE_HANDLES="<handle(s), comma-separated>" bash
      packages/build-imessage/install.sh` via Bash. It copies the skill verbatim
      and sets `imessage.enabled: true` + `imessage.owner_handles` (via
-     `chief.config_apply`). Or do the same by hand with your file tools —
-     never leave `owner_handles` malformed.
+     `chief.config_apply`).
+   - **No shell?** Do NOT hand-edit `config.yaml` — a bare handle like
+     `owner_handles: +15551234567` parses as a YAML **int** and boot-loops the
+     daemon (`tuple(int)` crash). Set it deterministically instead — this
+     writes a proper quoted list every time:
+
+     ```
+     python -m chief.config_apply imessage.enabled=true \
+       'imessage.owner_handles=["+15551234567"]'
+     ```
+
+     Only if you have neither a shell nor `config_apply` may you write the file
+     directly, and then `owner_handles` **must** be a quoted list — never a bare
+     scalar:
+
+     ```yaml
+     imessage:
+       enabled: true
+       owner_handles:
+         - "+15551234567"
+     ```
    - Record both installs in `data/installed.yaml` (`screening` and
      `build-imessage`, `source: bundled`).
    - `restart` — one guarded commit brings the skill + config live and boots
