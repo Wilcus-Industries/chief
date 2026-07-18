@@ -1,11 +1,11 @@
 name: anthropic-oauth
-description: Route the LLM provider at a local Claude-subscription proxy (OAuth) instead of OpenRouter.
+description: Route chosen models at a local Claude-subscription proxy (OAuth); OpenRouter stays the default.
 dependencies: []
 mcp_servers: {}
 skills:
   - skills/anthropic-oauth
 config_keys:
-  - provider_base_url
-  - models.default
+  - provider_backends
+  - provider_aliases
 secrets:
-  - openrouter_api_key
+  - proxy_api_key
