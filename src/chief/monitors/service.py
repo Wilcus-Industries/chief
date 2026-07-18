@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from chief.adapters.base import Message
 from chief.bus import Event, EventBus
-from chief.classifiers import Classifier
+from chief.classifiers import Classifier, ClassifierDef
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
 
@@ -77,6 +77,9 @@ class MonitorService:
             await db.delete(row)
             await db.commit()
             return True
+
+    def classifier_def(self, name: str) -> ClassifierDef | None:
+        return self._classifier.definition(name)
 
     async def _on_event(self, event: Event) -> None:
         # Owner messages already dispatch a turn on every channel, so a monitor

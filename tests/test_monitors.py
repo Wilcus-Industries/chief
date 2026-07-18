@@ -283,3 +283,35 @@ async def test_monitor_tool_classifier_form(engine: AsyncEngine) -> None:
         context,
     )
     assert "fire_label" in no_label
+
+
+async def test_monitor_tool_rejects_unknown_classifier(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "x",
+            "classifier": "ghost", "fire_label": "YES"}),
+        context,
+    )
+    assert "unknown classifier" in result
+
+
+async def test_monitor_tool_rejects_undeclared_fire_label(
+    engine: AsyncEngine,
+) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "x",
+            "classifier": "wake-judge", "fire_label": "yes"}),
+        context,
+    )
+    assert "fire_label" in result and "wake-judge" in result

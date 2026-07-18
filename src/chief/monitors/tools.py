@@ -70,6 +70,14 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
                 "instruction": instruction,
             }
         else:
+            definition = service.classifier_def(classifier)
+            if definition is None:
+                return f"error: unknown classifier '{classifier}'"
+            if fire_label not in definition.labels:
+                return (
+                    f"error: fire_label '{fire_label}' is not a declared label "
+                    f"of '{classifier}' ({', '.join(definition.labels)})"
+                )
             predicate = {
                 "kind": "classifier",
                 "classifier": classifier,
