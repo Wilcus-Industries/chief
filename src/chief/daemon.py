@@ -14,6 +14,7 @@ from chief.dispatch import Dispatcher
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
+from chief.shelltool import ShellService
 from chief.web.adapter import WebAdapter
 from chief.web.server import WebServer
 
@@ -37,6 +38,7 @@ class App:
     mcp_manager: McpManager
     mcp_configs: tuple[ServerConfig, ...]
     imessage_adapter: IMessageAdapter | None
+    shell_service: ShellService
 
     async def start(self) -> None:
         await self.socket_adapter.start()
@@ -61,4 +63,5 @@ class App:
             await self.imessage_adapter.stop()
         await self.web_adapter.stop()
         await self.socket_adapter.stop()
+        await self.shell_service.aclose()
         await self.engine.dispose()

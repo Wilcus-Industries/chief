@@ -6,7 +6,7 @@ skill, so it can be re-enabled later by reinstalling.
 
 1. Turn the channel off in `config.yaml`: set `imessage.enabled: false` (leave
    `owner_handles` or clear it — your call). `edit_file` the key, or run
-   `python -m chief.config_apply imessage.enabled=false` via Bash.
+   `python -m chief.config_apply imessage.enabled=false` with the `shell` tool.
 2. Delete the installed skill dir `skills/build-imessage/`.
 3. Remove the `build-imessage` entry from `data/installed.yaml`. (Leave
    `screening` unless the owner also wants it gone — see its `UNINSTALL.md`.)

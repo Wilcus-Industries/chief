@@ -52,7 +52,7 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    package) — follow `packages/screening/INSTALL.md`. Then place this package's
    skill and set its config, deterministically:
    - Copy the skill: run `IMESSAGE_HANDLES="<handle(s), comma-separated>" bash
-     packages/build-imessage/install.sh` via Bash. It copies the skill verbatim
+     packages/build-imessage/install.sh` with the `shell` tool. It copies verbatim
      and sets `imessage.enabled: true` + `imessage.owner_handles` (via
      `chief.config_apply`). Or do the same by hand with your file tools —
      never leave `owner_handles` malformed.
