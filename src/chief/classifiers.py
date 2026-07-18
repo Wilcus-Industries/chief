@@ -151,7 +151,7 @@ def _validate_classifier(path: Path) -> list[str]:
     if len(parts) < 3:
         return [f"{path}: frontmatter has no closing '---'"]
     try:
-        meta = yaml.safe_load(parts[1])
+        meta = yaml.load(parts[1], Loader=_LabelSafeLoader)
     except yaml.YAMLError as exc:
         return [f"{path}: frontmatter is not valid yaml ({exc})"]
     if not isinstance(meta, dict):
@@ -161,8 +161,11 @@ def _validate_classifier(path: Path) -> list[str]:
         problems.append(f"{path}: frontmatter missing 'name'")
     if not str(meta.get("description") or "").strip():
         problems.append(f"{path}: frontmatter missing 'description'")
-    if not (meta.get("labels") or ()):
-        problems.append(f"{path}: frontmatter missing 'labels'")
+    labels = meta.get("labels")
+    if not isinstance(labels, list) or not labels:
+        problems.append(f"{path}: 'labels' must be a non-empty list")
+    elif not all(isinstance(item, str) and item.strip() for item in labels):
+        problems.append(f"{path}: every label must be a non-empty string")
     if not parts[2].strip():
         problems.append(f"{path}: empty body")
     return problems

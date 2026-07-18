@@ -147,3 +147,21 @@ def test_validate_flags_malformed_definitions(tmp_path: Path) -> None:
 def test_validate_passes_well_formed(tmp_path: Path) -> None:
     make_classifiers(tmp_path, **{"wake-judge": WAKE_JUDGE})
     assert validate(tmp_path / "classifiers") == []
+
+
+def test_validate_flags_bad_label_shapes(tmp_path: Path) -> None:
+    root = tmp_path / "classifiers"
+    root.mkdir()
+    (root / "scalar-bool.md").write_text(
+        "---\nname: x\ndescription: d\nlabels: true\n---\nbody\n"
+    )
+    (root / "scalar-str.md").write_text(
+        "---\nname: x\ndescription: d\nlabels: NOPE\n---\nbody\n"
+    )
+    (root / "empty-label.md").write_text(
+        "---\nname: x\ndescription: d\nlabels: ['']\n---\nbody\n"
+    )
+    problems = validate(root)
+    assert any("scalar-bool" in p and "labels" in p for p in problems)
+    assert any("scalar-str" in p and "labels" in p for p in problems)
+    assert any("empty-label" in p for p in problems)
