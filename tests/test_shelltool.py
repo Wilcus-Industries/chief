@@ -22,6 +22,7 @@ from chief.shellhost import ShellHost
 from chief.shelltool import (
     ShellService,
     format_shell_result,
+    host_label,
     register_shell_tool,
     shell_label,
     shell_prompt_line,
@@ -102,6 +103,22 @@ def test_shell_prompt_line_names_the_dialect(monkeypatch: pytest.MonkeyPatch) ->
     assert "`shell` tool" in line
     assert "bash" in line
     assert "chief-pkg" in line
+
+
+def test_host_label_maps_darwin_to_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.mac_ver", lambda: ("14.5", ("", "", ""), ""))
+    assert host_label() == "macOS 14.5"
+
+
+def test_host_label_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    assert host_label() == "Linux"
+
+
+def test_shell_prompt_line_names_the_os(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    assert "Linux" in shell_prompt_line()
 
 
 # ---- command execution ----------------------------------------------------------

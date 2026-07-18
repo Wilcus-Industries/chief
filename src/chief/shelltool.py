@@ -9,6 +9,7 @@ by the daemon at shutdown; ``shell_prompt_line`` tells the agent which shell dia
 is actually speaking.
 """
 
+import platform
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,13 +40,27 @@ def shell_label() -> str:
         return "a shell"
 
 
+def host_label() -> str:
+    """The OS the daemon runs on (``macOS 14.5`` / ``Linux``), for the system prompt.
+
+    Maps ``Darwin`` to ``macOS`` with its product version so the agent knows it is on a
+    Mac (BSD userland — ``sed -i ''``, ``pbcopy``, no ``apt``) versus Linux.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        version = platform.mac_ver()[0]
+        return f"macOS {version}".strip()
+    return system or "an unknown OS"
+
+
 def shell_prompt_line() -> str:
-    """One line for the system prompt naming the shell tool and its actual dialect."""
+    """One line for the system prompt: the host OS, the shell tool, and its dialect."""
     return (
-        f"\n\nYou have a `shell` tool that runs commands on the host via "
-        f"{shell_label()} — mind that dialect (not necessarily bash). "
-        f"{HOST_SHELL_CONTRACT} Discover and install capability packages with it "
-        "(`chief-pkg list`/`search`); see the package-manager skill."
+        f"\n\nYou are running as a daemon on {host_label()}. You have a `shell` tool "
+        f"that runs commands on the host via {shell_label()} — mind the OS and that "
+        f"dialect (not necessarily Linux or bash). {HOST_SHELL_CONTRACT} Discover and "
+        "install capability packages with it (`chief-pkg list`/`search`); see the "
+        "package-manager skill."
     )
 
 
