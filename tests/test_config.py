@@ -1,10 +1,13 @@
-"""Config loading: defaults, yaml, env overrides, secret file fallback."""
+"""Config loading: defaults, yaml, env overrides, secret file fallback, and the
+deterministic config-writer (``merge_config`` / ``config_apply``)."""
 
 from pathlib import Path
 
 import pytest
+import yaml
 
-from chief.config import load_config
+from chief.config import load_config, merge_config
+from chief.config_apply import main as config_apply_main
 
 
 def test_defaults_when_no_file(tmp_path: Path) -> None:
@@ -43,3 +46,23 @@ def test_extra_model_roles_survive_alongside_default(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.models["compaction"] == "test/cheap"
     assert config.default_model == "test/model"
+
+
+def test_merge_config_creates_and_deep_merges(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    merge_config({"imessage": {"enabled": True}}, path)
+    merge_config({"imessage": {"owner_handles": ["+1"]}, "web_port": 9}, path)
+    loaded = yaml.safe_load(path.read_text())
+    assert loaded == {
+        "imessage": {"enabled": True, "owner_handles": ["+1"]},
+        "web_port": 9,
+    }
+
+
+def test_config_apply_parses_dotted_yaml_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_apply_main(["imessage.enabled=true", 'imessage.owner_handles=["+1","+2"]'])
+    loaded = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    assert loaded == {"imessage": {"enabled": True, "owner_handles": ["+1", "+2"]}}

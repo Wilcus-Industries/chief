@@ -105,8 +105,8 @@ def build_gate(config: Config) -> Gate:
 def build_mcp(
     config: Config, registry: ToolRegistry
 ) -> tuple[McpManager, tuple[ServerConfig, ...]]:
-    """MCP servers are pure config: the agent adds one by self_edit-ing the
-    ``mcp_servers`` key, and it connects on the next boot."""
+    """MCP servers are pure config: the agent adds one by editing the
+    ``mcp_servers`` key (then ``restart``), and it connects on the next boot."""
     mcp_configs = tuple(
         ServerConfig(
             name=name,

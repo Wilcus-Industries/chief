@@ -1,4 +1,5 @@
-"""Self-edit pipeline: seatbelt behavior over a real (temporary) git repo."""
+"""The guarded restart pipeline: the central self-edit mechanism, over a real
+(temporary) git repo — real done-check, real commit, real rollback marker."""
 
 import asyncio
 import json
@@ -7,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from chief.agent.tools import ToolRegistry
 from chief.audit import AuditLog
+from chief.filetools import register_file_tools
+from chief.provider.base import ToolCall
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import (
     MARKER_NAME,
@@ -15,7 +19,7 @@ from chief.selfedit.recovery import (
     clear_marker,
     rollback_if_marked,
 )
-from chief.selfedit.tools import register_selfedit_tools
+from chief.selfedit.tools import register_restart_tool
 
 
 def git(repo: Path, *args: str) -> str:
@@ -51,87 +55,119 @@ def make_pipeline(
 ) -> tuple[SelfEditPipeline, RestartSpy]:
     restart = RestartSpy()
     pipeline = SelfEditPipeline(
-        repo,
-        AuditLog(tmp_path / "audit.jsonl"),
-        restart,
-        checks=((check,),),
+        repo, AuditLog(tmp_path / "audit.jsonl"), restart, checks=((check,),)
     )
     return pipeline, restart
 
 
-async def test_green_check_merges_and_restarts(repo: Path, tmp_path: Path) -> None:
+# --- restart pipeline: green / red / no-op ---------------------------------
+
+
+async def test_green_check_commits_and_restarts(repo: Path, tmp_path: Path) -> None:
     pipeline, restart = make_pipeline(repo, tmp_path, "true")
-    result = await pipeline.apply(
-        {"greeting.txt": "hello v2\n"}, "improve the greeting"
-    )
+    (repo / "greeting.txt").write_text("hello v2\n")
+    result = await pipeline.restart("improve the greeting")
     assert "restarting" in result
     assert (repo / "greeting.txt").read_text() == "hello v2\n"
     assert restart.called
     marker = json.loads((repo / MARKER_NAME).read_text())
     assert marker["rationale"] == "improve the greeting"
-    log = git(repo, "log", "--oneline")
-    assert "self-edit: improve the greeting" in log
+    assert "self-edit: improve the greeting" in git(repo, "log", "--oneline")
 
 
-async def test_red_check_reverts_everything(repo: Path, tmp_path: Path) -> None:
+async def test_red_check_keeps_edits_and_reports(repo: Path, tmp_path: Path) -> None:
     pipeline, restart = make_pipeline(repo, tmp_path, "false")
-    result = await pipeline.apply({"greeting.txt": "broken\n"}, "break it")
+    (repo / "greeting.txt").write_text("broken\n")
+    result = await pipeline.restart("break it")
     assert result.startswith("error: done-check failed")
-    assert (repo / "greeting.txt").read_text() == "hello\n"
+    # The edit is KEPT so the agent can fix forward — not reverted (#198).
+    assert (repo / "greeting.txt").read_text() == "broken\n"
     assert not restart.called
     assert not (repo / MARKER_NAME).exists()
-    branches = git(repo, "branch", "--list")
-    assert "selfedit" not in branches
-
-
-async def test_dirty_tree_refuses(repo: Path, tmp_path: Path) -> None:
-    (repo / "greeting.txt").write_text("uncommitted change\n")
-    pipeline, restart = make_pipeline(repo, tmp_path, "true")
-    result = await pipeline.apply({"greeting.txt": "x"}, "r")
-    assert result == "error: working tree is dirty; refusing to self-edit"
-    assert not restart.called
-
-
-async def test_lingering_marker_does_not_block_next_selfedit(
-    repo: Path, tmp_path: Path
-) -> None:
-    # A merged self-edit leaves the rollback marker behind; if boot never
-    # clears it (recovery skipped, crash), it stays untracked in the tree.
-    # The pipeline must not treat its own marker as "dirty" and wedge every
-    # future self-edit — the exact state that stranded the mini.
-    pipeline, _ = make_pipeline(repo, tmp_path, "true")
-    await pipeline.apply({"greeting.txt": "v2\n"}, "first")
-    assert (repo / MARKER_NAME).exists()
-    result = await pipeline.apply({"greeting.txt": "v3\n"}, "second")
-    assert "restarting" in result
-    assert (repo / "greeting.txt").read_text() == "v3\n"
-
-
-async def test_marker_plus_real_dirt_still_refuses(
-    repo: Path, tmp_path: Path
-) -> None:
-    # The marker is ignored, but a genuinely dirty tree alongside it must still
-    # refuse — the filter must not blanket-pass whenever the marker is present.
-    (repo / MARKER_NAME).write_text('{"rollback_to": "x"}')
-    (repo / "greeting.txt").write_text("uncommitted change\n")
-    pipeline, restart = make_pipeline(repo, tmp_path, "true")
-    result = await pipeline.apply({"greeting.txt": "x"}, "r")
-    assert result == "error: working tree is dirty; refusing to self-edit"
-    assert not restart.called
-
-
-@pytest.mark.parametrize(
-    "path",
-    ["/etc/passwd", "../outside.txt", "secrets/openrouter_api_key", "data/chief.db"],
-)
-async def test_forbidden_paths_are_rejected(
-    repo: Path, tmp_path: Path, path: str
-) -> None:
-    pipeline, restart = make_pipeline(repo, tmp_path, "true")
-    result = await pipeline.apply({path: "x"}, "sneaky")
-    assert result.startswith("error:")
-    assert not restart.called
     assert "self-edit" not in git(repo, "log", "--oneline")
+
+
+async def test_noop_restart_is_allowed(repo: Path, tmp_path: Path) -> None:
+    pipeline, restart = make_pipeline(repo, tmp_path, "true")
+    result = await pipeline.restart("just reload")
+    assert "restarting" in result
+    assert restart.called
+    assert not (repo / MARKER_NAME).exists()
+    assert "self-edit" not in git(repo, "log", "--oneline")
+
+
+async def test_lingering_marker_is_not_a_change(repo: Path, tmp_path: Path) -> None:
+    # The pipeline's own untracked marker must not read as a repo change and
+    # get committed as an empty edit — the state that stranded the mini.
+    (repo / MARKER_NAME).write_text('{"rollback_to": "x"}')
+    pipeline, restart = make_pipeline(repo, tmp_path, "true")
+    result = await pipeline.restart("reload")
+    assert "no repo changes" in result
+    assert restart.called
+    assert "self-edit" not in git(repo, "log", "--oneline")
+
+
+async def test_restart_is_serialized(repo: Path, tmp_path: Path) -> None:
+    # Concurrent restarts must not interleave commit/status and corrupt git.
+    pipeline, restart = make_pipeline(repo, tmp_path, "true")
+    (repo / "greeting.txt").write_text("v2\n")
+    results = await asyncio.gather(pipeline.restart("a"), pipeline.restart("b"))
+    assert all("restarting" in r for r in results)
+    assert restart.called
+    assert git(repo, "log", "--oneline").count("self-edit") == 1
+
+
+# --- central mechanism: write_file -> restart through the tools -------------
+
+
+def _edit_registry(
+    repo: Path, tmp_path: Path, check: str
+) -> tuple[ToolRegistry, RestartSpy]:
+    registry = ToolRegistry()
+    register_file_tools(registry, repo)
+    pipeline, restart = make_pipeline(repo, tmp_path, check)
+    register_restart_tool(registry, pipeline)
+    return registry, restart
+
+
+async def test_write_then_restart_commits(repo: Path, tmp_path: Path) -> None:
+    registry, restart = _edit_registry(repo, tmp_path, "true")
+    await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="write_file",
+            arguments={"path": "greeting.txt", "content": "agent wrote this\n"},
+        )
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="restart", arguments={"rationale": "agent edit"})
+    )
+    assert "restarting" in result
+    assert (repo / "greeting.txt").read_text() == "agent wrote this\n"
+    assert restart.called
+    assert "self-edit: agent edit" in git(repo, "log", "--oneline")
+
+
+async def test_write_then_failed_restart_keeps_edit(
+    repo: Path, tmp_path: Path
+) -> None:
+    registry, restart = _edit_registry(repo, tmp_path, "false")
+    await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="write_file",
+            arguments={"path": "greeting.txt", "content": "still here\n"},
+        )
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="restart", arguments={"rationale": "nope"})
+    )
+    assert result.startswith("error: done-check failed")
+    assert (repo / "greeting.txt").read_text() == "still here\n"
+    assert not restart.called
+
+
+# --- recovery.py: rollback marker + restart controller ---------------------
 
 
 def test_rollback_if_marked_resets_and_reexecs(repo: Path) -> None:
@@ -149,12 +185,7 @@ def test_rollback_if_marked_resets_and_reexecs(repo: Path) -> None:
 async def test_boot_failure_after_selfedit_rolls_back(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crash during boot (incl. a broken import) rolls back and re-execs.
-
-    ``build_app`` is imported inside ``amain``'s try, so an ``ImportError``
-    from a self-edit that breaks ``chief.app`` follows the same rollback path
-    as a runtime failure — it never escapes the seatbelt.
-    """
+    """A crash during boot (incl. a broken import) rolls back and re-execs."""
     import chief.app
     import chief.entrypoint
 
@@ -188,66 +219,38 @@ def test_clear_marker_declares_health(repo: Path) -> None:
 
 
 async def test_restart_controller_drains_active_turns_before_firing() -> None:
-    """A restart requested mid-turn waits for every active turn to leave (i.e.
-    commit) before exec'ing, so a concurrent turn is never killed uncommitted."""
     fired: list[bool] = []
     controller = RestartController(lambda: fired.append(True))
-
-    await controller.enter_turn()  # a concurrent turn is running
-    controller.request()  # a self-edit merges mid-flight
+    await controller.enter_turn()
+    controller.request()
     fire = asyncio.create_task(controller.fire_if_requested())
     await asyncio.sleep(0.01)
-    assert not fired  # still draining: the other turn hasn't committed
-
-    controller.leave_turn()  # the concurrent turn commits and leaves
+    assert not fired
+    controller.leave_turn()
     await asyncio.wait_for(fire, 1)
     assert fired == [True]
 
 
 async def test_restart_controller_holds_new_turns_once_requested() -> None:
-    """Once a restart is pending, new turns are held at the admission gate so
-    the drain can reach zero instead of chasing fresh arrivals forever."""
     controller = RestartController(lambda: None)
     controller.request()
     entering = asyncio.create_task(controller.enter_turn())
     await asyncio.sleep(0.01)
-    assert not entering.done()  # held, not admitted
+    assert not entering.done()
     entering.cancel()
 
 
 async def test_restart_controller_times_out_a_stuck_turn() -> None:
-    """A turn that never leaves must not wedge the restart: after the drain
-    timeout the daemon restarts anyway (the edit already merged)."""
     fired: list[bool] = []
     controller = RestartController(lambda: fired.append(True), drain_timeout=0.02)
-    await controller.enter_turn()  # a turn that will never commit
+    await controller.enter_turn()
     controller.request()
     await asyncio.wait_for(controller.fire_if_requested(), 1)
     assert fired == [True]
 
 
 async def test_restart_controller_noop_without_request() -> None:
-    """No restart requested → fire_if_requested is a cheap no-op."""
     fired: list[bool] = []
     controller = RestartController(lambda: fired.append(True))
     await controller.fire_if_requested()
     assert fired == []
-
-
-async def test_tool_validates_its_arguments(repo: Path, tmp_path: Path) -> None:
-    from chief.agent.tools import ToolRegistry
-    from chief.provider.base import ToolCall
-
-    pipeline, _ = make_pipeline(repo, tmp_path, "true")
-    registry = ToolRegistry()
-    register_selfedit_tools(registry, pipeline)
-    bad = await registry.dispatch(
-        ToolCall(
-            id="1", name="self_edit", arguments={"files": "nope", "rationale": "r"}
-        )
-    )
-    assert bad.startswith("error: files must be")
-    empty = await registry.dispatch(
-        ToolCall(id="2", name="self_edit", arguments={"files": {}, "rationale": "r"})
-    )
-    assert empty.startswith("error: files must be")

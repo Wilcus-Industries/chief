@@ -117,14 +117,14 @@ async def test_selfedit_turn_fires_restart_after_reply_sent(
 
     registry = ToolRegistry()
 
-    async def fake_self_edit() -> str:
+    async def fake_restart() -> str:
         controller.request()
         return "restarting"
 
     registry.register(
-        Tool(ToolSpec(name="self_edit", description="", parameters={}), fake_self_edit)
+        Tool(ToolSpec(name="restart", description="", parameters={}), fake_restart)
     )
-    provider = FakeProvider([tool_turn("self_edit", {}), text_turn("done")])
+    provider = FakeProvider([tool_turn("restart", {}), text_turn("done")])
     manager = SessionManager(
         provider=provider,
         tools_factory=lambda thread, channel: registry,

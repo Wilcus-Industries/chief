@@ -1,20 +1,21 @@
-"""The guarded self-edit pipeline.
+"""The guarded restart pipeline — the seatbelt for self-editing.
 
-Edits land on a scratch branch, the full done-check runs there, and only a
-green check merges back and restarts the daemon. A marker file survives the
-restart so a boot failure can roll back to the recorded commit (see
-``recovery.py``). Every step is audited.
+The agent edits its working tree freely with the file tools; nothing is live
+until ``restart``. ``restart`` runs the full done-check against the working
+tree, and only on green commits the tree, writes a rollback marker, and reboots
+the daemon into the new code (a boot failure rolls back to the recorded commit,
+see ``recovery.py``). On red the edits are **kept in place** and the failure is
+returned so the agent fixes forward. Restarts are serialized behind a lock.
 
-Subprocesses run with explicit argument lists (never a shell), so file
-contents and rationales cannot inject commands.
+Subprocesses run with explicit argument lists (never a shell), so rationales
+cannot inject commands.
 """
 
 import asyncio
 import json
 import logging
-import os
-from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+import subprocess
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from chief.audit import AuditLog
@@ -29,11 +30,21 @@ DEFAULT_CHECKS: tuple[tuple[str, ...], ...] = (
     ("uv", "run", "mypy", "."),
 )
 
-FORBIDDEN_PREFIXES = ("secrets", ".git", "data")
+
+def _capture(argv: Sequence[str], cwd: Path) -> tuple[int, str]:
+    """Run ``argv`` (no shell) and return (returncode, combined output)."""
+    proc = subprocess.run(
+        list(argv),
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, proc.stdout
 
 
 class SelfEditPipeline:
-    """Applies agent-proposed edits under the done-check seatbelt."""
+    """Runs the done-check and, on green, commits + restarts into the tree."""
 
     def __init__(
         self,
@@ -46,149 +57,72 @@ class SelfEditPipeline:
         self._audit = audit
         self._restart = restart
         self._checks = checks
+        # Serialize check/commit/re-exec so concurrent sessions can't interleave
+        # a restart (PRD #198). The deferred re-exec still races other sessions'
+        # writes between restarts — an accepted, documented tradeoff.
+        self._lock = asyncio.Lock()
 
-    async def apply(self, files: dict[str, str], rationale: str) -> str:
-        """Run the pipeline for a set of file edits; returns a result string.
+    async def restart(self, rationale: str) -> str:
+        """Run the done-check against the working tree, then restart on green.
 
-        On green: edits are merged, a rollback marker is written, and the
-        daemon restarts into the new code. On red: everything is reverted
-        and the check output comes back for the model to fix.
+        Green: commit the tree (if it changed), write the rollback marker, and
+        request a restart into the new code. Red: keep the edits in place and
+        return the failure output. A no-op (no repo changes) is allowed — it
+        still restarts, covering config reloads and script-only installs.
         """
-        for path in files:
-            if reason := _reject_path(path):
-                return f"error: {reason}"
+        async with self._lock:
+            return await self._guarded_restart(rationale)
 
-        async def write() -> None:
-            for path, content in files.items():
-                target = self._root / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content)
-
-        return await self._guarded(write, rationale, list(files))
-
-    async def install(
-        self, scripts: list[Path], env: dict[str, str], rationale: str
-    ) -> str:
-        """Run package install scripts, in order, under the same seatbelt.
-
-        Each script is a package's own ``install.sh`` — trusted, deterministic
-        bytes (copy skill dirs verbatim, set config keys, wire MCP). They run
-        as one guarded mutation: a single done-check, merge, and restart, so
-        the whole install is one approval and rolls back as a unit (issue
-        #185). ``env`` (e.g. ``IMESSAGE_HANDLES``) is passed to every script.
-        """
-
-        async def run() -> None:
-            for script in scripts:
-                await self._run_installer(script, env)
-
-        return await self._guarded(run, rationale, [str(s) for s in scripts])
-
-    async def _guarded(
-        self,
-        mutate: Callable[[], Awaitable[None]],
-        rationale: str,
-        audit_files: list[str],
-    ) -> str:
-        """The shared seatbelt: branch, mutate, done-check, merge or revert."""
-        if await self._dirty():
-            return "error: working tree is dirty; refusing to self-edit"
+    async def _guarded_restart(self, rationale: str) -> str:
         base = (await self._git("rev-parse", "HEAD")).strip()
-        branch = f"selfedit-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
-        await self._git("checkout", "-b", branch)
-        try:
-            await mutate()
-            await self._git("add", "-A")
-            await self._git("commit", "--allow-empty", "-m", f"self-edit: {rationale}")
-            failure = await self._run_checks()
-        except Exception:
-            await self._abandon(branch, base)
-            raise
+        failure = await self._run_checks()
         if failure is not None:
-            await self._abandon(branch, base)
-            self._audit.record("self_edit", outcome="check_failed", files=audit_files)
-            return f"error: done-check failed, edit reverted\n{failure}"
-        await self._git("checkout", "-")
-        await self._git("merge", "--ff-only", branch)
-        await self._git("branch", "-d", branch)
+            self._audit.record("restart", outcome="check_failed")
+            return f"error: done-check failed; your edits are kept.\n{failure}"
+        committed = await self._commit_if_dirty(rationale, base)
+        self._audit.record(
+            "restart", outcome="restarting", rationale=rationale, committed=committed
+        )
+        logger.info("restart approved (%s); committed=%s", rationale, committed)
+        self._restart()
+        if committed:
+            return "done-check green; committed and restarting into the new code"
+        return "done-check green; no repo changes, restarting"
+
+    async def _commit_if_dirty(self, rationale: str, base: str) -> bool:
+        """Commit tracked working-tree changes and drop a rollback marker.
+
+        Returns whether anything was committed. Gitignored writes (``data``,
+        ``secrets``, ``config.yaml``, off-repo) never enter the commit, so they
+        are unversioned — the rollback marker only rewinds repo files (#198).
+        """
+        if not await self._repo_dirty():
+            return False
+        await self._git("add", "-A")
+        await self._git("commit", "-m", f"self-edit: {rationale}")
         marker = {"rollback_to": base, "rationale": rationale}
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
-        self._audit.record(
-            "self_edit", outcome="merged", files=audit_files, rationale=rationale
-        )
-        logger.info("self-edit merged (%s); restarting", rationale)
-        self._restart()
-        return "self-edit applied; restarting into the new code"
-
-    async def _run_installer(self, script: Path, env: dict[str, str]) -> None:
-        """Run one install.sh with the given params (arg list, no shell)."""
-        process = await asyncio.create_subprocess_exec(
-            "bash",
-            str(self._root / script),
-            cwd=self._root,
-            env={**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output, _ = await process.communicate()
-        if process.returncode != 0:
-            tail = output.decode(errors="replace")[-4000:]
-            raise RuntimeError(f"installer {script} failed:\n{tail}")
+        return True
 
     async def _run_checks(self) -> str | None:
         """Run every check command; return combined output on first failure."""
         for cmd in self._checks:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=self._root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            output, _ = await process.communicate()
-            if process.returncode != 0:
-                return f"$ {' '.join(cmd)}\n{output.decode(errors='replace')[-4000:]}"
+            code, output = await asyncio.to_thread(_capture, cmd, self._root)
+            if code != 0:
+                return f"$ {' '.join(cmd)}\n{output[-4000:]}"
         return None
 
-    async def _abandon(self, branch: str, base: str) -> None:
-        await self._git("checkout", "-")
-        await self._git("branch", "-D", branch)
-        await self._git("reset", "--hard", base)
-        # A mutation that raised mid-run (e.g. an installer that copied a
-        # skill, then aborted) leaves untracked files reset --hard won't
-        # touch. The seatbelt entry guaranteed a clean tree, so clean -fd
-        # only removes those; -x is omitted so gitignored config/data stay.
-        await self._git("clean", "-fd")
-
-    async def _dirty(self) -> bool:
+    async def _repo_dirty(self) -> bool:
         # The rollback marker is the pipeline's own runtime state, written
-        # post-merge and normally cleared on the next healthy boot. If it
-        # lingers (recovery skipped, crash), it must not count as "dirty" and
-        # refuse every future self-edit — the state that stranded the mini.
-        # `.gitignore` also lists it so human `git status` stays clean; this
-        # filter makes the guard robust even without that entry.
+        # post-commit and normally cleared on the next healthy boot. If it
+        # lingers (recovery skipped, crash), it must not count as a change and
+        # commit an empty marker-only edit. `.gitignore` also lists it so human
+        # `git status` stays clean; this filter is belt-and-suspenders.
         lines = (await self._git("status", "--porcelain")).splitlines()
         return any(line[3:].strip() != MARKER_NAME for line in lines if line.strip())
 
     async def _git(self, *args: str) -> str:
-        process = await asyncio.create_subprocess_exec(
-            "git",
-            *args,
-            cwd=self._root,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        output, _ = await process.communicate()
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"git {' '.join(args)} failed: {output.decode(errors='replace')}"
-            )
-        return output.decode()
-
-
-def _reject_path(path: str) -> str | None:
-    p = Path(path)
-    if p.is_absolute() or ".." in p.parts:
-        return f"path escapes the harness: {path}"
-    if p.parts and p.parts[0] in FORBIDDEN_PREFIXES:
-        return f"path is off-limits to self-edit: {path}"
-    return None
+        code, output = await asyncio.to_thread(_capture, ("git", *args), self._root)
+        if code != 0:
+            raise RuntimeError(f"git {' '.join(args)} failed: {output}")
+        return output

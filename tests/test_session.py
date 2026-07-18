@@ -134,12 +134,12 @@ async def test_run_turn_commits_but_does_not_fire_restart(
 
     registry = ToolRegistry()
 
-    async def fake_self_edit() -> str:
+    async def fake_restart() -> str:
         controller.request()
-        return "self-edit applied; restarting"
+        return "restarting into the new code"
 
     registry.register(
-        Tool(ToolSpec(name="self_edit", description="", parameters={}), fake_self_edit)
+        Tool(ToolSpec(name="restart", description="", parameters={}), fake_restart)
     )
 
     original_append = store.append
@@ -150,7 +150,7 @@ async def test_run_turn_commits_but_does_not_fire_restart(
 
     store.append = traced_append  # type: ignore[method-assign]
 
-    provider = FakeProvider([tool_turn("self_edit", {}), text_turn("done, back soon")])
+    provider = FakeProvider([tool_turn("restart", {}), text_turn("done, back soon")])
     manager = SessionManager(
         provider=provider,
         tools_factory=lambda thread, channel: registry,
