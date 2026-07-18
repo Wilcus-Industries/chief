@@ -1,15 +1,18 @@
 """Slash commands: deterministic control plane, parsed before any model call."""
 
+from pathlib import Path
+
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
 from chief.agent.tools import ToolRegistry
 from chief.bus import EventBus
+from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
-from chief.monitors.service import ModelJudge, MonitorService
+from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory, make_session_factory
 from chief.persistence.store import MessageStore
 
@@ -29,7 +32,10 @@ def make_commands(
         max_concurrent=4,
     )
     monitors = MonitorService(
-        factory, EventBus(), _no_wake, ModelJudge(FakeProvider([]), "m")
+        factory,
+        EventBus(),
+        _no_wake,
+        Classifier(FakeProvider([]), ClassifierRegistry(Path("classifiers")), "m"),
     )
     cron = CronService(factory, _no_wake)
     commands = CommandSet(manager, monitors, cron, store=store)

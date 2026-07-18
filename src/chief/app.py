@@ -17,6 +17,7 @@ from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
 from chief.approvals import Approval
 from chief.budget import Budget
 from chief.bus import EventBus
+from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
@@ -24,7 +25,7 @@ from chief.cron.timing import parse_quiet_hours
 from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
-from chief.monitors.service import ModelJudge, MonitorService
+from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
@@ -103,10 +104,12 @@ async def _build_agent_core(
         manager, bus=bus, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
     )
-    judge = ModelJudge(
-        provider, config.models.get("cheap-judgment", config.default_model)
+    classifier = Classifier(
+        provider,
+        ClassifierRegistry(config.classifiers_dir),
+        config.models.get("default_classifier", config.default_model),
     )
-    monitors = MonitorService(factory, bus, dispatcher.handle, judge)
+    monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours)
     )

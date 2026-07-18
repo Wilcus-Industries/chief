@@ -1,7 +1,10 @@
 """Monitor service: persists monitors, watches the bus, wakes the agent.
 
 Predicates come in two kinds: ``code`` (a cheap regex over an event payload
-field) and ``model`` (a small-model yes/no judgment).
+field) and ``classifier`` (a named categorical-label classifier that fires on
+one label). The agent-facing tool exposes three forms — ``pattern`` (code),
+``instruction`` (sugar lowering to the built-in wake-judge classifier), and a
+named ``classifier`` + ``fire_label``.
 """
 
 import json
@@ -14,37 +17,13 @@ from sqlalchemy import select
 
 from chief.adapters.base import Message
 from chief.bus import Event, EventBus
+from chief.classifiers import Classifier
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
-from chief.provider.base import Completion, Provider
 
 logger = logging.getLogger(__name__)
 
 WakeAgent = Callable[[Message], Awaitable[None]]
-
-
-class ModelJudge:
-    """Small-model yes/no judgment for monitor predicates."""
-
-    def __init__(self, provider: Provider, model: str) -> None:
-        self._provider = provider
-        self._model = model
-
-    async def judge(self, instruction: str, event: Event) -> bool:
-        messages = [
-            {"role": "system", "content": "Answer with exactly YES or NO."},
-            {
-                "role": "user",
-                "content": f"{instruction}\n\nEvent:\n{json.dumps(event.payload)}",
-            },
-        ]
-        text = ""
-        async for item in self._provider.stream(
-            model=self._model, messages=messages, tools=[]
-        ):
-            if isinstance(item, Completion):
-                text = item.text
-        return text.strip().upper().startswith("YES")
 
 
 class MonitorService:
@@ -55,11 +34,11 @@ class MonitorService:
         factory: SessionFactory,
         bus: EventBus,
         wake: WakeAgent,
-        judge: ModelJudge,
+        classifier: Classifier,
     ) -> None:
         self._factory = factory
         self._wake = wake
-        self._judge = judge
+        self._classifier = classifier
         bus.subscribe(self._on_event)
 
     async def create(
@@ -108,8 +87,12 @@ class MonitorService:
         for monitor in await self.list_enabled():
             if monitor.watch_channel != event.channel:
                 continue
-            if await self._matches(monitor, event):
-                await self._fire(monitor, event)
+            # One monitor's classifier raising must not abort the sibling loop.
+            try:
+                if await self._matches(monitor, event):
+                    await self._fire(monitor, event)
+            except Exception:
+                logger.exception("monitor %s errored", monitor.id)
 
     async def _matches(self, monitor: MonitorRow, event: Event) -> bool:
         predicate: dict[str, Any] = dict(monitor.predicate)
@@ -117,8 +100,15 @@ class MonitorService:
             field = str(predicate.get("field", "text"))
             value = str(event.payload.get(field, ""))
             return re.search(str(predicate["pattern"]), value, re.I) is not None
-        if predicate.get("kind") == "model":
-            return await self._judge.judge(str(predicate["instruction"]), event)
+        if predicate.get("kind") == "classifier":
+            text = json.dumps(event.payload)
+            instruction = predicate.get("instruction")
+            if instruction is not None:
+                text = f"{instruction}\n\nEvent:\n{text}"
+            label = await self._classifier.classify(
+                str(predicate["classifier"]), text
+            )
+            return label == str(predicate["fire_label"])
         logger.warning("monitor %s has unknown predicate kind", monitor.id)
         return False
 

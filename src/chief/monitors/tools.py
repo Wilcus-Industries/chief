@@ -10,9 +10,12 @@ _SPEC = ToolSpec(
     name="monitor",
     description=(
         "Manage monitors that watch a channel and wake this thread on a match. "
-        "action=create needs `description` and exactly one of `pattern` (regex "
-        "over event text, cheap) or `instruction` (a small-model yes/no), plus "
-        "optional `watch_channel` (defaults to this thread's channel). "
+        "action=create needs `description` and exactly one of three forms: "
+        "`pattern` (regex over event text, cheap), `instruction` (a "
+        "yes/no judgment via the built-in wake-judge classifier), or "
+        "`classifier` (a named categorical classifier, which requires "
+        "`fire_label` — the label that fires the monitor). Plus optional "
+        "`watch_channel` (defaults to this thread's channel). "
         "action=list takes nothing. action=delete needs `monitor_id`."
     ),
     parameters={
@@ -22,6 +25,8 @@ _SPEC = ToolSpec(
             "description": {"type": "string"},
             "pattern": {"type": "string"},
             "instruction": {"type": "string"},
+            "classifier": {"type": "string"},
+            "fire_label": {"type": "string"},
             "watch_channel": {
                 "type": "string",
                 "description": "channel to watch; defaults to this thread's channel",
@@ -41,19 +46,35 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         description: str | None,
         pattern: str | None,
         instruction: str | None,
+        classifier: str | None,
+        fire_label: str | None,
         watch_channel: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
         if not description:
             return "error: create needs a description"
-        if (pattern is None) == (instruction is None):
-            return "error: give exactly one of pattern or instruction"
-        predicate = (
-            {"kind": "code", "field": "text", "pattern": pattern}
-            if pattern is not None
-            else {"kind": "model", "instruction": instruction}
-        )
+        forms = [pattern, instruction, classifier]
+        if sum(form is not None for form in forms) != 1:
+            return "error: give exactly one of pattern, instruction, or classifier"
+        if classifier is not None and not fire_label:
+            return "error: classifier needs a fire_label"
+        predicate: dict[str, Any]
+        if pattern is not None:
+            predicate = {"kind": "code", "field": "text", "pattern": pattern}
+        elif instruction is not None:
+            predicate = {
+                "kind": "classifier",
+                "classifier": "wake-judge",
+                "fire_label": "YES",
+                "instruction": instruction,
+            }
+        else:
+            predicate = {
+                "kind": "classifier",
+                "classifier": classifier,
+                "fire_label": fire_label,
+            }
         monitor_id = await service.create(
             description=description,
             watch_channel=watch_channel or context.channel,
@@ -78,12 +99,20 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         description: str | None = None,
         pattern: str | None = None,
         instruction: str | None = None,
+        classifier: str | None = None,
+        fire_label: str | None = None,
         watch_channel: str | None = None,
         monitor_id: Any = None,
     ) -> str:
         if action == "create":
             return await _create(
-                context, description, pattern, instruction, watch_channel
+                context,
+                description,
+                pattern,
+                instruction,
+                classifier,
+                fire_label,
+                watch_channel,
             )
         if action == "list":
             return await _list()
