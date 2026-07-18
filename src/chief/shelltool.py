@@ -41,15 +41,23 @@ def shell_label() -> str:
 
 
 def host_label() -> str:
-    """The OS the daemon runs on (``macOS 14.5`` / ``Linux``), for the system prompt.
+    """The OS the daemon runs on, for the system prompt.
 
-    Maps ``Darwin`` to ``macOS`` with its product version so the agent knows it is on a
-    Mac (BSD userland — ``sed -i ''``, ``pbcopy``, no ``apt``) versus Linux.
+    ``Darwin`` → ``macOS <ver>`` (BSD userland — ``sed -i ''``, ``pbcopy``, no ``apt``).
+    Linux → the distro's ``PRETTY_NAME`` from ``/etc/os-release`` (``Arch Linux``,
+    ``Ubuntu 22.04.4 LTS``) so the agent picks the right package manager; a bare
+    ``Linux`` if that file is absent. Any other platform reports its own name.
     """
     system = platform.system()
     if system == "Darwin":
         version = platform.mac_ver()[0]
         return f"macOS {version}".strip()
+    if system == "Linux":
+        try:
+            pretty = platform.freedesktop_os_release().get("PRETTY_NAME", "").strip()
+        except OSError:
+            pretty = ""
+        return pretty or "Linux"
     return system or "an unknown OS"
 
 

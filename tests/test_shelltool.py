@@ -111,14 +111,32 @@ def test_host_label_maps_darwin_to_macos(monkeypatch: pytest.MonkeyPatch) -> Non
     assert host_label() == "macOS 14.5"
 
 
-def test_host_label_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_label_linux_names_the_distro(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "platform.freedesktop_os_release", lambda: {"PRETTY_NAME": "Arch Linux"}
+    )
+    assert host_label() == "Arch Linux"
+
+
+def test_host_label_linux_falls_back_when_no_os_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+
+    def _raise() -> dict[str, str]:
+        raise OSError("no /etc/os-release")
+
+    monkeypatch.setattr("platform.freedesktop_os_release", _raise)
     assert host_label() == "Linux"
 
 
 def test_shell_prompt_line_names_the_os(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("platform.system", lambda: "Linux")
-    assert "Linux" in shell_prompt_line()
+    monkeypatch.setattr(
+        "platform.freedesktop_os_release", lambda: {"PRETTY_NAME": "Ubuntu 22.04"}
+    )
+    assert "Ubuntu 22.04" in shell_prompt_line()
 
 
 # ---- command execution ----------------------------------------------------------
