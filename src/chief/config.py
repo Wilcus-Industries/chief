@@ -24,6 +24,13 @@ class Config:
     socket_path: Path = Path("data/chief.sock")
     max_concurrent_sessions: int = 4
     openrouter_api_key: str = ""
+    # The OpenAI-compatible endpoint the provider streams from. Defaults to
+    # OpenRouter; override to a local proxy (e.g. claude-code-openai-server,
+    # which serves a Claude subscription in bare mode) to drive Anthropic via
+    # OAuth instead of paying per token. Caveat: such a proxy reports no dollar
+    # cost, so budget_cap_usd is inert against it. Set openrouter_api_key to the
+    # proxy's bearer (e.g. CCI_API_KEY) — it is sent verbatim as Authorization.
+    provider_base_url: str = "https://openrouter.ai/api/v1"
     gate_never: tuple[str, ...] = ()
     gate_approved: tuple[str, ...] = ()
     budget_cap_usd: float = 0.0
@@ -65,6 +72,9 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         max_concurrent_sessions=int(_env_or(raw, "max_concurrent_sessions", 4)),
         openrouter_api_key=os.environ.get(
             "OPENROUTER_API_KEY", _read_secret(Path("secrets/openrouter_api_key"))
+        ),
+        provider_base_url=str(
+            _env_or(raw, "provider_base_url", "https://openrouter.ai/api/v1")
         ),
         gate_never=tuple(gate.get("never") or ()),
         gate_approved=tuple(gate.get("approved") or ()),
