@@ -137,6 +137,8 @@ def validate(root: Path) -> list[str]:
     """
     problems: list[str] = []
     for path in sorted(root.glob("*.md")):
+        if path.name == "README.md":
+            continue
         problems.extend(_validate_classifier(path))
     return problems
 
