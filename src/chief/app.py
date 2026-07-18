@@ -114,7 +114,9 @@ async def _build_agent_core(
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
     """Assemble every core service; ``provider`` overrides OpenRouter (tests)."""
-    provider = provider or OpenRouterProvider(config.openrouter_api_key)
+    provider = provider or OpenRouterProvider(
+        config.openrouter_api_key, temperature=config.temperature
+    )
     engine, factory, store = await build_persistence(config)
     gate = build_gate(config)
     skills = SkillLibrary(config.skills_dir)

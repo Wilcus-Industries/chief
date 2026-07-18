@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from chief.config import load_config, merge_config
+from chief.config import ConfigError, load_config, merge_config
 from chief.config_apply import main as config_apply_main
 
 
@@ -46,6 +46,54 @@ def test_extra_model_roles_survive_alongside_default(tmp_path: Path) -> None:
     config = load_config(path)
     assert config.models["compaction"] == "test/cheap"
     assert config.default_model == "test/model"
+
+
+def test_owner_handles_bare_numeric_scalar_raises_clear_error(
+    tmp_path: Path,
+) -> None:
+    """The exact mini boot-loop: a bare ``+1...`` handle parses as a YAML int
+    (dropping the ``+``). Old code hit ``tuple(int)`` and crashed deep in boot.
+    Coercing it would scope to the wrong chat, so raise an actionable error.
+    """
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  owner_handles: +16507321162\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_owner_handles_single_string_coerces_to_tuple(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  owner_handles: '+1'\n")
+    assert load_config(path).imessage_owner_handles == ("+1",)
+
+
+def test_owner_handles_list_and_missing(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  owner_handles:\n    - '+1'\n    - '+2'\n")
+    assert load_config(path).imessage_owner_handles == ("+1", "+2")
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("imessage:\n  enabled: true\n")
+    assert load_config(empty).imessage_owner_handles == ()
+
+
+def test_owner_handles_bad_shape_raises_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  owner_handles:\n    a: 1\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_temperature_defaults_to_zero(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "missing.yaml").temperature == 0.0
+
+
+def test_temperature_override_and_not_leaked_into_models(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("models:\n  default: test/model\n  temperature: 0.7\n")
+    config = load_config(path)
+    assert config.temperature == 0.7
+    assert config.default_model == "test/model"
+    assert "temperature" not in config.models
 
 
 def test_merge_config_creates_and_deep_merges(tmp_path: Path) -> None:
