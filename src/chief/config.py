@@ -2,7 +2,7 @@
 
 Models ship with exactly one role — ``default``. The agent invents further
 roles via self-config; core never hardcodes any (``downgrade`` and
-``cheap-judgment`` are honored when present, never required).
+``default_classifier`` are honored when present, never required).
 """
 
 import os
