@@ -31,6 +31,7 @@ from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
+from chief.shelltool import ShellService, shell_prompt_line
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
 from chief.toolset import register_native_tools
@@ -49,7 +50,7 @@ __all__ = ["App", "build_app"]
 
 
 async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
-    prompt = system_prompt() + skills.prompt_lines()
+    prompt = system_prompt() + skills.prompt_lines() + shell_prompt_line()
     if not await store.has_sessions():
         prompt += ONBOARDING_SUFFIX
     return prompt
@@ -121,6 +122,11 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     core = await _build_agent_core(config, provider, store, factory, gate, skills)
 
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
+    shell_service = ShellService(
+        workspace_dir=str(Path.cwd()),
+        timeout_seconds=config.shell_timeout_seconds,
+        output_limit=config.shell_output_limit,
+    )
     register_native_tools(
         core.registry,
         manager=core.manager,
@@ -128,6 +134,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         cron_service=core.cron,
         selfedit_pipeline=selfedit_pipeline,
         skills=skills,
+        shell_service=shell_service,
         provider=provider,
         agents_dir=config.agents_dir,
         default_model=config.default_model,
@@ -153,4 +160,5 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         mcp_manager=mcp_manager,
         mcp_configs=mcp_configs,
         imessage_adapter=adapters.imessage,
+        shell_service=shell_service,
     )
