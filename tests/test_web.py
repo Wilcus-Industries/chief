@@ -1,6 +1,7 @@
 """Web UI: auth, chat send, SSE frames, monitor list."""
 
 import asyncio
+from pathlib import Path
 
 import httpx
 import pytest
@@ -10,7 +11,8 @@ from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
 from chief.agent.tools import ToolRegistry
 from chief.bus import EventBus
-from chief.monitors.service import ModelJudge, MonitorService
+from chief.classifiers import Classifier, ClassifierRegistry
+from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.web.adapter import WebAdapter
@@ -48,7 +50,7 @@ def web(engine: AsyncEngine) -> WebParts:
         factory,
         EventBus(),
         _no_wake,
-        ModelJudge(FakeProvider([]), "m"),
+        Classifier(FakeProvider([]), ClassifierRegistry(Path("classifiers")), "m"),
     )
     store = MessageStore(factory)
     manager = SessionManager(
