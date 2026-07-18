@@ -34,6 +34,7 @@ class Config:
     web_password: str = ""
     skills_dir: Path = Path("skills")
     agents_dir: Path = Path("agents")
+    classifiers_dir: Path = Path("classifiers")
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     packages_dir: Path = Path("packages")
     packages_repo: str = "https://github.com/CrazyWillBear/chief-packages"
@@ -81,6 +82,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         ),
         skills_dir=Path(_env_or(raw, "skills_dir", "skills")),
         agents_dir=Path(_env_or(raw, "agents_dir", "agents")),
+        classifiers_dir=Path(_env_or(raw, "classifiers_dir", "classifiers")),
         mcp_servers=dict(raw.get("mcp_servers") or {}),
         packages_dir=Path(_env_or(raw, "packages_dir", "packages")),
         packages_repo=str(_env_or(raw, "packages_repo", Config().packages_repo)),

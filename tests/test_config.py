@@ -48,6 +48,25 @@ def test_extra_model_roles_survive_alongside_default(tmp_path: Path) -> None:
     assert config.default_model == "test/model"
 
 
+def test_default_classifier_role_survives_alongside_default(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "models:\n  default: test/model\n  default_classifier: test/cheap\n"
+    )
+    config = load_config(path)
+    assert config.models["default_classifier"] == "test/cheap"
+    assert config.default_model == "test/model"
+
+
+def test_classifiers_dir_default_and_override(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "missing.yaml").classifiers_dir == Path(
+        "classifiers"
+    )
+    path = tmp_path / "config.yaml"
+    path.write_text("classifiers_dir: custom/dir\n")
+    assert load_config(path).classifiers_dir == Path("custom/dir")
+
+
 def test_merge_config_creates_and_deep_merges(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     merge_config({"imessage": {"enabled": True}}, path)
