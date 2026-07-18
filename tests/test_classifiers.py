@@ -15,6 +15,7 @@ from chief.classifiers import (
     ClassifierDef,
     ClassifierError,
     ClassifierRegistry,
+    _match_label,
     validate,
 )
 
@@ -114,6 +115,13 @@ async def test_model_resolution_falls_back_to_default(tmp_path: Path) -> None:
     classifier = Classifier(provider, registry, "default/model")
     assert await classifier.classify("wake-judge", "x") == "NO"
     assert provider.models[0] == "default/model"
+
+
+def test_match_label_prefers_longest_prefix() -> None:
+    labels = ("SPAM", "SPAM_URGENT")
+    assert _match_label("SPAM_URGENT!", labels) == "SPAM_URGENT"
+    assert _match_label("SPAM here", labels) == "SPAM"
+    assert _match_label("SPAM", labels) == "SPAM"  # exact pass still first
 
 
 def test_validate_flags_malformed_definitions(tmp_path: Path) -> None:

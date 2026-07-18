@@ -122,7 +122,7 @@ def _match_label(reply: str, labels: tuple[str, ...]) -> str | None:
     for label in labels:
         if norm == label.upper():
             return label
-    for label in labels:
+    for label in sorted(labels, key=len, reverse=True):
         if norm.startswith(label.upper()):
             return label
     return None
