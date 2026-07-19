@@ -173,6 +173,9 @@ def build_adapters(
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
             restart=core.restart,
+            # Consume approval answers at the poll stage, ahead of the
+            # per-thread FIFO worker a gated turn would otherwise deadlock.
+            resolve_approval=dispatcher.resolve_approval,
         )
         dispatcher.register(imessage_adapter)
 

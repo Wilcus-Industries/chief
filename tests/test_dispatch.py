@@ -68,6 +68,27 @@ async def test_approval_answer_is_consumed_not_dispatched(
     assert provider.calls == []  # the yes never became a turn
 
 
+async def test_resolve_approval_answers_pending_card_without_a_turn(
+    store: MessageStore,
+) -> None:
+    """The public resolver (used by iMessage's poll stage to bypass its FIFO
+    worker) consumes an answer to a pending card and reports True; with no
+    card pending it reports False so the message would run a turn."""
+    provider = FakeProvider([])
+    approvals = ApprovalBroker()
+    dispatcher = Dispatcher(make_manager(provider, store), approvals=approvals)
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    assert dispatcher.resolve_approval(owner_message("yes")) is False  # no card
+    card = asyncio.create_task(
+        approvals.ask("cli:t", "ok?", lambda q: adapter.send("cli:t", q))
+    )
+    await asyncio.sleep(0.01)
+    assert dispatcher.resolve_approval(owner_message("yes")) is True
+    assert await card is Approval.ONCE
+    assert provider.calls == []
+
+
 async def test_stranger_is_logged_and_never_answered(
     engine: AsyncEngine, store: MessageStore
 ) -> None:

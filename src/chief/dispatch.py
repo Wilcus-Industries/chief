@@ -64,6 +64,19 @@ class Dispatcher:
         """The adapter serving a channel (KeyError on unknown = wiring bug)."""
         return self._adapters[channel]
 
+    def resolve_approval(self, message: Message) -> bool:
+        """Consume a message as an approval answer if a card is pending on its
+        thread; True means it answered one (and must not start a turn).
+
+        A channel whose per-thread turns run on a single serialized worker
+        (iMessage) calls this in its poll/route stage, *before* enqueuing the
+        row — so the owner's answer bypasses the head-of-line-blocked turn it
+        must unblock instead of queuing behind it (that queue-behind is the
+        approval deadlock)."""
+        if self._approvals is None:
+            return False
+        return self._approvals.resolve(message.thread_key, message.text)
+
     async def handle(self, message: Message, *, fire_restart: bool = True) -> None:
         """Run one turn for an inbound message and send the reply back.
 
@@ -71,9 +84,7 @@ class Dispatcher:
         *after* the reply is sent, so it's never lost. ``fire_restart=False``
         defers that to the caller (imessage, which must persist its inbound
         cursor first — else the row re-polls and chief answers twice)."""
-        if self._approvals and self._approvals.resolve(
-            message.thread_key, message.text
-        ):
+        if self.resolve_approval(message):
             return
         if message.sender not in (OWNER, SYSTEM):
             if self._strangers is not None:
