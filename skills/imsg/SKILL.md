@@ -8,11 +8,14 @@ description: Send outbound iMessages/SMS to any recipient and read/search conver
 `imsg` is a macOS CLI (`brew install steipete/tap/imsg`, installed by this
 package) that you drive through the **shell tool**. It is your only reliable way
 to text a **third party** and to read conversations the core adapter can't see.
+This skill documents the **v0.13.x** CLI surface — if `imsg --version` shows
+something else, check `imsg --help` before relying on exact flags.
 
 Division of labour — do not blur these:
 
-- **Inbound + replying to the owner's self-chat**: the core iMessage adapter,
-  automatically. It polls `chat.db`, runs a turn, and sends your reply back
+- **Inbound + replying to the owner** (their self-chat in self-DM mode, their
+  thread with a dedicated Apple ID): the core iMessage adapter, automatically.
+  It polls `chat.db`, runs a turn, and sends your reply back
   **auto-prefixed 🤖**. Never use `imsg` for this — see the loop rule below.
 - **Texting someone who is not the owner** (only when the owner asks): `imsg
   send`. Their replies come back `is_from_me = 0` and are handled as strangers
@@ -23,11 +26,15 @@ Division of labour — do not blur these:
 
 ## Never `imsg send` to an owner handle
 
-The 🤖 echo guard lives only on the **core adapter's** send path. An `imsg send`
-into the owner's self-chat writes an **unprefixed** `is_from_me = 1` row, which
-the adapter reads as a fresh owner message and re-dispatches — an infinite
-self-reply loop. To reply to the owner, return your turn's text normally and let
-the adapter send it. Only `imsg send --to` a **non-owner** recipient.
+The 🤖 echo guard lives only on the **core adapter's** send path. In either
+setup mode, an `imsg send` to an owner handle writes an **unprefixed** row into
+the very chat the adapter polls, which it reads as a fresh owner message and
+re-dispatches — an infinite self-reply loop. To reply to the owner, return your
+turn's text normally and let the adapter send it. Only `imsg send --to` a
+**non-owner** recipient.
+
+The shell tool also enforces this mechanically: any `imsg`/`osascript` command
+that references an owner handle is refused before it runs.
 
 ## Sending
 
