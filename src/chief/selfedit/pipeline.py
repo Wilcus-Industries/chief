@@ -2,10 +2,14 @@
 
 The agent edits its working tree freely with the file tools; nothing is live
 until ``restart``. ``restart`` runs the full done-check against the working
-tree, and only on green commits the tree, writes a rollback marker, and reboots
-the daemon into the new code (a boot failure rolls back to the recorded commit,
-see ``recovery.py``). On red the edits are **kept in place** and the failure is
-returned so the agent fixes forward. Restarts are serialized behind a lock.
+tree, then loads the live ``config.yaml`` (the done-check only exercises
+fixture configs, so a bad real value would otherwise pass every check and
+boot-loop launchd — boot-side rollback can't rescue a config-only change), and
+only on both green commits the tree, writes a rollback marker, and reboots the
+daemon into the new code (a boot failure rolls back to the recorded commit,
+see ``recovery.py``). On red — check or config — the edits are **kept in
+place** and the failure is returned so the agent fixes forward. Restarts are
+serialized behind a lock.
 
 Subprocesses run with explicit argument lists (never a shell), so rationales
 cannot inject commands.
@@ -19,6 +23,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from chief.audit import AuditLog
+from chief.config import load_config
 from chief.selfedit.recovery import MARKER_NAME
 
 logger = logging.getLogger(__name__)
@@ -52,11 +57,16 @@ class SelfEditPipeline:
         audit: AuditLog,
         restart: Callable[[], None],
         checks: tuple[tuple[str, ...], ...] = DEFAULT_CHECKS,
+        validate_config: Callable[[], object] = load_config,
     ) -> None:
         self._root = repo_root
         self._audit = audit
         self._restart = restart
         self._checks = checks
+        # Load the live config.yaml before restart so a bad real value aborts
+        # here instead of boot-looping launchd. The done-check only exercises
+        # fixture configs; load_config is side-effect-free (injectable for tests).
+        self._validate_config = validate_config
         # Serialize check/commit/re-exec so concurrent sessions can't interleave
         # a restart (PRD #198). The deferred re-exec still races other sessions'
         # writes between restarts — an accepted, documented tradeoff.
@@ -79,6 +89,14 @@ class SelfEditPipeline:
         if failure is not None:
             self._audit.record("restart", outcome="check_failed")
             return f"error: done-check failed; your edits are kept.\n{failure}"
+        config_error = await self._validate_live_config()
+        if config_error is not None:
+            self._audit.record("restart", outcome="config_invalid")
+            return (
+                "error: config.yaml is invalid; your edits are kept and the "
+                "daemon was NOT restarted (a bad config would boot-loop the "
+                f"reboot).\n{config_error}"
+            )
         committed = await self._commit_if_dirty(rationale, base)
         self._audit.record(
             "restart", outcome="restarting", rationale=rationale, committed=committed
@@ -103,6 +121,19 @@ class SelfEditPipeline:
         marker = {"rollback_to": base, "rationale": rationale}
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
         return True
+
+    async def _validate_live_config(self) -> str | None:
+        """Load the live config off the event loop; return the error on failure.
+
+        A config-only change writes no rollback marker (marker is commit-only)
+        and git can't rewind gitignored ``config.yaml`` anyway, so boot-side
+        recovery can't save a bad-config reboot — this pre-restart gate is the
+        only prevention. Any load exception aborts the restart."""
+        try:
+            await asyncio.to_thread(self._validate_config)
+        except Exception as exc:
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
     async def _run_checks(self) -> str | None:
         """Run every check command; return combined output on first failure."""

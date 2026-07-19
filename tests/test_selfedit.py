@@ -4,12 +4,14 @@
 import asyncio
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from chief.agent.tools import ToolRegistry
 from chief.audit import AuditLog
+from chief.config import ConfigError
 from chief.filetools import register_file_tools
 from chief.provider.base import ToolCall
 from chief.selfedit.pipeline import SelfEditPipeline
@@ -51,11 +53,18 @@ class RestartSpy:
 
 
 def make_pipeline(
-    repo: Path, tmp_path: Path, check: str
+    repo: Path,
+    tmp_path: Path,
+    check: str,
+    validate: Callable[[], object] = lambda: None,
 ) -> tuple[SelfEditPipeline, RestartSpy]:
     restart = RestartSpy()
     pipeline = SelfEditPipeline(
-        repo, AuditLog(tmp_path / "audit.jsonl"), restart, checks=((check,),)
+        repo,
+        AuditLog(tmp_path / "audit.jsonl"),
+        restart,
+        checks=((check,),),
+        validate_config=validate,
     )
     return pipeline, restart
 
@@ -93,6 +102,43 @@ async def test_noop_restart_is_allowed(repo: Path, tmp_path: Path) -> None:
     assert "restarting" in result
     assert restart.called
     assert not (repo / MARKER_NAME).exists()
+    assert "self-edit" not in git(repo, "log", "--oneline")
+
+
+async def test_bad_config_aborts_restart_and_keeps_edits(
+    repo: Path, tmp_path: Path
+) -> None:
+    # The done-check runs against fixtures; a bad *real* config.yaml value
+    # passes every check then boot-loops launchd. Validate the live config
+    # after the check and before commit/restart: abort, keep the edit, no
+    # commit, no restart — mirror the red-check "edits kept" contract.
+    def bad_config() -> object:
+        raise ConfigError("owner_handles must be a quoted handle")
+
+    pipeline, restart = make_pipeline(repo, tmp_path, "true", validate=bad_config)
+    (repo / "greeting.txt").write_text("edited\n")
+    result = await pipeline.restart("edit the greeting")
+    assert result.startswith("error: config")
+    assert not restart.called
+    assert (repo / "greeting.txt").read_text() == "edited\n"  # kept, not reverted
+    assert "self-edit" not in git(repo, "log", "--oneline")
+
+
+async def test_real_bad_config_yaml_aborts_restart(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End-to-end via the default validator (load_config): a bare-int
+    # owner_handles (YAML dropping the '+') is exactly the value that
+    # boot-looped the mini. It must abort the restart here instead.
+    (repo / "config.yaml").write_text("imessage:\n  owner_handles: 6507321162\n")
+    restart = RestartSpy()
+    pipeline = SelfEditPipeline(
+        repo, AuditLog(tmp_path / "audit.jsonl"), restart, checks=(("true",),)
+    )
+    monkeypatch.chdir(repo)
+    result = await pipeline.restart("some edit")
+    assert result.startswith("error: config")
+    assert not restart.called
     assert "self-edit" not in git(repo, "log", "--oneline")
 
 

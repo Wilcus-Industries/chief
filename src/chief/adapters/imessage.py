@@ -85,6 +85,7 @@ class IMessageAdapter(Adapter):
         poll_seconds: float = 2.0,
         run_jxa: RunJxa = _run_jxa_subprocess,
         restart: RestartBoundary | None = None,
+        resolve_approval: Callable[[Message], bool] | None = None,
     ) -> None:
         self._on_message = on_message
         self._db_path = db_path
@@ -93,6 +94,11 @@ class IMessageAdapter(Adapter):
         self._poll_seconds = poll_seconds
         self._run_jxa = run_jxa
         self._restart = restart
+        # Drain an approval answer at the poll stage, ahead of the per-thread
+        # FIFO worker: a gated turn suspends its worker awaiting the owner's
+        # answer, so that answer must bypass the worker or it deadlocks the
+        # whole thread until the card times out (fail-closed deny).
+        self._resolve_approval = resolve_approval
         self._cursor = 0
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
@@ -147,10 +153,13 @@ class IMessageAdapter(Adapter):
             self._cursor = rowid
             self._save_cursor()
             message = self._map(sender, text, from_me, in_group, has_room, in_self)
-            if message is not None and not self._dedup.is_duplicate(
+            if message is None or self._dedup.is_duplicate(
                 (message.sender, message.text), date
             ):
-                self._enqueue(message)
+                continue
+            if self._resolve_approval is not None and self._resolve_approval(message):
+                continue  # answered a pending card — bypass the FIFO worker
+            self._enqueue(message)
 
     def _enqueue(self, message: Message) -> None:
         """Route a message to its thread's FIFO queue, spawning a worker the

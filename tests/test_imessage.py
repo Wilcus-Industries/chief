@@ -116,6 +116,8 @@ class Harness:
         # Optional hook run inside on_message — a self-edit turn requesting a
         # restart is modelled by having it call ``controller.request()``.
         self.on_deliver: Callable[[Message], Awaitable[None]] | None = None
+        # Optional poll-stage approval resolver (dispatcher.resolve_approval).
+        self.resolve_approval: Callable[[Message], bool] | None = None
 
     def adapter(self) -> IMessageAdapter:
         async def on_message(message: Message) -> None:
@@ -134,6 +136,7 @@ class Harness:
             owner_handles=(OWNER,),
             run_jxa=run_jxa,
             restart=self.restart,
+            resolve_approval=self.resolve_approval,
         )
 
 
@@ -338,6 +341,55 @@ async def test_same_thread_runs_in_arrival_order(tmp_path: Path) -> None:
     await adapter.poll_once()
     await adapter.drain()
     assert [m.text for m in harness.delivered] == ["first", "second"]
+
+
+async def test_approval_answer_bypasses_blocked_worker(tmp_path: Path) -> None:
+    """A gated turn suspends its thread's FIFO worker awaiting the owner's
+    approval. The answer arrives on the SAME thread — it must resolve at the
+    poll stage (bypassing the busy worker), not queue behind the very turn it
+    unblocks. Otherwise the thread deadlocks until the card times out."""
+    harness = Harness(tmp_path)
+    release = asyncio.Event()
+    resolved: list[str] = []
+
+    async def on_deliver(message: Message) -> None:
+        if message.text == "run the tool":
+            await release.wait()  # gated turn suspended awaiting approval
+
+    def resolve_approval(message: Message) -> bool:
+        if message.text == "yes":
+            resolved.append(message.thread_key)
+            release.set()  # the answer unblocks the suspended turn
+            return True
+        return False
+
+    harness.on_deliver = on_deliver
+    harness.resolve_approval = resolve_approval
+    harness.store.add_message(OWNER, "run the tool", from_me=1, chat=OWNER, date=1)
+    adapter = harness.adapter()
+    await adapter.poll_once()  # enqueues the gated turn; worker now blocked
+
+    harness.store.add_message(OWNER, "yes", from_me=1, chat=OWNER, date=2)
+    # The answer resolves even though the worker is stuck on the earlier turn.
+    await asyncio.wait_for(adapter.poll_once(), timeout=1.0)
+    assert resolved == [OWNER]
+    # The answer bypassed the worker (never delivered as a turn), and the
+    # unblocked gated turn now completes.
+    await asyncio.wait_for(adapter.drain(), timeout=1.0)
+    assert [m.text for m in harness.delivered] == ["run the tool"]
+    await adapter.stop()
+
+
+async def test_non_answer_still_runs_a_turn(tmp_path: Path) -> None:
+    """When no card is pending the resolver returns False, so the message
+    routes to its worker and runs a turn as normal."""
+    harness = Harness(tmp_path)
+    harness.resolve_approval = lambda message: False
+    harness.store.add_message(OWNER, "just chatting", from_me=1, chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["just chatting"]
 
 
 async def test_poll_once_returns_without_awaiting_turn(tmp_path: Path) -> None:
