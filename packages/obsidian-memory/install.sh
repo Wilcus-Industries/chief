@@ -14,7 +14,7 @@ fi
 mkdir -p "skills/obsidian-memory"
 
 # Write skill file (stub)
-cat > "skills/obsidian-memory" <<EOF
+cat > "skills/obsidian-memory/skill.md" <<EOF
 # obsidian-memory skill
 # This is a placeholder. The real logic is in the provider configuration.
 EOF
@@ -34,6 +34,7 @@ mkdir -p data
 if [[ ! -f "data/installed.yaml" ]]; then
   echo "{}" > "data/installed.yaml"
 fi
-yq eval ".obsidian-memory = {\"source\": \"bundled\"}" -i "data/installed.yaml"
+echo "obsidian-memory:" >> "data/installed.yaml"
+echo "  source: bundled" >> "data/installed.yaml"
 
 echo "Installed obsidian-memory for vault $VAULT_PATH."
