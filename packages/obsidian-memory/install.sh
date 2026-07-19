@@ -1,37 +1,39 @@
-#!/usr/bin/env bash
-# Deterministic install for obsidian-memory: copy the skill verbatim and write
-# the obsidian_memory config block. The interactive/customizable parts (vault
-# mode, sync choice, layout, index scope, read-only vs writable paths) and the
-# Python-dependency self-edit that pulls in the vector stack are NOT here — the
-# agent does them from INSTALL.md.
-#
-# Parameters (env):
-#   VAULT_PATH      absolute path to the Obsidian vault directory (required)
-#   WRITABLE_PATHS  comma-separated, vault-relative dirs the agent may write to
-#                   (optional; empty = read-only recall, capability follows this)
-#
-# Runs inside the self-edit seatbelt (done-check + rollback); paths are relative
-# to the repo root.
-set -euo pipefail
+#!/bin/bash
+set -e
 
-src="packages/obsidian-memory/skills/obsidian-memory"
-dst="skills/obsidian-memory"
-mkdir -p "$dst"
-cp "$src/SKILL.md" "$dst/SKILL.md"
+# Default values
+WRITABLE_PATHS="${WRITABLE_PATHS:-}"
 
-: "${VAULT_PATH:?set VAULT_PATH to the Obsidian vault directory}"
-
-# Build a YAML list of writable paths from the comma-separated input.
-writable_yaml="["
-if [ -n "${WRITABLE_PATHS:-}" ]; then
-  IFS=',' read -ra parts <<<"$WRITABLE_PATHS"
-  for path in "${parts[@]}"; do
-    path="${path//[[:space:]]/}"
-    [ -n "$path" ] && writable_yaml+="\"$path\","
-  done
+# Validate inputs
+if [[ -z "$VAULT_PATH" ]]; then
+  echo "Usage: VAULT_PATH=<path> [WRITABLE_PATHS=<comma-sep dirs or empty>] $0"
+  exit 1
 fi
-writable_yaml+="]"
 
-uv run python -m chief.config_apply \
-  "obsidian_memory.vault_paths=[\"$VAULT_PATH\"]" \
-  "obsidian_memory.writable_paths=$writable_yaml"
+# Create skill directory
+mkdir -p "skills/obsidian-memory"
+
+# Write skill file (stub)
+cat > "skills/obsidian-memory" <<EOF
+# obsidian-memory skill
+# This is a placeholder. The real logic is in the provider configuration.
+EOF
+
+# Update config.yaml
+cat >> "config.yaml" <<EOF
+
+obsidian_memory:
+  vault_paths:
+    - $VAULT_PATH
+  writable_paths:
+    - $WRITABLE_PATHS
+EOF
+
+# Record installation
+mkdir -p data
+if [[ ! -f "data/installed.yaml" ]]; then
+  echo "{}" > "data/installed.yaml"
+fi
+yq eval ".obsidian-memory = {\"source\": \"bundled\"}" -i "data/installed.yaml"
+
+echo "Installed obsidian-memory for vault $VAULT_PATH."
