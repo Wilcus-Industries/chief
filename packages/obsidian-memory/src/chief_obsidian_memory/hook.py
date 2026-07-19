@@ -21,9 +21,11 @@ if TYPE_CHECKING:
     from chief_obsidian_memory.index import SearchHit
 
 STANDING_REMINDER = (
-    "You keep an Obsidian memory vault. Recall from it with the obsidian-memory "
-    "skill and the `chief-memory` CLI, and save durable facts the owner shares "
-    "as vault notes when your writable paths allow it."
+    "You keep an Obsidian memory vault. To recall, call the `shell` tool with "
+    "`uv run chief-memory search \"<query>\"` — it is a shell command, NOT a "
+    "native tool; there is no `obsidian-memory`/`memory_search` tool to call. "
+    "See the obsidian-memory skill. Save durable facts the owner shares as vault "
+    "notes when your writable paths allow it."
 )
 
 
