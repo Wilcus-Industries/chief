@@ -14,6 +14,19 @@ from typing import Any, NamedTuple
 from chief_obsidian_memory.chunk import chunk_note, iter_notes
 from chief_obsidian_memory.config import MemorySettings
 
+# One loaded model2vec model per name, reused across VaultIndex instances (the
+# ambient hook builds a fresh index each firing; reloading weights every turn
+# would waste seconds and memory).
+_MODEL_CACHE: dict[str, Any] = {}
+
+
+def _load_model(name: str) -> Any:
+    if name not in _MODEL_CACHE:
+        from model2vec import StaticModel
+
+        _MODEL_CACHE[name] = StaticModel.from_pretrained(name)
+    return _MODEL_CACHE[name]
+
 
 class SearchHit(NamedTuple):
     """One search result: the note it came from, its heading, the chunk text,
@@ -106,9 +119,7 @@ class VaultIndex:
 
     def _get_model(self) -> Any:
         if self._model is None:
-            from model2vec import StaticModel
-
-            self._model = StaticModel.from_pretrained(self._settings.embed_model)
+            self._model = _load_model(self._settings.embed_model)
         return self._model
 
     def _open(self) -> Any:
