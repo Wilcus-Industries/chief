@@ -55,3 +55,9 @@ def test_read_soul_directory_is_empty_not_crash(tmp_path: Path) -> None:
     soul = tmp_path / "Soul.md"
     soul.mkdir()
     assert read_soul(soul_path=soul) == ""
+
+
+def test_default_prompt_teaches_verify_before_explain() -> None:
+    # Anti-confabulation rule: check the mechanism (source, audit log) before
+    # explaining a failure of chief's own tooling — never invent one.
+    assert "verify the mechanism" in DEFAULT_SYSTEM_PROMPT

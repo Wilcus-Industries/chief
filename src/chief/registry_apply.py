@@ -7,16 +7,50 @@ package). Idempotent — re-running an install updates the same entry::
 
     python -m chief.registry_apply obsidian-memory --source bundled
 
-``--remove`` deregisters (the UNINSTALL.md counterpart).
+``--remove`` deregisters (the UNINSTALL.md counterpart). The read side lives
+here too: :func:`load_installed` is the one registry loader boot, discovery,
+and verify all share.
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 INSTALLED_REGISTRY = Path("data/installed.yaml")
+
+
+def load_installed(path: Path = INSTALLED_REGISTRY) -> dict[str, object]:
+    """The install registry: ``{name: {source, commit}}`` (empty if absent).
+
+    A registry that exists but doesn't parse to a mapping degrades to ``{}`` —
+    which silently turns every package's hooks off at once — so that
+    degradation must be LOUD: an ERROR naming the file, never a quiet empty."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError:
+        logger.error(
+            "registry %s is not valid yaml — treating it as EMPTY, so every "
+            "package's hooks are OFF until it is fixed (rewrite it with "
+            "chief.registry_apply)", path, exc_info=True,
+        )
+        return {}
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        logger.error(
+            "registry %s parsed to %s, not a mapping — treating it as EMPTY, "
+            "so every package's hooks are OFF until it is fixed (rewrite it "
+            "with chief.registry_apply)", path, type(data).__name__,
+        )
+        return {}
+    return data
 
 
 def apply(

@@ -32,8 +32,8 @@ from chief.monitors.service import MonitorService
 from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
-from chief.pkgcli import INSTALLED_REGISTRY, _load_installed
 from chief.provider.base import Provider
+from chief.registry_apply import INSTALLED_REGISTRY, load_installed
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.shellprompt import shell_prompt_line
@@ -81,7 +81,7 @@ async def _build_agent_core(
     hooks = HookRegistry()
     load_hooks(
         library=PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
-        installed=_load_installed(INSTALLED_REGISTRY),
+        installed=load_installed(INSTALLED_REGISTRY),
         registry=hooks,
         provider=provider,
         models=config.models,
