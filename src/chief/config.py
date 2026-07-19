@@ -87,6 +87,8 @@ class Config:
     packages_repo: str = "https://github.com/CrazyWillBear/chief-packages"
     shell_timeout_seconds: float = 20.0
     shell_output_limit: int = 30_000
+    hooks_timeout_seconds: float = 10.0
+    hooks_disabled: tuple[str, ...] = ()
     imessage_enabled: bool = False
     imessage_owner_handles: tuple[str, ...] = ()
     imessage_db_path: Path = field(
@@ -99,11 +101,20 @@ class Config:
         return self.models["default"]
 
 
+def load_raw(path: Path = Path("config.yaml")) -> dict[str, Any]:
+    """Parse config.yaml into a raw mapping (``{}`` when the file is absent).
+
+    The single yaml read the loader and the hooks phase both go through, so a
+    package's ``config_keys`` are sliced from the exact same source of truth.
+    """
+    if path.exists():
+        return yaml.safe_load(path.read_text()) or {}
+    return {}
+
+
 def load_config(path: Path = Path("config.yaml")) -> Config:
     """Load config.yaml (if present), then apply env overrides."""
-    raw: dict[str, Any] = {}
-    if path.exists():
-        raw = yaml.safe_load(path.read_text()) or {}
+    raw = load_raw(path)
     raw_models = dict(raw.get("models") or {})
     temperature = float(raw_models.pop("temperature", 0.0))
     models = dict(Config().models) | raw_models
@@ -111,6 +122,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     budget = raw.get("budget") or {}
     imessage = raw.get("imessage") or {}
     shell = raw.get("shell") or {}
+    hooks = raw.get("hooks") or {}
     return Config(
         models=models,
         temperature=temperature,
@@ -143,6 +155,8 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         packages_repo=str(_env_or(raw, "packages_repo", Config().packages_repo)),
         shell_timeout_seconds=float(shell.get("timeout_seconds", 20.0)),
         shell_output_limit=int(shell.get("output_limit", 30_000)),
+        hooks_timeout_seconds=float(hooks.get("timeout_seconds", 10.0)),
+        hooks_disabled=tuple(hooks.get("disabled") or ()),
         imessage_enabled=bool(imessage.get("enabled", False)),
         imessage_owner_handles=_as_handles(imessage.get("owner_handles")),
         imessage_db_path=Path(

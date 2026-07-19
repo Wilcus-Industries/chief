@@ -19,15 +19,19 @@ from chief.budget import Budget
 from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
-from chief.config import Config
+from chief.config import Config, load_raw
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
+from chief.hooks import HookRegistry
+from chief.hooks.loader import load_hooks
 from chief.monitors.service import MonitorService
+from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
+from chief.pkgcli import INSTALLED_REGISTRY, _load_installed
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
@@ -72,6 +76,18 @@ async def _build_agent_core(
     budget = Budget(factory, config.budget_cap_usd, config.budget_warn_ratio)
     bus = EventBus()
     registry = ToolRegistry()
+    hooks = HookRegistry()
+    load_hooks(
+        library=PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
+        installed=_load_installed(INSTALLED_REGISTRY),
+        registry=hooks,
+        provider=provider,
+        models=config.models,
+        budget=budget,
+        raw_config=load_raw(),
+        disabled=config.hooks_disabled,
+        data_root=Path("data/hooks"),
+    )
 
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)
@@ -99,6 +115,8 @@ async def _build_agent_core(
         downgrade_model=config.models.get("downgrade"),
         compactor=Compactor(provider, config.default_model),
         restart_gate=restart,
+        hooks=hooks,
+        hooks_timeout_seconds=config.hooks_timeout_seconds,
     )
     dispatcher = Dispatcher(
         manager, bus=bus, approvals=gate.approvals,
