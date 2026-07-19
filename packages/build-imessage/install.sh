@@ -10,7 +10,9 @@
 #                     (the self-chat id for self-DM mode, or the owner's phone
 #                     for a dedicated Apple ID) — see INSTALL.md step 1.
 #
-# Runs inside the self-edit seatbelt (done-check + rollback); paths are
+# The done-check gates the restart, but config.yaml is gitignored — a bad
+# config write is NOT rolled back (the pre-restart config gate is the only
+# protection). Paths are
 # relative to the repo root.
 set -euo pipefail
 
@@ -44,3 +46,7 @@ handles_yaml+="]"
 uv run python -m chief.config_apply \
   imessage.enabled=true \
   "imessage.owner_handles=$handles_yaml"
+
+# Record the install in the registry so discovery and the hooks loader see
+# it — the one bookkeeping step that must never be left to hand-editing.
+uv run python -m chief.registry_apply build-imessage --source bundled

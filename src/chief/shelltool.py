@@ -5,71 +5,17 @@ registered tool routes each call to its own thread's persistent shell by ``threa
 ``shell`` mutates the host and so is not read-only — the gate (:mod:`chief.gate`) raises
 an approval card on every command until the owner "always allow"s it, exactly like
 ``write_file``/``edit_file``/``restart``. ``ShellService`` owns the shells and is closed
-by the daemon at shutdown; ``shell_prompt_line`` tells the agent which shell dialect it
-is actually speaking.
+by the daemon at shutdown; the prompt-side labels live in :mod:`chief.shellprompt`.
 """
 
-import platform
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
-from chief.shellframe import resolve_shell
 from chief.shellhost import ShellHost
-
-#: The host shell's invariants, single-sourced so the tool description and the system
-#: prompt can't drift: the owner's real machine; chain steps in one command.
-HOST_SHELL_CONTRACT = (
-    "The shell runs directly on the owner's machine as their user, with their full "
-    "environment. Chain steps with && in one command rather than relying on separate "
-    "calls."
-)
-
-
-def shell_label() -> str:
-    """The bare name of the shell the tool will drive (``zsh``/``bash``/…).
-
-    Names the dialect for the system prompt so the agent can't assume bash on a zsh
-    host. Best-effort: ``"a shell"`` if none resolves, so prompt assembly never fails.
-    """
-    try:
-        return Path(resolve_shell()[0]).name
-    except RuntimeError:
-        return "a shell"
-
-
-def host_label() -> str:
-    """The OS the daemon runs on, for the system prompt.
-
-    ``Darwin`` → ``macOS <ver>`` (BSD userland — ``sed -i ''``, ``pbcopy``, no ``apt``).
-    Linux → the distro's ``PRETTY_NAME`` from ``/etc/os-release`` (``Arch Linux``,
-    ``Ubuntu 22.04.4 LTS``) so the agent picks the right package manager; a bare
-    ``Linux`` if that file is absent. Any other platform reports its own name.
-    """
-    system = platform.system()
-    if system == "Darwin":
-        version = platform.mac_ver()[0]
-        return f"macOS {version}".strip()
-    if system == "Linux":
-        try:
-            pretty = platform.freedesktop_os_release().get("PRETTY_NAME", "").strip()
-        except OSError:
-            pretty = ""
-        return pretty or "Linux"
-    return system or "an unknown OS"
-
-
-def shell_prompt_line() -> str:
-    """One line for the system prompt: the host OS, the shell tool, and its dialect."""
-    return (
-        f"\n\nYou are running as a daemon on {host_label()}. You have a `shell` tool "
-        f"that runs commands on the host via {shell_label()} — mind the OS and that "
-        f"dialect (not necessarily Linux or bash). {HOST_SHELL_CONTRACT} Discover and "
-        "install capability packages with it (`chief-pkg list`/`search`); see the "
-        "package-manager skill."
-    )
+from chief.shellprompt import HOST_SHELL_CONTRACT
 
 
 def format_shell_result(result: dict[str, Any]) -> str:
@@ -165,7 +111,18 @@ _SHELL_SPEC = ToolSpec(
 )
 
 
-def register_shell_tool(registry: ToolRegistry, service: ShellService) -> None:
+#: A pre-flight over the raw command string: return a refusal message to block
+#: the command, or ``None`` to let it run. Guards are mechanical seatbelts for
+#: hazards prompts alone can't be trusted to prevent (e.g. the iMessage
+#: owner-handle echo loop) — keep them few and specific.
+ShellGuard = Callable[[str], str | None]
+
+
+def register_shell_tool(
+    registry: ToolRegistry,
+    service: ShellService,
+    guards: Sequence[ShellGuard] = (),
+) -> None:
     """Expose the single ``shell`` tool, routing each call to its thread's shell.
 
     ``wants_context=True`` delivers the calling :class:`ToolContext` so one registered
@@ -178,6 +135,10 @@ def register_shell_tool(registry: ToolRegistry, service: ShellService) -> None:
         timeout: float | None = None,
         context: ToolContext | None = None,
     ) -> str:
+        for guard in guards:
+            refusal = guard(command)
+            if refusal is not None:
+                return refusal
         thread_key = context.thread_key if context is not None else "default"
         try:
             result = await service.run(thread_key, command, timeout=timeout)

@@ -9,6 +9,7 @@ neither is its own native tool. Channel- and capability-specific tools arrive la
 as package-registered tools; this is only the always-on core set.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from chief.agent.manager import SessionManager
@@ -24,7 +25,7 @@ from chief.monitors.tools import register_monitor_tools
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.tools import register_restart_tool
-from chief.shelltool import ShellService, register_shell_tool
+from chief.shelltool import ShellGuard, ShellService, register_shell_tool
 from chief.skills import SkillLibrary, register_skill_tools
 from chief.subagents import AgentRegistry, register_spawn_tool
 
@@ -43,6 +44,7 @@ def register_native_tools(
     default_model: str,
     budget: Budget,
     root: Path,
+    shell_guards: Sequence[ShellGuard] = (),
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
@@ -55,7 +57,7 @@ def register_native_tools(
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
     register_file_tools(registry, root)
-    register_shell_tool(registry, shell_service)
+    register_shell_tool(registry, shell_service, guards=shell_guards)
     register_restart_tool(registry, selfedit_pipeline)
     register_skill_tools(registry, skills)
     register_spawn_tool(

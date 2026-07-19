@@ -55,10 +55,11 @@ and config (steps 6–7), then build the first index and verify (steps 8–9).
    `VAULT_PATH="<abs vault path>" WRITABLE_PATHS="<comma-sep dirs or empty>"
    bash packages/obsidian-memory/install.sh` with the `shell` tool. It copies
    the skill and sets `obsidian_memory.vault_paths` + `.writable_paths` via
-   `chief.config_apply`. Tune `obsidian_memory.ambient_n` (recall cadence),
-   `.top_k`, `.include`/`.exclude`, and `.injection_cap_tokens` by hand if the
-   owner wants non-defaults. Record the install in `data/installed.yaml`
-   (`obsidian-memory`, `source: bundled`).
+   `chief.config_apply`, and records the install in `data/installed.yaml` via
+   `chief.registry_apply`. Tune `obsidian_memory.ambient_n` (recall cadence),
+   `.top_k`, `.include`/`.exclude`, and `.injection_cap_tokens` with
+   `uv run python -m chief.config_apply obsidian_memory.<key>=<value>` if the
+   owner wants non-defaults — never append blocks to config.yaml by hand.
 8. **Port an existing memory store (best-effort, if present).** If a `memory`
    (or similar markdown-notes) package is installed, offer to copy its notes
    into the vault so nothing is lost. The competing package stays installed and

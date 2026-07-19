@@ -19,13 +19,11 @@ from chief.shellframe import (
     resolve_shell,
 )
 from chief.shellhost import ShellHost
+from chief.shellprompt import host_label, shell_label, shell_prompt_line
 from chief.shelltool import (
     ShellService,
     format_shell_result,
-    host_label,
     register_shell_tool,
-    shell_label,
-    shell_prompt_line,
 )
 
 
@@ -349,3 +347,31 @@ async def test_registered_tool_surfaces_spawn_failure(tmp_path: Path) -> None:
     register_shell_tool(registry, service)
     out = await registry.dispatch(_call("echo hi"), ToolContext("t1", "socket"))
     assert "unavailable" in out
+
+
+async def test_shell_guard_blocks_before_execution(tmp_path: Path) -> None:
+    # A tripping guard refuses the command without ever reaching the shell
+    # (audit C1: mechanical seatbelts over the raw command string).
+    shell = ShellService(
+        workspace_dir=str(tmp_path), timeout_seconds=5.0, output_limit=10_000
+    )
+    registry = ToolRegistry()
+
+    def no_marker(command: str) -> str | None:
+        return "error: blocked by guard" if "MARKER" in command else None
+
+    register_shell_tool(registry, shell, guards=(no_marker,))
+    blocked = await registry.dispatch(
+        ToolCall(
+            id="1", name="shell", arguments={"command": "touch MARKER && echo hi"}
+        ),
+        ToolContext("t1", "socket"),
+    )
+    assert blocked == "error: blocked by guard"
+    assert not (tmp_path / "MARKER").exists()
+    allowed = await registry.dispatch(
+        ToolCall(id="2", name="shell", arguments={"command": "echo fine"}),
+        ToolContext("t1", "socket"),
+    )
+    assert "fine" in allowed
+    await shell.aclose()

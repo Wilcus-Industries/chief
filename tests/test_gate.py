@@ -126,6 +126,29 @@ async def test_always_answer_runs_and_persists_tool(tmp_path: Path) -> None:
     assert promoted == ["gray"]
 
 
+async def test_unknown_tool_errors_without_card(tmp_path: Path) -> None:
+    """A phantom tool name never raises a card and never persists (audit C2)."""
+    promoted: list[str] = []
+    gated, questions = make_gated(
+        tmp_path, Approval.ALWAYS, on_always=promoted.append
+    )
+    result = await gated.dispatch(
+        ToolCall(id="1", name="phantom", arguments={"query": "x"})
+    )
+    assert result.startswith("error: unknown tool 'phantom'")
+    # Self-correcting: names the real tools and the recovery path.
+    assert "echo" in result
+    assert "load_skill" in result
+    assert questions == []
+    assert promoted == []
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+    ]
+    assert entries[-1]["tool"] == "phantom"
+    assert entries[-1]["outcome"] == "unknown_tool"
+
+
 async def test_audit_records_each_outcome(tmp_path: Path) -> None:
     gated, _ = make_gated(tmp_path, Approval.ONCE)
     await gated.dispatch(ToolCall(id="1", name="echo", arguments={}))

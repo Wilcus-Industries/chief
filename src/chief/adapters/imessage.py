@@ -43,6 +43,41 @@ logger = logging.getLogger(__name__)
 
 BOT_PREFIX = "\U0001f916 "  # 🤖 — marks chief's replies in the shared self-chat
 
+# Shell commands that can write into Messages behind the adapter's back. The
+# adapter's own ``send()`` prefixes BOT_PREFIX so chief's replies in the shared
+# self-chat are skipped on the next poll; an out-of-band sender (the ``imsg``
+# CLI, raw osascript) writes an unprefixed row that polls back as an owner
+# message — an infinite self-reply loop. The guard below blocks that
+# mechanically; the skill-level "never imsg the owner" rule is not enough.
+_OUT_OF_BAND_SENDERS = ("imsg", "osascript")
+
+
+def owner_send_guard(
+    owner_handles: tuple[str, ...],
+) -> Callable[[str], str | None]:
+    """A shell-tool guard refusing out-of-band sends to an owner handle."""
+    handles = tuple(h.strip().lstrip("+") for h in owner_handles if h.strip())
+
+    def guard(command: str) -> str | None:
+        if not handles:
+            return None
+        lowered = command.lower()
+        if not any(sender in lowered for sender in _OUT_OF_BAND_SENDERS):
+            return None
+        for handle in handles:
+            if handle and handle in command:
+                return (
+                    "error: blocked — this command references an owner handle "
+                    "via an out-of-band Messages sender (imsg/osascript). "
+                    "Anything sent to the owner's own handle echoes back into "
+                    "your inbox and starts an infinite self-reply loop. Answer "
+                    "the owner in your normal reply instead; imsg is only for "
+                    "OTHER recipients."
+                )
+        return None
+
+    return guard
+
 RunJxa = Callable[[str, tuple[str, ...]], Awaitable[str]]
 
 SEND_TEXT_SCRIPT = (

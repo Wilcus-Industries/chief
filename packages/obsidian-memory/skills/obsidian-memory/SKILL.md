@@ -1,6 +1,6 @@
 ---
 name: obsidian-memory
-description: Recall from and save to the owner's Obsidian vault — conventions, CLI, ambient policy.
+description: Owner's Obsidian vault memory. Not a tool — recall/save run as shell commands (`uv run chief-memory ...`); conventions, CLI, ambient policy.
 ---
 
 # Obsidian vault memory
@@ -9,18 +9,25 @@ The owner keeps a personal Obsidian vault. You have a semantic + wikilink index
 over it and an ambient recall hook that surfaces relevant notes on a cadence.
 Your job is to **use recall well** and **save durable knowledge cleanly**.
 
-## Recall — the `chief-memory` CLI
+## Recall — the `chief-memory` command (run it in the shell)
 
-Run these with the `shell` tool (they read the index, never the model):
+**There is no `obsidian-memory` / `memory` / `memory_search` native tool. Do
+not call one — it does not exist and the call will fail.** Recall is a
+command-line program you run through the **`shell` tool**, exactly like `ls` or
+`git`. The only correct move is: call the `shell` tool with one of these command
+strings (they read the index, never the model):
 
 - `uv run chief-memory search "<query>"` — semantic hits, one note path per
-  line. Use it whenever a question might touch something the owner told you
-  before.
+  line. Run it whenever a question might touch something the owner told you
+  before (who they are, their preferences, past decisions, people, projects).
 - `uv run chief-memory related "<query>"` — semantic hits **widened by
   wikilinks**, so a linked note a pure search would miss still surfaces.
 - `uv run chief-memory links "<note>"` — a note's 1-hop wikilink neighbourhood.
 - `uv run chief-memory reindex` — rebuild after bulk external edits (the index
   self-heals single out-of-band edits at query time, so this is rarely needed).
+
+So to recall who the owner is, the action is: `shell` tool →
+`uv run chief-memory search "owner"`. Never a tool named after this package.
 
 Every result line names its **source note path** — cite it, and open the note
 with your file tools when you need the full context, not just the chunk.

@@ -5,7 +5,7 @@ This turns off vault memory. The subpackage code stays in core
 and skill, so it can be re-enabled later by reinstalling. It never touches the
 vault itself — the owner's notes are theirs.
 
-1. Remove the `obsidian-memory` entry from `data/installed.yaml` so the boot
+1. Deregister: `uv run python -m chief.registry_apply obsidian-memory --remove`, so the boot
    loader stops registering its hook.
 2. Clear the config block: remove the `obsidian_memory:` key from `config.yaml`
    (`edit_file` it out, or set its sub-keys empty). No config = the hook, even

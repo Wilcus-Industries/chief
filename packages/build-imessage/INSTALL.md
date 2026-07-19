@@ -78,9 +78,10 @@ Gather the parameters first (steps 1–3), run the deterministic install once
        owner_handles:
          - "+15551234567"
      ```
-   - Record both installs in `data/installed.yaml` (`screening` and
-     `build-imessage`, `source: bundled`).
-   - `restart` — one guarded commit brings the skill + config live and boots
+   - Each package's `install.sh` records its own install in
+     `data/installed.yaml` (via `chief.registry_apply`) — no hand-editing.
+   - `restart` — the guarded commit brings the skill live; the config lands by
+     disk reload (gitignored, not rolled back on failure) and boots
      the adapter.
 5. Walk the owner through granting **Full Disk Access** to the daemon's host
    process (System Settings → Privacy & Security → Full Disk Access — add the

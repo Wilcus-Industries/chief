@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from chief.config import load_config
+from chief.config import Config, load_config, load_raw
 from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")
@@ -102,6 +102,38 @@ def _under(package: Package, root: Path) -> bool:
         return False
 
 
+def verify_install(
+    package: Package,
+    installed: Mapping[str, object],
+    config_raw: Mapping[str, object],
+    skills_root: Path = Path("skills"),
+    secrets_root: Path = Path("secrets"),
+) -> list[str]:
+    """Postcondition check for a package install; empty means fully installed.
+
+    Everything the manifest declares must actually have landed — half-installs
+    (skills copied but no registry entry, config keys missing) were silent
+    before: the hooks loader just skipped the package and discovery reported
+    it uninstalled.
+    """
+    problems = []
+    if package.name not in installed:
+        problems.append(
+            f"not registered in data/installed.yaml — run: uv run python -m "
+            f"chief.registry_apply {package.name}"
+        )
+    for skill in package.skills:
+        if not (skills_root / skill / "SKILL.md").exists():
+            problems.append(f"skill '{skill}' missing at {skills_root / skill}")
+    for key in package.config_keys:
+        if key not in config_raw:
+            problems.append(f"config key '{key}' absent from config.yaml")
+    for secret in package.secrets:
+        if not (secrets_root / secret).exists():
+            problems.append(f"secret file '{secret}' absent from {secrets_root}/")
+    return problems
+
+
 def _matches(row: Row, query: str) -> bool:
     needle = query.lower()
     return needle in row.name.lower() or needle in row.description.lower()
@@ -134,10 +166,32 @@ def _run(argv: list[str], rows: list[Row]) -> str:
     return render(rows)
 
 
+def _run_verify(name: str, config: Config) -> None:
+    library = PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR))
+    package = library.get(name)
+    if package is None:
+        raise SystemExit(f"no such package: {name}")
+    problems = verify_install(
+        package, _load_installed(INSTALLED_REGISTRY), load_raw()
+    )
+    if problems:
+        print(f"{name}: install INCOMPLETE")
+        for problem in problems:
+            print(f"  - {problem}")
+        raise SystemExit(1)
+    print(f"verified: {name} is fully installed")
+
+
 def main(argv: list[str] | None = None) -> None:
+    args = sys.argv[1:] if argv is None else argv
     config = load_config()
     clone_if_missing(config.packages_repo, CLONED_PACKAGES_DIR)
+    if args[:1] == ["verify"]:
+        if len(args) != 2:
+            raise SystemExit("usage: chief-pkg verify <name>")
+        _run_verify(args[1], config)
+        return
     rows = discover(
         config.packages_dir, CLONED_PACKAGES_DIR, _load_installed(INSTALLED_REGISTRY)
     )
-    print(_run(sys.argv[1:] if argv is None else argv, rows))
+    print(_run(args, rows))
