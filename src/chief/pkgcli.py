@@ -10,7 +10,6 @@ is no ``pull`` or ``remove`` here (PRD #198).
 """
 
 import argparse
-import importlib.util
 import os
 import subprocess
 import sys
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chief.config import Config, load_config, load_raw
-from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary
+from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary, dep_importable
 from chief.registry_apply import load_installed as _load_installed
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")
@@ -124,10 +123,10 @@ def verify_install(
         if not (secrets_root / secret).exists():
             problems.append(f"secret file '{secret}' absent from {secrets_root}/")
     for dep in package.python_deps:
-        if importlib.util.find_spec(dep) is None:
+        if not dep_importable(dep):
             problems.append(
-                f"python dependency '{dep}' not importable — add it to "
-                f"pyproject.toml and run `uv sync`"
+                f"python dependency '{dep}' not importable (python_deps "
+                "lists import names) — add its distribution and `uv sync`"
             )
     return problems
 

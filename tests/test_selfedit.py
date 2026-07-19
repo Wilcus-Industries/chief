@@ -232,6 +232,30 @@ async def test_revert_edits_noop_on_clean_tree(repo: Path, tmp_path: Path) -> No
     assert "nothing to revert" in await pipeline.revert_edits()
 
 
+async def test_revert_edits_discards_staged_content_too(
+    repo: Path, tmp_path: Path
+) -> None:
+    # `git checkout -- .` restores from the INDEX: an edit staged via a shell
+    # `git add` would survive the "revert". The tool promises HEAD (#234).
+    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+    (repo / "greeting.txt").write_text("staged-broken\n")
+    git(repo, "add", "greeting.txt")
+    result = await pipeline.revert_edits()
+    assert (repo / "greeting.txt").read_text() == "hello\n"  # back to HEAD
+    assert git(repo, "status", "--porcelain").strip() == ""  # index reset too
+    assert "greeting.txt" in result
+
+
+async def test_dirty_files_reports_rename_destination(repo: Path) -> None:
+    # Porcelain renames read `R  old -> new`; the confirm list should show
+    # just the destination path, unquoted (#234, display-only).
+    from chief.selfedit.gitops import dirty_files
+
+    git(repo, "mv", "greeting.txt", "salute with space.txt")
+    files = await dirty_files(repo)
+    assert files == ["salute with space.txt"]
+
+
 def test_capture_times_out_hung_check(tmp_path: Path) -> None:
     # A hung done-check must fail, not hold the restart lock forever (audit H2).
     code, output = gitops._capture(

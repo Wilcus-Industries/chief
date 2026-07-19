@@ -114,6 +114,21 @@ def test_anthropic_oauth_install_fails_fast_without_secret(tmp_path: Path) -> No
     assert not (tmp_path / "skills").exists()
 
 
+def test_anthropic_oauth_install_rejects_non_http_proxy_url(
+    tmp_path: Path,
+) -> None:
+    # A PROXY_URL starting with a dash would be parsed as curl OPTIONS, not a
+    # URL — require an http(s) scheme before anything runs (#234).
+    script = REPO_PACKAGES / "anthropic-oauth" / "install.sh"
+    result = _run_install(
+        script, tmp_path, {"PROXY_URL": "-o/tmp/evil", "MODEL": "m"}
+    )
+    assert result.returncode == 1  # type: ignore[attr-defined]
+    assert "http" in result.stderr  # type: ignore[attr-defined]
+    assert not (tmp_path / "config.yaml").exists()
+    assert not (tmp_path / "skills").exists()
+
+
 def test_anthropic_oauth_install_fails_fast_on_dead_proxy(tmp_path: Path) -> None:
     (tmp_path / "secrets").mkdir()
     (tmp_path / "secrets" / "proxy_api_key").write_text("k\n")

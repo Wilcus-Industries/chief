@@ -25,7 +25,7 @@ INSTALLED_REGISTRY = Path("data/installed.yaml")
 
 
 def load_installed(path: Path = INSTALLED_REGISTRY) -> dict[str, object]:
-    """The install registry: ``{name: {source, commit}}`` (empty if absent).
+    """The install registry: ``{name: {source}}`` (empty if absent).
 
     A registry that exists but doesn't parse to a mapping degrades to ``{}`` —
     which silently turns every package's hooks off at once — so that
@@ -56,12 +56,12 @@ def load_installed(path: Path = INSTALLED_REGISTRY) -> dict[str, object]:
 def apply(
     name: str, source: str, path: Path = INSTALLED_REGISTRY, remove: bool = False
 ) -> None:
-    """Set (or remove) ``name``'s registry entry, preserving the others."""
-    data: dict[str, object] = {}
-    if path.exists():
-        loaded = yaml.safe_load(path.read_text())
-        if isinstance(loaded, dict):
-            data = loaded
+    """Set (or remove) ``name``'s registry entry, preserving the others.
+
+    Reads through :func:`load_installed` so a corrupt registry degrades the
+    same LOUD way everywhere — and the documented remedy (rewrite it with
+    chief.registry_apply) is exactly this function running."""
+    data = load_installed(path)
     if remove:
         data.pop(name, None)
     else:

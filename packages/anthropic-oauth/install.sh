@@ -24,6 +24,17 @@ set -euo pipefail
 : "${MODEL:?set MODEL to the bare model id the proxy exposes}"
 alias_name="${ALIAS:-opus}"
 
+# An http(s) scheme is required: it keeps a leading-dash value from being
+# parsed as curl options and rejects obviously broken bases before any probe.
+case "$PROXY_URL" in
+  http://*|https://*) ;;
+  *)
+    echo "error: PROXY_URL must start with http:// or https://" \
+      "(got: $PROXY_URL) — nothing was changed" >&2
+    exit 1
+    ;;
+esac
+
 # Fail fast BEFORE any mutation: wiring a dead endpoint or a missing secret
 # into config.yaml would route model calls at a black hole while the install
 # "succeeds". Nothing below runs until the proxy actually answers.
@@ -34,7 +45,7 @@ if [ ! -s secrets/proxy_api_key ]; then
 fi
 if ! curl -fsS --max-time 5 \
   -H "Authorization: Bearer $(cat secrets/proxy_api_key)" \
-  "${PROXY_URL%/}/models" >/dev/null; then
+  --url "${PROXY_URL%/}/models" >/dev/null; then
   echo "error: proxy at $PROXY_URL did not answer GET /models — start the" \
     "proxy first, then re-run (nothing was changed)" >&2
   exit 1
@@ -46,8 +57,8 @@ mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
 
 uv run python -m chief.config_apply \
-  "provider_backends.proxy={base_url: $PROXY_URL, api_key_secret: proxy_api_key}" \
-  "provider_aliases.$alias_name={backend: proxy, model: $MODEL}"
+  "provider_backends.proxy={base_url: '$PROXY_URL', api_key_secret: proxy_api_key}" \
+  "provider_aliases.$alias_name={backend: proxy, model: '$MODEL'}"
 
 # Record the install in the registry so discovery and the hooks loader see
 # it — the one bookkeeping step that must never be left to hand-editing.

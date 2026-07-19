@@ -8,6 +8,7 @@ itself as the completion signal. Discovery is done by the ``chief-pkg`` CLI
 roots — bundled ``packages/`` and the local clone of the chief-packages repo.
 """
 
+import importlib.util
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,18 @@ import yaml
 logger = logging.getLogger(__name__)
 
 CLONED_PACKAGES_DIR = Path("data/packages")
+
+
+def dep_importable(dep: str) -> bool:
+    """Whether one manifest ``python_deps`` entry imports.
+
+    ``python_deps`` lists IMPORT names (``yaml``), never distribution names
+    (``PyYAML``). A dotted name whose parent package is absent makes
+    ``find_spec`` raise instead of returning None — same answer: not there."""
+    try:
+        return importlib.util.find_spec(dep) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 @dataclass(frozen=True)

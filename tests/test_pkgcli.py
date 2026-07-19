@@ -138,6 +138,22 @@ def test_registry_apply_survives_malformed_registry(tmp_path: Path) -> None:
     }
 
 
+def test_registry_apply_rewrites_corrupt_yaml_loudly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # apply() reads through load_installed, so a corrupt registry degrades
+    # the same LOUD way everywhere instead of a raw traceback (#234) — and
+    # the rewrite is the documented remedy.
+    registry = tmp_path / "installed.yaml"
+    registry.write_text("a: [unclosed\n")
+    with caplog.at_level("ERROR"):
+        registry_apply.apply("screening", "bundled", registry)
+    assert "not valid yaml" in caplog.text
+    assert yaml.safe_load(registry.read_text()) == {
+        "screening": {"source": "bundled"}
+    }
+
+
 def _manifest_package(tmp_path: Path) -> Package:
     root = tmp_path / "packages" / "demo"
     root.mkdir(parents=True)
@@ -241,4 +257,27 @@ def test_verify_install_checks_python_deps_importable(tmp_path: Path) -> None:
     )
     text = "\n".join(problems)
     assert "definitely_missing_dep_xyz" in text
+    assert "import names" in text  # the fix hint names the semantics
     assert not any("'yaml'" in p for p in problems)  # importable dep passes
+
+
+def test_verify_install_handles_dotted_dep_with_absent_parent(
+    tmp_path: Path,
+) -> None:
+    # find_spec("missing.sub") raises ModuleNotFoundError rather than
+    # returning None — that must read as "not importable", not crash (#234).
+    root = tmp_path / "packages" / "dotdemo"
+    root.mkdir(parents=True)
+    (root / "manifest.yaml").write_text(
+        "name: dotdemo\ndescription: d\n"
+        "python_deps: [definitely_missing_dep_xyz.sub]\n"
+    )
+    package = PackageLibrary((tmp_path / "packages",)).scan()[0]
+    problems = verify_install(
+        package,
+        installed={"dotdemo": {"source": "bundled"}},
+        config_raw={},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert any("definitely_missing_dep_xyz.sub" in p for p in problems)
