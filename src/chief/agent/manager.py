@@ -5,9 +5,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from chief.agent.compaction import Compactor
-from chief.agent.session import RestartGate, Session
+from chief.agent.restart_gate import RestartGate
+from chief.agent.session import Session
 from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget
+from chief.hooks import HookRegistry
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 
@@ -32,6 +34,8 @@ class SessionManager:
         compactor: Compactor | None = None,
         restart_gate: RestartGate | None = None,
         soul_reader: Callable[[], str] | None = None,
+        hooks: HookRegistry | None = None,
+        hooks_timeout_seconds: float = 10.0,
     ) -> None:
         self._provider = provider
         self._tools_factory = tools_factory
@@ -44,6 +48,8 @@ class SessionManager:
         self._compactor = compactor
         self._restart_gate = restart_gate
         self._soul_reader = soul_reader
+        self._hooks = hooks
+        self._hooks_timeout_seconds = hooks_timeout_seconds
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
 
@@ -73,6 +79,8 @@ class SessionManager:
                 restart_gate=self._restart_gate,
                 origin_channel=origin,
                 soul_reader=self._soul_reader,
+                hooks=self._hooks,
+                hooks_timeout_seconds=self._hooks_timeout_seconds,
             )
             self._sessions[thread_key] = session
             return session

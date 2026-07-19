@@ -57,6 +57,21 @@ async def read_finals(streams: Streams, count: int) -> list[dict[str, Any]]:
     return finals
 
 
+async def test_boot_answers_a_turn_when_no_packages_declare_hooks(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Regression: the hooks load phase must never block boot. With nothing
+    # installed, load_hooks is a no-op and the daemon answers normally.
+    provider = FakeProvider([text_turn("hello from chief")])
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        send_frame(streams, "hi", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "hello from chief"
+    finally:
+        await shutdown(app, streams)
+
+
 def test_build_provider_empty_config_is_plain_openrouter() -> None:
     provider = build_provider(Config(openrouter_api_key="k"))
     assert isinstance(provider, OpenRouterProvider)

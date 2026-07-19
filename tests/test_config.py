@@ -6,7 +6,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from chief.config import AliasSpec, ConfigError, load_config, merge_config
+from chief.config import (
+    AliasSpec,
+    ConfigError,
+    load_config,
+    load_raw,
+    merge_config,
+)
 from chief.config_apply import main as config_apply_main
 
 
@@ -153,6 +159,30 @@ def test_owner_handles_bad_shape_raises_config_error(tmp_path: Path) -> None:
     path.write_text("imessage:\n  owner_handles:\n    a: 1\n")
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_hooks_defaults(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.hooks_timeout_seconds == 10.0
+    assert config.hooks_disabled == ()
+
+
+def test_hooks_yaml_override(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("hooks:\n  timeout_seconds: 3\n  disabled: [foo]\n")
+    config = load_config(path)
+    assert config.hooks_timeout_seconds == 3.0
+    assert config.hooks_disabled == ("foo",)
+
+
+def test_load_raw_missing_path_is_empty(tmp_path: Path) -> None:
+    assert load_raw(tmp_path / "missing.yaml") == {}
+
+
+def test_load_raw_reads_mapping(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("web_port: 9\n")
+    assert load_raw(path) == {"web_port": 9}
 
 
 def test_temperature_defaults_to_zero(tmp_path: Path) -> None:

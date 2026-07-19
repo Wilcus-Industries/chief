@@ -6,43 +6,22 @@ before each turn and recorded after.
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any, Protocol
+from typing import Any
 
 from chief.agent.compaction import Compactor
 from chief.agent.loop import OnDelta, TurnResult, run_turn
 from chief.agent.prompt import read_soul
+from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget, BudgetState, BudgetStatus
+from chief.hooks import HookRegistry, assemble_system, run_post_turn
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 
-
-class RestartGate(Protocol):
-    """Brackets a turn so a pending self-edit restart drains it before exec.
-
-    ``enter_turn`` blocks while a restart is pending and otherwise registers
-    the turn as active; ``leave_turn`` deregisters it; ``fire_if_requested``
-    restarts (never returning) once the turn has committed. See
-    ``chief.selfedit.recovery.RestartController``.
-    """
-
-    async def enter_turn(self) -> None: ...
-
-    def leave_turn(self) -> None: ...
-
-    async def fire_if_requested(self) -> None: ...
-
-
-class _NullGate:
-    """No-op gate for sessions with no restart coordinator (tests, non-daemon)."""
-
-    async def enter_turn(self) -> None: ...
-
-    def leave_turn(self) -> None: ...
-
-    async def fire_if_requested(self) -> None: ...
+logger = logging.getLogger(__name__)
 
 
 class Session:
@@ -65,6 +44,8 @@ class Session:
         restart_gate: RestartGate | None = None,
         origin_channel: str | None = None,
         soul_reader: Callable[[], str] | None = None,
+        hooks: HookRegistry | None = None,
+        hooks_timeout_seconds: float = 10.0,
     ) -> None:
         self.thread_key = thread_key
         self.model = model
@@ -81,6 +62,9 @@ class Session:
         self._gate: RestartGate = restart_gate or _NullGate()
         self._origin_channel = origin_channel
         self._read_soul = soul_reader or read_soul
+        self._hooks = hooks
+        self._hooks_timeout_seconds = hooks_timeout_seconds
+        self._session_started = False
 
     @property
     def busy(self) -> bool:
@@ -121,7 +105,7 @@ class Session:
             model = self._downgrade_model
         await self._maybe_compact()
         transcript = [
-            {"role": "system", "content": self._system_content()},
+            {"role": "system", "content": await self._assemble_system()},
             *self._messages,
             {"role": "user", "content": user_text},
         ]
@@ -133,19 +117,36 @@ class Session:
             tools=self._tools,
             on_delta=on_delta,
         )
-        await self._commit(
-            [{"role": "user", "content": user_text}, *transcript[baseline:]]
-        )
+        new_messages = [{"role": "user", "content": user_text}, *transcript[baseline:]]
+        await self._commit(new_messages)
+        if self._hooks is not None:
+            await run_post_turn(
+                self._hooks.post_turn(), result, new_messages,
+                self._hooks_timeout_seconds, logger,
+            )
         return await self._settle_budget(result, status)
 
-    def _system_content(self) -> str:
-        """The full system prompt, assembled at call time (never persisted): the
-        owner's soul at the top (read fresh each turn, so soul edits apply
-        immediately), then the base prompt, then a note of the thread's origin
-        channel so the agent knows which device it's speaking through."""
+    async def _assemble_system(self) -> str:
+        """The full system prompt, composed fresh each turn (never persisted):
+        the soul on top, then the base prompt + origin note, then each installed
+        package's context contribution as a name-sorted <hook> block. session_
+        start blocks are added only on a thread's first turn of the process."""
+        first_turn = not self._session_started
+        self._session_started = True
+        return await assemble_system(
+            base=self._base_system(),
+            soul_reader=self._read_soul,
+            hooks=self._hooks,
+            first_turn=first_turn,
+            timeout=self._hooks_timeout_seconds,
+            logger=logger,
+        )
+
+    def _base_system(self) -> str:
+        """The base prompt plus a note of the thread's origin channel so the
+        agent knows which device it's speaking through. Soul and package hooks
+        layer on top in :meth:`_assemble_system`."""
         prompt = self._system_prompt
-        if soul := self._read_soul():
-            prompt = f"{soul}\n\n{prompt}"
         if self._origin_channel:
             prompt = (
                 f"{prompt}\n\nYou are talking with the owner over "
