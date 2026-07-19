@@ -176,14 +176,18 @@ class ShellHost:
         self._sentinel = sentinel or f"__CHIEF_SENTINEL_{secrets.token_hex(12)}__"
         self._shells: dict[str, _Shell] = {}
 
-    async def execute(self, thread_key: str, command: str) -> CommandResult:
+    async def execute(
+        self, thread_key: str, command: str, *, timeout: float | None = None
+    ) -> CommandResult:
         Path(self._workdir).mkdir(parents=True, exist_ok=True)
         shell = self._shells.get(thread_key)
         if shell is None:
             shell = _Shell(self._argv, self._sentinel, self._workdir)
             self._shells[thread_key] = shell
         return await shell.run(
-            command, timeout=self._timeout, output_limit=self._output_limit
+            command,
+            timeout=self._timeout if timeout is None else timeout,
+            output_limit=self._output_limit,
         )
 
     async def aclose(self) -> None:

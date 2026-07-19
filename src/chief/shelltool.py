@@ -117,9 +117,17 @@ class ShellService:
             )
         return self._host
 
-    async def run(self, thread_key: str, command: str) -> dict[str, Any]:
-        """Run one command on ``thread_key``'s persistent shell; return its dict."""
-        result = await self._ensure_host().execute(thread_key, command)
+    async def run(
+        self, thread_key: str, command: str, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """Run one command on ``thread_key``'s persistent shell; return its dict.
+
+        ``timeout`` overrides :attr:`timeout_seconds` for this one call (the agent
+        passes it for genuinely slow work); ``None`` uses the configured default.
+        """
+        result = await self._ensure_host().execute(
+            thread_key, command, timeout=timeout
+        )
         return result.as_dict()
 
     async def aclose(self) -> None:
@@ -142,7 +150,15 @@ _SHELL_SPEC = ToolSpec(
             "command": {
                 "type": "string",
                 "description": "The shell command to run on the host.",
-            }
+            },
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Optional. Seconds before the command is killed. Defaults to 20; "
+                    "raise it for genuinely slow work (installs, clones, builds). A "
+                    "killed command returns exit code 124 and loses its shell state."
+                ),
+            },
         },
         "required": ["command"],
     },
@@ -157,10 +173,14 @@ def register_shell_tool(registry: ToolRegistry, service: ShellService) -> None:
     failure surfaces as an error string, never a raise.
     """
 
-    async def shell(command: str, context: ToolContext | None = None) -> str:
+    async def shell(
+        command: str,
+        timeout: float | None = None,
+        context: ToolContext | None = None,
+    ) -> str:
         thread_key = context.thread_key if context is not None else "default"
         try:
-            result = await service.run(thread_key, command)
+            result = await service.run(thread_key, command, timeout=timeout)
         except Exception as exc:  # shell spawn failed — surface, don't crash the loop
             return f"error: shell unavailable: {exc}"
         return format_shell_result(result)
