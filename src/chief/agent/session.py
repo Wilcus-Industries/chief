@@ -8,7 +8,6 @@ before each turn and recorded after.
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import replace
 from typing import Any
 
 from chief.agent.compaction import Compactor
@@ -16,8 +15,9 @@ from chief.agent.loop import OnDelta, TurnResult, run_turn
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.tools import ToolDispatcher
-from chief.budget import Budget, BudgetState, BudgetStatus
-from chief.hooks import HookRegistry, assemble_system, run_post_turn
+from chief.agent.turn_budget import refuse_over_budget, settle_budget
+from chief.budget import Budget, BudgetState
+from chief.hooks import HookRegistry, TurnContext, assemble_system, run_post_turn
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 
@@ -77,11 +77,16 @@ class Session:
         """The per-turn lock; a wipe holds it so no turn starts mid-write."""
         return self._lock
 
-    async def run_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
+    async def run_turn(
+        self, user_text: str, on_delta: OnDelta, sender: str = "owner"
+    ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
-        The per-thread lock is taken before the global semaphore so queued
-        turns on one busy thread can't starve every concurrency slot.
+        ``sender`` (``"owner"``, ``"system"``, or a stranger id) is carried to
+        the context hooks so private-data hooks can gate on who is speaking;
+        it defaults to the owner. The per-thread lock is taken before the
+        global semaphore so queued turns on one busy thread can't starve every
+        concurrency slot.
         """
         async with self._lock:
             async with self._semaphore:
@@ -92,20 +97,23 @@ class Session:
                 # durable too, never here where the reply is still un-sent.
                 await self._gate.enter_turn()
                 try:
-                    return await self._one_turn(user_text, on_delta)
+                    return await self._one_turn(user_text, on_delta, sender)
                 finally:
                     self._gate.leave_turn()
 
-    async def _one_turn(self, user_text: str, on_delta: OnDelta) -> TurnResult:
+    async def _one_turn(
+        self, user_text: str, on_delta: OnDelta, sender: str
+    ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
         if status is not None and status.state is BudgetState.EXHAUSTED:
             if self._downgrade_model is None:
-                return await self._refuse_over_budget(user_text, status)
+                return await refuse_over_budget(self._commit, user_text, status)
             model = self._downgrade_model
         await self._maybe_compact()
+        system = await self._assemble_system(user_text, sender)
         transcript = [
-            {"role": "system", "content": await self._assemble_system()},
+            {"role": "system", "content": system},
             *self._messages,
             {"role": "user", "content": user_text},
         ]
@@ -124,19 +132,31 @@ class Session:
                 self._hooks.post_turn(), result, new_messages,
                 self._hooks_timeout_seconds, logger,
             )
-        return await self._settle_budget(result, status)
+        return await settle_budget(self._budget, self.thread_key, result, status)
 
-    async def _assemble_system(self) -> str:
+    async def _assemble_system(self, user_text: str, sender: str) -> str:
         """The full system prompt, composed fresh each turn (never persisted):
         the soul on top, then the base prompt + origin note, then each installed
         package's context contribution as a name-sorted <hook> block. session_
-        start blocks are added only on a thread's first turn of the process."""
+        start blocks are added only on a thread's first turn of the process.
+
+        The per-turn :class:`TurnContext` handed to the context hooks carries
+        ``self._messages`` as-is — the transcript *before* this user turn is
+        appended — so a hook judges relevance against the conversation so far."""
         first_turn = not self._session_started
         self._session_started = True
+        turn = TurnContext(
+            user_text=user_text,
+            messages=self._messages,
+            sender=sender,
+            thread_key=self.thread_key,
+            channel=self._origin_channel,
+        )
         return await assemble_system(
             base=self._base_system(),
             soul_reader=self._read_soul,
             hooks=self._hooks,
+            turn=turn,
             first_turn=first_turn,
             timeout=self._hooks_timeout_seconds,
             logger=logger,
@@ -164,36 +184,6 @@ class Session:
             self._messages = compacted
             await self._store.replace(self.thread_key, compacted)
 
-    async def _refuse_over_budget(
-        self, user_text: str, status: BudgetStatus
-    ) -> TurnResult:
-        text = (
-            f"budget exhausted (${status.spent:.2f} of ${status.cap:.2f} this "
-            "cycle) and no downgrade model is configured; not running this turn"
-        )
-        await self._commit(
-            [
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": text},
-            ]
-        )
-        return TurnResult(text=text)
-
     async def _commit(self, new_messages: list[dict[str, Any]]) -> None:
         self._messages.extend(new_messages)
         await self._store.append(self.thread_key, new_messages)
-
-    async def _settle_budget(
-        self, result: TurnResult, before: BudgetStatus | None
-    ) -> TurnResult:
-        if self._budget is None or before is None:
-            return result
-        await self._budget.record(self.thread_key, result.usage.cost)
-        after = await self._budget.status()
-        if after.state is not before.state and after.state is not BudgetState.OK:
-            notice = (
-                f"[budget {after.state.value}: ${after.spent:.2f} of "
-                f"${after.cap:.2f} spent this cycle]"
-            )
-            return replace(result, notice=notice)
-        return result

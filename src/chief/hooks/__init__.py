@@ -7,7 +7,7 @@ session_start) add name-attributed blocks to the system prompt; observers
 :class:`HookContext`; execution is resilient (:mod:`chief.hooks.runner`).
 """
 
-from chief.hooks.context import HookContext
+from chief.hooks.context import HookContext, TurnContext
 from chief.hooks.registry import (
     HookRegistry,
     PackageHookRegistrar,
@@ -29,6 +29,7 @@ __all__ = [
     "PostTurnHook",
     "PreTurnHook",
     "SessionStartHook",
+    "TurnContext",
     "assemble_system",
     "render_block",
     "run_context_hooks",
