@@ -1,5 +1,6 @@
 """iMessage adapter over a fake chat.db: cursor, mapping, echo, send."""
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -144,6 +145,7 @@ async def test_first_boot_starts_at_head_no_replay(tmp_path: Path) -> None:
     await adapter.stop()
     harness.store.add_message(OWNER, "fresh text")
     await adapter.poll_once()
+    await adapter.drain()
     assert [m.text for m in harness.delivered] == ["fresh text"]
 
 
@@ -163,6 +165,7 @@ async def test_owner_maps_stranger_passes_echo_and_noise_skip(
     harness.store.add_message("+15557776666", "group chatter", group=True)
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
         ("owner", OWNER, "hi chief"),
         ("+15559998888", "+15559998888", "yo from a stranger"),
@@ -177,6 +180,7 @@ async def test_owner_self_dm_from_me_delivered(tmp_path: Path) -> None:
     harness.store.add_message(OWNER, "note to self", from_me=1, chat=OWNER)
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
         ("owner", OWNER, "note to self"),
     ]
@@ -191,6 +195,7 @@ async def test_self_dm_body_in_attributedbody_is_decoded(tmp_path: Path) -> None
     )
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [(m.sender, m.text) for m in harness.delivered] == [
         ("owner", "I’ll take the edi too"),
     ]
@@ -205,6 +210,7 @@ async def test_owner_self_dm_twin_delivered_once(tmp_path: Path) -> None:
     harness.store.add_message(OWNER, "ping", from_me=1, chat=OWNER, date=100)
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [(m.sender, m.text) for m in harness.delivered] == [("owner", "ping")]
 
 
@@ -219,6 +225,7 @@ async def test_owner_repeats_text_after_window_delivers_both(
     harness.store.add_message(OWNER, "ok", from_me=1, chat=OWNER, date=later)
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [m.text for m in harness.delivered] == ["ok", "ok"]
 
 
@@ -234,6 +241,7 @@ async def test_self_chat_scope_does_not_leak_other_conversations(
     )
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert [(m.sender, m.text) for m in harness.delivered] == [
         ("owner", "self note"),
     ]
@@ -244,6 +252,7 @@ async def test_cursor_persists_across_restarts(tmp_path: Path) -> None:
     harness.store.add_message(OWNER, "first")
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
     assert len(harness.delivered) == 1
 
     reborn = harness.adapter()
@@ -251,6 +260,7 @@ async def test_cursor_persists_across_restarts(tmp_path: Path) -> None:
     await reborn.stop()
     harness.store.add_message(OWNER, "second")
     await reborn.poll_once()
+    await reborn.drain()
     assert [m.text for m in harness.delivered] == ["first", "second"]
 
 
@@ -275,6 +285,7 @@ async def test_selfedit_row_saves_cursor_before_restart_no_double_send(
 
     adapter = harness.adapter()
     await adapter.poll_once()
+    await adapter.drain()
 
     # Delivered once; the cursor was already durable when the restart fired.
     assert [m.text for m in harness.delivered] == ["self-edit please"]
@@ -288,7 +299,63 @@ async def test_selfedit_row_saves_cursor_before_restart_no_double_send(
     await reborn.start()
     await reborn.stop()
     await reborn.poll_once()
+    await reborn.drain()
     assert [m.text for m in harness.delivered] == ["self-edit please"]
+
+
+async def test_slow_thread_does_not_block_other_thread(tmp_path: Path) -> None:
+    """A slow turn on one thread must not stall another thread's turn. Thread A
+    blocks on a gate; thread B runs to completion and opens the gate — so B
+    finishes before A, proving the two workers run concurrently."""
+    harness = Harness(tmp_path)
+    gate = asyncio.Event()
+    order: list[str] = []
+
+    async def on_deliver(message: Message) -> None:
+        if message.thread_key == OWNER:
+            await gate.wait()  # thread A stalls until B opens the gate
+            order.append("A")
+        else:
+            order.append("B")
+            gate.set()
+
+    harness.on_deliver = on_deliver
+    harness.store.add_message(OWNER, "slow", from_me=1, chat=OWNER)
+    harness.store.add_message("+15559998888", "fast")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert order == ["B", "A"]
+
+
+async def test_same_thread_runs_in_arrival_order(tmp_path: Path) -> None:
+    """Two messages on one thread run serially in arrival order (single FIFO
+    worker per thread)."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "first", from_me=1, chat=OWNER, date=1)
+    harness.store.add_message(OWNER, "second", from_me=1, chat=OWNER, date=2)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["first", "second"]
+
+
+async def test_poll_once_returns_without_awaiting_turn(tmp_path: Path) -> None:
+    """poll_once enqueues and returns even when a turn never completes — the
+    hung turn detaches onto its worker rather than stalling the poll loop."""
+    harness = Harness(tmp_path)
+    started = asyncio.Event()
+
+    async def on_deliver(message: Message) -> None:
+        started.set()
+        await asyncio.Event().wait()  # never returns
+
+    harness.on_deliver = on_deliver
+    harness.store.add_message(OWNER, "hang", from_me=1, chat=OWNER)
+    adapter = harness.adapter()
+    await asyncio.wait_for(adapter.poll_once(), timeout=1.0)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await adapter.stop()  # cancels the hung worker
 
 
 async def test_send_prefixes_owner_threads_only(tmp_path: Path) -> None:

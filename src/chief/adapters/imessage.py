@@ -1,4 +1,5 @@
-# styleguide: file-length — self-DM posture + twin dedup earn the extra line.
+# styleguide: file-length — self-DM posture, twin dedup, and per-thread FIFO
+# dispatch (queues/workers) cohere here; splitting the adapter reads worse.
 """iMessage adapter: a dumb pipe over the local Messages store, macOS-only.
 
 Registration is guarded by ``sys.platform == "darwin"`` in app wiring; the
@@ -6,8 +7,11 @@ module itself is platform-neutral so tests drive it anywhere with a fake
 chat.db and a fake send runner.
 
 Inbound is a poll loop over ``chat.db`` (read-only sqlite) with a persisted
-rowid cursor — restarts neither replay old texts nor drop ones that arrived
-while down. Same-account self-DM posture: chief runs on the owner's own Apple
+rowid cursor advanced at read: each row is dispatched onto its thread's FIFO
+worker so a slow turn on one thread never stalls another, and turns run at
+most once (a hard crash mid-turn drops that row rather than replaying it;
+graceful self-edit restarts drain in-flight turns first). Same-account
+self-DM posture: chief runs on the owner's own Apple
 ID, so self-chat texts carry ``is_from_me = 1``. A row is delivered when it is
 a real inbound (``is_from_me = 0``) OR sits in the owner's self-chat (scoped by
 ``chat.chat_identifier IN owner_handles``, keeping other conversations out);
@@ -92,6 +96,10 @@ class IMessageAdapter(Adapter):
         self._cursor = 0
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
+        # One FIFO queue + worker per thread: a slow turn on one thread can't
+        # stall another's, while same-thread turns stay serialized in order.
+        self._queues: dict[str, asyncio.Queue[Message]] = {}
+        self._workers: dict[str, asyncio.Task[None]] = {}
 
     async def start(self) -> None:
         self._cursor = self._load_cursor()
@@ -102,13 +110,16 @@ class IMessageAdapter(Adapter):
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        for task in [self._task, *self._workers.values()]:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._task = None
+        self._workers.clear()
+        self._queues.clear()
 
     async def send(self, thread_key: str, text: str) -> None:
         if thread_key in self._owner_handles:
@@ -124,22 +135,56 @@ class IMessageAdapter(Adapter):
             await asyncio.sleep(self._poll_seconds)
 
     async def poll_once(self) -> None:
-        """One poll tick: deliver new rows, persisting the cursor after each.
+        """One poll tick: enqueue new rows onto their thread's worker, never
+        awaiting a turn — so one slow/hung turn can't stall the poll loop.
 
-        The cursor is saved (and any pending self-edit restart fired) per row,
-        after its turn committed and reply sent — so a self-edit row can't execv
-        before its cursor is durable, get re-polled, and answer twice."""
+        The cursor advances and is persisted at READ (before the turn runs), so
+        the row can't be re-polled and answered twice (at-most-once): a hard
+        crash between enqueue and reply drops that row rather than replaying it;
+        graceful self-edit restarts still drain in-flight turns first."""
         rows = await asyncio.to_thread(self._fetch, self._cursor)
         for rowid, sender, text, from_me, in_group, has_room, in_self, date in rows:
             self._cursor = rowid
+            self._save_cursor()
             message = self._map(sender, text, from_me, in_group, has_room, in_self)
             if message is not None and not self._dedup.is_duplicate(
                 (message.sender, message.text), date
             ):
+                self._enqueue(message)
+
+    def _enqueue(self, message: Message) -> None:
+        """Route a message to its thread's FIFO queue, spawning a worker the
+        first time that thread is seen."""
+        queue = self._queues.get(message.thread_key)
+        if queue is None:
+            queue = asyncio.Queue()
+            self._queues[message.thread_key] = queue
+            self._workers[message.thread_key] = asyncio.create_task(
+                self._worker(message.thread_key, queue)
+            )
+        queue.put_nowait(message)
+
+    async def _worker(
+        self, thread_key: str, queue: "asyncio.Queue[Message]"
+    ) -> None:
+        """Drain one thread's queue serially (FIFO), firing any pending self-edit
+        restart after each turn commits. The cursor is already durable (saved at
+        read), so the restart can never re-deliver an unanswered row."""
+        while True:
+            message = await queue.get()
+            try:
                 await self._on_message(message)
-            self._save_cursor()
-            if self._restart is not None:
-                await self._restart.fire_if_requested()
+                if self._restart is not None:
+                    await self._restart.fire_if_requested()
+            except Exception:
+                logger.exception("imessage turn failed for %s", thread_key)
+            finally:
+                queue.task_done()
+
+    async def drain(self) -> None:
+        """Block until every per-thread queue is empty (test seam)."""
+        for queue in list(self._queues.values()):
+            await queue.join()
 
     def _map(
         self,
