@@ -452,3 +452,12 @@ def test_owner_send_guard_ignores_non_messaging_commands() -> None:
 
 def test_owner_send_guard_no_handles_is_noop() -> None:
     assert owner_send_guard(())("imsg send --to x --text y") is None
+
+
+def test_owner_send_guard_email_handle_matches_case_insensitively() -> None:
+    # Apple-ID handles are emails and case-insensitive; a case-mixed config
+    # handle must still block a lowercased send (issue #233).
+    guard = owner_send_guard(("Owner@iCloud.com",))
+    assert guard("imsg send --to owner@icloud.com --text hi") is not None
+    assert guard("IMSG send --to OWNER@ICLOUD.COM --text hi") is not None
+    assert guard("imsg send --to friend@icloud.com --text hi") is None

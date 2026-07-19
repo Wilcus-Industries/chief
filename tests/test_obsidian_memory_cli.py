@@ -63,6 +63,11 @@ def _write_config(tmp_path: Path, vault: Path, **extra: str) -> None:
     lines = ["obsidian_memory:", "  vault_paths:", f"    - {vault}"]
     lines += [f"  {k}: {v}" for k, v in extra.items()]
     (tmp_path / "config.yaml").write_text("\n".join(lines) + "\n")
+    # The CLI's repo-root marker is config.yaml PLUS the install registry (a
+    # package install always writes it) — mirror a real installed repo.
+    registry = tmp_path / "data" / "installed.yaml"
+    registry.parent.mkdir(exist_ok=True)
+    registry.write_text("obsidian-memory: {source: bundled}\n")
 
 
 def test_search_resolves_vault_from_the_daemon_config_without_flags(
@@ -165,6 +170,21 @@ def test_cli_outside_any_repo_fails_loudly_instead_of_empty_index(
         cli.main(["search", "anything"])
     assert "config.yaml" in str(excinfo.value)
     assert not (nowhere / "data").exists()  # no index fabricated
+
+
+def test_stray_config_without_registry_is_not_a_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A lone config.yaml in some ancestor (any random project) must not
+    # hijack resolution — the root marker is config.yaml + the install
+    # registry (issue #234).
+    (tmp_path / "config.yaml").write_text("obsidian_memory: {}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CHIEF_MEMORY_VAULT", raising=False)
+    monkeypatch.delenv("CHIEF_MEMORY_INDEX_HOME", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["search", "anything"])
+    assert "installed.yaml" in str(excinfo.value)
 
 
 def test_search_no_matches_names_the_resolved_paths(

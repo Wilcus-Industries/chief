@@ -20,7 +20,7 @@ from pathlib import Path
 
 from chief.audit import AuditLog
 from chief.config import load_config
-from chief.selfedit.gitops import dirty_files, run_check, run_git
+from chief.selfedit.gitops import dirty_files, run_checks, run_git
 from chief.selfedit.recovery import MARKER_NAME
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,8 @@ class SelfEditPipeline:
                 f"rationale {rationale!r}:\n{file_list}\n"
                 "If every file belongs to this change, call restart again with "
                 "confirm=true. If something does not belong, first discard it "
-                "(shell: git checkout -- <path>) or restart separately with a "
+                "(shell: git checkout HEAD -- <path>) or restart separately "
+                "with a "
                 "rationale that honestly describes it."
             )
         base = (await self._git("rev-parse", "HEAD")).strip()
@@ -156,7 +157,9 @@ class SelfEditPipeline:
             dirty = await self._dirty_files()
             if not dirty:
                 return "nothing to revert: the working tree is clean"
-            await self._git("checkout", "--", ".")
+            # HEAD explicitly: bare `checkout -- .` restores from the INDEX,
+            # so content staged via a shell `git add` would survive (#234).
+            await self._git("checkout", "HEAD", "--", ".")
             remaining = await self._dirty_files()
             reverted = [path for path in dirty if path not in remaining]
             self._audit.record(
@@ -184,12 +187,7 @@ class SelfEditPipeline:
         return None
 
     async def _run_checks(self) -> str | None:
-        """Run every check command; return combined output on first failure."""
-        for cmd in self._checks:
-            code, output = await run_check(cmd, self._root)
-            if code != 0:
-                return f"$ {' '.join(cmd)}\n{output[-4000:]}"
-        return None
+        return await run_checks(self._checks, self._root)
 
     async def _dirty_files(self) -> list[str]:
         return await dirty_files(self._root)

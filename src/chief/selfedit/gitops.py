@@ -40,6 +40,17 @@ async def run_check(cmd: Sequence[str], root: Path) -> tuple[int, str]:
     return await asyncio.to_thread(_capture, cmd, root, CHECK_TIMEOUT_SECONDS)
 
 
+async def run_checks(
+    checks: Sequence[Sequence[str]], root: Path
+) -> str | None:
+    """Run every check command; return combined output on first failure."""
+    for cmd in checks:
+        code, output = await run_check(cmd, root)
+        if code != 0:
+            return f"$ {' '.join(cmd)}\n{output[-4000:]}"
+    return None
+
+
 async def run_git(root: Path, *args: str) -> str:
     """Run a git command in ``root``; raise on a non-zero exit."""
     code, output = await asyncio.to_thread(_capture, ("git", *args), root)
@@ -58,5 +69,14 @@ async def dirty_files(root: Path) -> list[str]:
     stays clean; this filter is belt-and-suspenders.
     """
     lines = (await run_git(root, "status", "--porcelain")).splitlines()
-    paths = [line[3:].strip() for line in lines if line.strip()]
+    paths = [_porcelain_path(line) for line in lines if line.strip()]
     return [path for path in paths if path != MARKER_NAME]
+
+
+def _porcelain_path(line: str) -> str:
+    """The (new) path from one porcelain line: renames read ``XY old -> new``
+    and special-char paths come double-quoted — report just the destination."""
+    path = line[3:]
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"')

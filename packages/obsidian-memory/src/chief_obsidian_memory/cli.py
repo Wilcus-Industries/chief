@@ -128,10 +128,15 @@ def _index(args: argparse.Namespace) -> VaultIndex:
 
 
 def _repo_root() -> Path | None:
-    """The nearest ancestor of the CWD holding a ``config.yaml`` — the daemon
-    repo root every default resolves against — or None when there isn't one."""
+    """The nearest ancestor of the CWD that is the daemon repo root — holding
+    ``config.yaml`` beside the ``data/installed.yaml`` install registry (this
+    CLI only exists once a package install wrote it) — or None when there
+    isn't one. Requiring the registry stops a stray config.yaml higher up
+    from silently binding recall to the wrong vault and index."""
     for candidate in (Path.cwd(), *Path.cwd().parents):
-        if (candidate / "config.yaml").is_file():
+        if (candidate / "config.yaml").is_file() and (
+            candidate / "data" / "installed.yaml"
+        ).is_file():
             return candidate
     return None
 
@@ -153,7 +158,10 @@ def _settings(args: argparse.Namespace) -> MemorySettings:
         where = (
             f"{root / 'config.yaml'} has no obsidian_memory.vault_paths"
             if root
-            else f"no config.yaml found from {Path.cwd()} upward"
+            else (
+                "no chief repo (config.yaml + data/installed.yaml) found "
+                f"from {Path.cwd()} upward"
+            )
         )
         raise SystemExit(
             f"no vault configured: {where} — pass --vault, set "
