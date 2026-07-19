@@ -6,6 +6,7 @@ stay independent. The session-scoped ``embedder`` is seeded into the module
 model cache so the hook's own index construction reuses it.
 """
 
+import asyncio
 import logging
 import subprocess
 import sys
@@ -101,6 +102,63 @@ async def test_non_owner_turn_injects_nothing_and_calls_no_judge(
     # The gated turn also never advanced the cadence: the first owner turn fires.
     assert await recall(_owner("the roof leaks in the rain")) is not None
     assert len(judge.calls) == 1
+
+
+def _to_thread_spy(
+    monkeypatch: pytest.MonkeyPatch, calls: list[Any]
+) -> None:
+    """Wrap ``asyncio.to_thread`` so a test can see what gets offloaded while
+    the real work still runs."""
+    real = asyncio.to_thread
+
+    async def spy(fn: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append(fn)
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy)
+
+
+async def test_firing_recall_offloads_index_work_off_the_event_loop(
+    vault: Path,
+    tmp_path: Path,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The blocking index/search path (chroma open, a possible full vault build,
+    # query embedding) must run via asyncio.to_thread, so one recall firing
+    # can't stall the daemon's event loop — every other channel and monitor.
+    judge = FakeProvider([text_turn("1")])
+    recall = _hook(_context(judge, vault, tmp_path / "data", engine))
+    offloaded: list[Any] = []
+    _to_thread_spy(monkeypatch, offloaded)
+
+    out = await recall(_owner("the roof leaks in the rain"))
+
+    assert out is not None  # the judge still selected the roof candidate
+    assert offloaded, "index/search work must be offloaded to a worker thread"
+
+
+async def test_owner_gate_and_cadence_precede_any_thread_offload(
+    vault: Path,
+    tmp_path: Path,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A non-owner turn and a silent (non-firing) owner turn never reach the
+    # thread: the fast owner-gate + cadence check stay on the loop, first.
+    judge = FakeProvider([text_turn("1")])
+    recall = _hook(_context(judge, vault, tmp_path / "data", engine))
+    offloaded: list[Any] = []
+    _to_thread_spy(monkeypatch, offloaded)
+
+    system_turn = TurnContext("wake", [], "system", "cli:t", "cli")
+    assert await recall(system_turn) is None
+    assert offloaded == []  # owner-gate short-circuits before the thread
+
+    assert await recall(_owner("first owner turn fires")) is not None
+    assert len(offloaded) == 1  # turn 1 fires -> exactly one offload
+    assert await recall(_owner("second owner turn is silent")) is None
+    assert len(offloaded) == 1  # turn 2 is silent -> no further offload
 
 
 async def test_judge_receives_the_transcript_as_one_system_message(

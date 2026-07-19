@@ -7,10 +7,30 @@ builds a :class:`MemorySettings` — every sub-key optional, code fills defaults
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import Any
 
 _DEFAULT_EXCLUDE = (".obsidian/", "templates/", "attachments/")
 _TUPLE_KEYS = ("include", "exclude", "vault_paths", "writable_paths")
+_PACKAGE_NAME = "obsidian-memory"
+_DATA_ROOT = Path("data/hooks")
+
+
+def package_data_dir() -> Path:
+    """The package's on-disk data dir, ``data/hooks/obsidian-memory``.
+
+    Mirrors the hook loader's ``data_root / name`` (``chief.app`` wires
+    ``data_root=data/hooks``). The CLI has no ``HookContext``, so it rebuilds
+    the same directory from this one place — so it targets the ambient hook's
+    index rather than a private one of its own.
+    """
+    return _DATA_ROOT / _PACKAGE_NAME
+
+
+def index_home_for(data_dir: Path) -> Path:
+    """The chroma index home under a package data dir. The single derivation
+    the ambient hook and the CLI share, so both open the same collection."""
+    return data_dir / "index"
 
 
 @dataclass(frozen=True)
