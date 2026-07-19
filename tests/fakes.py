@@ -23,6 +23,7 @@ class FakeProvider:
     def __init__(self, script: list[list[ProviderEvent]]) -> None:
         self._script = list(script)
         self.calls: list[list[dict[str, Any]]] = []
+        self.models: list[str] = []
         # Optional handshake for concurrency tests: when set, each call waits
         # here after recording itself, so tests control interleaving.
         self.gate: asyncio.Event | None = None
@@ -34,6 +35,7 @@ class FakeProvider:
         messages: list[dict[str, Any]],
         tools: list[ToolSpec],
     ) -> AsyncIterator[ProviderEvent]:
+        self.models.append(model)
         self.calls.append([dict(m) for m in messages])
         if self.gate is not None:
             await self.gate.wait()

@@ -1,16 +1,21 @@
 """Monitors: predicates, wakes, persistence, and the agent-facing tools."""
 
+from pathlib import Path
+
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.tools import ToolContext, ToolRegistry
 from chief.bus import Event, EventBus
-from chief.monitors.service import ModelJudge, MonitorService
+from chief.classifiers import Classifier, ClassifierRegistry
+from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.persistence.db import make_session_factory
 from chief.provider.base import ToolCall
 
 from .fakes import FakeProvider, text_turn
+
+REPO = Path(__file__).parent.parent
 
 CODE_PREDICATE = {"kind": "code", "field": "text", "pattern": "urgent"}
 
@@ -38,8 +43,12 @@ def make_service(
     engine: AsyncEngine, bus: EventBus, judge_provider: FakeProvider | None = None
 ) -> tuple[MonitorService, WakeSink]:
     wake = WakeSink()
-    judge = ModelJudge(judge_provider or FakeProvider([]), "judge-model")
-    service = MonitorService(make_session_factory(engine), bus, wake, judge)
+    classifier = Classifier(
+        judge_provider or FakeProvider([]),
+        ClassifierRegistry(REPO / "classifiers"),
+        "judge-model",
+    )
+    service = MonitorService(make_session_factory(engine), bus, wake, classifier)
     return service, wake
 
 
@@ -101,7 +110,9 @@ async def test_monitor_ignores_other_channels(engine: AsyncEngine) -> None:
     assert wake.messages == []
 
 
-async def test_model_predicate_asks_the_judge(engine: AsyncEngine) -> None:
+async def test_instruction_predicate_asks_the_judge(engine: AsyncEngine) -> None:
+    """The instruction form lowers to a wake-judge classifier predicate; the
+    instruction text still reaches the prompt and it fires on YES."""
     bus = EventBus()
     judge_provider = FakeProvider([text_turn("NO"), text_turn("YES")])
     service, wake = make_service(engine, bus, judge_provider)
@@ -110,7 +121,12 @@ async def test_model_predicate_asks_the_judge(engine: AsyncEngine) -> None:
         watch_channel="cli",
         wake_channel="cli",
         wake_thread="cli:home",
-        predicate={"kind": "model", "instruction": "Is this about an invoice?"},
+        predicate={
+            "kind": "classifier",
+            "classifier": "wake-judge",
+            "fire_label": "YES",
+            "instruction": "Is this about an invoice?",
+        },
     )
     await bus.publish(inbound("hello"))
     assert wake.messages == []
@@ -119,6 +135,52 @@ async def test_model_predicate_asks_the_judge(engine: AsyncEngine) -> None:
     # The judge saw the instruction and the event payload.
     judged = judge_provider.calls[0][1]["content"]
     assert "Is this about an invoice?" in judged
+
+
+async def test_classifier_predicate_fires_on_its_label(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    judge_provider = FakeProvider([text_turn("NO"), text_turn("YES")])
+    service, wake = make_service(engine, bus, judge_provider)
+    await service.create(
+        description="wake when the judge says yes",
+        watch_channel="cli",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        predicate={
+            "kind": "classifier",
+            "classifier": "wake-judge",
+            "fire_label": "YES",
+        },
+    )
+    await bus.publish(inbound("nope"))
+    assert wake.messages == []
+    await bus.publish(inbound("yep"))
+    assert len(wake.messages) == 1
+
+
+async def test_classifier_error_does_not_block_siblings(
+    engine: AsyncEngine,
+) -> None:
+    """A monitor whose classifier raises must not abort the sibling loop."""
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    # Lower id, evaluated first: an unknown classifier name raises.
+    await service.create(
+        description="broken",
+        watch_channel="cli",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        predicate={"kind": "classifier", "classifier": "ghost", "fire_label": "YES"},
+    )
+    await service.create(
+        description="urgent watcher",
+        watch_channel="cli",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        predicate=CODE_PREDICATE,
+    )
+    await bus.publish(inbound("this is URGENT"))
+    assert len(wake.messages) == 1
 
 
 async def test_deleted_monitor_stops_firing(engine: AsyncEngine) -> None:
@@ -185,3 +247,71 @@ async def test_monitor_tools_create_list_delete(engine: AsyncEngine) -> None:
     assert await registry.dispatch(
         ToolCall(id="5", name="monitor", arguments={"action": "list"})
     ) == "no monitors"
+
+
+async def test_monitor_tool_classifier_form(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    created = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "wake on yes",
+                "classifier": "wake-judge",
+                "fire_label": "YES",
+            },
+        ),
+        context,
+    )
+    assert created == "monitor #1 created"
+    no_label = await registry.dispatch(
+        ToolCall(
+            id="2",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "missing label",
+                "classifier": "wake-judge",
+            },
+        ),
+        context,
+    )
+    assert "fire_label" in no_label
+
+
+async def test_monitor_tool_rejects_unknown_classifier(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "x",
+            "classifier": "ghost", "fire_label": "YES"}),
+        context,
+    )
+    assert "unknown classifier" in result
+
+
+async def test_monitor_tool_rejects_undeclared_fire_label(
+    engine: AsyncEngine,
+) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "x",
+            "classifier": "wake-judge", "fire_label": "yes"}),
+        context,
+    )
+    assert "fire_label" in result and "wake-judge" in result
