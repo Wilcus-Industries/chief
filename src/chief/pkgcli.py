@@ -10,6 +10,7 @@ is no ``pull`` or ``remove`` here (PRD #198).
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -22,6 +23,10 @@ from chief.config import load_config
 from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")
+
+#: Hard ceiling on the one-time clone so a stalled network or auth prompt can never
+#: wedge `chief-pkg` (and, through the single dispatcher, the whole daemon).
+CLONE_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -44,19 +49,28 @@ def _load_installed(path: Path) -> dict[str, object]:
 
 
 def clone_if_missing(repo_url: str, dest: Path) -> None:
-    """Clone the chief-packages repo once; never fail the CLI if it can't.
+    """Clone the chief-packages repo once; never fail OR hang the CLI if it can't.
 
-    The remote may not exist yet, so a clone failure is a warning, not an
-    error — discovery still works over the bundled root alone.
+    The remote may not exist yet, so a clone failure is a warning, not an error —
+    discovery still works over the bundled root alone. ``GIT_TERMINAL_PROMPT=0`` stops
+    git blocking forever on an interactive auth prompt, and a hard ``timeout`` bounds a
+    stalled network; either way discovery falls back to bundled-only.
     """
     if dest.exists() or not repo_url:
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        ["git", "clone", "--depth", "1", repo_url, str(dest)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "clone", "--depth", "1", repo_url, str(dest)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=CLONE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"warning: clone of {repo_url} timed out after "
+              f"{CLONE_TIMEOUT_SECONDS:g}s", file=sys.stderr)
+        return
     if result.returncode != 0:
         print(f"warning: could not clone {repo_url}: {result.stderr.strip()}",
               file=sys.stderr)

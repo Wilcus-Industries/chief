@@ -85,7 +85,7 @@ class Config:
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     packages_dir: Path = Path("packages")
     packages_repo: str = "https://github.com/CrazyWillBear/chief-packages"
-    shell_timeout_seconds: float = 120.0
+    shell_timeout_seconds: float = 20.0
     shell_output_limit: int = 30_000
     imessage_enabled: bool = False
     imessage_owner_handles: tuple[str, ...] = ()
@@ -141,7 +141,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         mcp_servers=dict(raw.get("mcp_servers") or {}),
         packages_dir=Path(_env_or(raw, "packages_dir", "packages")),
         packages_repo=str(_env_or(raw, "packages_repo", Config().packages_repo)),
-        shell_timeout_seconds=float(shell.get("timeout_seconds", 120.0)),
+        shell_timeout_seconds=float(shell.get("timeout_seconds", 20.0)),
         shell_output_limit=int(shell.get("output_limit", 30_000)),
         imessage_enabled=bool(imessage.get("enabled", False)),
         imessage_owner_handles=_as_handles(imessage.get("owner_handles")),

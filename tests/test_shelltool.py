@@ -205,6 +205,42 @@ async def test_timeout_kills_and_respawns(tmp_path: Path) -> None:
     await shell.aclose()
 
 
+async def test_per_call_timeout_overrides_service_default(tmp_path: Path) -> None:
+    # A long service default must not stop a short per-call timeout from killing a hang
+    # — this keeps one wedged command (e.g. a stuck `chief-pkg` clone) from blocking the
+    # daemon for the whole service timeout.
+    shell = ShellService(
+        workspace_dir=str(tmp_path), timeout_seconds=120.0, output_limit=10_000
+    )
+    result = await shell.run("s1", "sleep 30", timeout=0.4)
+    assert result["exit_code"] == TIMEOUT_EXIT_CODE
+    await shell.aclose()
+
+
+def test_shell_spec_exposes_optional_timeout() -> None:
+    from chief.shelltool import _SHELL_SPEC
+
+    props = _SHELL_SPEC.parameters["properties"]
+    assert "timeout" in props
+    assert "timeout" not in _SHELL_SPEC.parameters["required"]
+
+
+async def test_registered_tool_passes_timeout_through(tmp_path: Path) -> None:
+    # The agent-supplied `timeout` arg reaches the shell: a 0.4s cap kills `sleep 30`
+    # instead of waiting out the 120s service default.
+    shell = ShellService(
+        workspace_dir=str(tmp_path), timeout_seconds=120.0, output_limit=10_000
+    )
+    registry = ToolRegistry()
+    register_shell_tool(registry, shell)
+    call = ToolCall(
+        id="1", name="shell", arguments={"command": "sleep 30", "timeout": 0.4}
+    )
+    out = await registry.dispatch(call, ToolContext("t1", "socket"))
+    assert f"exit code {TIMEOUT_EXIT_CODE}" in out
+    await shell.aclose()
+
+
 async def test_output_cap_truncates(tmp_path: Path) -> None:
     shell = ShellService(
         workspace_dir=str(tmp_path), timeout_seconds=5.0, output_limit=100

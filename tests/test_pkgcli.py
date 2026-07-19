@@ -1,6 +1,9 @@
 """chief-pkg discovery over real package roots and a real (local) clone root."""
 
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from chief.pkgcli import clone_if_missing, discover, render
 
@@ -69,3 +72,35 @@ def test_clone_if_missing_skips_when_present(tmp_path: Path) -> None:
     (dest / "keep").write_text("x")
     clone_if_missing("file:///no/such/repo.git", dest)
     assert (dest / "keep").read_text() == "x"
+
+
+def test_clone_if_missing_cannot_hang_on_a_credential_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git must never block on an interactive auth prompt or a stalled network — that
+    # would wedge `chief-pkg` and, through the single dispatcher, the whole daemon.
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    clone_if_missing("https://example.com/repo.git", tmp_path / "clone")
+    assert captured.get("timeout")  # bounded, never unbounded
+    env = captured.get("env")
+    assert isinstance(env, dict) and env.get("GIT_TERMINAL_PROMPT") == "0"
+
+
+def test_clone_if_missing_survives_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A clone that hits its own timeout must warn and fall back to bundled-only, not
+    # raise into the CLI.
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    dest = tmp_path / "clone"
+    clone_if_missing("https://example.com/repo.git", dest)
+    assert not dest.exists()

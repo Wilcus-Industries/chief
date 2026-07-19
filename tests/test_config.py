@@ -16,6 +16,19 @@ def test_defaults_when_no_file(tmp_path: Path) -> None:
     assert config.max_concurrent_sessions == 4
 
 
+def test_shell_timeout_defaults_to_20s(tmp_path: Path) -> None:
+    # A short default keeps a hung command from stalling the daemon for minutes; the
+    # agent can still pass a larger per-call `timeout` for genuinely slow work.
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.shell_timeout_seconds == 20.0
+
+
+def test_shell_timeout_yaml_override(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("shell:\n  timeout_seconds: 45\n")
+    assert load_config(path).shell_timeout_seconds == 45.0
+
+
 def test_yaml_values_override_defaults(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
