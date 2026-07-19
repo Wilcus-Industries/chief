@@ -120,6 +120,68 @@ def test_cli_and_hook_derive_the_same_collection_and_index_home(
         index_home=config.index_home_for(config.package_data_dir()),
         settings=hook_settings,
     )
-    assert cli_index._index_home == hook_index._index_home
+    # The CLI anchors to the repo root (absolute); the hook's path is relative
+    # to the daemon CWD (the same root here) — compare resolved identity.
+    assert cli_index._index_home.resolve() == hook_index._index_home.resolve()
     assert cli_index._collection_name() == hook_index._collection_name()
     assert cli_index._settings.embed_model == hook_index._settings.embed_model
+
+
+# --- defaults anchor to the repo root, never the bare CWD (audit M7) --------
+
+
+def test_cli_resolves_config_and_index_from_a_subdirectory(
+    vault: Path,
+    tmp_path: Path,
+    warm_cache: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Run from the wrong CWD, the old CLI silently built a fresh empty index
+    # there and answered "no matches"; defaults now resolve against the
+    # nearest ancestor holding a config.yaml.
+    _write_config(tmp_path, vault)
+    sub = tmp_path / "some" / "subdir"
+    sub.mkdir(parents=True)
+    monkeypatch.chdir(sub)
+    monkeypatch.delenv("CHIEF_MEMORY_VAULT", raising=False)
+    monkeypatch.delenv("CHIEF_MEMORY_INDEX_HOME", raising=False)
+
+    assert cli.main(["reindex"]) == 0
+    assert "reindexed 5 chunks" in capsys.readouterr().out
+    assert (tmp_path / "data" / "hooks" / "obsidian-memory" / "index").is_dir()
+    assert not (sub / "data").exists()
+
+
+def test_cli_outside_any_repo_fails_loudly_instead_of_empty_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    monkeypatch.chdir(nowhere)
+    monkeypatch.delenv("CHIEF_MEMORY_VAULT", raising=False)
+    monkeypatch.delenv("CHIEF_MEMORY_INDEX_HOME", raising=False)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["search", "anything"])
+    assert "config.yaml" in str(excinfo.value)
+    assert not (nowhere / "data").exists()  # no index fabricated
+
+
+def test_search_no_matches_names_the_resolved_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # An empty answer must be checkable — it names the vault and index it
+    # searched, so a wrong path can't masquerade as "the tool is broken".
+    empty_vault = tmp_path / "vault"
+    empty_vault.mkdir()
+    _write_config(tmp_path, empty_vault)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CHIEF_MEMORY_VAULT", raising=False)
+    monkeypatch.delenv("CHIEF_MEMORY_INDEX_HOME", raising=False)
+
+    assert cli.main(["search", "anything"]) == 0
+    out = capsys.readouterr().out
+    assert "no matches" in out
+    assert str(empty_vault) in out

@@ -8,6 +8,11 @@ hook resolve the identical vault, index home, and embedding model. That keeps
 silently-different collection. ``--vault`` / ``CHIEF_MEMORY_VAULT`` and
 ``--index-home`` / ``CHIEF_MEMORY_INDEX_HOME`` override the config block; every
 result line carries its source note path, so recall is always traceable.
+
+Defaults resolve against the **repo root** (the nearest ancestor of the CWD
+holding a ``config.yaml``), never the bare CWD: run from the wrong directory,
+a CWD-relative CLI silently built a fresh empty index and answered
+"no matches" — indistinguishable, to the model, from a broken tool.
 """
 
 import argparse
@@ -73,9 +78,14 @@ def _common() -> argparse.ArgumentParser:
 
 
 def _search(args: argparse.Namespace) -> int:
+    settings = _settings(args)
     hits = _index(args).search(args.query, args.k)
     if not hits:
-        print("no matches")
+        # Name the resolved paths so an empty answer is checkable, never
+        # mistaken for a broken tool.
+        print(
+            f"no matches (vault={_vault(settings)}, index={_index_home(args)})"
+        )
         return 0
     for hit in hits:
         print(f"{hit.score:.3f}  {hit.note_path} :: {hit.heading}")
@@ -117,27 +127,52 @@ def _index(args: argparse.Namespace) -> VaultIndex:
     )
 
 
+def _repo_root() -> Path | None:
+    """The nearest ancestor of the CWD holding a ``config.yaml`` — the daemon
+    repo root every default resolves against — or None when there isn't one."""
+    for candidate in (Path.cwd(), *Path.cwd().parents):
+        if (candidate / "config.yaml").is_file():
+            return candidate
+    return None
+
+
 def _settings(args: argparse.Namespace) -> MemorySettings:
-    """Resolve settings from the daemon ``obsidian_memory`` config block, then
-    let an explicit ``--vault``/``CHIEF_MEMORY_VAULT`` override its vault path.
-    Fails loudly when neither config nor flag supplies a vault."""
+    """Resolve settings from the daemon ``obsidian_memory`` config block (found
+    via :func:`_repo_root`), then let an explicit ``--vault``/
+    ``CHIEF_MEMORY_VAULT`` override its vault path. Fails loudly — naming what
+    was searched — when neither config nor flag supplies a vault."""
     from chief.config import load_raw
 
-    settings = MemorySettings.from_config(load_raw().get("obsidian_memory"))
+    root = _repo_root()
+    raw = load_raw(root / "config.yaml") if root else {}
+    settings = MemorySettings.from_config(raw.get("obsidian_memory"))
     override = args.vault or os.environ.get("CHIEF_MEMORY_VAULT")
     if override:
         settings = replace(settings, vault_paths=(override,))
     if not settings.vault_paths:
+        where = (
+            f"{root / 'config.yaml'} has no obsidian_memory.vault_paths"
+            if root
+            else f"no config.yaml found from {Path.cwd()} upward"
+        )
         raise SystemExit(
-            "no vault configured: set obsidian_memory.vault_paths in "
-            "config.yaml, pass --vault, or set CHIEF_MEMORY_VAULT"
+            f"no vault configured: {where} — pass --vault, set "
+            "CHIEF_MEMORY_VAULT, or run from the chief repo"
         )
     return settings
 
 
 def _index_home(args: argparse.Namespace) -> Path:
     override = args.index_home or os.environ.get("CHIEF_MEMORY_INDEX_HOME")
-    return Path(override) if override else index_home_for(package_data_dir())
+    if override:
+        return Path(override)
+    root = _repo_root()
+    if root is None:
+        raise SystemExit(
+            f"no config.yaml found from {Path.cwd()} upward — cannot resolve "
+            "the index home; run from the chief repo or pass --index-home"
+        )
+    return root / index_home_for(package_data_dir())
 
 
 def _vault(settings: MemorySettings) -> Path:

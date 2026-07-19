@@ -38,6 +38,7 @@ class Package:
     skills: tuple[str, ...] = ()
     config_keys: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()
+    python_deps: tuple[str, ...] = ()
     hooks: HookSpec | None = None
 
     def install_md(self) -> str:
@@ -122,6 +123,7 @@ def _parse(manifest: Path) -> Package | None:
         skills=tuple(meta.get("skills") or ()),
         config_keys=tuple(meta.get("config_keys") or ()),
         secrets=tuple(meta.get("secrets") or ()),
+        python_deps=tuple(meta.get("python_deps") or ()),
         hooks=_parse_hooks(meta.get("hooks")),
     )
 

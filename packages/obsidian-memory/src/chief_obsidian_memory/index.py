@@ -15,6 +15,7 @@ from chief_obsidian_memory import heal
 from chief_obsidian_memory.chunk import chunk_note, iter_notes
 from chief_obsidian_memory.config import MemorySettings
 from chief_obsidian_memory.embedding import embed, load_model
+from chief_obsidian_memory.storelock import StoreLock
 
 
 class SearchHit(NamedTuple):
@@ -47,6 +48,10 @@ class VaultIndex:
         self._model = model
         self._client: Any | None = None
         self._collection: Any | None = None
+        # The daemon hook and the CLI share this store across processes; the
+        # public entry points hold this flock so a CLI reindex can't race the
+        # hook's build/heal into a corrupted collection.
+        self._lock = StoreLock(self._index_home)
 
     def build(self) -> int:
         """(Re)build the whole index from the vault; returns the chunk count.
@@ -56,11 +61,12 @@ class VaultIndex:
         so a misconfigured vault fails loudly instead of yielding empty recall."""
         if not self._vault.is_dir():
             raise FileNotFoundError(f"vault path does not exist: {self._vault}")
-        self._reset_collection()
-        count = 0
-        for rel, text in iter_notes(self._vault, self._settings):
-            count += self._index_note(rel, text)
-        return count
+        with self._lock:
+            self._reset_collection()
+            count = 0
+            for rel, text in iter_notes(self._vault, self._settings):
+                count += self._index_note(rel, text)
+            return count
 
     def search(self, query: str, k: int) -> list[SearchHit]:
         """Return the ``k`` chunks most similar to ``query``, closest first.
@@ -69,29 +75,33 @@ class VaultIndex:
         mtime staleness check on the hit notes and re-embeds any that drifted
         out of band before returning — so recall never serves stale or empty
         results silently. A missing vault surfaces loudly from :meth:`build`."""
-        collection = self._ensure()
-        if collection.count() == 0:
-            return []
-        hits = self._query(query, k)
-        stale = heal.drifted(collection, self._vault, [h.note_path for h in hits])
-        if stale:
-            for rel in stale:
-                self._reindex_note(rel)
+        with self._lock:
+            collection = self._ensure()
+            if collection.count() == 0:
+                return []
             hits = self._query(query, k)
-        return hits
+            stale = heal.drifted(
+                collection, self._vault, [h.note_path for h in hits]
+            )
+            if stale:
+                for rel in stale:
+                    self._reindex_note(rel)
+                hits = self._query(query, k)
+            return hits
 
     def refresh(self) -> int:
         """Re-embed only the notes whose content changed and drop deleted ones;
         returns how many notes were touched. Cheap enough for a cron sweep."""
-        collection = self._ensure()
-        to_reindex, to_delete = heal.diff(
-            self._vault, self._settings, heal.indexed_hashes(collection)
-        )
-        for rel in to_delete:
-            collection.delete(where={"note_path": rel})
-        for rel in to_reindex:
-            self._reindex_note(rel)
-        return len(to_reindex) + len(to_delete)
+        with self._lock:
+            collection = self._ensure()
+            to_reindex, to_delete = heal.diff(
+                self._vault, self._settings, heal.indexed_hashes(collection)
+            )
+            for rel in to_delete:
+                collection.delete(where={"note_path": rel})
+            for rel in to_reindex:
+                self._reindex_note(rel)
+            return len(to_reindex) + len(to_delete)
 
     def _query(self, query: str, k: int) -> list[SearchHit]:
         collection = self._open()
