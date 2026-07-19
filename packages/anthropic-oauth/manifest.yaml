@@ -1,0 +1,11 @@
+name: anthropic-oauth
+description: Route chosen models at a local Claude-subscription proxy (OAuth); OpenRouter stays the default.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/anthropic-oauth
+config_keys:
+  - provider_backends
+  - provider_aliases
+secrets:
+  - proxy_api_key
