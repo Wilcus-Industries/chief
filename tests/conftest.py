@@ -9,12 +9,15 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.persistence.db import init_schema, make_engine, make_session_factory
 from chief.persistence.store import MessageStore
+
+_FIXTURE_VAULT = Path(__file__).parent / "fixtures" / "vault"
 
 
 @pytest.fixture
@@ -45,3 +48,25 @@ def sock_path() -> Iterator[Path]:
 @pytest.fixture
 def store(engine: AsyncEngine) -> MessageStore:
     return MessageStore(make_session_factory(engine))
+
+
+@pytest.fixture(scope="session")
+def embedder() -> Any:
+    """The model2vec static model, loaded once per test session.
+
+    Loading downloads ~30MB of weights on first run then caches them; sharing
+    one loaded model keeps every obsidian-memory test well under the 30s
+    per-test timeout. Imported lazily so sessions that touch no memory test
+    never pay for it.
+    """
+    from model2vec import StaticModel
+
+    return StaticModel.from_pretrained("minishlab/potion-base-8M")
+
+
+@pytest.fixture
+def vault(tmp_path: Path) -> Path:
+    """A throwaway copy of the fixture Obsidian vault, safe to mutate."""
+    destination = tmp_path / "vault"
+    shutil.copytree(_FIXTURE_VAULT, destination)
+    return destination

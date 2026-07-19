@@ -1,0 +1,21 @@
+[project]
+name = "chief-obsidian-memory"
+version = "0.1.0"
+description = "Obsidian-vault semantic memory for chief: indexer, graph, ambient recall hook."
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=0.5",
+    "model2vec>=0.3",
+    "obsidiantools>=0.10",
+    "networkx>=3",
+]
+
+[project.scripts]
+chief-memory = "chief_obsidian_memory.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chief_obsidian_memory"]
