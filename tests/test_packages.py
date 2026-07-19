@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from chief.packages import HookSpec, PackageLibrary
+from chief.packages import HookSpec, PackageLibrary, validate
 
 REPO_PACKAGES = Path(__file__).parent.parent / "packages"
 
@@ -61,3 +61,15 @@ def test_bundled_packages_carry_skill_and_install_md() -> None:
         assert package is not None, name
         assert f"skills/{name}" in package.skills
         assert package.install_md().strip()
+
+
+def test_obsidian_memory_manifest_is_well_formed() -> None:
+    # The first code-shipping hook package must validate with a well-formed
+    # hooks block and its single top-level config key.
+    assert validate((REPO_PACKAGES,)) == []
+    package = PackageLibrary((REPO_PACKAGES,)).get("obsidian-memory")
+    assert package is not None
+    assert package.hooks == HookSpec(module="hooks.py", register="register")
+    assert package.config_keys == ("obsidian_memory",)
+    assert "skills/obsidian-memory" in package.skills
+    assert package.install_md().strip()

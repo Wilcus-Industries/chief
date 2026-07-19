@@ -1,0 +1,12 @@
+name: obsidian-memory
+description: Semantic + wikilink memory over an Obsidian vault, with owner-gated ambient recall.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/obsidian-memory
+config_keys:
+  - obsidian_memory
+secrets: []
+hooks:
+  module: hooks.py
+  register: register

@@ -120,7 +120,9 @@ class Dispatcher:
             await adapter.send_delta(message.thread_key, text)
 
         try:
-            result = await session.run_turn(message.text, on_delta)
+            result = await session.run_turn(
+                message.text, on_delta, sender=message.sender
+            )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.

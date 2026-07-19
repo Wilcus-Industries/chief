@@ -30,8 +30,10 @@ file before you change it.
   first-turn context (`session_start`), and turn observers (`post_turn`) through
   `src/chief/hooks/`: `registry.py` (the store), `runner.py` (resilient
   timeout-bounded execution + the `<hook source="…">` render and system
-  assembly), `context.py` (the `HookContext` — the entire surface a hook may
-  touch), and `loader.py` (the boot importer). A package opts in with a `hooks:`
+  assembly), `context.py` (the `HookContext` a hook registers with, plus the
+  per-turn `TurnContext` — inbound text, recent transcript, sender, thread,
+  channel — its context hooks receive so they can judge relevance and gate on
+  the sender), and `loader.py` (the boot importer). A package opts in with a `hooks:`
   block in its manifest (`module` + `register`); `build_app` scans installed,
   non-`hooks.disabled` packages and calls each one's `register(context, hooks)`.
   Only `Session._one_turn` fires hooks — subagents never do.

@@ -27,3 +27,22 @@ class HookContext:
     data_dir: Path
     logger: logging.Logger
     budget: Budget
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """What a context hook sees about the turn it is contributing to.
+
+    Built once per turn and passed to every ``pre_turn``/``session_start``
+    hook. ``messages`` is the recent transcript *before* the incoming user
+    turn is appended, so a hook can judge relevance against the conversation
+    so far. ``sender`` is the inbound message's origin (``"owner"``,
+    ``"system"`` for monitor/cron wakes, or a stranger id) — hooks that touch
+    private data gate on it. ``channel`` is None for wakes without a channel.
+    """
+
+    user_text: str
+    messages: list[dict[str, Any]]
+    sender: str
+    thread_key: str
+    channel: str | None
