@@ -11,21 +11,10 @@ import hashlib
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from chief_obsidian_memory import heal
 from chief_obsidian_memory.chunk import chunk_note, iter_notes
 from chief_obsidian_memory.config import MemorySettings
-
-# One loaded model2vec model per name, reused across VaultIndex instances (the
-# ambient hook builds a fresh index each firing; reloading weights every turn
-# would waste seconds and memory).
-_MODEL_CACHE: dict[str, Any] = {}
-
-
-def _load_model(name: str) -> Any:
-    if name not in _MODEL_CACHE:
-        from model2vec import StaticModel
-
-        _MODEL_CACHE[name] = StaticModel.from_pretrained(name)
-    return _MODEL_CACHE[name]
+from chief_obsidian_memory.embedding import embed, load_model
 
 
 class SearchHit(NamedTuple):
@@ -74,10 +63,38 @@ class VaultIndex:
         return count
 
     def search(self, query: str, k: int) -> list[SearchHit]:
-        """Return the ``k`` chunks most similar to ``query``, closest first."""
-        collection = self._open()
+        """Return the ``k`` chunks most similar to ``query``, closest first.
+
+        Self-heals a missing/emptied index by building it, then does a cheap
+        mtime staleness check on the hit notes and re-embeds any that drifted
+        out of band before returning — so recall never serves stale or empty
+        results silently. A missing vault surfaces loudly from :meth:`build`."""
+        collection = self._ensure()
         if collection.count() == 0:
             return []
+        hits = self._query(query, k)
+        stale = heal.drifted(collection, self._vault, [h.note_path for h in hits])
+        if stale:
+            for rel in stale:
+                self._reindex_note(rel)
+            hits = self._query(query, k)
+        return hits
+
+    def refresh(self) -> int:
+        """Re-embed only the notes whose content changed and drop deleted ones;
+        returns how many notes were touched. Cheap enough for a cron sweep."""
+        collection = self._ensure()
+        to_reindex, to_delete = heal.diff(
+            self._vault, self._settings, heal.indexed_hashes(collection)
+        )
+        for rel in to_delete:
+            collection.delete(where={"note_path": rel})
+        for rel in to_reindex:
+            self._reindex_note(rel)
+        return len(to_reindex) + len(to_delete)
+
+    def _query(self, query: str, k: int) -> list[SearchHit]:
+        collection = self._open()
         result = collection.query(
             query_embeddings=self._embed([query]),
             n_results=min(k, collection.count()),
@@ -91,6 +108,22 @@ class VaultIndex:
                 strict=True,
             )
         ]
+
+    def _ensure(self) -> Any:
+        """Open the collection, building the whole index if it is empty or was
+        dropped/corrupted — the self-heal path."""
+        collection = self._open()
+        if collection.count() == 0:
+            self.build()
+            collection = self._open()
+        return collection
+
+    def _reindex_note(self, rel: str) -> None:
+        collection = self._open()
+        collection.delete(where={"note_path": rel})
+        path = self._vault / rel
+        if path.exists():
+            self._index_note(rel, path.read_text())
 
     def _index_note(self, rel: str, text: str) -> int:
         chunks = chunk_note(rel, text)
@@ -107,7 +140,7 @@ class VaultIndex:
                     "note_path": rel,
                     "heading": c.heading,
                     "mtime": mtime,
-                    "content_hash": _hash(text),
+                    "content_hash": heal.content_hash(text),
                 }
                 for c in chunks
             ],
@@ -115,11 +148,11 @@ class VaultIndex:
         return len(chunks)
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        return [vector.tolist() for vector in self._get_model().encode(texts)]
+        return embed(self._get_model(), texts)
 
     def _get_model(self) -> Any:
         if self._model is None:
-            self._model = _load_model(self._settings.embed_model)
+            self._model = load_model(self._settings.embed_model)
         return self._model
 
     def _open(self) -> Any:
@@ -151,7 +184,3 @@ class VaultIndex:
     def _collection_name(self) -> str:
         digest = hashlib.sha256(str(self._vault.resolve()).encode()).hexdigest()
         return f"vault_{digest[:16]}"
-
-
-def _hash(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
