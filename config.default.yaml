@@ -77,6 +77,15 @@ shell:
   timeout_seconds: 20
   output_limit: 30000
 
+# Agent-loop hooks: packages that contribute per-turn context (pre_turn),
+# once-per-thread context (session_start), or observe finished turns
+# (post_turn). timeout_seconds bounds each hook — a slower or raising hook is
+# logged and skipped, never stalling the turn. disabled lists package names
+# whose hooks are turned off without uninstalling the package.
+hooks:
+  timeout_seconds: 10
+  disabled: []
+
 # iMessage adapter (macOS only; configured by the build-imessage package).
 # owner_handles: the self-chat handle(s) — owner texts run turns, everyone
 # else is logged + published for monitors.

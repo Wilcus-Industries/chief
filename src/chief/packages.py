@@ -20,6 +20,15 @@ CLONED_PACKAGES_DIR = Path("data/packages")
 
 
 @dataclass(frozen=True)
+class HookSpec:
+    """Where a package's agent-loop hooks live: a module file and its
+    ``register(context, hooks)`` entry point, both relative to the package dir."""
+
+    module: str
+    register: str
+
+
+@dataclass(frozen=True)
 class Package:
     """One package as declared by its manifest, plus where it was found."""
 
@@ -29,6 +38,7 @@ class Package:
     skills: tuple[str, ...] = ()
     config_keys: tuple[str, ...] = ()
     secrets: tuple[str, ...] = ()
+    hooks: HookSpec | None = None
 
     def install_md(self) -> str:
         install = self.path / "INSTALL.md"
@@ -81,7 +91,22 @@ def _validate_manifest(manifest: Path) -> list[str]:
         problems.append(f"{manifest}: missing 'name'")
     if not str(meta.get("description") or "").strip():
         problems.append(f"{manifest}: missing 'description'")
+    problems.extend(_validate_hooks(manifest, meta.get("hooks")))
     return problems
+
+
+def _validate_hooks(manifest: Path, hooks: object) -> list[str]:
+    """A declared ``hooks`` block must be a mapping with non-empty ``module``
+    and ``register``; a malformed one fails the done-check and is rolled back."""
+    if hooks is None:
+        return []
+    if (
+        not isinstance(hooks, dict)
+        or not str(hooks.get("module") or "").strip()
+        or not str(hooks.get("register") or "").strip()
+    ):
+        return [f"{manifest}: 'hooks' must set non-empty 'module' and 'register'"]
+    return []
 
 
 def _parse(manifest: Path) -> Package | None:
@@ -97,4 +122,13 @@ def _parse(manifest: Path) -> Package | None:
         skills=tuple(meta.get("skills") or ()),
         config_keys=tuple(meta.get("config_keys") or ()),
         secrets=tuple(meta.get("secrets") or ()),
+        hooks=_parse_hooks(meta.get("hooks")),
     )
+
+
+def _parse_hooks(hooks: object) -> HookSpec | None:
+    """Build a HookSpec from a well-formed mapping; drop anything else silently
+    (the mcp_servers precedent — validation, not parsing, is the loud path)."""
+    if isinstance(hooks, dict) and hooks.get("module") and hooks.get("register"):
+        return HookSpec(module=str(hooks["module"]), register=str(hooks["register"]))
+    return None
