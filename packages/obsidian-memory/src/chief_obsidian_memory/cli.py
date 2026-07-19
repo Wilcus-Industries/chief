@@ -1,20 +1,27 @@
 """The ``chief-memory`` command line: search and reindex an Obsidian vault.
 
-Vault and index home resolve from flags first, then the ``CHIEF_MEMORY_VAULT``
-and ``CHIEF_MEMORY_INDEX_HOME`` environment variables the installer sets, then
-the built-in default index home under chief's data dir. Every result line
-carries the source note path so recall is always traceable to a note.
+Settings resolve from the daemon's ``obsidian_memory`` config block — the same
+source the ambient hook reads via ``HookContext.config`` — so the CLI and the
+hook resolve the identical vault, index home, and embedding model. That keeps
+``reindex`` writing the very collection recall queries: a divergent
+``embed_model`` or ``include``/``exclude`` would otherwise build a second,
+silently-different collection. ``--vault`` / ``CHIEF_MEMORY_VAULT`` and
+``--index-home`` / ``CHIEF_MEMORY_INDEX_HOME`` override the config block; every
+result line carries its source note path, so recall is always traceable.
 """
 
 import argparse
 import os
+from dataclasses import replace
 from pathlib import Path
 
-from chief_obsidian_memory.config import MemorySettings
+from chief_obsidian_memory.config import (
+    MemorySettings,
+    index_home_for,
+    package_data_dir,
+)
 from chief_obsidian_memory.graph import VaultGraph, related
 from chief_obsidian_memory.index import VaultIndex
-
-DEFAULT_INDEX_HOME = "data/hooks/obsidian-memory/index"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,8 +83,11 @@ def _search(args: argparse.Namespace) -> int:
 
 
 def _reindex(args: argparse.Namespace) -> int:
-    count = _index(args).build()
-    print(f"reindexed {count} chunks from {_vault_path(args)}")
+    settings = _settings(args)
+    count = VaultIndex(
+        vault=_vault(settings), index_home=_index_home(args), settings=settings
+    ).build()
+    print(f"reindexed {count} chunks from {_vault(settings)}")
     return 0
 
 
@@ -96,28 +106,42 @@ def _related(args: argparse.Namespace) -> int:
 
 
 def _graph(args: argparse.Namespace) -> VaultGraph:
-    vault = _vault_path(args)
-    return VaultGraph(vault=vault, settings=MemorySettings(vault_paths=(str(vault),)))
+    settings = _settings(args)
+    return VaultGraph(vault=_vault(settings), settings=settings)
 
 
 def _index(args: argparse.Namespace) -> VaultIndex:
-    vault = _vault_path(args)
-    index_home = Path(
-        args.index_home
-        or os.environ.get("CHIEF_MEMORY_INDEX_HOME")
-        or DEFAULT_INDEX_HOME
+    settings = _settings(args)
+    return VaultIndex(
+        vault=_vault(settings), index_home=_index_home(args), settings=settings
     )
-    settings = MemorySettings(vault_paths=(str(vault),))
-    return VaultIndex(vault=vault, index_home=index_home, settings=settings)
 
 
-def _vault_path(args: argparse.Namespace) -> Path:
-    vault = args.vault or os.environ.get("CHIEF_MEMORY_VAULT")
-    if not vault:
+def _settings(args: argparse.Namespace) -> MemorySettings:
+    """Resolve settings from the daemon ``obsidian_memory`` config block, then
+    let an explicit ``--vault``/``CHIEF_MEMORY_VAULT`` override its vault path.
+    Fails loudly when neither config nor flag supplies a vault."""
+    from chief.config import load_raw
+
+    settings = MemorySettings.from_config(load_raw().get("obsidian_memory"))
+    override = args.vault or os.environ.get("CHIEF_MEMORY_VAULT")
+    if override:
+        settings = replace(settings, vault_paths=(override,))
+    if not settings.vault_paths:
         raise SystemExit(
-            "no vault: pass --vault or set CHIEF_MEMORY_VAULT"
+            "no vault configured: set obsidian_memory.vault_paths in "
+            "config.yaml, pass --vault, or set CHIEF_MEMORY_VAULT"
         )
-    return Path(vault)
+    return settings
+
+
+def _index_home(args: argparse.Namespace) -> Path:
+    override = args.index_home or os.environ.get("CHIEF_MEMORY_INDEX_HOME")
+    return Path(override) if override else index_home_for(package_data_dir())
+
+
+def _vault(settings: MemorySettings) -> Path:
+    return Path(settings.vault_paths[0])
 
 
 if __name__ == "__main__":
