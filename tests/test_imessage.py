@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from chief.adapters.base import Message
-from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
+from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter, owner_send_guard
 from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
@@ -417,3 +417,38 @@ async def test_send_prefixes_owner_threads_only(tmp_path: Path) -> None:
     await adapter.send("+15559998888", "owner-requested text")
     assert harness.jxa_calls[0][1] == (OWNER, BOT_PREFIX + "reply to self-chat")
     assert harness.jxa_calls[1][1] == ("+15559998888", "owner-requested text")
+
+
+# --- owner_send_guard: the mechanical echo-loop seatbelt (audit C1) ---------
+
+
+def test_owner_send_guard_blocks_imsg_to_owner() -> None:
+    guard = owner_send_guard(("+16505550000",))
+    refusal = guard('imsg send --to "+16505550000" --text "hi"')
+    assert refusal is not None
+    assert "self-reply loop" in refusal
+
+
+def test_owner_send_guard_blocks_bare_digits_and_osascript() -> None:
+    guard = owner_send_guard(("+16505550000",))
+    assert guard("imsg send --to 16505550000 --text hi") is not None
+    assert guard('osascript -e \'send "x" to buddy "16505550000"\'') is not None
+
+
+def test_owner_send_guard_allows_other_recipients() -> None:
+    guard = owner_send_guard(("+16505550000",))
+    assert guard('imsg send --to "+15559998888" --text "for a friend"') is None
+    assert guard("imsg chats --limit 5") is None
+    assert guard("imsg history --chat-id 7 --limit 5") is None
+
+
+def test_owner_send_guard_ignores_non_messaging_commands() -> None:
+    # The handle alone (e.g. in a grep over logs) is fine — only commands that
+    # also invoke an out-of-band sender are blocked.
+    guard = owner_send_guard(("+16505550000",))
+    assert guard("grep 16505550000 data/chief.log") is None
+    assert guard("ls -la") is None
+
+
+def test_owner_send_guard_no_handles_is_noop() -> None:
+    assert owner_send_guard(())("imsg send --to x --text y") is None

@@ -7,7 +7,10 @@ where the value parses as YAML, so bools, numbers, and lists work::
     python -m chief.config_apply imessage.enabled=true \
         'imessage.owner_handles=["+15551234567"]'
 
-Runs inside the self-edit seatbelt, so a bad write is rolled back.
+Note: ``config.yaml`` is gitignored, so the self-edit seatbelt can NOT roll a
+bad write back — the pre-restart config gate (loading the live file) is the
+only protection. All the more reason to write through this merge instead of
+hand-editing.
 """
 
 import sys

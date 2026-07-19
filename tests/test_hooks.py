@@ -479,3 +479,28 @@ def test_malformed_hooks_manifest_fails_validation(tmp_path: Path) -> None:
     )
     problems = validate((tmp_path,))
     assert any("hooks" in p for p in problems)
+
+
+async def test_half_installed_package_warns_loudly(
+    engine: AsyncEngine, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Skills landed but the registry entry didn't (the prod half-install):
+    # the loader must say so instead of silently skipping (audit H1).
+    write_hook_package(tmp_path, "fixture", GOOD_HOOK)
+    (tmp_path / "fixture" / "manifest.yaml").write_text(
+        "name: fixture\ndescription: fixture pkg\nskills: [fixture]\n"
+        "hooks:\n  module: hooks.py\n  register: register\n"
+    )
+    skill_dir = tmp_path / "skills" / "fixture"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# fixture\n")
+    monkeypatch.chdir(tmp_path)
+    registry = HookRegistry()
+    provider = FakeProvider([])
+    with caplog.at_level(logging.WARNING):
+        load_fixture_hooks(tmp_path, engine, registry, provider, {}, ())
+    assert registry.pre_turn() == []
+    assert any(
+        "no data/installed.yaml entry" in r.getMessage() for r in caplog.records
+    )

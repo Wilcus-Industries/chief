@@ -82,6 +82,65 @@ async def test_tool_call_turn_dispatches_and_loops() -> None:
     assert provider.calls[1][-1] == tool_message
 
 
+async def test_identical_repeat_calls_are_refused_after_limit() -> None:
+    # Perseveration breaker (audit H2): the 4th identical call is refused with
+    # a course-correcting error instead of running — prod once repeated one
+    # command ~30 times in two minutes.
+    ran: list[str] = []
+
+    async def echo(text: str) -> str:
+        ran.append(text)
+        return f"echo: {text}"
+
+    registry = ToolRegistry()
+    registry.register(Tool(spec=ECHO_SPEC, handler=echo))
+    call = ToolCall(id="c1", name="echo", arguments={"text": "same"})
+    rounds: list[list[Any]] = [
+        [Completion(text="", tool_calls=(call,))] for _ in range(5)
+    ]
+    rounds.append(text_turn("gave up"))
+    provider = FakeProvider(rounds)
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    result = await run_turn(
+        provider=provider,
+        model="test-model",
+        messages=messages,
+        tools=registry,
+        on_delta=DeltaSink(),
+    )
+    assert result.text == "gave up"
+    assert len(ran) == 3  # 4th and 5th refused
+    refusals = [
+        m for m in messages if m["role"] == "tool" and "already ran" in m["content"]
+    ]
+    assert len(refusals) == 2
+    assert "different approach" in refusals[0]["content"]
+
+
+async def test_distinct_arguments_do_not_trip_the_repeat_breaker() -> None:
+    calls = [
+        ToolCall(id=f"c{i}", name="echo", arguments={"text": f"v{i}"})
+        for i in range(5)
+    ]
+    rounds: list[list[Any]] = [
+        [Completion(text="", tool_calls=(c,))] for c in calls
+    ]
+    rounds.append(text_turn("done"))
+    provider = FakeProvider(rounds)
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    result = await run_turn(
+        provider=provider,
+        model="test-model",
+        messages=messages,
+        tools=echo_registry(),
+        on_delta=DeltaSink(),
+    )
+    assert result.text == "done"
+    assert not any(
+        "already ran" in m["content"] for m in messages if m["role"] == "tool"
+    )
+
+
 async def test_unknown_tool_result_feeds_back_to_the_model() -> None:
     call = ToolCall(id="c1", name="missing", arguments={})
     provider = FakeProvider(
@@ -96,7 +155,7 @@ async def test_unknown_tool_result_feeds_back_to_the_model() -> None:
         on_delta=DeltaSink(),
     )
     assert result.text == "recovered"
-    assert messages[2]["content"] == "error: unknown tool 'missing'"
+    assert messages[2]["content"].startswith("error: unknown tool 'missing'")
 
 
 async def test_iteration_cap_stops_a_tool_loop_runaway() -> None:

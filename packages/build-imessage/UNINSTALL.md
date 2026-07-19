@@ -8,7 +8,7 @@ skill, so it can be re-enabled later by reinstalling.
    `owner_handles` or clear it — your call). `edit_file` the key, or run
    `python -m chief.config_apply imessage.enabled=false` with the `shell` tool.
 2. Delete the installed skill dirs `skills/build-imessage/` and `skills/imsg/`.
-3. Remove the `build-imessage` entry from `data/installed.yaml`. (Leave
+3. Deregister: `uv run python -m chief.registry_apply build-imessage --remove`. (Leave
    `screening` unless the owner also wants it gone — see its `UNINSTALL.md`.)
 4. Remove the notify-tier monitor you created for iMessage, if any (use the
    `monitor` tool to delete it).

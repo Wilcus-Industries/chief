@@ -37,7 +37,7 @@ async def test_dispatch_runs_the_handler() -> None:
 async def test_dispatch_unknown_tool_returns_error_string() -> None:
     registry = make_registry()
     result = await registry.dispatch(ToolCall(id="1", name="nope", arguments={}))
-    assert result == "error: unknown tool 'nope'"
+    assert result.startswith("error: unknown tool 'nope'")
 
 
 async def test_dispatch_bad_arguments_returns_error_string() -> None:

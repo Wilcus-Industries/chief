@@ -39,6 +39,23 @@ def load_hooks(
     them. Errors are contained per-package; the registry gains what loads."""
     for pkg in library.scan():
         if pkg.name not in installed or pkg.name in disabled or pkg.hooks is None:
+            if (
+                pkg.hooks is not None
+                and pkg.name not in installed
+                and pkg.name not in disabled
+                and _looks_half_installed(pkg.skills)
+            ):
+                # Its skills landed but the registry entry didn't: a
+                # half-install. Silent skipping is how one lingered in prod —
+                # the package "worked" (skills answered) while its hooks never
+                # loaded and discovery called it uninstalled.
+                logger.warning(
+                    "package %s has installed skills but no data/installed.yaml "
+                    "entry — its hooks are NOT loaded. Finish the install: "
+                    "uv run python -m chief.registry_apply %s",
+                    pkg.name,
+                    pkg.name,
+                )
             continue
         if not is_safe_package_name(pkg.name):
             logger.error(
@@ -55,6 +72,12 @@ def load_hooks(
             logger.error(
                 "package %s hooks failed to load; skipping", pkg.name, exc_info=True
             )
+
+
+def _looks_half_installed(
+    skills: tuple[str, ...], skills_root: Path = Path("skills")
+) -> bool:
+    return any((skills_root / skill / "SKILL.md").exists() for skill in skills)
 
 
 def _register_package(

@@ -32,21 +32,28 @@ collision.
 2. `read_file` its `manifest.yaml` (skills, config_keys, secrets) and its
    `INSTALL.md`. Gather anything the INSTALL.md marks as a **question** (handles,
    tiers, secrets) from the owner first, conversationally.
-3. Do the INSTALL.md's steps: `write_file`/`edit_file` to place skill files and
-   set config keys, run any build script it names with the `shell` tool. For
-   `secrets`, ask the owner to place each file under `secrets/` themselves —
-   never have them paste secret values into chat.
-4. Record the install in `data/installed.yaml` (`write_file`/`edit_file`): a
-   `<name>: {source: bundled|cloned, commit: <origin commit>}` entry. `chief-pkg
-   --installed` reads this.
-5. `restart` — one guarded commit brings the skill files and config live.
-6. Confirm the capability works with a real call before reporting success.
+3. Do the INSTALL.md's steps. **Run the package's `install.sh`** when it has
+   one — it is the deterministic path (skills, config keys, and the
+   `data/installed.yaml` registry entry all land correctly); do not re-create
+   its steps by hand. For `secrets`, ask the owner to place each file under
+   `secrets/` themselves — never have them paste secret values into chat.
+4. Config keys are ALWAYS set with
+   `uv run python -m chief.config_apply dotted.key=<value>` (shell tool) — a
+   deterministic deep-merge. Never hand-edit or shell-append blocks to
+   `config.yaml`: a duplicated block now fails the restart gate, and
+   config.yaml is gitignored so a bad hand-write is not rolled back.
+5. `restart` — the guarded commit brings the skill files live; config lands by
+   disk reload.
+6. Verify before reporting success: `chief-pkg verify <name>` must print
+   "fully installed" (it checks the registry entry, skills, config keys, and
+   secrets), then confirm the capability with one real call.
 
 ## Uninstall (follow the package's `UNINSTALL.md`)
 
 1. `chief-pkg search <name>` to find its path.
 2. `read_file` its `UNINSTALL.md` and do its steps with your file tools — remove
-   the installed skill dir, unset the config keys, drop its `data/installed.yaml`
-   entry. Its **final step deletes the `UNINSTALL.md` itself**; the vanished
-   file is the completion signal.
+   the installed skill dir, unset the config keys, and deregister with
+   `uv run python -m chief.registry_apply <name> --remove`. Its **final step
+   deletes the `UNINSTALL.md` itself**; the vanished file is the completion
+   signal.
 3. `restart` to bring the removal live.

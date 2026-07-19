@@ -101,14 +101,45 @@ class Config:
         return self.models["default"]
 
 
+class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml is untyped
+    """SafeLoader that raises on duplicate mapping keys.
+
+    PyYAML silently keeps the last duplicate, so a shell-appended second copy
+    of a config block "parses fine" and every check passes — three appended
+    ``obsidian_memory:`` blocks did exactly that in prod. Rejecting the
+    duplicate makes the *second* append fail loudly at the restart gate.
+    """
+
+
+def _no_duplicates(loader: _StrictLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in seen:
+            raise ConfigError(
+                f"duplicate key {key!r} in config.yaml (line "
+                f"{key_node.start_mark.line + 1}) — the same block was written "
+                "twice; merge the copies (use chief.config_apply, never append)"
+            )
+        seen.add(key)
+    return dict(loader.construct_mapping(node, deep=True))
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates
+)
+
+
 def load_raw(path: Path = Path("config.yaml")) -> dict[str, Any]:
     """Parse config.yaml into a raw mapping (``{}`` when the file is absent).
 
     The single yaml read the loader and the hooks phase both go through, so a
     package's ``config_keys`` are sliced from the exact same source of truth.
+    Duplicate top-level or nested keys raise :class:`ConfigError` (see
+    :class:`_StrictLoader`).
     """
     if path.exists():
-        return yaml.safe_load(path.read_text()) or {}
+        return yaml.load(path.read_text(), Loader=_StrictLoader) or {}
     return {}
 
 
@@ -173,7 +204,7 @@ def merge_config(updates: dict[str, Any], path: Path = Path("config.yaml")) -> N
     so standard keys are set byte-exactly instead of retyped by the model.
     Nested mappings merge key-by-key; every other value is replaced.
     """
-    raw = (yaml.safe_load(path.read_text()) if path.exists() else {}) or {}
+    raw = load_raw(path)
     path.write_text(yaml.safe_dump(_deep_merge(raw, updates), sort_keys=False))
 
 

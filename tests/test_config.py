@@ -235,3 +235,29 @@ def test_config_apply_parses_dotted_yaml_values(
     config_apply_main(["imessage.enabled=true", 'imessage.owner_handles=["+1","+2"]'])
     loaded = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert loaded == {"imessage": {"enabled": True, "owner_handles": ["+1", "+2"]}}
+
+
+def test_load_raw_rejects_duplicate_top_level_keys(tmp_path: Path) -> None:
+    # PyYAML's silent last-wins let a triple-appended config block pass every
+    # check in prod (audit H5) — the strict loader fails the second copy.
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "obsidian_memory:\n  ambient_n: 3\n"
+        "obsidian_memory:\n  ambient_n: 3\n"
+    )
+    with pytest.raises(ConfigError, match="duplicate key 'obsidian_memory'"):
+        load_raw(path)
+
+
+def test_load_raw_rejects_duplicate_nested_keys(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("models:\n  default: a\n  default: b\n")
+    with pytest.raises(ConfigError, match="duplicate key 'default'"):
+        load_raw(path)
+
+
+def test_merge_config_refuses_a_duplicated_base(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("block: {a: 1}\nblock: {a: 2}\n")
+    with pytest.raises(ConfigError, match="duplicate key"):
+        merge_config({"other": True}, path)

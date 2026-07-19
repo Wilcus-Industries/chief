@@ -1,29 +1,26 @@
 """The guarded restart pipeline — the seatbelt for self-editing.
 
 The agent edits its working tree freely with the file tools; nothing is live
-until ``restart``. ``restart`` runs the full done-check against the working
-tree, then loads the live ``config.yaml`` (the done-check only exercises
-fixture configs, so a bad real value would otherwise pass every check and
-boot-loop launchd — boot-side rollback can't rescue a config-only change), and
-only on both green commits the tree, writes a rollback marker, and reboots the
-daemon into the new code (a boot failure rolls back to the recorded commit,
-see ``recovery.py``). On red — check or config — the edits are **kept in
-place** and the failure is returned so the agent fixes forward. Restarts are
-serialized behind a lock.
+until ``restart``: dirty-tree file-list confirmation, the full done-check,
+then a live ``config.yaml`` load (fixture configs alone would let a bad real
+value boot-loop launchd). Only on all green does it commit, write the
+rollback marker, and reboot into the new code (a boot failure rolls back —
+``recovery.py``). On red the edits are **kept** and the failure returned so
+the agent fixes forward. Restarts serialize behind a lock.
 
-Subprocesses run with explicit argument lists (never a shell), so rationales
-cannot inject commands.
+Subprocess plumbing (checks, git, argv-only — no shell) lives in
+``gitops.py``.
 """
 
 import asyncio
 import json
 import logging
-import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 
 from chief.audit import AuditLog
 from chief.config import load_config
+from chief.selfedit.gitops import dirty_files, run_check, run_git
 from chief.selfedit.recovery import MARKER_NAME
 
 logger = logging.getLogger(__name__)
@@ -34,18 +31,6 @@ DEFAULT_CHECKS: tuple[tuple[str, ...], ...] = (
     ("uv", "run", "ruff", "check", "."),
     ("uv", "run", "mypy", "."),
 )
-
-
-def _capture(argv: Sequence[str], cwd: Path) -> tuple[int, str]:
-    """Run ``argv`` (no shell) and return (returncode, combined output)."""
-    proc = subprocess.run(
-        list(argv),
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    return proc.returncode, proc.stdout
 
 
 class SelfEditPipeline:
@@ -63,17 +48,26 @@ class SelfEditPipeline:
         self._audit = audit
         self._restart = restart
         self._checks = checks
-        # Load the live config.yaml before restart so a bad real value aborts
-        # here instead of boot-looping launchd. The done-check only exercises
-        # fixture configs; load_config is side-effect-free (injectable for tests).
+        # Loads the live config.yaml pre-restart so a bad real value aborts
+        # here instead of boot-looping launchd (injectable for tests).
         self._validate_config = validate_config
         # Serialize check/commit/re-exec so concurrent sessions can't interleave
         # a restart (PRD #198). The deferred re-exec still races other sessions'
         # writes between restarts — an accepted, documented tradeoff.
         self._lock = asyncio.Lock()
+        # Circuit breaker: consecutive red done-checks. The agent has looped
+        # edit -> red -> edit before (once editing a recursion into config.py);
+        # each lap burns a full pytest+ruff+mypy run while the owner is blind.
+        self._consecutive_failures = 0
 
-    async def restart(self, rationale: str) -> str:
+    async def restart(self, rationale: str, confirm: bool = False) -> str:
         """Run the done-check against the working tree, then restart on green.
+
+        A dirty tree first requires confirmation: the changed-file list is
+        returned (before any check runs — checks are expensive) and the agent
+        must call again with ``confirm=True``. This stops working-tree debris
+        from being silently swept into a commit whose rationale describes a
+        different change (mislabeled history poisons later debugging).
 
         Green: commit the tree (if it changed), write the rollback marker, and
         request a restart into the new code. Red: keep the edits in place and
@@ -81,14 +75,40 @@ class SelfEditPipeline:
         still restarts, covering config reloads and script-only installs.
         """
         async with self._lock:
-            return await self._guarded_restart(rationale)
+            return await self._guarded_restart(rationale, confirm)
 
-    async def _guarded_restart(self, rationale: str) -> str:
+    async def _guarded_restart(self, rationale: str, confirm: bool) -> str:
+        dirty = await self._dirty_files()
+        if dirty and not confirm:
+            file_list = "\n".join(f"  {path}" for path in dirty)
+            self._audit.record(
+                "restart", outcome="confirm_needed", rationale=rationale, files=dirty
+            )
+            return (
+                "confirm: this restart will commit the files below under the "
+                f"rationale {rationale!r}:\n{file_list}\n"
+                "If every file belongs to this change, call restart again with "
+                "confirm=true. If something does not belong, first discard it "
+                "(shell: git checkout -- <path>) or restart separately with a "
+                "rationale that honestly describes it."
+            )
         base = (await self._git("rev-parse", "HEAD")).strip()
         failure = await self._run_checks()
         if failure is not None:
-            self._audit.record("restart", outcome="check_failed")
-            return f"error: done-check failed; your edits are kept.\n{failure}"
+            self._consecutive_failures += 1
+            self._audit.record(
+                "restart", outcome="check_failed", streak=self._consecutive_failures
+            )
+            message = f"error: done-check failed; your edits are kept.\n{failure}"
+            if self._consecutive_failures >= 3:
+                message += (
+                    f"\n\nThis is {self._consecutive_failures} failed "
+                    "done-checks in a row. STOP editing forward. Show the "
+                    "owner the diff (shell: git diff) and ask how to proceed, "
+                    "or discard the broken edits with the revert_edits tool."
+                )
+            return message
+        self._consecutive_failures = 0
         config_error = await self._validate_live_config()
         if config_error is not None:
             self._audit.record("restart", outcome="config_invalid")
@@ -99,7 +119,11 @@ class SelfEditPipeline:
             )
         committed = await self._commit_if_dirty(rationale, base)
         self._audit.record(
-            "restart", outcome="restarting", rationale=rationale, committed=committed
+            "restart",
+            outcome="restarting",
+            rationale=rationale,
+            committed=committed,
+            files=dirty,
         )
         logger.info("restart approved (%s); committed=%s", rationale, committed)
         self._restart()
@@ -114,13 +138,37 @@ class SelfEditPipeline:
         ``secrets``, ``config.yaml``, off-repo) never enter the commit, so they
         are unversioned — the rollback marker only rewinds repo files (#198).
         """
-        if not await self._repo_dirty():
+        if not await self._dirty_files():
             return False
         await self._git("add", "-A")
         await self._git("commit", "-m", f"self-edit: {rationale}")
         marker = {"rollback_to": base, "rationale": rationale}
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
         return True
+
+    async def revert_edits(self) -> str:
+        """Discard uncommitted changes to tracked repo files (back to HEAD).
+
+        The safe exit from an edit -> red-check loop. Untracked files are left
+        alone (they may be data the agent still wants) but are reported so
+        nothing is silently forgotten."""
+        async with self._lock:
+            dirty = await self._dirty_files()
+            if not dirty:
+                return "nothing to revert: the working tree is clean"
+            await self._git("checkout", "--", ".")
+            remaining = await self._dirty_files()
+            reverted = [path for path in dirty if path not in remaining]
+            self._audit.record(
+                "revert_edits", outcome="reverted", files=reverted
+            )
+            self._consecutive_failures = 0
+            lines = "\n".join(f"  {path}" for path in reverted) or "  (none)"
+            message = f"reverted tracked files to HEAD:\n{lines}"
+            if remaining:
+                left = "\n".join(f"  {path}" for path in remaining)
+                message += f"\nuntracked files left in place:\n{left}"
+            return message
 
     async def _validate_live_config(self) -> str | None:
         """Load the live config off the event loop; return the error on failure.
@@ -138,22 +186,14 @@ class SelfEditPipeline:
     async def _run_checks(self) -> str | None:
         """Run every check command; return combined output on first failure."""
         for cmd in self._checks:
-            code, output = await asyncio.to_thread(_capture, cmd, self._root)
+            code, output = await run_check(cmd, self._root)
             if code != 0:
                 return f"$ {' '.join(cmd)}\n{output[-4000:]}"
         return None
 
-    async def _repo_dirty(self) -> bool:
-        # The rollback marker is the pipeline's own runtime state, written
-        # post-commit and normally cleared on the next healthy boot. If it
-        # lingers (recovery skipped, crash), it must not count as a change and
-        # commit an empty marker-only edit. `.gitignore` also lists it so human
-        # `git status` stays clean; this filter is belt-and-suspenders.
-        lines = (await self._git("status", "--porcelain")).splitlines()
-        return any(line[3:].strip() != MARKER_NAME for line in lines if line.strip())
+    async def _dirty_files(self) -> list[str]:
+        return await dirty_files(self._root)
 
     async def _git(self, *args: str) -> str:
-        code, output = await asyncio.to_thread(_capture, ("git", *args), self._root)
-        if code != 0:
-            raise RuntimeError(f"git {' '.join(args)} failed: {output}")
-        return output
+        return await run_git(self._root, *args)
+

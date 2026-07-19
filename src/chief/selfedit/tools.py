@@ -19,20 +19,42 @@ _RESTART_SPEC = ToolSpec(
         "in place and the check output comes back for you to fix forward. A "
         "restart with no repo changes is allowed (config reloads, script-only "
         "installs). The reboot happens at the safe turn boundary, after your "
-        "reply is sent. `rationale` is the commit message for the change."
+        "reply is sent. `rationale` is the commit message for the change. "
+        "When the tree is dirty, the first call returns the changed-file list "
+        "for review — check every file belongs to this rationale, then call "
+        "again with confirm=true."
     ),
     parameters={
         "type": "object",
-        "properties": {"rationale": {"type": "string"}},
+        "properties": {
+            "rationale": {"type": "string"},
+            "confirm": {"type": "boolean"},
+        },
         "required": ["rationale"],
     },
 )
 
 
-def register_restart_tool(registry: ToolRegistry, pipeline: SelfEditPipeline) -> None:
-    """Expose the ``restart`` tool backed by the guarded pipeline."""
+_REVERT_SPEC = ToolSpec(
+    name="revert_edits",
+    description=(
+        "Discard your uncommitted changes to tracked repo files, restoring "
+        "them to HEAD. The safe exit when the done-check keeps failing: "
+        "instead of editing forward again, revert and rethink. Untracked "
+        "files are left in place and reported."
+    ),
+    parameters={"type": "object", "properties": {}},
+)
 
-    async def restart(rationale: str) -> str:
-        return await pipeline.restart(rationale)
+
+def register_restart_tool(registry: ToolRegistry, pipeline: SelfEditPipeline) -> None:
+    """Expose the ``restart`` + ``revert_edits`` tools backed by the pipeline."""
+
+    async def restart(rationale: str, confirm: bool = False) -> str:
+        return await pipeline.restart(rationale, confirm)
+
+    async def revert_edits() -> str:
+        return await pipeline.revert_edits()
 
     registry.register(Tool(_RESTART_SPEC, restart))
+    registry.register(Tool(_REVERT_SPEC, revert_edits))

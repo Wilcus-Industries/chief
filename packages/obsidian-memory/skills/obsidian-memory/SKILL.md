@@ -1,6 +1,6 @@
 ---
 name: obsidian-memory
-description: Recall from and save to the owner's Obsidian vault — conventions, CLI, ambient policy.
+description: Owner's Obsidian vault memory. Not a tool — recall/save run as shell commands (`uv run chief-memory ...`); conventions, CLI, ambient policy.
 ---
 
 # Obsidian vault memory

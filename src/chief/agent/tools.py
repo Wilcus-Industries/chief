@@ -71,7 +71,12 @@ class ToolRegistry:
         """Run one tool call; any failure returns an error string result."""
         tool = self._tools.get(call.name)
         if tool is None:
-            return f"error: unknown tool '{call.name}'"
+            names = ", ".join(sorted(self._tools)) or "(none)"
+            return (
+                f"error: unknown tool '{call.name}'. Your native tools are: "
+                f"{names}. If '{call.name}' is a skill or a CLI, use "
+                "load_skill or run it with the shell tool."
+            )
         kwargs = dict(call.arguments)
         if tool.wants_context:
             kwargs["context"] = context

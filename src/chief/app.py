@@ -10,6 +10,7 @@ deterministic fake (the one scripted fake CI allows, PRD #183).
 import logging
 from pathlib import Path
 
+from chief.adapters.imessage import owner_send_guard
 from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
@@ -35,7 +36,8 @@ from chief.pkgcli import INSTALLED_REGISTRY, _load_installed
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
-from chief.shelltool import ShellService, shell_prompt_line
+from chief.shellprompt import shell_prompt_line
+from chief.shelltool import ShellService
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
 from chief.toolset import register_native_tools
@@ -161,6 +163,9 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         default_model=config.default_model,
         budget=core.budget,
         root=Path.cwd(),
+        # Mechanical echo-loop seatbelt: shell commands must not message the
+        # owner's own handle out-of-band (imsg/osascript) — see owner_send_guard.
+        shell_guards=(owner_send_guard(config.imessage_owner_handles),),
     )
     commands = CommandSet(core.manager, core.monitors, core.cron, store, skills=skills)
     core.dispatcher.set_commands(commands)
