@@ -14,6 +14,10 @@
 # (monitor model-predicates).
 models:
   default: qwen/qwen3-coder
+  # Sampling temperature for every LLM call (agent, monitors, compaction).
+  # 0.0 = deterministic, best for agent reliability. Override if a swapped-in
+  # model degrades at exactly 0. Applies to all roles, not just default.
+  temperature: 0.0
 
 # OpenAI-compatible endpoint the DEFAULT/legacy backend streams from. Default =
 # OpenRouter; leave it unless pointing chief's fallback backend at another

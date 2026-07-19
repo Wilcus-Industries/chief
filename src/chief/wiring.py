@@ -87,11 +87,15 @@ def build_provider(config: Config) -> Provider:
     a backend that was never assembled.
     """
     backends: dict[str, Provider] = {
-        name: OpenRouterProvider(spec.api_key, base_url=spec.base_url)
+        name: OpenRouterProvider(
+            spec.api_key, temperature=config.temperature, base_url=spec.base_url
+        )
         for name, spec in config.provider_backends.items()
     }
     default = backends.get("default") or OpenRouterProvider(
-        config.openrouter_api_key, base_url=config.provider_base_url
+        config.openrouter_api_key,
+        temperature=config.temperature,
+        base_url=config.provider_base_url,
     )
     if not config.provider_backends and not config.provider_aliases:
         return default

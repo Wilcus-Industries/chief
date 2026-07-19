@@ -13,6 +13,15 @@ from typing import Any
 import yaml
 
 
+class ConfigError(ValueError):
+    """A config.yaml value is the wrong shape and can't be coerced.
+
+    Raised instead of letting a bad value crash deep in the boot path with an
+    opaque ``TypeError`` (the mini boot-loop: a bare ``owner_handles`` scalar
+    hit ``tuple(int)``).
+    """
+
+
 @dataclass(frozen=True)
 class BackendSpec:
     """A named provider backend: an OpenAI-compatible endpoint plus its key.
@@ -41,6 +50,7 @@ class Config:
     models: dict[str, str] = field(
         default_factory=lambda: {"default": "qwen/qwen3-coder"}
     )
+    temperature: float = 0.0
     db_path: Path = Path("data/chief.db")
     socket_path: Path = Path("data/chief.sock")
     max_concurrent_sessions: int = 4
@@ -89,13 +99,16 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     raw: dict[str, Any] = {}
     if path.exists():
         raw = yaml.safe_load(path.read_text()) or {}
-    models = dict(Config().models) | dict(raw.get("models") or {})
+    raw_models = dict(raw.get("models") or {})
+    temperature = float(raw_models.pop("temperature", 0.0))
+    models = dict(Config().models) | raw_models
     gate = raw.get("gate") or {}
     budget = raw.get("budget") or {}
     imessage = raw.get("imessage") or {}
     shell = raw.get("shell") or {}
     return Config(
         models=models,
+        temperature=temperature,
         db_path=Path(_env_or(raw, "db_path", "data/chief.db")),
         socket_path=Path(_env_or(raw, "socket_path", "data/chief.sock")),
         max_concurrent_sessions=int(_env_or(raw, "max_concurrent_sessions", 4)),
@@ -125,7 +138,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         shell_timeout_seconds=float(shell.get("timeout_seconds", 120.0)),
         shell_output_limit=int(shell.get("output_limit", 30_000)),
         imessage_enabled=bool(imessage.get("enabled", False)),
-        imessage_owner_handles=tuple(imessage.get("owner_handles") or ()),
+        imessage_owner_handles=_as_handles(imessage.get("owner_handles")),
         imessage_db_path=Path(
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
@@ -153,6 +166,30 @@ def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]
         else:
             merged[key] = value
     return merged
+
+
+def _as_handles(value: Any) -> tuple[str, ...]:
+    """Coerce ``imessage.owner_handles`` into a tuple of strings.
+
+    A single quoted string becomes a one-element tuple; a list/tuple becomes
+    per-element strings; missing/empty becomes ``()``. A **bare numeric scalar**
+    (``owner_handles: +15551234567`` → YAML parses it as the int
+    ``15551234567``, silently dropping the ``+``) is rejected with a clear
+    ``ConfigError``: coercing it would scope to the wrong chat and fail
+    silently, and raising turns the mini boot-loop (``tuple(int)`` TypeError
+    deep in boot) into an actionable error. A mapping is likewise rejected.
+    """
+    if value is None or value == "":
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(v) for v in value)
+    raise ConfigError(
+        "imessage.owner_handles must be a quoted handle or a list of quoted "
+        f"handles (e.g. [\"+15551234567\"]), got {type(value).__name__} "
+        f"{value!r} — quote it so YAML keeps the leading '+'."
+    )
 
 
 def _env_or(raw: dict[str, Any], key: str, default: Any) -> Any:

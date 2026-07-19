@@ -26,6 +26,7 @@ class OpenRouterProvider:
         self,
         api_key: str,
         *,
+        temperature: float = 0.0,
         base_url: str = _DEFAULT_BASE_URL,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -34,6 +35,7 @@ class OpenRouterProvider:
         )
         self._base_url = base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._temperature = temperature
 
     async def stream(
         self,
@@ -47,6 +49,7 @@ class OpenRouterProvider:
             "model": model,
             "messages": messages,
             "stream": True,
+            "temperature": self._temperature,
             # Ask OpenRouter to report dollar cost in the final usage chunk.
             "usage": {"include": True},
         }
