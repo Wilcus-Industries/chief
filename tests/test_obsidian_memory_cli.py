@@ -5,16 +5,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from chief_obsidian_memory import cli, index
+from chief_obsidian_memory import cli, embedding
 
 
 @pytest.fixture
 def warm_cache(embedder: Any) -> Iterator[None]:
     """Seed the module model cache so the CLI (which builds its own index with
     no injected model) reuses the session-loaded model instead of reloading."""
-    index._MODEL_CACHE["minishlab/potion-base-8M"] = embedder
+    embedding._MODEL_CACHE["minishlab/potion-base-8M"] = embedder
     yield
-    index._MODEL_CACHE.clear()
+    embedding._MODEL_CACHE.clear()
 
 
 def _args(vault: Path, tmp_path: Path, *rest: str) -> list[str]:
