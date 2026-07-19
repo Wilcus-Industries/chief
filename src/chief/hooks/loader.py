@@ -16,6 +16,7 @@ from typing import Any
 from chief.budget import Budget
 from chief.hooks.context import HookContext
 from chief.hooks.registry import HookRegistry, PackageHookRegistrar
+from chief.hooks.runner import is_safe_package_name
 from chief.packages import HookSpec, PackageLibrary
 from chief.provider.base import Provider
 
@@ -38,6 +39,11 @@ def load_hooks(
     them. Errors are contained per-package; the registry gains what loads."""
     for pkg in library.scan():
         if pkg.name not in installed or pkg.name in disabled or pkg.hooks is None:
+            continue
+        if not is_safe_package_name(pkg.name):
+            logger.error(
+                "package %r has an unsafe name; skipping its hooks", pkg.name
+            )
             continue
         try:
             _register_package(

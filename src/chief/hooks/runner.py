@@ -9,6 +9,7 @@ message so the session stays thin.
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -56,9 +57,46 @@ async def run_post_turn(
             logger.error("post_turn hook %r failed", name, exc_info=True)
 
 
+# The block delimiter and the name-attribution attribute are trusted structure;
+# a contribution's text/name must never be able to forge either. Contributed
+# text may be attacker-influenced (retrieved/relayed content, e.g. #207), so a
+# ``<hook``/``</hook`` in it is neutralized and a name is reduced to a slug.
+_HOOK_TAG = re.compile(r"<(/?hook)", re.IGNORECASE)
+_UNSAFE_NAME_CHAR = re.compile(r"[^a-zA-Z0-9._-]")
+
+
+def _escape_hook_tags(text: str) -> str:
+    """Entity-escape only ``<hook``/``</hook`` sequences so a contribution can't
+    break out of or forge a delimiter. All other text passes through verbatim."""
+    return _HOOK_TAG.sub(r"&lt;\1", text)
+
+
+def sanitize_package_name(name: str) -> str:
+    """Reduce a package name to the delimiter- and path-safe slug charset
+    ``[a-zA-Z0-9._-]``, dropping anything else — so a crafted name can neither
+    break the ``source="..."`` attribute nor carry a path separator."""
+    return _UNSAFE_NAME_CHAR.sub("", name)
+
+
+def is_safe_package_name(name: str) -> bool:
+    """True only if ``name`` is already a clean slug and not a traversal
+    component — the loader skips packages that fail this before any mkdir."""
+    return (
+        bool(name)
+        and name == sanitize_package_name(name)
+        and name not in (".", "..")
+    )
+
+
 def render_block(package: str, text: str) -> str:
-    """The delimited, name-attributed block a context contribution renders to."""
-    return f'\n\n<hook source="{package}">\n{text}\n</hook>'
+    """The delimited, name-attributed block a context contribution renders to.
+
+    The block format is fixed structure; the contributed ``package`` and
+    ``text`` are sanitized so neither can forge attribution or a delimiter.
+    """
+    source = sanitize_package_name(package)
+    body = _escape_hook_tags(text)
+    return f'\n\n<hook source="{source}">\n{body}\n</hook>'
 
 
 async def assemble_system(
