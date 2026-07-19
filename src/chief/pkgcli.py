@@ -114,8 +114,11 @@ def verify_install(
             f"chief.registry_apply {package.name}"
         )
     for skill in package.skills:
-        if not (skills_root / skill / "SKILL.md").exists():
-            problems.append(f"skill '{skill}' missing at {skills_root / skill}")
+        # Manifests list package-relative paths (skills/<name>); the install
+        # lands at skills_root/<name> — compare on the basename.
+        name = Path(skill).name
+        if not (skills_root / name / "SKILL.md").exists():
+            problems.append(f"skill '{name}' missing at {skills_root / name}")
     for key in package.config_keys:
         if key not in config_raw:
             problems.append(f"config key '{key}' absent from config.yaml")
