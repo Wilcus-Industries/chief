@@ -1,5 +1,9 @@
 """Core configuration: a small flat set of keys from config.yaml, env-overridable.
 
+styleguide: file-length — the config schema (all keys, their typed provider
+specs, and the single load path that coerces yaml/env into them) is one
+cohesive boot contract; splitting it fragments what one file should own.
+
 Models ship with exactly one role — ``default``. The agent invents further
 roles via self-config; core never hardcodes any (``downgrade`` and
 ``default_classifier`` are honored when present, never required).
