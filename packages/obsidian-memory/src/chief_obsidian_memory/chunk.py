@@ -60,11 +60,14 @@ def iter_notes(vault: Path, settings: MemorySettings) -> Iterator[tuple[str, str
     them — so ``.obsidian/``, ``templates/`` and ``attachments/`` never index."""
     for path in sorted(vault.rglob("*.md")):
         rel = path.relative_to(vault).as_posix()
-        if _in_scope(rel, settings):
+        if in_scope(rel, settings):
             yield rel, path.read_text()
 
 
-def _in_scope(rel: str, settings: MemorySettings) -> bool:
+def in_scope(rel: str, settings: MemorySettings) -> bool:
+    """True when a vault-relative note path passes the include/exclude prefixes.
+
+    Shared by iteration and the wikilink graph so both index the same notes."""
     if settings.include and not rel.startswith(settings.include):
         return False
     return not rel.startswith(settings.exclude)

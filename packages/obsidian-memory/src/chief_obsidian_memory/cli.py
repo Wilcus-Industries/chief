@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from chief_obsidian_memory.config import MemorySettings
+from chief_obsidian_memory.graph import VaultGraph, related
 from chief_obsidian_memory.index import VaultIndex
 
 DEFAULT_INDEX_HOME = "data/hooks/obsidian-memory/index"
@@ -38,6 +39,19 @@ def _parser() -> argparse.ArgumentParser:
         "reindex", parents=[common], help="rebuild the whole index"
     )
     reindex.set_defaults(run=_reindex)
+
+    links = sub.add_parser("links", parents=[common], help="wikilink neighbours")
+    links.add_argument("note")
+    links.add_argument("--hops", type=int, default=1)
+    links.set_defaults(run=_links)
+
+    rel = sub.add_parser(
+        "related", parents=[common], help="semantic hits widened by wikilinks"
+    )
+    rel.add_argument("query")
+    rel.add_argument("--k", type=int, default=MemorySettings().top_k)
+    rel.add_argument("--hops", type=int, default=1)
+    rel.set_defaults(run=_related)
     return parser
 
 
@@ -65,6 +79,25 @@ def _reindex(args: argparse.Namespace) -> int:
     count = _index(args).build()
     print(f"reindexed {count} chunks from {_vault_path(args)}")
     return 0
+
+
+def _links(args: argparse.Namespace) -> int:
+    for note_path in _graph(args).neighbors(args.note, args.hops):
+        print(note_path)
+    return 0
+
+
+def _related(args: argparse.Namespace) -> int:
+    for note_path in related(
+        _index(args), _graph(args), args.query, args.k, args.hops
+    ):
+        print(note_path)
+    return 0
+
+
+def _graph(args: argparse.Namespace) -> VaultGraph:
+    vault = _vault_path(args)
+    return VaultGraph(vault=vault, settings=MemorySettings(vault_paths=(str(vault),)))
 
 
 def _index(args: argparse.Namespace) -> VaultIndex:
