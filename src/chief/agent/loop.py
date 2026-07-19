@@ -18,6 +18,12 @@ OnDelta = Callable[[str], Awaitable[None]]
 # real multi-step work legitimately chains many calls.
 MAX_ITERATIONS = 25
 
+# Perseveration breaker: the same tool call with identical arguments ran this
+# many times in one turn — a fourth run cannot yield new information, only
+# burn spend (prod once repeated an identical mkdir/git-commit pair ~30 times
+# in two minutes). The call is refused with a course-correcting error instead.
+REPEAT_LIMIT = 3
+
 
 @dataclass(frozen=True)
 class TurnResult:
@@ -43,6 +49,7 @@ async def run_turn(
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
     usage = Usage()
+    seen_calls: dict[tuple[str, str], int] = {}
     for _ in range(max_iterations):
         completion = await _stream_once(provider, model, messages, tools, on_delta)
         usage = usage + completion.usage
@@ -50,7 +57,17 @@ async def run_turn(
         if not completion.tool_calls:
             return TurnResult(text=completion.text, usage=usage)
         for call in completion.tool_calls:
-            result = await tools.dispatch(call)
+            key = (call.name, json.dumps(call.arguments, sort_keys=True))
+            seen_calls[key] = seen_calls.get(key, 0) + 1
+            if seen_calls[key] > REPEAT_LIMIT:
+                result = (
+                    f"error: this exact {call.name} call already ran "
+                    f"{REPEAT_LIMIT} times this turn with identical arguments "
+                    "— repeating it cannot change the result. Stop, take a "
+                    "different approach, or ask the owner for help."
+                )
+            else:
+                result = await tools.dispatch(call)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )

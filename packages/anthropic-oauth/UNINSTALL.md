@@ -18,7 +18,7 @@ config, the secret, and the skill.
    `secrets/openrouter_api_key` was never touched, so the default backend keeps
    working.
 4. Delete the installed skill dir `skills/anthropic-oauth/`.
-5. Remove the `anthropic-oauth` entry from `data/installed.yaml`.
+5. Deregister: `uv run python -m chief.registry_apply anthropic-oauth --remove`.
 6. Delete this `UNINSTALL.md` (`packages/anthropic-oauth/UNINSTALL.md`) — its
    absence signals the uninstall completed.
 7. `restart` to bring the change live. The owner can then stop the proxy

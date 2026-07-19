@@ -21,11 +21,17 @@ guarded `restart`:
   approval gate is the only guard; be deliberate. Edits are **inert** until you
   restart — Python does not reload live imports, so a half-finished or broken
   tree cannot hurt the running daemon.
-- `restart`: runs the full done-check (`pytest`, `ruff`, `mypy`) against your
-  working tree. **On green** it commits your edits and reboots into the new code
-  (a failed boot auto-rolls-back to the last good commit). **On red** it *keeps
-  your edits in place* and returns the failure so you fix forward and restart
-  again. A restart with no repo changes is fine (config reload, script install).
+- `restart`: with a dirty tree, the first call returns the changed-file list —
+  check every file belongs to your rationale, then call again with
+  `confirm=true`. It then runs the full done-check (`pytest`, `ruff`, `mypy`)
+  against your working tree. **On green** it commits your edits and reboots
+  into the new code (a failed boot auto-rolls-back to the last good commit).
+  **On red** it *keeps your edits in place* and returns the failure so you fix
+  forward and restart again. A restart with no repo changes is fine (config
+  reload, script install).
+- `revert_edits`: discards your uncommitted changes to tracked files (back to
+  HEAD). Reach for it when the done-check keeps failing — reverting and
+  rethinking beats digging deeper.
 
 Recipe:
 
@@ -34,7 +40,14 @@ Recipe:
    edits; keep one coherent change per restart so a red check is easy to read.
 3. Call `restart` with a `rationale` (it becomes the commit message).
 4. If the done-check comes back red, read it, fix the same files, and `restart`
-   again. Don't fight the check — it is the seatbelt.
+   again. Don't fight the check — it is the seatbelt. After ~3 reds in a row,
+   stop: show the owner the diff, or `revert_edits` and rethink.
+
+Setting config values: use
+`uv run python -m chief.config_apply dotted.key=<value>` (shell tool) — it
+deep-merges deterministically. Never append blocks to `config.yaml` with the
+shell (a duplicate key now fails the restart gate), and remember config.yaml
+is gitignored: a bad hand-write has no rollback.
 
 The rollback/done-check safety covers **repo files** only. Writes into `data/`,
 `secrets/`, or outside the repo are gated but unversioned — no rollback. Put

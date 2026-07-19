@@ -4,8 +4,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
-from chief.pkgcli import clone_if_missing, discover, render
+from chief import registry_apply
+from chief.packages import Package, PackageLibrary
+from chief.pkgcli import clone_if_missing, discover, render, verify_install
 
 
 def write_package(root: Path, name: str, description: str) -> None:
@@ -104,3 +107,76 @@ def test_clone_if_missing_survives_a_timeout(
     dest = tmp_path / "clone"
     clone_if_missing("https://example.com/repo.git", dest)
     assert not dest.exists()
+
+
+# --- registry_apply + verify: enforced install postconditions (audit H1) ----
+
+
+def test_registry_apply_sets_and_removes_entries(tmp_path: Path) -> None:
+    registry = tmp_path / "data" / "installed.yaml"
+    registry_apply.apply("screening", "bundled", registry)
+    registry_apply.apply("memory", "cloned", registry)
+    data = yaml.safe_load(registry.read_text())
+    assert data == {
+        "screening": {"source": "bundled"},
+        "memory": {"source": "cloned"},
+    }
+    # Idempotent re-run and removal preserve the other entries.
+    registry_apply.apply("screening", "bundled", registry)
+    registry_apply.apply("memory", "cloned", registry, remove=True)
+    assert yaml.safe_load(registry.read_text()) == {
+        "screening": {"source": "bundled"}
+    }
+
+
+def test_registry_apply_survives_malformed_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "installed.yaml"
+    registry.write_text("- not\n- a\n- mapping\n")
+    registry_apply.apply("screening", "bundled", registry)
+    assert yaml.safe_load(registry.read_text()) == {
+        "screening": {"source": "bundled"}
+    }
+
+
+def _manifest_package(tmp_path: Path) -> Package:
+    root = tmp_path / "packages" / "demo"
+    root.mkdir(parents=True)
+    (root / "manifest.yaml").write_text(
+        "name: demo\ndescription: d\nskills: [demo]\n"
+        "config_keys: [demo_block]\nsecrets: [demo_key]\n"
+    )
+    return PackageLibrary((tmp_path / "packages",)).scan()[0]
+
+
+def test_verify_install_reports_every_missing_postcondition(
+    tmp_path: Path,
+) -> None:
+    package = _manifest_package(tmp_path)
+    problems = verify_install(
+        package,
+        installed={},
+        config_raw={},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    text = "\n".join(problems)
+    assert "not registered" in text
+    assert "skill 'demo' missing" in text
+    assert "config key 'demo_block' absent" in text
+    assert "secret file 'demo_key' absent" in text
+
+
+def test_verify_install_passes_when_everything_landed(tmp_path: Path) -> None:
+    package = _manifest_package(tmp_path)
+    (tmp_path / "skills" / "demo").mkdir(parents=True)
+    (tmp_path / "skills" / "demo" / "SKILL.md").write_text("# demo\n")
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "demo_key").write_text("k\n")
+    problems = verify_install(
+        package,
+        installed={"demo": {"source": "bundled"}},
+        config_raw={"demo_block": {}},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert problems == []

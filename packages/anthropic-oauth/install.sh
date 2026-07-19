@@ -14,7 +14,9 @@
 # Re-run with a different ALIAS/MODEL to add more aliases — config deep-merges,
 # so each run adds one alias without clobbering the others.
 #
-# Runs inside the self-edit seatbelt (done-check + rollback); paths are
+# The done-check gates the restart, but config.yaml is gitignored — a bad
+# config write is NOT rolled back (the pre-restart config gate is the only
+# protection). Paths are
 # relative to the repo root.
 set -euo pipefail
 
@@ -30,3 +32,7 @@ alias_name="${ALIAS:-opus}"
 uv run python -m chief.config_apply \
   "provider_backends.proxy={base_url: $PROXY_URL, api_key_secret: proxy_api_key}" \
   "provider_aliases.$alias_name={backend: proxy, model: $MODEL}"
+
+# Record the install in the registry so discovery and the hooks loader see
+# it — the one bookkeeping step that must never be left to hand-editing.
+uv run python -m chief.registry_apply anthropic-oauth --source bundled

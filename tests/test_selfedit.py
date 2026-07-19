@@ -14,6 +14,7 @@ from chief.audit import AuditLog
 from chief.config import ConfigError
 from chief.filetools import register_file_tools
 from chief.provider.base import ToolCall
+from chief.selfedit import gitops
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import (
     MARKER_NAME,
@@ -75,7 +76,12 @@ def make_pipeline(
 async def test_green_check_commits_and_restarts(repo: Path, tmp_path: Path) -> None:
     pipeline, restart = make_pipeline(repo, tmp_path, "true")
     (repo / "greeting.txt").write_text("hello v2\n")
-    result = await pipeline.restart("improve the greeting")
+    # A dirty tree first echoes the changed-file list for review (audit C3).
+    preview = await pipeline.restart("improve the greeting")
+    assert preview.startswith("confirm:")
+    assert "greeting.txt" in preview
+    assert not restart.called
+    result = await pipeline.restart("improve the greeting", confirm=True)
     assert "restarting" in result
     assert (repo / "greeting.txt").read_text() == "hello v2\n"
     assert restart.called
@@ -87,7 +93,7 @@ async def test_green_check_commits_and_restarts(repo: Path, tmp_path: Path) -> N
 async def test_red_check_keeps_edits_and_reports(repo: Path, tmp_path: Path) -> None:
     pipeline, restart = make_pipeline(repo, tmp_path, "false")
     (repo / "greeting.txt").write_text("broken\n")
-    result = await pipeline.restart("break it")
+    result = await pipeline.restart("break it", confirm=True)
     assert result.startswith("error: done-check failed")
     # The edit is KEPT so the agent can fix forward — not reverted (#198).
     assert (repo / "greeting.txt").read_text() == "broken\n"
@@ -117,7 +123,7 @@ async def test_bad_config_aborts_restart_and_keeps_edits(
 
     pipeline, restart = make_pipeline(repo, tmp_path, "true", validate=bad_config)
     (repo / "greeting.txt").write_text("edited\n")
-    result = await pipeline.restart("edit the greeting")
+    result = await pipeline.restart("edit the greeting", confirm=True)
     assert result.startswith("error: config")
     assert not restart.called
     assert (repo / "greeting.txt").read_text() == "edited\n"  # kept, not reverted
@@ -136,7 +142,7 @@ async def test_real_bad_config_yaml_aborts_restart(
         repo, AuditLog(tmp_path / "audit.jsonl"), restart, checks=(("true",),)
     )
     monkeypatch.chdir(repo)
-    result = await pipeline.restart("some edit")
+    result = await pipeline.restart("some edit", confirm=True)
     assert result.startswith("error: config")
     assert not restart.called
     assert "self-edit" not in git(repo, "log", "--oneline")
@@ -153,11 +159,95 @@ async def test_lingering_marker_is_not_a_change(repo: Path, tmp_path: Path) -> N
     assert "self-edit" not in git(repo, "log", "--oneline")
 
 
+async def test_confirm_preview_runs_no_checks(repo: Path, tmp_path: Path) -> None:
+    # The file-list preview must come back before any (expensive) check runs:
+    # with a failing check, a dirty unconfirmed restart still returns the
+    # confirm message, not the check failure.
+    pipeline, restart = make_pipeline(repo, tmp_path, "false")
+    (repo / "greeting.txt").write_text("dirty\n")
+    result = await pipeline.restart("some change")
+    assert result.startswith("confirm:")
+    assert not restart.called
+
+
+async def test_confirmed_commit_records_file_list(
+    repo: Path, tmp_path: Path
+) -> None:
+    pipeline, _ = make_pipeline(repo, tmp_path, "true")
+    (repo / "greeting.txt").write_text("v2\n")
+    (repo / "extra.txt").write_text("debris\n")
+    await pipeline.restart("labeled change", confirm=True)
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / "audit.jsonl").read_text().splitlines()
+    ]
+    restarting = [e for e in entries if e.get("outcome") == "restarting"]
+    assert sorted(restarting[-1]["files"]) == ["extra.txt", "greeting.txt"]
+
+
+async def test_failure_streak_escalates_after_three(
+    repo: Path, tmp_path: Path
+) -> None:
+    # Circuit breaker (audit H3): the third consecutive red tells the agent to
+    # stop editing forward and surface the diff / revert.
+    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+    (repo / "greeting.txt").write_text("broken\n")
+    first = await pipeline.restart("try", confirm=True)
+    second = await pipeline.restart("try again", confirm=True)
+    third = await pipeline.restart("once more", confirm=True)
+    assert "STOP" not in first and "STOP" not in second
+    assert "STOP editing forward" in third
+    assert "revert_edits" in third
+
+
+async def test_green_resets_failure_streak(repo: Path, tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+    (repo / "greeting.txt").write_text("broken\n")
+    await pipeline.restart("a", confirm=True)
+    await pipeline.restart("b", confirm=True)
+    # Flip the check green: streak resets, so a later red starts from 1.
+    pipeline._checks = (("true",),)
+    await pipeline.restart("c", confirm=True)
+    pipeline._checks = (("false",),)
+    (repo / "greeting.txt").write_text("broken again\n")
+    result = await pipeline.restart("d", confirm=True)
+    assert "STOP" not in result
+
+
+async def test_revert_edits_restores_tracked_keeps_untracked(
+    repo: Path, tmp_path: Path
+) -> None:
+    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+    (repo / "greeting.txt").write_text("broken\n")
+    (repo / "notes.txt").write_text("untracked\n")
+    result = await pipeline.revert_edits()
+    assert (repo / "greeting.txt").read_text() == "hello\n"  # back to HEAD
+    assert (repo / "notes.txt").exists()  # untracked left alone
+    assert "greeting.txt" in result
+    assert "notes.txt" in result
+
+
+async def test_revert_edits_noop_on_clean_tree(repo: Path, tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(repo, tmp_path, "true")
+    assert "nothing to revert" in await pipeline.revert_edits()
+
+
+def test_capture_times_out_hung_check(tmp_path: Path) -> None:
+    # A hung done-check must fail, not hold the restart lock forever (audit H2).
+    code, output = gitops._capture(
+        ("sleep", "60"), tmp_path, timeout=0.2
+    )
+    assert code == 1
+    assert "timed out" in output
+
+
 async def test_restart_is_serialized(repo: Path, tmp_path: Path) -> None:
     # Concurrent restarts must not interleave commit/status and corrupt git.
     pipeline, restart = make_pipeline(repo, tmp_path, "true")
     (repo / "greeting.txt").write_text("v2\n")
-    results = await asyncio.gather(pipeline.restart("a"), pipeline.restart("b"))
+    results = await asyncio.gather(
+        pipeline.restart("a", confirm=True), pipeline.restart("b", confirm=True)
+    )
     assert all("restarting" in r for r in results)
     assert restart.called
     assert git(repo, "log", "--oneline").count("self-edit") == 1
@@ -185,8 +275,17 @@ async def test_write_then_restart_commits(repo: Path, tmp_path: Path) -> None:
             arguments={"path": "greeting.txt", "content": "agent wrote this\n"},
         )
     )
-    result = await registry.dispatch(
+    preview = await registry.dispatch(
         ToolCall(id="2", name="restart", arguments={"rationale": "agent edit"})
+    )
+    assert preview.startswith("confirm:")
+    assert "greeting.txt" in preview
+    result = await registry.dispatch(
+        ToolCall(
+            id="3",
+            name="restart",
+            arguments={"rationale": "agent edit", "confirm": True},
+        )
     )
     assert "restarting" in result
     assert (repo / "greeting.txt").read_text() == "agent wrote this\n"
@@ -206,7 +305,9 @@ async def test_write_then_failed_restart_keeps_edit(
         )
     )
     result = await registry.dispatch(
-        ToolCall(id="2", name="restart", arguments={"rationale": "nope"})
+        ToolCall(
+            id="2", name="restart", arguments={"rationale": "nope", "confirm": True}
+        )
     )
     assert result.startswith("error: done-check failed")
     assert (repo / "greeting.txt").read_text() == "still here\n"

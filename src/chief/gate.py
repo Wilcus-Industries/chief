@@ -93,6 +93,13 @@ class GatedTools:
     async def dispatch(
         self, call: ToolCall, context: ToolContext | None = None
     ) -> str:
+        if call.name not in {spec.name for spec in self._registry.specs()}:
+            # A hallucinated tool name must never interrupt the owner with an
+            # approval card (or worse, persist an "always" for a name that
+            # doesn't exist) — fail straight back to the model so it can
+            # self-correct.
+            self._record(call, "unknown_tool")
+            return await self._registry.dispatch(call, self._context)
         decision = self._policy.decide(call.name)
         if decision is Decision.ASK and call.name in self._read_only():
             decision = Decision.APPROVED

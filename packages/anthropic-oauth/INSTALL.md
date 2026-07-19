@@ -57,12 +57,12 @@ Gather parameters (steps 1–3), run the deterministic install once per alias
    - Run `PROXY_URL="<base url>" MODEL="<bare model id>" ALIAS="<alias>" bash
      packages/anthropic-oauth/install.sh` via Bash. It copies the skill verbatim
      and adds `provider_backends.proxy` + `provider_aliases.<alias>` (via
-     `chief.config_apply`). `ALIAS` defaults to `opus`. Re-run with a different
-     `ALIAS`/`MODEL` to add more aliases — the config deep-merges. Or do the
-     same by hand with your file tools.
-   - Record the install in `data/installed.yaml` (`anthropic-oauth`,
-     `source: bundled`).
-   - `restart` — one guarded commit brings the skill + config live and rebuilds
+     `chief.config_apply`) and records the install in `data/installed.yaml`
+     (via `chief.registry_apply`). `ALIAS` defaults to `opus`. Re-run with a
+     different `ALIAS`/`MODEL` to add more aliases — the config deep-merges.
+     Run the script; do not re-create its steps by hand.
+   - `restart` — the guarded commit brings the skill live; the config lands by
+     disk reload (gitignored, not rolled back on failure) and rebuilds
      the router with the new proxy backend and aliases.
 5. **Verify a proxied turn runs.** After restart, in some thread send
    `/model <alias>` then a normal message and confirm a reply streams back. A

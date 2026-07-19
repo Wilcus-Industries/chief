@@ -29,6 +29,9 @@ the adapter reads as a fresh owner message and re-dispatches — an infinite
 self-reply loop. To reply to the owner, return your turn's text normally and let
 the adapter send it. Only `imsg send --to` a **non-owner** recipient.
 
+The shell tool also enforces this mechanically: any `imsg`/`osascript` command
+that references an owner handle is refused before it runs.
+
 ## Sending
 
 ```
