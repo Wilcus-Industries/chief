@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from chief.packages import PackageLibrary
+from chief.packages import HookSpec, PackageLibrary
 
 REPO_PACKAGES = Path(__file__).parent.parent / "packages"
 
@@ -35,6 +35,23 @@ def test_get_returns_none_for_unknown(tmp_path: Path) -> None:
     library = PackageLibrary((tmp_path,))
     assert library.get("ghost") is None
     assert library.get("solo") is not None
+
+
+def test_manifest_hooks_block_parses_to_a_hookspec(tmp_path: Path) -> None:
+    pkg = tmp_path / "withhooks"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: withhooks\ndescription: d\n"
+        "hooks:\n  module: hooks.py\n  register: register\n"
+    )
+    package = PackageLibrary((tmp_path,)).get("withhooks")
+    assert package is not None
+    assert package.hooks == HookSpec(module="hooks.py", register="register")
+
+
+def test_manifest_without_hooks_has_none(tmp_path: Path) -> None:
+    write_package(tmp_path, "plain")
+    assert PackageLibrary((tmp_path,)).get("plain").hooks is None  # type: ignore[union-attr]
 
 
 def test_bundled_packages_carry_skill_and_install_md() -> None:

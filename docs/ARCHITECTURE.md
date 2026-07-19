@@ -21,9 +21,20 @@ file before you change it.
   server list, though, is a *runtime value*: `load_config` always fills
   `mcp_servers` from the `mcp_servers` key in `config.yaml`, so that is the
   file you edit to add a server (see the recipe), not the dataclass default.
-- **System prompt** — assembled in `src/chief/agent/prompt.py` (`system_prompt`
-  + `ONBOARDING_SUFFIX`); skill one-liners are appended in
-  `chief.app._build_prompt`.
+- **System prompt** — the boot-static base is in `src/chief/agent/prompt.py`
+  (`system_prompt` + `ONBOARDING_SUFFIX`); skill one-liners are appended in
+  `chief.app._build_prompt`. The *per-turn* message (soul on top, then base +
+  origin note, then package hook blocks) is assembled fresh each turn in
+  `Session._assemble_system` via `chief.hooks.runner.assemble_system`.
+- **Agent-loop hooks** — packages contribute per-turn context (`pre_turn`),
+  first-turn context (`session_start`), and turn observers (`post_turn`) through
+  `src/chief/hooks/`: `registry.py` (the store), `runner.py` (resilient
+  timeout-bounded execution + the `<hook source="…">` render and system
+  assembly), `context.py` (the `HookContext` — the entire surface a hook may
+  touch), and `loader.py` (the boot importer). A package opts in with a `hooks:`
+  block in its manifest (`module` + `register`); `build_app` scans installed,
+  non-`hooks.disabled` packages and calls each one's `register(context, hooks)`.
+  Only `Session._one_turn` fires hooks — subagents never do.
 - **Skills** — one directory per skill under `skills/`, each a `SKILL.md` (YAML
   frontmatter + body). Loader/validator: `src/chief/skills.py`. The prompt
   carries only the one-liners; `load_skill` pulls a full body.
