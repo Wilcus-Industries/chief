@@ -104,6 +104,35 @@ def test_store_lock_excludes_a_second_holder_and_reenters(tmp_path: Path) -> Non
     other.close()
 
 
+def test_store_lock_closes_handle_when_flock_fails(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    # A flock failure (e.g. EINTR) must not leak the opened fd or corrupt the
+    # depth count — the next enter should start clean (#234).
+    import fcntl
+
+    import pytest
+    from chief_obsidian_memory.storelock import StoreLock
+
+    lock = StoreLock(tmp_path / "idx")
+    real_flock = fcntl.flock
+
+    def boom(fd: int, op: int) -> None:
+        raise OSError("interrupted")
+
+    # storelock calls fcntl.flock through the shared module object, so
+    # patching the fcntl module itself intercepts its call.
+    monkeypatch.setattr(fcntl, "flock", boom)
+    with pytest.raises(OSError):
+        lock.__enter__()
+    assert lock._handle is None
+    assert lock._depth == 0
+    # With flock restored the same instance acquires normally.
+    monkeypatch.setattr(fcntl, "flock", real_flock)
+    with lock:
+        pass
+
+
 def test_index_entry_points_take_the_lock_without_deadlock(
     vault: Path, tmp_path: Path, embedder: Any
 ) -> None:

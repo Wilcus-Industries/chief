@@ -16,7 +16,11 @@ from typing import TextIO
 
 
 class StoreLock:
-    """A blocking, per-process re-entrant flock on ``<index_home>/.lock``."""
+    """A blocking, per-process re-entrant flock on ``<index_home>/.lock``.
+
+    Assumes one holder per process (daemon hook OR separate-process CLI):
+    two instances in one process hold distinct descriptors, and flock does
+    not nest across those, so they would block each other."""
 
     def __init__(self, index_home: Path) -> None:
         self._path = Path(index_home) / ".lock"
@@ -26,8 +30,13 @@ class StoreLock:
     def __enter__(self) -> "StoreLock":
         if self._depth == 0:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = self._path.open("w")
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+            handle = self._path.open("w")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except BaseException:
+                handle.close()  # a flock failure must not leak the fd
+                raise
+            self._handle = handle
         self._depth += 1
         return self
 

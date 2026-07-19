@@ -56,7 +56,11 @@ def owner_send_guard(
     owner_handles: tuple[str, ...],
 ) -> Callable[[str], str | None]:
     """A shell-tool guard refusing out-of-band sends to an owner handle."""
-    handles = tuple(h.strip().lstrip("+") for h in owner_handles if h.strip())
+    # Lowercased for matching: Apple-ID email handles are case-insensitive,
+    # so `Owner@iCloud.com` must block `imsg send --to owner@icloud.com`.
+    handles = tuple(
+        h.strip().lstrip("+").lower() for h in owner_handles if h.strip()
+    )
 
     def guard(command: str) -> str | None:
         if not handles:
@@ -65,7 +69,7 @@ def owner_send_guard(
         if not any(sender in lowered for sender in _OUT_OF_BAND_SENDERS):
             return None
         for handle in handles:
-            if handle and handle in command:
+            if handle and handle in lowered:
                 return (
                     "error: blocked — this command references an owner handle "
                     "via an out-of-band Messages sender (imsg/osascript). "
