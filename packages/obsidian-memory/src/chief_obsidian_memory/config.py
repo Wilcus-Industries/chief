@@ -41,7 +41,8 @@ class MemorySettings:
     ``window`` — transcript messages the judge sees. ``top_k`` — candidates
     pre-fetched per query. ``injection_cap_tokens`` — recall injection ceiling.
     ``include``/``exclude`` — vault-relative path prefixes gating what indexes.
-    ``vault_paths`` — the vault root(s). ``writable_paths`` — where the agent
+    ``vault_paths`` — the vault root; only the first entry is used (the code
+    is single-vault end-to-end). ``writable_paths`` — where the agent
     may save notes (capability follows config; empty means read-only).
     """
 

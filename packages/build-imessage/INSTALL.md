@@ -58,26 +58,18 @@ Gather the parameters first (steps 1–3), run the deterministic install once
      policy + `imsg` CLI usage), and sets `imessage.enabled: true` +
      `imessage.owner_handles` (via `chief.config_apply`). Homebrew is required;
      this install is macOS-only anyway.
-   - **No shell?** Do NOT hand-edit `config.yaml` — a bare handle like
+   - **Never hand-edit `config.yaml` for these keys.** A bare handle like
      `owner_handles: +15551234567` parses as a YAML **int** and boot-loops the
-     daemon (`tuple(int)` crash). Set it deterministically instead — this
-     writes a proper quoted list every time:
+     daemon (`tuple(int)` crash). If you can't run install.sh, run the same
+     config write it performs — it emits a proper quoted list every time:
 
      ```
-     python -m chief.config_apply imessage.enabled=true \
+     uv run python -m chief.config_apply imessage.enabled=true \
        'imessage.owner_handles=["+15551234567"]'
      ```
 
-     Only if you have neither a shell nor `config_apply` may you write the file
-     directly, and then `owner_handles` **must** be a quoted list — never a bare
-     scalar:
-
-     ```yaml
-     imessage:
-       enabled: true
-       owner_handles:
-         - "+15551234567"
-     ```
+     (For a human doing a fully manual setup: `owner_handles` must be written
+     as a quoted YAML list — `["+15551234567"]` — never a bare scalar.)
    - Each package's `install.sh` records its own install in
      `data/installed.yaml` (via `chief.registry_apply`) — no hand-editing.
    - `restart` — the guarded commit brings the skill live; the config lands by

@@ -20,14 +20,30 @@
 # relative to the repo root.
 set -euo pipefail
 
+: "${PROXY_URL:?set PROXY_URL to the proxy base, e.g. http://127.0.0.1:8000/v1}"
+: "${MODEL:?set MODEL to the bare model id the proxy exposes}"
+alias_name="${ALIAS:-opus}"
+
+# Fail fast BEFORE any mutation: wiring a dead endpoint or a missing secret
+# into config.yaml would route model calls at a black hole while the install
+# "succeeds". Nothing below runs until the proxy actually answers.
+if [ ! -s secrets/proxy_api_key ]; then
+  echo "error: secrets/proxy_api_key is missing or empty — write the proxy's" \
+    "bearer token there first (see INSTALL.md), then re-run" >&2
+  exit 1
+fi
+if ! curl -fsS --max-time 5 \
+  -H "Authorization: Bearer $(cat secrets/proxy_api_key)" \
+  "${PROXY_URL%/}/models" >/dev/null; then
+  echo "error: proxy at $PROXY_URL did not answer GET /models — start the" \
+    "proxy first, then re-run (nothing was changed)" >&2
+  exit 1
+fi
+
 src="packages/anthropic-oauth/skills/anthropic-oauth"
 dst="skills/anthropic-oauth"
 mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
-
-: "${PROXY_URL:?set PROXY_URL to the proxy base, e.g. http://127.0.0.1:8000/v1}"
-: "${MODEL:?set MODEL to the bare model id the proxy exposes}"
-alias_name="${ALIAS:-opus}"
 
 uv run python -m chief.config_apply \
   "provider_backends.proxy={base_url: $PROXY_URL, api_key_secret: proxy_api_key}" \

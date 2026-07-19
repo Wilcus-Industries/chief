@@ -7,6 +7,11 @@ skills:
 config_keys:
   - obsidian_memory
 secrets: []
+python_deps:
+  - chromadb
+  - model2vec
+  - obsidiantools
+  - networkx
 hooks:
   module: hooks.py
   register: register

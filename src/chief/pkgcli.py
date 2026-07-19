@@ -10,6 +10,7 @@ is no ``pull`` or ``remove`` here (PRD #198).
 """
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
@@ -17,10 +18,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from chief.config import Config, load_config, load_raw
 from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary
+from chief.registry_apply import load_installed as _load_installed
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")
 
@@ -38,14 +38,6 @@ class Row:
     source: str
     installed: bool
     path: Path
-
-
-def _load_installed(path: Path) -> dict[str, object]:
-    """The agent-written registry: ``{name: {source, commit}}`` (empty if absent)."""
-    if not path.exists():
-        return {}
-    data = yaml.safe_load(path.read_text())
-    return data if isinstance(data, dict) else {}
 
 
 def clone_if_missing(repo_url: str, dest: Path) -> None:
@@ -131,6 +123,12 @@ def verify_install(
     for secret in package.secrets:
         if not (secrets_root / secret).exists():
             problems.append(f"secret file '{secret}' absent from {secrets_root}/")
+    for dep in package.python_deps:
+        if importlib.util.find_spec(dep) is None:
+            problems.append(
+                f"python dependency '{dep}' not importable — add it to "
+                f"pyproject.toml and run `uv sync`"
+            )
     return problems
 
 

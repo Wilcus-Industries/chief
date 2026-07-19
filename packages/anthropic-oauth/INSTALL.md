@@ -55,7 +55,10 @@ Gather parameters (steps 1–3), run the deterministic install once per alias
    works. Never put the key in `config.yaml` or the manifest.
 4. Place the skill and set config, deterministically:
    - Run `PROXY_URL="<base url>" MODEL="<bare model id>" ALIAS="<alias>" bash
-     packages/anthropic-oauth/install.sh` via Bash. It copies the skill verbatim
+     packages/anthropic-oauth/install.sh` via Bash. It **fails fast before
+     touching anything** if `secrets/proxy_api_key` is missing/empty (step 3)
+     or the proxy doesn't answer `GET <base>/models` (step 1) — a dead
+     endpoint is never wired into config. Then it copies the skill verbatim
      and adds `provider_backends.proxy` + `provider_aliases.<alias>` (via
      `chief.config_apply`) and records the install in `data/installed.yaml`
      (via `chief.registry_apply`). `ALIAS` defaults to `opus`. Re-run with a

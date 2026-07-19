@@ -78,3 +78,46 @@ def _index(vault: Path, embedder: Any) -> VaultIndex:
         settings=MemorySettings(),
         model=embedder,
     )
+
+
+# --- cross-process store lock (audit M3) ------------------------------------
+
+
+def test_store_lock_excludes_a_second_holder_and_reenters(tmp_path: Path) -> None:
+    import fcntl
+
+    import pytest
+    from chief_obsidian_memory.storelock import StoreLock
+
+    lock = StoreLock(tmp_path / "idx")
+    with lock:
+        with lock:  # re-entrant: search's self-heal builds under the lock
+            pass
+        other = (tmp_path / "idx" / ".lock").open("w")
+        with pytest.raises(OSError):
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        other.close()
+    # Released on exit: a fresh holder acquires without blocking.
+    other = (tmp_path / "idx" / ".lock").open("w")
+    fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+    other.close()
+
+
+def test_index_entry_points_take_the_lock_without_deadlock(
+    vault: Path, tmp_path: Path, embedder: Any
+) -> None:
+    # build/refresh/search all hold the store flock; search's self-heal path
+    # (empty collection -> build) re-enters it rather than deadlocking.
+    settings = MemorySettings()
+    index = VaultIndex(
+        vault=vault, index_home=tmp_path / "idx", settings=settings, model=embedder
+    )
+    index.build()
+    assert (tmp_path / "idx" / ".lock").exists()
+    fresh = VaultIndex(
+        vault=vault, index_home=tmp_path / "idx2", settings=settings, model=embedder
+    )
+    hits = fresh.search("leaking roof in the rain", 3)  # self-heal under lock
+    assert hits
+    assert fresh.refresh() == 0

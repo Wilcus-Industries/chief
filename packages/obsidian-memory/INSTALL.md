@@ -28,9 +28,11 @@ State these to the owner and get an explicit yes; do not install silently.
 Gather the parameters through the interview (steps 1–5), add the dependencies
 and config (steps 6–7), then build the first index and verify (steps 8–9).
 
-1. **Vault mode.** Ask whether chief should use the owner's **existing** vault,
-   create a **new** one for chief, or **both** (a shared vault). Get the
-   absolute path(s).
+1. **Vault mode.** Ask whether chief should use the owner's **existing** vault
+   or **create a new one** for chief (which the owner can also open in
+   Obsidian — a shared vault). Either way the answer is exactly **one** vault:
+   the code indexes a single vault end-to-end (only the first `vault_paths`
+   entry is used), so get one absolute path and never record a second.
 2. **Sync.** Ask how the vault syncs across devices — **git** (default,
    recommended: versioned, diffable), **iCloud**, **Obsidian Sync**, or
    **none**. This is the owner's setup, not chief's; just record it so the skill

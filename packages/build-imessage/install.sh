@@ -24,6 +24,20 @@ if ! command -v imsg >/dev/null 2>&1; then
   brew install steipete/tap/imsg
 fi
 
+# The imsg skill documents the exact v0.13.x CLI surface; a drifted upstream
+# CLI makes those documented flags wrong — the precise trigger for improvised
+# osascript. Warn loudly on drift rather than fail: brew only serves the
+# latest formula, so failing would brick installs on every upstream bump.
+imsg_version="$(imsg --version 2>/dev/null || echo unknown)"
+case "$imsg_version" in
+  *0.13.*) ;;
+  *)
+    echo "warning: imsg version '$imsg_version' is not the 0.13.x the imsg" \
+      "skill documents — check 'imsg --help' against skills/imsg/SKILL.md" \
+      "before relying on documented flags" >&2
+    ;;
+esac
+
 # Copy both skills verbatim: build-imessage (channel policy) + imsg (CLI usage).
 for skill in build-imessage imsg; do
   src="packages/build-imessage/skills/$skill"

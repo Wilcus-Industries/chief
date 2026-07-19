@@ -180,3 +180,65 @@ def test_verify_install_passes_when_everything_landed(tmp_path: Path) -> None:
         secrets_root=tmp_path / "secrets",
     )
     assert problems == []
+
+
+# --- registry loading is loud when it degrades to empty (audit M4) ----------
+
+
+def test_load_installed_absent_or_blank_is_quietly_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from chief.registry_apply import load_installed as _load_installed
+
+    blank = tmp_path / "installed.yaml"
+    blank.write_text("")
+    with caplog.at_level("ERROR"):
+        assert _load_installed(tmp_path / "missing.yaml") == {}
+        assert _load_installed(blank) == {}
+    assert not caplog.records  # absence is normal, not an error
+
+
+def test_load_installed_non_mapping_is_empty_but_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from chief.registry_apply import load_installed as _load_installed
+
+    registry = tmp_path / "installed.yaml"
+    registry.write_text("- not\n- a\n- mapping\n")
+    with caplog.at_level("ERROR"):
+        assert _load_installed(registry) == {}
+    assert "not a mapping" in caplog.text
+    assert str(registry) in caplog.text
+
+
+def test_load_installed_invalid_yaml_is_empty_but_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from chief.registry_apply import load_installed as _load_installed
+
+    registry = tmp_path / "installed.yaml"
+    registry.write_text("a: [unclosed\n")
+    with caplog.at_level("ERROR"):
+        assert _load_installed(registry) == {}
+    assert "not valid yaml" in caplog.text
+    assert str(registry) in caplog.text
+
+
+def test_verify_install_checks_python_deps_importable(tmp_path: Path) -> None:
+    root = tmp_path / "packages" / "depdemo"
+    root.mkdir(parents=True)
+    (root / "manifest.yaml").write_text(
+        "name: depdemo\ndescription: d\n"
+        "python_deps: [yaml, definitely_missing_dep_xyz]\n"
+    )
+    package = PackageLibrary((tmp_path / "packages",)).scan()[0]
+    problems = verify_install(
+        package,
+        installed={"depdemo": {"source": "bundled"}},
+        config_raw={},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    text = "\n".join(problems)
+    assert "definitely_missing_dep_xyz" in text
+    assert not any("'yaml'" in p for p in problems)  # importable dep passes
