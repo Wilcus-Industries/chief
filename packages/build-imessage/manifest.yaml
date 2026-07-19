@@ -1,10 +1,11 @@
 name: build-imessage
-description: Set up the macOS iMessage channel (self-DM) with a notify tier.
+description: Set up the macOS iMessage channel (self-DM) with a notify tier, plus the imsg CLI for outbound sends and on-demand reads.
 dependencies:
   - screening
 mcp_servers: {}
 skills:
   - skills/build-imessage
+  - skills/imsg
 config_keys:
   - imessage.enabled
   - imessage.owner_handles
