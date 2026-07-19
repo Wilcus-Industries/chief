@@ -14,26 +14,31 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from chief.agent.loop import TurnResult
+from chief.hooks.context import TurnContext
 
 if TYPE_CHECKING:
     from chief.hooks.registry import HookRegistry
 
-ContextEntry = tuple[str, Callable[[], Awaitable[str | None]]]
+ContextEntry = tuple[str, Callable[[TurnContext], Awaitable[str | None]]]
 PostEntry = tuple[str, Callable[[TurnResult, list[dict[str, Any]]], Awaitable[None]]]
 
 
 async def run_context_hooks(
-    entries: list[ContextEntry], timeout: float, logger: logging.Logger
+    entries: list[ContextEntry],
+    turn: TurnContext,
+    timeout: float,
+    logger: logging.Logger,
 ) -> list[tuple[str, str]]:
     """Run each context hook under ``timeout``; collect non-empty (name, text).
 
-    A hook that raises or exceeds the timeout is logged and dropped; the other
-    contributions are unaffected. Used for both pre_turn and session_start.
+    Each hook is handed the per-turn :class:`TurnContext`. A hook that raises
+    or exceeds the timeout is logged and dropped; the other contributions are
+    unaffected. Used for both pre_turn and session_start.
     """
     contributions: list[tuple[str, str]] = []
     for name, fn in entries:
         try:
-            text = await asyncio.wait_for(fn(), timeout)
+            text = await asyncio.wait_for(fn(turn), timeout)
         except Exception:
             logger.error("hook %r failed; dropping contribution", name, exc_info=True)
             continue
@@ -104,6 +109,7 @@ async def assemble_system(
     base: str,
     soul_reader: Callable[[], str],
     hooks: "HookRegistry | None",
+    turn: TurnContext,
     first_turn: bool,
     timeout: float,
     logger: logging.Logger,
@@ -112,24 +118,34 @@ async def assemble_system(
 
     Soul on top (reserved: its legacy ``{soul}\\n\\n{base}`` placement, never a
     <hook> block, but run through the same resilient runner), then base + origin
-    note, then each package contribution as a name-sorted <hook> block.
+    note, then each package contribution as a name-sorted <hook> block. ``turn``
+    is forwarded to every context hook.
     """
-    soul = await run_context_hooks([("soul", _sync(soul_reader))], timeout, logger)
+    soul = await run_context_hooks(
+        [("soul", _sync(soul_reader))], turn, timeout, logger
+    )
     system = f"{soul[0][1]}\n\n{base}" if soul else base
     if hooks is None:
         return system
-    blocks = await run_context_hooks(hooks.pre_turn(), timeout, logger)
+    blocks = await run_context_hooks(hooks.pre_turn(), turn, timeout, logger)
     if first_turn:
-        blocks += await run_context_hooks(hooks.session_start(), timeout, logger)
+        blocks += await run_context_hooks(
+            hooks.session_start(), turn, timeout, logger
+        )
     for package, text in sorted(blocks, key=lambda block: block[0]):
         system += render_block(package, text)
     return system
 
 
-def _sync(reader: Callable[[], str]) -> Callable[[], Awaitable[str | None]]:
-    """Adapt the sync soul reader onto the async context-hook seam."""
+def _sync(
+    reader: Callable[[], str],
+) -> Callable[[TurnContext], Awaitable[str | None]]:
+    """Adapt the sync soul reader onto the async context-hook seam.
 
-    async def read() -> str | None:
+    The soul ignores the turn, but must match the one-arg hook signature.
+    """
+
+    async def read(_turn: TurnContext) -> str | None:
         return reader()
 
     return read

@@ -2,9 +2,13 @@
 
 Three kinds, each an async callable a package registers under its name:
 
-- ``pre_turn`` ``() -> str | None`` — context added to every turn
-- ``session_start`` ``() -> str | None`` — context added on a thread's first turn
+- ``pre_turn`` ``(turn) -> str | None`` — context added to every turn
+- ``session_start`` ``(turn) -> str | None`` — context on a thread's first turn
 - ``post_turn`` ``(result, messages) -> None`` — observes a finished turn
+
+Context hooks receive a :class:`TurnContext` (the inbound text, recent
+transcript, sender, thread, channel) so they can judge relevance and gate on
+who is speaking.
 
 Read accessors return entries sorted by package name (stable), so a package's
 placement in the assembled prompt is deterministic regardless of the order it
@@ -15,9 +19,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from chief.agent.loop import TurnResult
+from chief.hooks.context import TurnContext
 
-PreTurnHook = Callable[[], Awaitable[str | None]]
-SessionStartHook = Callable[[], Awaitable[str | None]]
+PreTurnHook = Callable[[TurnContext], Awaitable[str | None]]
+SessionStartHook = Callable[[TurnContext], Awaitable[str | None]]
 PostTurnHook = Callable[[TurnResult, list[dict[str, Any]]], Awaitable[None]]
 
 
