@@ -50,11 +50,14 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    On notify-all, offer the optional cheap-model screen ("worth waking?").
 4. Install `screening` first (it is a prerequisite for any public-facing
    package) — follow `packages/screening/INSTALL.md`. Then place this package's
-   skill and set its config, deterministically:
-   - Copy the skill: run `IMESSAGE_HANDLES="<handle(s), comma-separated>" bash
-     packages/build-imessage/install.sh` with the `shell` tool. It copies verbatim
-     and sets `imessage.enabled: true` + `imessage.owner_handles` (via
-     `chief.config_apply`).
+   skills and set its config, deterministically:
+   - Run `IMESSAGE_HANDLES="<handle(s), comma-separated>" bash
+     packages/build-imessage/install.sh` with the `shell` tool. It
+     `brew install steipete/tap/imsg` (idempotent — the outbound-send CLI, see
+     the imsg skill), copies **both** skills verbatim (`build-imessage` channel
+     policy + `imsg` CLI usage), and sets `imessage.enabled: true` +
+     `imessage.owner_handles` (via `chief.config_apply`). Homebrew is required;
+     this install is macOS-only anyway.
    - **No shell?** Do NOT hand-edit `config.yaml` — a bare handle like
      `owner_handles: +15551234567` parses as a YAML **int** and boot-loops the
      daemon (`tuple(int)` crash). Set it deterministically instead — this
@@ -88,6 +91,13 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    build-imessage skill, adapted to the owner's tier and whitelist. No monitor
    for no-notify.
 7. First outbound send triggers a macOS **Automation → Messages** prompt; tell
-   the owner to approve it. Verify per mode: for self-DM, have the owner text
-   their **own** self-chat; for a dedicated ID, have them text the dedicated
-   account from their phone. Confirm your reply (prefixed 🤖) arrives.
+   the owner to approve it (the same prompt covers `imsg send`). Verify per
+   mode: for self-DM, have the owner text their **own** self-chat; for a
+   dedicated ID, have them text the dedicated account from their phone. Confirm
+   your reply (prefixed 🤖) arrives.
+8. Verify the outbound CLI: `imsg --version` (or `command -v imsg`) with the
+   `shell` tool confirms it is on PATH. With the owner's go-ahead, send one
+   test text to a **non-owner** handle the owner names — `imsg send --to
+   "<their handle>" --text "test from chief"` — and confirm it lands. Never
+   `imsg send` to an owner handle (it bypasses the 🤖 echo guard and loops; see
+   the imsg skill).
