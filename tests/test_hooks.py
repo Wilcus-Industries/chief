@@ -488,8 +488,10 @@ async def test_half_installed_package_warns_loudly(
     # Skills landed but the registry entry didn't (the prod half-install):
     # the loader must say so instead of silently skipping (audit H1).
     write_hook_package(tmp_path, "fixture", GOOD_HOOK)
+    # Path-form skill entry like real manifests — the half-install probe
+    # must compare on the basename.
     (tmp_path / "fixture" / "manifest.yaml").write_text(
-        "name: fixture\ndescription: fixture pkg\nskills: [fixture]\n"
+        "name: fixture\ndescription: fixture pkg\nskills: [skills/fixture]\n"
         "hooks:\n  module: hooks.py\n  register: register\n"
     )
     skill_dir = tmp_path / "skills" / "fixture"

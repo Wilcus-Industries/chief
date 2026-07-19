@@ -77,7 +77,11 @@ def load_hooks(
 def _looks_half_installed(
     skills: tuple[str, ...], skills_root: Path = Path("skills")
 ) -> bool:
-    return any((skills_root / skill / "SKILL.md").exists() for skill in skills)
+    # Manifest skill entries are package-relative paths (skills/<name>); the
+    # installed copy lives at skills_root/<name> — compare on the basename.
+    return any(
+        (skills_root / Path(skill).name / "SKILL.md").exists() for skill in skills
+    )
 
 
 def _register_package(

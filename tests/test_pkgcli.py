@@ -157,8 +157,10 @@ def test_registry_apply_rewrites_corrupt_yaml_loudly(
 def _manifest_package(tmp_path: Path) -> Package:
     root = tmp_path / "packages" / "demo"
     root.mkdir(parents=True)
+    # Path-form skill entry, like every real manifest (skills/<name>) — the
+    # verify must compare on the basename.
     (root / "manifest.yaml").write_text(
-        "name: demo\ndescription: d\nskills: [demo]\n"
+        "name: demo\ndescription: d\nskills: [skills/demo]\n"
         "config_keys: [demo_block]\nsecrets: [demo_key]\n"
     )
     return PackageLibrary((tmp_path / "packages",)).scan()[0]
