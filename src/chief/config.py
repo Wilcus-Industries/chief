@@ -14,6 +14,27 @@ import yaml
 
 
 @dataclass(frozen=True)
+class BackendSpec:
+    """A named provider backend: an OpenAI-compatible endpoint plus its key.
+
+    ``api_key`` is resolved AT LOAD from ``api_key_env`` (an env var name) then
+    ``api_key_secret`` (a filename under ``secrets/``) — mirroring how
+    ``openrouter_api_key`` resolves. No inline keys ever live in the yaml.
+    """
+
+    base_url: str
+    api_key: str
+
+
+@dataclass(frozen=True)
+class AliasSpec:
+    """A typed model name mapped onto ``(backend, real model id)`` for routing."""
+
+    backend: str
+    model: str
+
+
+@dataclass(frozen=True)
 class Config:
     """Runtime configuration for the daemon."""
 
@@ -24,6 +45,18 @@ class Config:
     socket_path: Path = Path("data/chief.sock")
     max_concurrent_sessions: int = 4
     openrouter_api_key: str = ""
+    # The OpenAI-compatible endpoint the provider streams from. Defaults to
+    # OpenRouter; override to a local proxy (e.g. claude-code-openai-server,
+    # which serves a Claude subscription in bare mode) to drive Anthropic via
+    # OAuth instead of paying per token. Caveat: such a proxy reports no dollar
+    # cost, so budget_cap_usd is inert against it. Set openrouter_api_key to the
+    # proxy's bearer (e.g. CCI_API_KEY) — it is sent verbatim as Authorization.
+    provider_base_url: str = "https://openrouter.ai/api/v1"
+    # Named extra backends and typed-name -> (backend, real model) aliases for
+    # per-model routing (see RouterProvider). Empty = the single legacy default
+    # backend above; the anthropic-oauth package populates them.
+    provider_backends: dict[str, "BackendSpec"] = field(default_factory=dict)
+    provider_aliases: dict[str, "AliasSpec"] = field(default_factory=dict)
     gate_never: tuple[str, ...] = ()
     gate_approved: tuple[str, ...] = ()
     budget_cap_usd: float = 0.0
@@ -69,6 +102,11 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         openrouter_api_key=os.environ.get(
             "OPENROUTER_API_KEY", _read_secret(Path("secrets/openrouter_api_key"))
         ),
+        provider_base_url=str(
+            _env_or(raw, "provider_base_url", "https://openrouter.ai/api/v1")
+        ),
+        provider_backends=_parse_backends(raw.get("provider_backends") or {}),
+        provider_aliases=_parse_aliases(raw.get("provider_aliases") or {}),
         gate_never=tuple(gate.get("never") or ()),
         gate_approved=tuple(gate.get("approved") or ()),
         budget_cap_usd=float(budget.get("cap_usd", 0.0)),
@@ -123,3 +161,27 @@ def _env_or(raw: dict[str, Any], key: str, default: Any) -> Any:
 
 def _read_secret(path: Path) -> str:
     return path.read_text().strip() if path.exists() else ""
+
+
+def _parse_backends(raw: dict[str, Any]) -> dict[str, BackendSpec]:
+    return {
+        name: BackendSpec(base_url=str(spec["base_url"]), api_key=_backend_key(spec))
+        for name, spec in raw.items()
+    }
+
+
+def _backend_key(spec: dict[str, Any]) -> str:
+    """Resolve a backend key: ``api_key_env`` var first, then a secret file."""
+    env = spec.get("api_key_env")
+    if env and os.environ.get(env):
+        return os.environ[env]
+    if secret := spec.get("api_key_secret"):
+        return _read_secret(Path("secrets") / str(secret))
+    return ""
+
+
+def _parse_aliases(raw: dict[str, Any]) -> dict[str, AliasSpec]:
+    return {
+        name: AliasSpec(backend=str(spec["backend"]), model=str(spec["model"]))
+        for name, spec in raw.items()
+    }

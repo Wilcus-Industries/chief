@@ -63,24 +63,33 @@ class OpenRouterProvider:
                 for t in tools
             ]
         acc = _StreamAccumulator()
-        async with self._client.stream(
-            "POST",
-            f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=self._headers,
-        ) as response:
-            if response.status_code != 200:
-                body = (await response.aread()).decode(errors="replace")
-                raise ProviderError(f"OpenRouter HTTP {response.status_code}: {body}")
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[len("data: ") :]
-                if data == "[DONE]":
-                    break
-                delta_text = acc.feed(json.loads(data))
-                if delta_text:
-                    yield TextDelta(delta_text)
+        try:
+            async with self._client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                json=payload,
+                headers=self._headers,
+            ) as response:
+                if response.status_code != 200:
+                    body = (await response.aread()).decode(errors="replace")
+                    raise ProviderError(
+                        f"OpenRouter HTTP {response.status_code}: {body}"
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[len("data: ") :]
+                    if data == "[DONE]":
+                        break
+                    delta_text = acc.feed(json.loads(data))
+                    if delta_text:
+                        yield TextDelta(delta_text)
+        except httpx.TransportError as exc:
+            # A down/unreachable backend (connect refused, transport, timeout)
+            # must fail loud with context — never a silent model swap upstream.
+            raise ProviderError(
+                f"backend unreachable ({self._base_url}, model {model}): {exc}"
+            ) from exc
         yield acc.completion()
 
 

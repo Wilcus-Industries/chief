@@ -6,7 +6,7 @@
 # ships a deliberately small set of keys; packages bring their own.
 #
 # Env overrides: CHIEF_DB_PATH, CHIEF_SOCKET_PATH, CHIEF_MAX_CONCURRENT_SESSIONS,
-# OPENROUTER_API_KEY (or secrets/openrouter_api_key).
+# OPENROUTER_API_KEY (or secrets/openrouter_api_key), CHIEF_PROVIDER_BASE_URL.
 
 # Model roles. Core ships exactly one — the agent invents further roles via
 # self-config. Two optional roles are honored when present, never required:
@@ -14,6 +14,25 @@
 # (monitor model-predicates).
 models:
   default: qwen/qwen3-coder
+
+# OpenAI-compatible endpoint the DEFAULT/legacy backend streams from. Default =
+# OpenRouter; leave it unless pointing chief's fallback backend at another
+# OpenAI-compat host. Env: CHIEF_PROVIDER_BASE_URL.
+provider_base_url: https://openrouter.ai/api/v1
+
+# Per-model routing (optional; empty = one backend, the default above). Name
+# extra backends under `provider_backends` (each an OpenAI-compat base_url plus
+# a key resolved from `api_key_env` then a `secrets/<api_key_secret>` file —
+# never an inline key), then map typed names to (backend, real model) under
+# `provider_aliases`. A thread routes to an alias with `/model <alias>` or the
+# agent's switch_model tool; any unlisted model uses the default backend. To
+# drive a Claude SUBSCRIPTION via OAuth (a local proxy) for chosen models,
+# install the `anthropic-oauth` package — it fills these in and documents the
+# ToS / dead-budget-cap caveats. Example:
+#   provider_backends:
+#     proxy: {base_url: http://127.0.0.1:8000/v1, api_key_secret: proxy_api_key}
+#   provider_aliases:
+#     opus: {backend: proxy, model: claude-opus-4-8}
 
 db_path: data/chief.db
 socket_path: data/chief.sock
