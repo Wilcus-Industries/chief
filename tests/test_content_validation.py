@@ -7,7 +7,7 @@ back instead of merged (issue #186).
 
 from pathlib import Path
 
-from chief import packages, skills
+from chief import classifiers, packages, skills
 
 REPO = Path(__file__).parent.parent
 
@@ -18,6 +18,14 @@ description: Greet someone warmly.
 # Greeting
 
 Say hello.
+"""
+
+GOOD_CLASSIFIER = """---
+name: mood
+description: Judge the mood of a message.
+labels: [HAPPY, SAD]
+---
+Reply with the mood of the message.
 """
 
 
@@ -79,6 +87,24 @@ def test_invalid_manifest_yaml_is_flagged(tmp_path: Path) -> None:
     (pkg / "manifest.yaml").write_text("name: [unterminated\n")
     problems = packages.validate((tmp_path,))
     assert any("yaml" in p.lower() for p in problems)
+
+
+def test_valid_classifier_passes(tmp_path: Path) -> None:
+    (tmp_path / "mood.md").write_text(GOOD_CLASSIFIER)
+    assert classifiers.validate(tmp_path) == []
+
+
+def test_classifier_missing_labels_is_flagged(tmp_path: Path) -> None:
+    (tmp_path / "bare.md").write_text(
+        "---\nname: x\ndescription: y\n---\nbody\n"
+    )
+    problems = classifiers.validate(tmp_path)
+    assert any("labels" in p for p in problems)
+
+
+def test_bundled_classifiers_are_wellformed() -> None:
+    problems = classifiers.validate(REPO / "classifiers")
+    assert problems == [], "\n".join(problems)
 
 
 def test_bundled_skills_are_wellformed() -> None:
