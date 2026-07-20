@@ -1,0 +1,8 @@
+name: whisper
+description: Local speech-to-text with whisper.cpp — transcribe voice memos and audio/video files the owner sends.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/whisper
+config_keys: []
+secrets: []
