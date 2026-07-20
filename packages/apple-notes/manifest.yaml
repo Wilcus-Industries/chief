@@ -1,0 +1,8 @@
+name: apple-notes
+description: Manage Apple Notes via the memo CLI — create, search, edit, export.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/apple-notes
+config_keys: []
+secrets: []
