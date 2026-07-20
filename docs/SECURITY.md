@@ -215,6 +215,23 @@ Default bind is `127.0.0.1:8130` — loopback only. `web_password` is deliberate
 `/app.css` and `/app.js` are intentionally unauthenticated; every other route
 re-checks `is_authed`.
 
+## Scheduled shell commands — `cron/tools.py`, `shelltool.py`
+
+A `command` schedule runs arbitrary shell with nobody present, so two things hold
+it:
+
+**Creation is the only control point.** The `schedule` tool raises its own card
+before the row exists — independent of the gate's approved list, and refused
+outright when no asker is wired. The card renders the command through
+`json.dumps`, so a multi-line command cannot draw its own `yes / no` line and
+bury the real payload around it.
+
+**Both shell paths carry the same guards.** `shell_guards` (today: the iMessage
+`owner_send_guard` echo-loop seatbelt) are wired into the `shell` tool *and*, via
+`guarded_runner`, into the unattended runner cron fires. A refused command never
+reaches the shell; it returns exit code 126 and is logged. Reaching
+`ShellService.run` directly bypasses the seatbelts — always wrap it.
+
 ## The invariant list
 
 1. **Fail closed everywhere.** Unparsed approval → deny. Timed-out card → deny.
@@ -230,6 +247,8 @@ re-checks `is_authed`.
    restart report are likewise best-effort.
 8. **`system` senders run turns but are never published to the bus** — otherwise
    monitors trigger themselves in a loop.
+9. **An unattended shell path is guarded exactly like the owner-driven one**, and
+   a control card never renders attacker-shaped text unescaped.
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,

@@ -97,7 +97,16 @@ class CronService:
 
     async def _loop(self) -> None:
         while True:
-            delay = await self._tick()
+            try:
+                delay = await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad tick — a schema skew after an upgrade, a transient DB
+                # error — must not silently kill the loop and stop every
+                # schedule until the daemon restarts. Log it and retry.
+                logger.exception("schedule tick failed; retrying")
+                delay = self._poll
             await asyncio.sleep(min(delay, self._poll))
 
     async def _tick(self) -> float:

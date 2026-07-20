@@ -1,5 +1,6 @@
 """Native tool for the agent to manage its own schedules."""
 
+import json
 from typing import Any
 
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
@@ -67,9 +68,13 @@ def register_cron_tools(
         """
         if ask is None:
             return False
+        # json.dumps escapes newlines, so a multi-line command cannot draw its
+        # own "yes / no" line and bury the real payload above or below it. This
+        # card is the only control point for unattended shell execution — it
+        # must not be forgeable by the command it is asking about.
         question = (
             f"approve a scheduled command on [{spec}]? it will run unattended, "
-            f"with no approval when it fires:\n{command}\nyes / no"
+            f"with no approval when it fires:\n{json.dumps(command)}\nyes / no"
         )
         # ALWAYS has nothing to persist here — treat it as this one yes.
         return await ask(context, question) is not Approval.DENY
