@@ -180,14 +180,16 @@ Rules that matter:
   always landing.
 - Blocks are **sorted by package name** before rendering, so placement is
   deterministic regardless of load order.
-- A `post_tool` hook may **annotate** (a `<hook>` note above the verbatim
-  payload) or **veto** (the payload is withheld, the model gets your reason).
-  It cannot rewrite the payload — any other return value is ignored, and the
-  first veto wins.
-- Contributed text is escaped — `<hook>` delimiters are entity-escaped and the
-  source attribute is slugged. **Contributed text may be attacker-influenced**
-  (retrieved or relayed content), so the delimiter and attribution are trusted
-  structure a contribution must not be able to forge.
+- A `post_tool` hook may **annotate** (a `<hook>` note above the payload) or
+  **veto** (the payload is withheld, the model gets your reason). It cannot
+  rewrite the payload — any other return value is ignored, and the first veto
+  wins.
+- Contributed text **and tool payloads** are escaped — `<hook>` delimiters are
+  entity-escaped and the source attribute is slugged. **Both may be
+  attacker-influenced** (retrieved or relayed content), so the delimiter and
+  attribution are trusted structure neither can forge: a fetched page cannot
+  ship its own `<hook source="screener">` and impersonate the screener. Apart
+  from those delimiters, an annotated payload reaches the model byte-for-byte.
 - Keep the hook module import-light. It is imported at boot; do expensive imports
   lazily inside the hook body. `packages/obsidian-memory/hooks.py` is the
   reference shim.
