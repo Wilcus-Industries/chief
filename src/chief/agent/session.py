@@ -17,7 +17,13 @@ from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.tools import ToolDispatcher
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
-from chief.hooks import HookRegistry, TurnContext, assemble_system, run_post_turn
+from chief.hooks import (
+    HookRegistry,
+    TurnContext,
+    assemble_system,
+    run_post_turn,
+    tool_screener,
+)
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 
@@ -124,6 +130,9 @@ class Session:
             messages=transcript,
             tools=self._tools,
             on_delta=on_delta,
+            post_tool=tool_screener(
+                self._hooks, self._hooks_timeout_seconds, logger
+            ),
         )
         new_messages = [{"role": "user", "content": user_text}, *transcript[baseline:]]
         await self._commit(new_messages)

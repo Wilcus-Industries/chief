@@ -173,7 +173,9 @@ source attribute — contributed text may be attacker-influenced.
 3. **No tool calls → return `TurnResult`.** The only success exit.
 4. Per `ToolCall`: the key is `(name, canonical-json args)`. Seen more than
    `REPEAT_LIMIT` times *this turn* → refused with a course-correcting error
-   string instead of running. Otherwise `tools.dispatch(call)`.
+   string instead of running. Otherwise `tools.dispatch(call)`, then the
+   `post_tool` hooks screen the result — annotate or veto — before step 5
+   appends it. The repeat-limit refusal is not screened.
 5. Appends the tool result.
 6. Exhausting the iteration cap returns an explicit error string.
 
