@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from chief.budget import Budget
+from chief.classifiers import Classifier
 from chief.hooks.context import HookContext
 from chief.hooks.registry import HookRegistry, PackageHookRegistrar
 from chief.hooks.runner import is_safe_package_name
@@ -34,6 +35,7 @@ def load_hooks(
     raw_config: Mapping[str, Any],
     disabled: tuple[str, ...],
     data_root: Path,
+    classifier: Classifier,
 ) -> None:
     """Register the hooks of every installed, non-disabled package that declares
     them. Errors are contained per-package; the registry gains what loads."""
@@ -66,7 +68,8 @@ def load_hooks(
             _register_package(
                 pkg.name, pkg.path / pkg.hooks.module, pkg.hooks,
                 registry, _context(pkg.name, pkg.config_keys, raw_config,
-                                   provider, models, budget, data_root),
+                                   provider, models, budget, data_root,
+                                   classifier),
             )
         except Exception:
             logger.error(
@@ -100,6 +103,7 @@ def _register_package(
 def _context(
     name: str, config_keys: tuple[str, ...], raw_config: Mapping[str, Any],
     provider: Provider, models: Mapping[str, str], budget: Budget, data_root: Path,
+    classifier: Classifier,
 ) -> HookContext:
     data_dir = data_root / name
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -110,4 +114,5 @@ def _context(
         data_dir=data_dir,
         logger=logging.getLogger(f"chief.hooks.{name}"),
         budget=budget,
+        classifier=classifier,
     )

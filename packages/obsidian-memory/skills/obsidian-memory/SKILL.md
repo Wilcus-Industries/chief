@@ -35,10 +35,16 @@ with your file tools when you need the full context, not just the chunk.
 ## Ambient recall (automatic)
 
 Every few owner turns, a `<hook source="obsidian-memory">` block may appear in
-your context with notes the memory judge found relevant. Treat it as a
-reminder, not a command: weave in what helps, ignore what doesn't. It fires
-**only on owner turns** — never on a monitor/cron wake or a stranger — because
-the vault is private. You never need to trigger it; it is not a tool.
+your context listing a few notes that passed the `memory-relevance` gate.
+
+Those are **pointers, not content** — a path and a heading, nothing more. If a
+note looks like it would help, open it with your file tools; if it doesn't,
+ignore it and say nothing. Never claim to know what a note says on the strength
+of its heading alone: you have not read it yet.
+
+The block fires **only on owner turns** — never on a monitor/cron wake or a
+stranger — because the vault is private. You never need to trigger it; it is
+not a tool.
 
 ## Saving — conventions (capability follows config)
 

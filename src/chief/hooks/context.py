@@ -1,10 +1,10 @@
 """HookContext: the entire surface a package hook may touch.
 
 A hook is handed exactly this — its provider, the model roster, its own sliced
-config, a private data dir, a package-scoped logger, and the budget. There is
-deliberately no access to sessions, the gate, or the self-edit pipeline: hooks
-contribute per-turn context and observe finished turns, they do not steer the
-daemon.
+config, a private data dir, a package-scoped logger, the budget, and the
+classifier primitive. There is deliberately no access to sessions, the gate, or
+the self-edit pipeline: hooks contribute per-turn context and observe finished
+turns, they do not steer the daemon.
 """
 
 import logging
@@ -14,12 +14,20 @@ from pathlib import Path
 from typing import Any
 
 from chief.budget import Budget
+from chief.classifiers import Classifier
 from chief.provider.base import Provider
 
 
 @dataclass(frozen=True)
 class HookContext:
-    """Immutable per-package handle passed to a package's ``register``."""
+    """Immutable per-package handle passed to a package's ``register``.
+
+    ``classifier`` is the same primitive monitors use. A package that needs a
+    categorical judgement calls it rather than hand-rolling a ``provider``
+    completion: it gets label validation, retries, and — the point — a prompt
+    the owner can edit as a markdown file in the classifiers dir instead of a
+    string constant buried in package code.
+    """
 
     provider: Provider
     models: Mapping[str, str]
@@ -27,6 +35,7 @@ class HookContext:
     data_dir: Path
     logger: logging.Logger
     budget: Budget
+    classifier: Classifier
 
 
 @dataclass(frozen=True)

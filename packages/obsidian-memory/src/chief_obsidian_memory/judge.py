@@ -1,27 +1,39 @@
-"""The ambient-recall relevance judge: one in-process model call, no shell-out.
+"""Ambient-recall relevance gate: one classifier call per candidate, then a
+pointer nudge — never the note body.
 
-The conversation is rendered as a single system message — the judge reads it as
-data, never mistaking the transcript for its own instructions. Candidate notes
-are pre-fetched by the hook from the in-process index (never a subprocess) and
-listed alongside; the judge picks the relevant ones in one completion, and the
-selection is formatted and truncated to the token cap before injection. A full
-tool-driven search loop is a possible follow-up; this ships the cheap path.
+Two deliberate shapes here:
+
+- **Gate, not selector.** Each candidate gets its own yes/no ``classify`` call
+  through the core classifier primitive, run concurrently. One label per call
+  is exactly what that primitive does, so this drops a hand-rolled "answer with
+  numbers" parse whose malformed output silently injected *nothing* — a failure
+  that looked identical to "no notes were relevant". It also moves the prompt
+  into an owner-editable markdown file in the classifiers dir.
+- **Pointer, not payload.** Survivors render as ``path :: heading`` only; the
+  agent opens a note with its own file tools if it wants it. Injecting bodies
+  spent context on every recall whether the agent used them or not. A nudge
+  costs a line, so the gate now protects the *signal* — nudges the agent keeps
+  trusting — rather than a token budget.
+
+The candidates are already ranked by vector similarity upstream, so this does
+no re-ranking: the gate only removes, and search order survives.
 """
 
-import re
+import asyncio
 from typing import TYPE_CHECKING
 
-from chief.provider.base import Completion, Provider
+from chief.classifiers import Classifier, ClassifierError
 
 if TYPE_CHECKING:
     from chief_obsidian_memory.index import SearchHit
 
-_INSTRUCTIONS = (
-    "You are a memory relevance judge for the owner's personal Obsidian vault. "
-    "Below is the recent conversation, then a numbered list of candidate notes. "
-    "Choose only the candidates that would genuinely help the assistant's next "
-    "reply. Answer with the numbers of the relevant candidates separated by "
-    "commas (for example: 1, 3), or exactly 'none' if none apply."
+# Seeded into the classifiers dir by the package install; editable by the owner.
+CLASSIFIER_NAME = "memory-relevance"
+RELEVANT = "RELEVANT"
+
+_NUDGE_HEADER = (
+    "Possibly relevant notes in the owner's Obsidian vault. These are pointers, "
+    "not content — read a note with your file tools only if it would help:"
 )
 
 
@@ -37,55 +49,55 @@ def format_transcript(
 
 
 async def run_judge(
-    provider: Provider,
-    model: str,
+    classifier: Classifier,
     transcript: str,
     candidates: "list[SearchHit]",
     cap_tokens: int,
 ) -> str | None:
-    """Ask the judge which candidates are relevant; return the formatted, capped
-    injection text, or ``None`` when nothing is chosen."""
+    """Gate each candidate concurrently; return the pointer nudge, or ``None``
+    when nothing survives."""
     if not candidates:
         return None
-    reply = await _complete(provider, model, _prompt(transcript, candidates))
-    chosen = _parse_selection(reply, len(candidates))
-    if not chosen:
-        return None
-    return _truncate(_format([candidates[i] for i in chosen]), cap_tokens)
-
-
-def _prompt(transcript: str, candidates: "list[SearchHit]") -> str:
-    listing = "\n".join(
-        f"[{i + 1}] {c.note_path} :: {c.heading}\n{c.text}"
-        for i, c in enumerate(candidates)
+    verdicts = await asyncio.gather(
+        *(_relevant(classifier, transcript, hit) for hit in candidates)
     )
-    return f"{_INSTRUCTIONS}\n\n{transcript}\n\nCandidate notes:\n{listing}"
+    kept = [hit for hit, keep in zip(candidates, verdicts, strict=True) if keep]
+    if not kept:
+        return None
+    return _truncate(_format(kept), cap_tokens)
 
 
-async def _complete(provider: Provider, model: str, content: str) -> str:
-    messages = [{"role": "system", "content": content}]
-    final = ""
-    async for event in provider.stream(model=model, messages=messages, tools=[]):
-        if isinstance(event, Completion):
-            final = event.text
-    return final
+async def _relevant(
+    classifier: Classifier, transcript: str, hit: "SearchHit"
+) -> bool:
+    """One candidate's verdict. A classifier that never resolves a label drops
+    the candidate rather than failing the turn — a missed nudge is recoverable
+    (the agent can still search), a raised recall hook is not."""
+    try:
+        label = await classifier.classify(CLASSIFIER_NAME, _payload(transcript, hit))
+    except ClassifierError:
+        return False
+    return label == RELEVANT
 
 
-def _parse_selection(reply: str, count: int) -> list[int]:
-    if "none" in reply.lower():
-        return []
-    picked = {int(n) - 1 for n in re.findall(r"\d+", reply)}
-    return sorted(i for i in picked if 0 <= i < count)
+def _payload(transcript: str, hit: "SearchHit") -> str:
+    """Transcript first, candidate last: every candidate in a run shares the
+    transcript prefix, so the provider can cache it across the concurrent calls.
+    """
+    return (
+        f"{transcript}\n\nCandidate note:\n"
+        f"{hit.note_path} :: {hit.heading}\n{hit.text}"
+    )
 
 
 def _format(candidates: "list[SearchHit]") -> str:
-    body = "\n".join(
-        f"- {c.note_path} :: {c.heading}\n  {c.text}" for c in candidates
-    )
-    return f"Relevant notes from your Obsidian vault:\n{body}"
+    body = "\n".join(f"- {c.note_path} :: {c.heading}" for c in candidates)
+    return f"{_NUDGE_HEADER}\n{body}"
 
 
 def _truncate(text: str, cap_tokens: int) -> str:
+    # Pointers are short by construction; this is a backstop against a vault
+    # with pathological paths or headings, not the primary budget control.
     # ~4 characters per token is a good-enough budget without a tokenizer.
     limit = max(0, cap_tokens) * 4
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
