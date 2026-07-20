@@ -16,16 +16,19 @@ concerns live here:
 # (chat.chat_identifier IN owner_handles) — that scope is what lets the owner
 # DM their own assistant from their own Apple ID without leaking their other
 # conversations, since owner->friend sends carry the friend's chat, not the
-# owner's. associated_message_type = 0 drops tapbacks/edits; the chat joins
-# expose group/room flags plus self-chat membership. A body counts when text
-# is present OR an attributedBody blob is (self-DMs carry only the latter).
+# owner's. It also means chief's own group sends (is_from_me = 1, outside the
+# self-chat) never poll back, so a group needs no BOT_PREFIX echo guard.
+# associated_message_type = 0 drops tapbacks/edits. ``group_chat`` carries a
+# group's chat_identifier and is NULL for one-to-one chats — one column for
+# both "is this a group" and "which group", so a group message can thread on
+# the conversation instead of on whoever spoke. A body counts when text is
+# present OR an attributedBody blob is (self-DMs carry only the latter).
 # Handles bind as parameters ({scope} is only placeholder count).
 POLL_QUERY = (
     "SELECT message.ROWID AS rowid, handle.id AS sender, message.text AS text, "
     "message.is_from_me AS from_me, "
-    "MAX(CASE WHEN chat.style IS NOT NULL AND chat.style != 45 "
-    "THEN 1 ELSE 0 END) AS in_group, "
-    "MAX(CASE WHEN chat.room_name IS NOT NULL THEN 1 ELSE 0 END) AS has_room, "
+    "MAX(CASE WHEN (chat.style IS NOT NULL AND chat.style != 45) "
+    "OR chat.room_name IS NOT NULL THEN chat.chat_identifier END) AS group_chat, "
     "MAX(CASE WHEN self_chat.mid IS NOT NULL THEN 1 ELSE 0 END) AS in_self, "
     "message.attributedBody AS body, message.date AS date "
     "FROM message JOIN handle ON message.handle_id = handle.ROWID "
@@ -55,18 +58,20 @@ _NSSTRING = b"NSString"
 class RecentDedup:
     """Collapses self-DM twin rows to one delivery.
 
-    A ``(sender, text)`` key seen again within ``window_ns`` of its last
-    sighting is a redelivery of the same logical message — skip it. The window
-    keeps a genuine later repeat of the same text (owner types it again minutes
-    on) from being swallowed. State is in-memory: a fresh boot re-primes from
-    the store cursor, never replaying an already-delivered twin.
+    A ``(thread_key, sender, text)`` key seen again within ``window_ns`` of its
+    last sighting is a redelivery of the same logical message — skip it. The
+    thread is part of the key so two people saying "ok" in different group
+    chats at once stay two messages. The window keeps a genuine later repeat of
+    the same text (owner types it again minutes on) from being swallowed. State
+    is in-memory: a fresh boot re-primes from the store cursor, never replaying
+    an already-delivered twin.
     """
 
     def __init__(self, window_ns: int = DEDUP_WINDOW_NS) -> None:
         self._window = window_ns
-        self._seen: dict[tuple[str, str], int] = {}
+        self._seen: dict[tuple[str, ...], int] = {}
 
-    def is_duplicate(self, key: tuple[str, str], date_ns: int) -> bool:
+    def is_duplicate(self, key: tuple[str, ...], date_ns: int) -> bool:
         self._seen = {
             k: d for k, d in self._seen.items() if date_ns - d <= self._window
         }
