@@ -15,6 +15,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from chief.selfedit.notice import RestartNotice, write_restart_notice
+
 logger = logging.getLogger(__name__)
 
 MARKER_NAME = ".selfedit-pending.json"
@@ -51,9 +53,12 @@ class RestartController:
         self,
         restart: Callable[[], None] | None = None,
         drain_timeout: float = DRAIN_TIMEOUT_SECONDS,
+        repo_root: Path = Path("."),
     ) -> None:
         self._restart = restart if restart is not None else restart_daemon
         self._drain_timeout = drain_timeout
+        self._repo_root = repo_root
+        self._notice: RestartNotice | None = None
         self._requested = False
         self._active = 0
         self._admitting = asyncio.Event()
@@ -61,9 +66,16 @@ class RestartController:
         self._idle = asyncio.Event()
         self._idle.set()  # set whenever no turn is active
 
-    def request(self) -> None:
-        """Mark a restart due and stop admitting new turns (pipeline side)."""
+    def request(self, notice: RestartNotice | None = None) -> None:
+        """Mark a restart due and stop admitting new turns (pipeline side).
+
+        ``notice`` is the thread to report back to; it is held in memory and
+        only written at the exec — the request and the exec are a whole turn
+        plus the drain apart, and a notice on disk in between would be
+        claimed by any unrelated reboot that beat this one to it.
+        """
         self._requested = True
+        self._notice = notice
         self._admitting.clear()
 
     async def enter_turn(self) -> None:
@@ -95,6 +107,8 @@ class RestartController:
                 self._drain_timeout,
                 self._active,
             )
+        if self._notice is not None:
+            write_restart_notice(self._repo_root, self._notice)
         self._restart()
 
 
