@@ -3,6 +3,7 @@ only the LLM provider swapped (PRD #183 testing seam)."""
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from chief.mcpclient.manager import ServerConfig
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
+from chief.shelltool import GUARD_REFUSED_EXIT_CODE
 from chief.wiring import build_mcp, build_provider
 
 from .fakes import FakeProvider, text_turn
@@ -442,3 +444,39 @@ async def test_prompt_schedule_creation_raises_no_card(
         assert len(await app.cron_service.list_enabled()) == 1
     finally:
         await shutdown(app, streams)
+
+
+async def test_scheduled_command_gets_the_owner_send_guard(
+    tmp_path: Path, sock_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The shell tool's echo-loop seatbelt must also cover cron's unattended
+    # runner — an approved schedule is otherwise a way around it, with nobody
+    # present to notice the loop start.
+    config = make_config(
+        tmp_path, sock_path, imessage_owner_handles=("+15551234567",)
+    )
+    app = await build_app(config, provider=FakeProvider([]))
+    marker = tmp_path / "sent.txt"
+    # Created before start(): the loop sleeps its full poll when it boots empty.
+    await app.cron_service.create(
+        description="page the owner",
+        spec="@every 0.05",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command=f"echo sent > {marker}; imsg send --to +15551234567 hi",
+    )
+    with caplog.at_level(logging.INFO, logger="chief.cron.service"):
+        await app.start()
+        streams = await asyncio.open_unix_connection(str(config.socket_path))
+        try:
+            for _ in range(200):
+                if any("command exit=" in r.getMessage() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            await shutdown(app, streams)
+    fired = [r.getMessage() for r in caplog.records if "command exit=" in r.message]
+    assert fired, "the command schedule never fired"
+    # Refused by the guard before reaching the shell — so `echo` never ran.
+    assert f"exit={GUARD_REFUSED_EXIT_CODE}" in fired[0]
+    assert not marker.exists()

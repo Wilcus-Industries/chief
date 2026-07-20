@@ -37,7 +37,7 @@ from chief.registry_apply import INSTALLED_REGISTRY, load_installed
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.shellprompt import shell_prompt_line
-from chief.shelltool import ShellService
+from chief.shelltool import ShellGuard, ShellService, guarded_runner
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
 from chief.toolset import register_native_tools
@@ -66,7 +66,7 @@ async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
 async def _build_agent_core(
     config: Config, provider: Provider, store: MessageStore,
     factory: SessionFactory, gate: Gate, skills: SkillLibrary,
-    shell_service: ShellService,
+    shell_service: ShellService, shell_guards: tuple[ShellGuard, ...],
 ) -> Core:
     """Budget, bus, registry, the manager/dispatcher/tools_factory trio, and the
     monitor/cron services. The trio stays in one scope so ``tools_factory``'s
@@ -130,7 +130,7 @@ async def _build_agent_core(
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
-        run_command=shell_service.run,
+        run_command=guarded_runner(shell_service, shell_guards),
     )
     return Core(budget, bus, registry, restart, manager, dispatcher, monitors, cron)
 
@@ -147,8 +147,10 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         timeout_seconds=config.shell_timeout_seconds,
         output_limit=config.shell_output_limit,
     )
+    # Echo-loop seatbelt on BOTH shell paths: the tool and cron's runner.
+    shell_guards = (owner_send_guard(config.imessage_owner_handles),)
     core = await _build_agent_core(
-        config, provider, store, factory, gate, skills, shell_service
+        config, provider, store, factory, gate, skills, shell_service, shell_guards
     )
 
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
@@ -167,9 +169,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         default_model=config.default_model,
         budget=core.budget,
         root=Path.cwd(),
-        # Mechanical echo-loop seatbelt: shell commands must not message the
-        # owner's own handle out-of-band (imsg/osascript) — see owner_send_guard.
-        shell_guards=(owner_send_guard(config.imessage_owner_handles),),
+        shell_guards=shell_guards,
         model_aliases=model_aliases,
         ask=approval_asker(core.dispatcher, gate.approvals),
     )
