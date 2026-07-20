@@ -6,12 +6,20 @@ from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.monitors.service import MonitorService
 from chief.provider.base import ToolSpec
 
+# The `message.inbound` payload keys a `pattern` monitor can match on — see
+# Dispatcher._publish_inbound. A pattern searches exactly ONE of these, so a
+# field outside the set would match "" forever and never fire (#235).
+MATCHABLE_FIELDS = ("text", "sender", "thread_key")
+
 _SPEC = ToolSpec(
     name="monitor",
     description=(
         "Manage monitors that watch a channel and wake this thread on a match. "
         "action=create needs `description` and exactly one of three forms: "
-        "`pattern` (regex over event text, cheap), `instruction` (a "
+        "`pattern` (regex over ONE field of the event, cheap — `field` picks "
+        f"which, one of {', '.join(MATCHABLE_FIELDS)}, default `text`; note "
+        "`text` is the bare message body and never includes the sender, so "
+        "match a contact with field=`sender`), `instruction` (a "
         "yes/no judgment via the built-in wake-judge classifier), or "
         "`classifier` (a named categorical classifier, which requires "
         "`fire_label` — the label that fires the monitor). Plus optional "
@@ -24,6 +32,11 @@ _SPEC = ToolSpec(
             "action": {"type": "string", "enum": ["create", "list", "delete"]},
             "description": {"type": "string"},
             "pattern": {"type": "string"},
+            "field": {
+                "type": "string",
+                "enum": list(MATCHABLE_FIELDS),
+                "description": "event field `pattern` matches; default text",
+            },
             "instruction": {"type": "string"},
             "classifier": {"type": "string"},
             "fire_label": {"type": "string"},
@@ -49,6 +62,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         classifier: str | None,
         fire_label: str | None,
         watch_channel: str | None,
+        field: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
@@ -59,9 +73,20 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return "error: give exactly one of pattern, instruction, or classifier"
         if classifier is not None and not fire_label:
             return "error: classifier needs a fire_label"
+        if field is not None and pattern is None:
+            return "error: field only applies to the pattern form"
+        if field is not None and field not in MATCHABLE_FIELDS:
+            return (
+                f"error: '{field}' is not a matchable event field "
+                f"({', '.join(MATCHABLE_FIELDS)})"
+            )
         predicate: dict[str, Any]
         if pattern is not None:
-            predicate = {"kind": "code", "field": "text", "pattern": pattern}
+            predicate = {
+                "kind": "code",
+                "field": field or "text",
+                "pattern": pattern,
+            }
         elif instruction is not None:
             predicate = {
                 "kind": "classifier",
@@ -112,6 +137,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         fire_label: str | None = None,
         watch_channel: str | None = None,
         monitor_id: Any = None,
+        field: str | None = None,
     ) -> str:
         if action == "create":
             return await _create(
@@ -122,6 +148,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
                 classifier,
                 fire_label,
                 watch_channel,
+                field,
             )
         if action == "list":
             return await _list()
