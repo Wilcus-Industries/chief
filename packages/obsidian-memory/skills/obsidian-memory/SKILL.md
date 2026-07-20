@@ -62,4 +62,4 @@ When you may write, follow Obsidian conventions so the vault stays coherent:
 - Save **durable** facts (preferences, decisions, people, projects), not
   transient chatter. When in doubt, ask before writing.
 
-See `docs/best-practices.md` (in the package) for vault-layout options.
+See `packages/obsidian-memory/docs/best-practices.md` for vault-layout options.
