@@ -10,14 +10,26 @@ self-chat (note-to-self) and you answer there. There is no second number or
 account. Messages the owner sends to the self-chat arrive with
 `is_from_me = 1`, so the core adapter scopes inbound to the self-chat by
 `chat.chat_identifier IN (owner_handles)` and dispatches those rows as sender
-`owner`. Every other conversation on the owner's account is invisible by
-design — the scope predicate never lets other chats in.
+`owner`. The owner's *outbound* conversations stay invisible — the scope
+predicate admits `is_from_me = 1` rows only from the self-chat.
 
 The adapter is a dumb pipe: owner self-chat texts run a normal turn; a
 stranger inbound (someone texting the owner directly on a dedicated-ID setup,
 `is_from_me = 0`) is logged and published to the event bus, never answered.
 Notify tiers are **your** policy, built with monitors on the `imessage`
 channel — no code changes involved.
+
+## Group chats
+
+Inbound group messages reach the bus like any other third-party text, on the
+stranger path: logged, published, never auto-answered. They differ in one way
+— a group threads on the **conversation**, so `thread_key` is the group's
+`chat_identifier` and `sender` is the participant who spoke. Everywhere else
+those two fields are equal. Scope group policy on `thread_key`; scope
+per-person policy on `sender`.
+
+Get a group's `chat_identifier` with `imsg chats --json` (or `imsg group
+--chat-id N --json`) via the shell tool — see the imsg skill.
 
 ## The 🤖 echo guard (do not defeat)
 
@@ -43,6 +55,14 @@ double-fires on messages that already ran a turn.
   `^(\+15550001111|friend@example\.com)$` — regex-escape the handles.
 - **no-notify**: no monitor.
 
+The same three tiers work for groups — swap the matched field from `sender`
+to `thread_key`. A group whitelist is a code predicate on `thread_key` with
+pattern `^(chat123456789|chat987654321)$`; notify-all-groups plus a cheap
+screen is the model predicate with "this group message is worth waking the
+owner's agent for". A group's traffic is chattier than a 1:1, so prefer a
+whitelist or a screen over notify-all — every message in every group the
+owner is in otherwise lands in the stranger log.
+
 Set `wake_thread` to the owner's self-chat handle and `wake_channel` to
 `imessage` so wakes land where the owner reads.
 
@@ -54,4 +74,7 @@ Set `wake_thread` to the owner's self-chat handle and `wake_channel` to
   is the echo filter; never strip it or imitate it in other channels.
 - You may send to a non-owner handle only when the owner explicitly asks;
   such sends are unprefixed and look like a normal text from their account.
-- Group chats are invisible by design; do not promise group features.
+- Groups are read-only for the core adapter: it never sends into one. To text
+  a group, use `imsg send --chat-id` (imsg skill) — and only when the owner
+  asks. Your group sends carry `is_from_me = 1` outside the self-chat, so the
+  scope predicate drops them on the next poll; no 🤖 prefix is needed there.

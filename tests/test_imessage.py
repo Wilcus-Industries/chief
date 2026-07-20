@@ -59,9 +59,11 @@ class FakeStore:
     ) -> None:
         """Insert one message, optionally in a direct chat (``chat`` =
         the chat_identifier) or a group. ``chat`` models the self-chat
-        when it equals an owner handle. ``body`` sets attributedBody — how
-        modern macOS stores the owner's own sends, with ``text`` left empty.
-        ``date`` is the row's ns timestamp, used for twin dedup."""
+        when it equals an owner handle; with ``group=True`` it names the
+        room, so repeated calls land in one group thread. ``body`` sets
+        attributedBody — how modern macOS stores the owner's own sends, with
+        ``text`` left empty. ``date`` is the row's ns timestamp, used for
+        twin dedup."""
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 "SELECT ROWID FROM handle WHERE id = ?", (sender,)
@@ -80,12 +82,10 @@ class FakeStore:
                 (handle_id, text or None, from_me, tapback, body, date),
             ).lastrowid
             chat_id: int | None = None
-            if group:
-                chat_id = conn.execute(
-                    "INSERT INTO chat (style, room_name, chat_identifier) "
-                    "VALUES (43, 'room', 'group;+;room')"
-                ).lastrowid
-            elif chat is not None:
+            if group and chat is None:
+                chat = "group;+;room"
+            if chat is not None:
+                style, room = (43, "room") if group else (45, None)
                 found = conn.execute(
                     "SELECT ROWID FROM chat WHERE chat_identifier = ?", (chat,)
                 ).fetchone()
@@ -94,8 +94,8 @@ class FakeStore:
                     if found
                     else conn.execute(
                         "INSERT INTO chat (style, room_name, chat_identifier) "
-                        "VALUES (45, NULL, ?)",
-                        (chat,),
+                        "VALUES (?, ?, ?)",
+                        (style, room, chat),
                     ).lastrowid
                 )
             if chat_id is not None:
@@ -165,7 +165,6 @@ async def test_owner_maps_stranger_passes_echo_and_noise_skip(
     harness.store.add_message(OWNER, "loved a message", tapback=2000)
     # owner->friend sent copy: from_me=1, NOT the self-chat -> never dispatch.
     harness.store.add_message("+15551112222", "sent copy", from_me=1)
-    harness.store.add_message("+15557776666", "group chatter", group=True)
     adapter = harness.adapter()
     await adapter.poll_once()
     await adapter.drain()
@@ -174,6 +173,50 @@ async def test_owner_maps_stranger_passes_echo_and_noise_skip(
         ("+15559998888", "+15559998888", "yo from a stranger"),
     ]
     assert all(m.channel == "imessage" for m in harness.delivered)
+
+
+async def test_group_message_threads_on_the_chat_not_the_sender(
+    tmp_path: Path,
+) -> None:
+    """A group is the one place sender and thread_key diverge: many people
+    share one conversation, so monitors scope on the chat identifier."""
+    harness = Harness(tmp_path)
+    harness.store.add_message("+15557776666", "group chatter", group=True)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
+        ("+15557776666", "group;+;room", "group chatter")
+    ]
+
+
+async def test_group_participants_share_one_thread_key(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    harness.store.add_message("+15557776666", "one", group=True)
+    harness.store.add_message("+15554443333", "two", group=True)
+    harness.store.add_message("+15557776666", "three", group=True, chat="other")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [(m.sender, m.thread_key) for m in harness.delivered] == [
+        ("+15557776666", "group;+;room"),
+        ("+15554443333", "group;+;room"),
+        ("+15557776666", "other"),
+    ]
+
+
+async def test_chief_own_group_send_never_polls_back(tmp_path: Path) -> None:
+    """Chief texts a group out-of-band via the imsg CLI. That row lands
+    is_from_me=1 outside the owner self-chat, so the scope predicate drops
+    it — no echo loop, and no BOT_PREFIX needed in a group."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(
+        "+15557776666", "sent to the group", from_me=1, group=True
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert harness.delivered == []
 
 
 async def test_owner_self_dm_from_me_delivered(tmp_path: Path) -> None:
