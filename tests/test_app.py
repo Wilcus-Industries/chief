@@ -144,6 +144,38 @@ def test_build_mcp_empty_config_yields_no_servers() -> None:
     assert mcp_configs == ()
 
 
+def test_build_mcp_rejects_non_numeric_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": "not-a-number"},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
+
+
+def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": 0},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
+
+
 async def test_switch_model_is_gated_and_persists_the_override(
     tmp_path: Path, sock_path: Path
 ) -> None:

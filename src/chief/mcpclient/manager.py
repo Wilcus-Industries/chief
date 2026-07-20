@@ -49,6 +49,27 @@ class ServerConfig:
     timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
 
 
+def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig | None:
+    """Build a ``ServerConfig`` from a ``config.yaml`` entry; ``None`` on a
+    malformed ``timeout`` (non-numeric or <= 0) so a typo confines its
+    damage to this one server, not the whole daemon boot."""
+    timeout = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    raw_timeout = entry.get("timeout")
+    if raw_timeout is not None:
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            timeout = -1.0
+        if timeout <= 0:
+            logger.warning("mcp server %r has invalid timeout %r", name, raw_timeout)
+            return None
+    return ServerConfig(
+        name=name, url=entry.get("url"), cwd=entry.get("cwd"), timeout=timeout,
+        command=tuple(entry["command"]) if entry.get("command") else None,
+        env=dict(entry["env"]) if entry.get("env") else None,
+    )
+
+
 class McpManager:
     """Owns every MCP connection and its registered tools."""
 
