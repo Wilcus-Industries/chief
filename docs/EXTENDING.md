@@ -157,8 +157,17 @@ PostTurnHook     = Callable[[TurnResult, list[dict[str, Any]]], Awaitable[None]]
 ```
 
 `HookContext` gives a package `provider`, `models`, `config` (**sliced to just
-that package's `config_keys`**), `data_dir` (`data/hooks/<name>/`), `logger`, and
-`budget`. Deliberately **no** sessions, gate, or self-edit pipeline.
+that package's `config_keys`**), `data_dir` (`data/hooks/<name>/`), `logger`,
+`budget`, and `classifier`. Deliberately **no** sessions, gate, or self-edit
+pipeline.
+
+Reach for `classifier` before `provider` for any categorical judgement: it is
+the same primitive monitors use, so you get label validation and retries, and —
+the point — the prompt lives in an owner-editable `classifiers/<name>.md`
+instead of a string constant inside your package. Ship the definition in your
+package and have `install.sh` copy it into `classifiers/` without overwriting an
+existing file. `obsidian-memory`'s `memory-relevance` gate is the worked
+example.
 
 `TurnContext` carries `user_text`, `messages` (the transcript *before* the
 incoming turn), `sender`, `thread_key`, and `channel`.
