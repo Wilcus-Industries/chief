@@ -34,7 +34,7 @@ State these to the owner and get an explicit yes; do not install silently.
 
 ## Steps
 
-Gather parameters (steps 1–3), run the deterministic install once per alias
+Gather parameters (steps 1–3), run the deterministic install
 (step 4), then verify (steps 5–6).
 
 1. **Confirm the owner has a working proxy.** Recommended:
@@ -43,10 +43,13 @@ Gather parameters (steps 1–3), run the deterministic install once per alias
    started in **bare model mode** exposing `POST /v1/chat/completions`. Ask the
    owner for its base URL (e.g. `http://127.0.0.1:8000/v1`) and confirm it is
    up: a `GET <base>/models` should list at least one model.
-2. Ask the owner which **bare model id(s)** the proxy exposes (from that
-   `/models` list, e.g. `claude-opus-4-8`, `claude-sonnet-4.5`) and which
-   **alias** each should answer to (`opus`, `sonnet`, …). The alias is the name
-   the owner types after `/model`.
+2. **Model ids and aliases.** The install wires the three standard aliases —
+   `opus`, `sonnet`, `haiku` — to matching pinned model ids by default, so the
+   owner need not choose anything. Only ask if they want something else: a
+   model outside that set, or a different alias name. The alias is the name
+   the owner types after `/model`. Every id must appear in the proxy's
+   `/models` list; the script checks and refuses otherwise, because some
+   proxies echo an unknown id back on a completion instead of erroring.
 3. Set the **bearer** the proxy expects in the package's **own** secret,
    `secrets/proxy_api_key` (no longer the shared `openrouter_api_key`, so
    OpenRouter keeps working for unrouted threads). The proxy backend sends this
@@ -54,15 +57,18 @@ Gather parameters (steps 1–3), run the deterministic install once per alias
    write that value there; if it has no bearer, any non-empty placeholder
    works. Never put the key in `config.yaml` or the manifest.
 4. Place the skill and set config, deterministically:
-   - Run `PROXY_URL="<base url>" MODEL="<bare model id>" ALIAS="<alias>" bash
-     packages/anthropic-oauth/install.sh` via Bash. It **fails fast before
-     touching anything** if `secrets/proxy_api_key` is missing/empty (step 3)
-     or the proxy doesn't answer `GET <base>/models` (step 1) — a dead
-     endpoint is never wired into config. Then it copies the skill verbatim
-     and adds `provider_backends.proxy` + `provider_aliases.<alias>` (via
-     `chief.config_apply`) and records the install in `data/installed.yaml`
-     (via `chief.registry_apply`). `ALIAS` defaults to `opus`. Re-run with a
-     different `ALIAS`/`MODEL` to add more aliases — the config deep-merges.
+   - Run `PROXY_URL="<base url>" bash packages/anthropic-oauth/install.sh` via
+     Bash — that installs the standard `opus`/`sonnet`/`haiku` set. For a
+     model outside it, add `MODEL="<bare model id>" ALIAS="<alias>"` to
+     install exactly that one (both together, or the script refuses). It
+     **fails fast before touching anything** if `secrets/proxy_api_key` is
+     missing/empty (step 3), the proxy doesn't answer `GET <base>/models`
+     (step 1), or an id isn't in that list — a dead endpoint or unserved
+     model is never wired into config. Then it copies the skill verbatim and
+     adds `provider_backends.proxy` + every `provider_aliases.<alias>` in one
+     `chief.config_apply` call (all or nothing), and records the install in
+     `data/installed.yaml` (via `chief.registry_apply`). Re-running adds
+     aliases without clobbering existing ones — the config deep-merges.
      Run the script; do not re-create its steps by hand.
    - `restart` — the guarded commit brings the skill live; the config lands by
      disk reload (gitignored, not rolled back on failure) and rebuilds

@@ -9,9 +9,9 @@ Some of chief's LLM turns route through a **local OpenAI-compatible proxy**
 (e.g. claude-code-openai-server) that drives an authenticated `claude` CLI, so
 their cost is the owner's Claude **subscription**, not per-token OpenRouter
 billing. This is per-model, not global: core config `provider_backends.proxy`
-defines the backend, `provider_aliases` maps typed names (`opus`, `sonnet`, …)
-onto its bare model ids, and a thread opts in with `/model <alias>` or the
-`switch_model` tool. Threads left on the default alias stay on OpenRouter.
+defines the backend, `provider_aliases` maps typed names (`opus`, `sonnet`,
+`haiku` by default) onto its bare model ids, and a thread opts in with
+`/model <alias>` or the `switch_model` tool. Threads left on the default alias stay on OpenRouter.
 `secrets/proxy_api_key` is sent verbatim as the proxy's bearer. Nothing about
 the provider seam changed — it is the same OpenAI-wire streaming path, now
 fronted by the core `RouterProvider`.
