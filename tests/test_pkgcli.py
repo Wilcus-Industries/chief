@@ -8,7 +8,8 @@ import yaml
 
 from chief import registry_apply
 from chief.packages import Package, PackageLibrary
-from chief.pkgcli import clone_if_missing, discover, render, verify_install
+from chief.pkgcli import discover, render, verify_install
+from chief.pkgsync import clone_if_missing, pull_clone
 
 
 def write_package(root: Path, name: str, description: str) -> None:
@@ -107,6 +108,50 @@ def test_clone_if_missing_survives_a_timeout(
     dest = tmp_path / "clone"
     clone_if_missing("https://example.com/repo.git", dest)
     assert not dest.exists()
+
+
+def test_pull_clone_is_a_no_op_without_a_clone(tmp_path: Path) -> None:
+    assert pull_clone(tmp_path / "nothing") == "no clone to update"
+
+
+def test_pull_clone_survives_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """chief-pkg runs through the single dispatcher, so a hang here hangs the
+    daemon — the exact failure an unbounded clone caused once already."""
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, 10)
+
+    dest = tmp_path / "clone"
+    (dest / ".git").mkdir(parents=True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert "timed out" in pull_clone(dest)
+
+
+def test_pull_clone_survives_a_failed_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diverged or offline clone degrades to stale, never to an exception."""
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, "", "not possible to fast-forward")
+
+    dest = tmp_path / "clone"
+    (dest / ".git").mkdir(parents=True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert "could not pull" in pull_clone(dest)
+
+
+def test_pull_clone_reports_what_moved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd[-2:] == ["pull", "--ff-only"]
+        return subprocess.CompletedProcess(cmd, 0, "Updating a1b2c3..d4e5f6\n", "")
+
+    dest = tmp_path / "clone"
+    (dest / ".git").mkdir(parents=True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert pull_clone(dest) == "Updating a1b2c3..d4e5f6"
 
 
 # --- registry_apply + verify: enforced install postconditions (audit H1) ----

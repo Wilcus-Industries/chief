@@ -5,9 +5,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from chief.install.commands import ensure_config
-from chief.install.lifecycle import uninstall, update
+from chief.install.lifecycle import uninstall
 from chief.install.service import ServiceManager
 from chief.install.units import default_path_env, launchd_plist, systemd_unit
+from chief.install.update import update
 from chief.install.wizard import WizardIO, run_wizard
 
 CONFIG = "budget:\n  cap_usd: 0\n  warn_ratio: 0.8\n"
@@ -182,9 +183,11 @@ def _update_repo(tmp_path: Path) -> ServiceManager:
     return manager
 
 
-# rev-parse HEAD then origin/main: differing shas mean there is something
-# to merge. Ordered stdout keys would be ambiguous, so key on the full argv.
-AHEAD = {"rev-parse HEAD": "old\n", "rev-parse origin/main": "new\n"}
+SHAS = {"rev-parse HEAD": "old\n", "rev-parse origin/main": "new\n"}
+# `merge-base --is-ancestor origin/main HEAD` exits 0 when origin/main is
+# already contained in HEAD — nothing to do. FakeRunner returns 0 by default,
+# so a test that wants "there IS an update" must make that probe fail.
+NEEDS_UPDATE = {"merge-base --is-ancestor": "not an ancestor"}
 
 
 def test_linux_service_install_writes_unit_and_enables(tmp_path: Path) -> None:
@@ -199,10 +202,36 @@ def test_linux_service_install_writes_unit_and_enables(tmp_path: Path) -> None:
     assert "systemctl --user enable --now chief.service" in joined
 
 
+def test_darwin_restart_kickstarts_without_booting_out(tmp_path: Path) -> None:
+    """`kickstart -k` is atomic. A bootout first leaves the draining daemon
+    half-holding the label, the bootstrap that follows fails, and chief stays
+    down while the caller sees success — a real outage, once."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="darwin", home=tmp_path, runner=runner, uid=501
+    )
+    manager.restart()
+    joined = [" ".join(c) for c in runner.calls]
+    assert joined == ["launchctl kickstart -k gui/501/com.chief.daemon"]
+    assert not any("bootout" in c for c in joined)
+
+
+def test_darwin_restart_bootstraps_when_the_label_is_gone(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(fails={"kickstart -k": "no such service"})
+    manager = ServiceManager(
+        platform="darwin", home=tmp_path, runner=runner, uid=501
+    )
+    manager.restart()
+    joined = [" ".join(c) for c in runner.calls]
+    assert any("bootstrap gui/501" in c for c in joined)
+
+
 def test_update_merges_origin_main_and_restarts(tmp_path: Path) -> None:
     """Merge, never checkout: self-edit means the install always carries local
     commits, and a tag checkout would throw them out of the working tree."""
-    runner = FakeRunner(stdout=AHEAD)
+    runner = FakeRunner(stdout=SHAS, fails=NEEDS_UPDATE)
     manager = _update_repo(tmp_path)
     said: list[str] = []
     assert (
@@ -223,9 +252,7 @@ def test_update_merges_origin_main_and_restarts(tmp_path: Path) -> None:
 
 
 def test_update_no_op_when_already_at_origin_main(tmp_path: Path) -> None:
-    runner = FakeRunner(
-        stdout={"rev-parse HEAD": "same\n", "rev-parse origin/main": "same\n"}
-    )
+    runner = FakeRunner(stdout=SHAS)  # is-ancestor returns 0 = contained
     said: list[str] = []
     assert (
         update(
@@ -237,14 +264,17 @@ def test_update_no_op_when_already_at_origin_main(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert not any("merge" in " ".join(c) for c in runner.calls)
+    assert not any("merge -X" in " ".join(c) for c in runner.calls)
     assert any("already up to date" in line for line in said)
 
 
 def test_update_refuses_a_dirty_tracked_tree(tmp_path: Path) -> None:
     """Untracked installed skills are normal and must not block; modified
     tracked files would be silently clobbered by -X theirs, so refuse."""
-    runner = FakeRunner(stdout={**AHEAD, "status --porcelain": " M src/x.py\n"})
+    runner = FakeRunner(
+        stdout={**SHAS, "status --porcelain": " M src/x.py\n"},
+        fails=NEEDS_UPDATE,
+    )
     said: list[str] = []
     assert (
         update(
@@ -256,12 +286,14 @@ def test_update_refuses_a_dirty_tracked_tree(tmp_path: Path) -> None:
         )
         == 1
     )
-    assert not any("merge" in " ".join(c) for c in runner.calls)
+    assert not any("merge -X" in " ".join(c) for c in runner.calls)
     assert any("uncommitted" in line for line in said)
 
 
 def test_update_aborts_a_conflicted_merge(tmp_path: Path) -> None:
-    runner = FakeRunner(stdout=AHEAD, fails={"merge -X theirs": "CONFLICT"})
+    runner = FakeRunner(
+        stdout=SHAS, fails={**NEEDS_UPDATE, "merge -X theirs": "CONFLICT"}
+    )
     said: list[str] = []
     assert (
         update(
@@ -279,7 +311,7 @@ def test_update_aborts_a_conflicted_merge(tmp_path: Path) -> None:
 def test_update_rolls_back_when_the_daemon_comes_up_unhealthy(
     tmp_path: Path,
 ) -> None:
-    runner = FakeRunner(stdout=AHEAD)
+    runner = FakeRunner(stdout=SHAS, fails=NEEDS_UPDATE)
     said: list[str] = []
     assert (
         update(
@@ -310,10 +342,15 @@ def test_update_resyncs_installed_skills_from_packages(tmp_path: Path) -> None:
     other.mkdir(parents=True)
     (other / "SKILL.md").write_text("maps")
     said: list[str] = []
+    # `git show <before>:packages/…` returns what the installed copy holds,
+    # proving it is an untouched copy and therefore safe to advance.
+    runner = FakeRunner(
+        stdout={**SHAS, "show old:": "stale text"}, fails=NEEDS_UPDATE
+    )
     assert (
         update(
             repo_dir=tmp_path,
-            runner=FakeRunner(stdout=AHEAD),
+            runner=runner,
             service=_update_repo(tmp_path),
             say=said.append,
             healthy=lambda: True,
@@ -323,6 +360,38 @@ def test_update_resyncs_installed_skills_from_packages(tmp_path: Path) -> None:
     assert (installed / "SKILL.md").read_text() == "new text"
     assert not (tmp_path / "skills" / "maps").exists()
     assert any("imsg" in line for line in said)
+    # The re-synced copy is committed, or this command's own dirty-tree guard
+    # would refuse the next run (skills/ is tracked on a real install).
+    assert any("commit" in " ".join(c) for c in runner.calls)
+
+
+def test_update_never_clobbers_a_self_edited_skill(tmp_path: Path) -> None:
+    """chief self-edits its own installed skills. An installed copy that no
+    longer matches the pre-update packaged file is such an edit — advancing it
+    would destroy the agent's work, so report drift and leave it alone."""
+    pkg = tmp_path / "packages" / "screening" / "skills" / "screening"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text("packaged v2")
+    installed = tmp_path / "skills" / "screening"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("chief's own edit")
+    said: list[str] = []
+    assert (
+        update(
+            repo_dir=tmp_path,
+            # git show returns the ORIGINAL packaged text, which is not what
+            # the installed copy holds — so the copy was locally edited.
+            runner=FakeRunner(
+                stdout={**SHAS, "show old:": "packaged v1"}, fails=NEEDS_UPDATE
+            ),
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: True,
+        )
+        == 0
+    )
+    assert (installed / "SKILL.md").read_text() == "chief's own edit"
+    assert any("NOT overwritten" in line and "screening" in line for line in said)
 
 
 def test_uninstall_purge_needs_confirmation(tmp_path: Path) -> None:
