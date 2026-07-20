@@ -28,8 +28,11 @@ stranger path: logged, published, never auto-answered. They differ in one way
 those two fields are equal. Scope group policy on `thread_key`; scope
 per-person policy on `sender`.
 
-Get a group's `chat_identifier` with `imsg chats --json` (or `imsg group
---chat-id N --json`) via the shell tool — see the imsg skill.
+A group's `chat_identifier` is an **opaque 32-char hex string**, not a name or
+a phone number — the owner will not know it and cannot type it from memory.
+Resolve it from the group's display name with `imsg chats --json` (or `imsg
+group --chat-id N --json`) via the shell tool, and confirm the name back to
+the owner before you build a monitor on it — see the imsg skill.
 
 A group `sender` is always the raw handle — never `owner`, even if an owner
 handle speaks there. You therefore **cannot identify the owner inside a
@@ -65,7 +68,7 @@ double-fires on messages that already ran a turn.
 
 The same three tiers work for groups — swap the matched field from `sender`
 to `thread_key`. A group whitelist is a code predicate on `thread_key` with
-pattern `^(chat123456789|chat987654321)$`; notify-all-groups plus a cheap
+pattern `^(3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c|…)$`; notify-all-groups plus a cheap
 screen is the model predicate with "this group message is worth waking the
 owner's agent for". A group's traffic is chattier than a 1:1, so prefer a
 whitelist or a screen over notify-all — every message in every group the
