@@ -1,14 +1,22 @@
 """Installer plumbing: wizard steps, service rendering, update flow."""
 
+import asyncio
+import json
 import subprocess
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
-from chief.install.commands import ensure_config
+import pytest
+
+from chief.hooks.context import TurnContext
+from chief.install import updatecheck
+from chief.install.commands import ensure_config, main
 from chief.install.lifecycle import uninstall
 from chief.install.service import ServiceManager
 from chief.install.units import default_path_env, launchd_plist, systemd_unit
 from chief.install.update import update
+from chief.install.updatecheck import UpdateStatus
 from chief.install.wizard import WizardIO, run_wizard
 
 CONFIG = "budget:\n  cap_usd: 0\n  warn_ratio: 0.8\n"
@@ -412,3 +420,174 @@ def test_uninstall_purge_needs_confirmation(tmp_path: Path) -> None:
     )
     assert code == 1
     assert (tmp_path / "data").is_dir()
+
+
+# --- update check -----------------------------------------------------------
+# The hook must never put git between the owner and a reply: it answers from
+# the cache and refreshes behind the turn. Every test below pins one half of
+# that split, or a way git can fail without the daemon noticing.
+
+
+def _cache(tmp_path: Path, *, behind: int, age: float = 0.0) -> Path:
+    path = tmp_path / "update_status.json"
+    path.write_text(
+        json.dumps(
+            {
+                "behind": behind,
+                "target": "abc1234",
+                "checked_at": time.time() - age,
+            }
+        )
+    )
+    return path
+
+
+def _fake_git(
+    monkeypatch: pytest.MonkeyPatch, *, behind: str, fetch_code: int = 0
+) -> list[list[str]]:
+    """Stand in for the three git calls refresh() makes; record the argv."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if "fetch" in cmd:
+            return subprocess.CompletedProcess(cmd, fetch_code, "", "boom")
+        out = behind if "rev-list" in cmd else "deadbee"
+        return subprocess.CompletedProcess(cmd, 0, f"{out}\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def _turn() -> TurnContext:
+    return TurnContext(
+        user_text="hi", messages=[], sender="owner", thread_key="t", channel="cli"
+    )
+
+
+async def _drain() -> None:
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending)
+
+
+def test_notice_is_silent_when_there_is_no_news() -> None:
+    assert updatecheck.notice(None) is None
+    assert updatecheck.notice(UpdateStatus(0, "abc1234", time.time())) is None
+
+
+def test_notice_counts_commits_and_names_the_target() -> None:
+    line = updatecheck.notice(UpdateStatus(3, "abc1234", time.time()))
+    assert line is not None
+    assert "3 commits" in line and "abc1234" in line
+    assert "chief update" in line  # the owner runs it, not chief
+
+
+def test_read_status_treats_corrupt_or_missing_cache_as_no_news(
+    tmp_path: Path,
+) -> None:
+    assert updatecheck.read_status(tmp_path / "nope.json") is None
+    corrupt = tmp_path / "update_status.json"
+    corrupt.write_text("{not json")
+    assert updatecheck.read_status(corrupt) is None
+    corrupt.write_text('{"behind": 1}')  # well-formed JSON, wrong shape
+    assert updatecheck.read_status(corrupt) is None
+
+
+def test_refresh_counts_and_writes_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_git(monkeypatch, behind="4")
+    path = tmp_path / "update_status.json"
+    status = updatecheck.refresh(tmp_path, status_path=path)
+    assert status is not None
+    assert (status.behind, status.target) == (4, "deadbee")
+    assert json.loads(path.read_text())["behind"] == 4
+
+
+def test_refresh_returns_none_when_git_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unbounded git call once wedged the daemon; a slow one must read as
+    # "no news", never as an exception escaping into the caller.
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd, 20)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert updatecheck.refresh(tmp_path, status_path=tmp_path / "s.json") is None
+
+
+def test_refresh_returns_none_when_fetch_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "update_status.json"
+    _fake_git(monkeypatch, behind="4", fetch_code=1)
+    assert updatecheck.refresh(tmp_path, status_path=path) is None
+    assert not path.exists()
+
+
+async def test_session_start_answers_from_cache_without_touching_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updatecheck, "_refreshing", False)
+    calls = _fake_git(monkeypatch, behind="9")
+    hook = updatecheck.session_start_notice(
+        tmp_path, status_path=_cache(tmp_path, behind=2)
+    )
+    line = await hook(_turn())
+    assert line is not None and "2 commits" in line
+    await _drain()
+    assert calls == []  # fresh cache: no refresh scheduled at all
+
+
+async def test_stale_cache_still_answers_now_and_refreshes_behind_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updatecheck, "_refreshing", False)
+    _fake_git(monkeypatch, behind="9")
+    path = _cache(tmp_path, behind=2, age=updatecheck.STALE_AFTER_SECONDS + 1)
+    hook = updatecheck.session_start_notice(tmp_path, status_path=path)
+    line = await hook(_turn())
+    assert line is not None and "2 commits" in line  # the OLD answer, instantly
+    await _drain()
+    assert json.loads(path.read_text())["behind"] == 9  # next session sees 9
+
+
+async def test_concurrent_sessions_do_not_stampede_the_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updatecheck, "_refreshing", False)
+    refreshes: list[Path] = []
+
+    def counting_refresh(
+        repo_dir: Path, *, status_path: Path
+    ) -> UpdateStatus | None:
+        refreshes.append(repo_dir)
+        return None
+
+    monkeypatch.setattr(updatecheck, "refresh", counting_refresh)
+    hook = updatecheck.session_start_notice(
+        tmp_path, status_path=tmp_path / "missing.json"
+    )
+    assert await hook(_turn()) is None
+    assert await hook(_turn()) is None
+    await _drain()
+    assert len(refreshes) == 1
+
+
+def test_check_updates_command_reports_without_changing_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _fake_git(monkeypatch, behind="1")
+    assert main(["check-updates", "--repo", str(tmp_path)]) == 0
+    assert "1 commit behind" in capsys.readouterr().out
+
+
+def test_check_updates_command_fails_loudly_when_git_cannot_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _fake_git(monkeypatch, behind="1", fetch_code=1)
+    assert main(["check-updates", "--repo", str(tmp_path)]) == 1
+    assert "could not check" in capsys.readouterr().out
