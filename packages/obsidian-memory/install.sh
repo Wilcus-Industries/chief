@@ -16,14 +16,32 @@
 # to the repo root.
 set -euo pipefail
 
-# Default values
-WRITABLE_PATHS="${WRITABLE_PATHS:-}"
+src="packages/obsidian-memory/skills/obsidian-memory"
+dst="skills/obsidian-memory"
+mkdir -p "$dst"
+cp "$src/SKILL.md" "$dst/SKILL.md"
 
-# Validate inputs
-if [[ -z "$VAULT_PATH" ]]; then
-  echo "Usage: VAULT_PATH=<path> [WRITABLE_PATHS=<comma-sep dirs or empty>] $0"
-  exit 1
+# The relevance gate is a core classifier, so its definition has to live in the
+# classifiers dir, not the package. Never overwrite: the owner tunes this
+# prompt in place, and a re-install must not silently revert their edits.
+mkdir -p classifiers
+if [ ! -f classifiers/memory-relevance.md ]; then
+  cp packages/obsidian-memory/classifiers/memory-relevance.md \
+    classifiers/memory-relevance.md
 fi
+
+: "${VAULT_PATH:?set VAULT_PATH to the Obsidian vault directory}"
+
+# Build a YAML list of writable paths from the comma-separated input.
+writable_yaml="["
+if [ -n "${WRITABLE_PATHS:-}" ]; then
+  IFS=',' read -ra parts <<<"$WRITABLE_PATHS"
+  for path in "${parts[@]}"; do
+    path="${path//[[:space:]]/}"
+    [ -n "$path" ] && writable_yaml+="\"$path\","
+  done
+fi
+writable_yaml+="]"
 
 uv run python -m chief.config_apply \
   "obsidian_memory.vault_paths=[\"$VAULT_PATH\"]" \

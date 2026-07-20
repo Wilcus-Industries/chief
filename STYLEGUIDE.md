@@ -48,8 +48,8 @@ workflow; this file covers how code is written.
   cases) — not just success.
 - **Structure:** Arrange-Act-Assert. Mock external dependencies (network, filesystem,
   services) so tests are fast and deterministic.
-- **The `session_factory` fixture gives each test its own sqlite *file*** on the
-  production engine (NullPool). Do not "optimize" it back to StaticPool / `:memory:`:
+- **The `engine` / `store` fixtures give each test its own sqlite *file*** on the
+  production engine (NullPool). Do not "optimize" them back to StaticPool / `:memory:`:
   a pooled fixture shares ONE connection — and so one transaction — across concurrent
   sessions, letting a session read another's uncommitted rows and roll back another's
   write on close. That masked a real concurrency bug all the way into main (#134).
