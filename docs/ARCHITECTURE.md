@@ -64,7 +64,9 @@ through the adapter named on the `Message` that started it.
 - **Agent-loop hooks** — `src/chief/hooks/`: `registry.py` (the store),
   `runner.py` (timeout-bounded execution, `<hook>` rendering, system assembly),
   `context.py` (`HookContext` and the per-turn `TurnContext`), `loader.py` (the
-  boot importer). A package opts in with a `hooks:` block in its manifest. **Only
+  boot importer), `posttool.py` (the post_tool screen: annotate or veto a tool
+  result before the model reads it), `boot.py` (the registry assembly
+  `build_app` calls). A package opts in with a `hooks:` block in its manifest. **Only
   `Session._one_turn` fires hooks — subagents never do.**
 - **Skills** — one directory per skill under `skills/`, each a `SKILL.md`.
   Loader/validator: `src/chief/skills.py`. The prompt carries only one-liners;

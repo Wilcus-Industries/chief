@@ -2,6 +2,9 @@
 
 Mutates the caller's ``messages`` list in place (assistant turns and tool
 results are appended) so the session owns the full transcript afterwards.
+Tool results pass through the optional ``post_tool`` screen before they are
+appended, so a hook can tag or withhold untrusted output before the model
+reads it.
 """
 
 import json
@@ -13,6 +16,10 @@ from chief.agent.tools import ToolDispatcher
 from chief.provider.base import Completion, Provider, TextDelta, ToolCall, Usage
 
 OnDelta = Callable[[str], Awaitable[None]]
+
+# Screens one tool result before it is appended for the model. Supplied by
+# the session from the post_tool hooks; see chief.hooks.posttool.
+PostTool = Callable[[ToolCall, str], Awaitable[str]]
 
 # Backstop against a model that never stops calling tools; generous because
 # real multi-step work legitimately chains many calls.
@@ -45,6 +52,7 @@ async def run_turn(
     messages: list[dict[str, Any]],
     tools: ToolDispatcher,
     on_delta: OnDelta,
+    post_tool: PostTool | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
@@ -68,6 +76,8 @@ async def run_turn(
                 )
             else:
                 result = await tools.dispatch(call)
+                if post_tool is not None:
+                    result = await post_tool(call, result)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )
