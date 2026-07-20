@@ -1,8 +1,0 @@
-name: apple-reminders
-description: Apple Reminders via the remindctl CLI — add, list, complete, with due-vs-alarm handling.
-dependencies: []
-mcp_servers: {}
-skills:
-  - skills/apple-reminders
-config_keys: []
-secrets: []
