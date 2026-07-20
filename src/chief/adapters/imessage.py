@@ -188,12 +188,12 @@ class IMessageAdapter(Adapter):
         crash between enqueue and reply drops that row rather than replaying it;
         graceful self-edit restarts still drain in-flight turns first."""
         rows = await asyncio.to_thread(self._fetch, self._cursor)
-        for rowid, sender, text, from_me, in_group, has_room, in_self, date in rows:
+        for rowid, sender, text, from_me, group_chat, in_self, date in rows:
             self._cursor = rowid
             self._save_cursor()
-            message = self._map(sender, text, from_me, in_group, has_room, in_self)
+            message = self._map(sender, text, from_me, group_chat, in_self)
             if message is None or self._dedup.is_duplicate(
-                (message.sender, message.text), date
+                (message.thread_key, message.sender, message.text), date
             ):
                 continue
             if self._resolve_approval is not None and self._resolve_approval(message):
@@ -239,19 +239,31 @@ class IMessageAdapter(Adapter):
         sender: str,
         text: str,
         from_me: int,
-        in_group: int,
-        has_room: int,
+        group_chat: str | None,
         in_self: int,
     ) -> Message | None:
-        """Turn a polled row into a deliverable Message, or None to skip it."""
-        if in_group or has_room:
-            return None
+        """Turn a polled row into a deliverable Message, or None to skip it.
+
+        A group message threads on its chat, not on whoever spoke — the one
+        case where ``sender`` and ``thread_key`` differ. Groups are never the
+        owner's self-chat, so they take the stranger path: published for
+        monitors, never answered. Which groups matter is monitor policy."""
         if not text:
             return None  # attachment-only row: attributedBody held no text
         if text.startswith(BOT_PREFIX):
             return None  # chief's own reply echoing back through the store
         if from_me and not in_self:
             return None  # owner->friend sent copy: not the self-chat
+        if group_chat is not None:
+            # Raw sender, never "owner", even for an owner handle: sender
+            # "owner" takes the dispatcher's owner path, which runs a turn and
+            # replies to thread_key — and a group thread_key is a chat the
+            # one-to-one send path cannot address. It also means nobody in a
+            # group can present as the owner; group text is uniformly
+            # untrusted, and owner instructions arrive only via the self-chat.
+            return Message(
+                channel=self.name, sender=sender, thread_key=group_chat, text=text
+            )
         mapped = "owner" if (in_self or sender in self._owner_handles) else sender
         return Message(
             channel=self.name, sender=mapped, thread_key=sender, text=text
@@ -259,7 +271,7 @@ class IMessageAdapter(Adapter):
 
     def _fetch(
         self, after: int
-    ) -> list[tuple[int, str, str, int, int, int, int, int]]:
+    ) -> list[tuple[int, str, str, int, str | None, int, int]]:
         handles = tuple(self._owner_handles)
         scope = ",".join("?" for _ in handles) if handles else "NULL"
         query = POLL_QUERY.format(scope=scope)
@@ -269,8 +281,8 @@ class IMessageAdapter(Adapter):
             cur = conn.execute(query, params)
             return [
                 (
-                    int(r[0]), str(r[1]), text_of(r[2], r[7]), int(r[3]),
-                    int(r[4]), int(r[5]), int(r[6]), int(r[8]),
+                    int(r[0]), str(r[1]), text_of(r[2], r[6]), int(r[3]),
+                    None if r[4] is None else str(r[4]), int(r[5]), int(r[7]),
                 )
                 for r in cur.fetchall()
             ]

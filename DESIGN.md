@@ -23,7 +23,8 @@ comes as packages. Linux gets the same core, just without the macOS defaults.
    interface. Everything else — including memory — is a package.
 2. **Channels are dumb pipes.** An adapter delivers inbound `Message`s and exposes
    `send`. No per-channel features in core — no watches, no admission state machines,
-   no group-chat branches.
+   no group-chat *policy*. An adapter reports a group message's conversation as its
+   `thread_key` (identity, not a branch); which groups matter is a monitor.
 3. **Behavior is policy, safety is code.** The tool gate (never/approve lists,
    approval cards) is code-enforced. Everything behavioral — how to treat strangers,
    group etiquette, when to escalate — is prompt/policy the agent applies.
@@ -227,8 +228,9 @@ package and reads the calendar.
 - Per-platform engine stacks and their near-twin builders (`app.py`).
 - Telegram/Discord adapters in core (return later as BUILD packages if wanted).
 - Watches + watch candidates (become agent-created monitors).
-- Group-chat code branches, guest admission state machine, receptionist tools
-  (behavioral policy or later packages).
+- Group-chat behavior branches, guest admission state machine, receptionist tools
+  (behavioral policy or later packages). Core carries a group's chat identity as
+  `thread_key` and nothing more — no membership tracking, no group etiquette.
 - The Copilot SDK backend, premium-request budgeting, category routing table
   (replaced by provider seam + agent model switching).
 - The ~120-field config surface (core keeps a small set; packages bring their own
