@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from chief.packages import HookSpec, PackageLibrary, validate
+from chief.packages import HookSpec, McpServerSpec, PackageLibrary, validate
 
 REPO_PACKAGES = Path(__file__).parent.parent / "packages"
 
@@ -75,6 +75,174 @@ def test_obsidian_memory_manifest_is_well_formed() -> None:
     assert package.config_keys == ("obsidian_memory",)
     assert "skills/obsidian-memory" in package.skills
     assert package.install_md().strip()
+
+
+def test_manifest_mcp_servers_block_parses_to_specs(tmp_path: Path) -> None:
+    pkg = tmp_path / "withmcp"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: withmcp\ndescription: d\n"
+        "mcp_servers:\n"
+        "  fetch:\n"
+        "    command: [npx, fetch-mcp]\n"
+        "    color: purple\n"  # unrecognized key — dropped silently, not raised
+        "  remote:\n"
+        "    url: https://example.com/mcp\n"
+    )
+    package = PackageLibrary((tmp_path,)).get("withmcp")
+    assert package is not None
+    assert set(package.mcp_servers) == {
+        McpServerSpec(name="fetch", command=("npx", "fetch-mcp")),
+        McpServerSpec(name="remote", url="https://example.com/mcp"),
+    }
+
+
+def test_manifest_without_mcp_servers_has_empty_tuple(tmp_path: Path) -> None:
+    write_package(tmp_path, "plain")
+    package = PackageLibrary((tmp_path,)).get("plain")
+    assert package is not None
+    assert package.mcp_servers == ()
+
+
+def test_manifest_empty_mcp_servers_block_validates_and_parses_empty(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "emptymcp"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: emptymcp\ndescription: d\nmcp_servers: {}\n"
+    )
+    assert validate((tmp_path,)) == []
+    package = PackageLibrary((tmp_path,)).get("emptymcp")
+    assert package is not None
+    assert package.mcp_servers == ()
+
+
+def test_validate_reports_mcp_servers_block_that_is_not_a_mapping(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "badmcp"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: badmcp\ndescription: d\nmcp_servers: [not, a, mapping]\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "mcp_servers" in problems[0]
+    assert "must be a mapping" in problems[0]
+
+
+def test_validate_reports_mcp_server_missing_url_and_command(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "novia"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: novia\ndescription: d\nmcp_servers:\n  broken:\n    color: red\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "novia" in problems[0] or "mcp_servers.broken" in problems[0]
+    assert "exactly one of" in problems[0]
+
+
+def test_validate_reports_mcp_server_setting_both_url_and_command(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "bothvia"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: bothvia\ndescription: d\n"
+        "mcp_servers:\n  dupe:\n    url: https://x\n    command: [x]\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "exactly one of" in problems[0]
+
+
+def test_validate_reports_mcp_server_command_that_is_a_scalar(
+    tmp_path: Path,
+) -> None:
+    # A bare scalar is truthy but not a list — tuple(command) would mangle
+    # it char-by-char ('npx' -> ('n', 'p', 'x')) instead of raising (#238).
+    pkg = tmp_path / "scalarcmd"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: scalarcmd\ndescription: d\nmcp_servers:\n  fetch:\n    command: npx\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "mcp_servers.fetch.command" in problems[0]
+    assert "list" in problems[0]
+
+
+def test_validate_reports_mcp_server_command_with_non_string_items(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "intcmd"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: intcmd\ndescription: d\nmcp_servers:\n  fetch:\n    command: [1, 2]\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "mcp_servers.fetch.command" in problems[0]
+
+
+def test_validate_reports_mcp_server_url_that_is_not_a_string(
+    tmp_path: Path,
+) -> None:
+    pkg = tmp_path / "listurl"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: listurl\ndescription: d\n"
+        "mcp_servers:\n  fetch:\n    url: [not, a, url]\n"
+    )
+    problems = validate((tmp_path,))
+    assert len(problems) == 1
+    assert "mcp_servers.fetch.url" in problems[0]
+
+
+def test_parse_drops_a_scalar_command_instead_of_mangling_it(
+    tmp_path: Path,
+) -> None:
+    # Same malformed manifest as above, but hitting scan()/_parse directly —
+    # the path a pulled data/packages clone takes, which validate() never
+    # covers. Must not silently produce ('n', 'p', 'x').
+    pkg = tmp_path / "scalarcmd"
+    pkg.mkdir()
+    (pkg / "manifest.yaml").write_text(
+        "name: scalarcmd\ndescription: d\nmcp_servers:\n  fetch:\n    command: npx\n"
+    )
+    package = PackageLibrary((tmp_path,)).get("scalarcmd")
+    assert package is not None
+    assert package.mcp_servers == ()
+
+
+def test_parse_does_not_raise_on_a_non_iterable_command(tmp_path: Path) -> None:
+    # A non-iterable (e.g. an int) makes tuple(entry["command"]) raise
+    # TypeError out of _parse/PackageLibrary.scan, breaking discovery for
+    # every package in the root, not just the malformed one (#238).
+    pkg = tmp_path / "intcmd"
+    pkg.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "manifest.yaml").write_text("name: other\ndescription: d\n")
+    (pkg / "manifest.yaml").write_text(
+        "name: intcmd\ndescription: d\nmcp_servers:\n  fetch:\n    command: 5\n"
+    )
+    library = PackageLibrary((tmp_path,))
+    packages = {p.name: p for p in library.scan()}
+    assert set(packages) == {"intcmd", "other"}
+    assert packages["intcmd"].mcp_servers == ()
+
+
+def test_every_bundled_package_declares_an_empty_mcp_servers_block() -> None:
+    # Every real manifest currently declares `mcp_servers: {}` (issue #238) —
+    # that must still validate clean and parse to an empty tuple.
+    assert validate((REPO_PACKAGES,)) == []
+    for package in PackageLibrary((REPO_PACKAGES,)).scan():
+        assert package.mcp_servers == (), package.name
 
 
 def test_manifest_python_deps_parse_into_the_package(tmp_path: Path) -> None:

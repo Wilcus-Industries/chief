@@ -15,6 +15,9 @@ from pathlib import Path
 
 import yaml
 
+from chief.mcp_manifest import McpServerSpec as McpServerSpec
+from chief.mcp_manifest import parse_mcp_servers, validate_mcp_servers
+
 logger = logging.getLogger(__name__)
 
 CLONED_PACKAGES_DIR = Path("data/packages")
@@ -53,6 +56,7 @@ class Package:
     secrets: tuple[str, ...] = ()
     python_deps: tuple[str, ...] = ()
     hooks: HookSpec | None = None
+    mcp_servers: tuple[McpServerSpec, ...] = ()
 
     def install_md(self) -> str:
         install = self.path / "INSTALL.md"
@@ -106,6 +110,7 @@ def _validate_manifest(manifest: Path) -> list[str]:
     if not str(meta.get("description") or "").strip():
         problems.append(f"{manifest}: missing 'description'")
     problems.extend(_validate_hooks(manifest, meta.get("hooks")))
+    problems.extend(validate_mcp_servers(manifest, meta.get("mcp_servers")))
     return problems
 
 
@@ -138,12 +143,13 @@ def _parse(manifest: Path) -> Package | None:
         secrets=tuple(meta.get("secrets") or ()),
         python_deps=tuple(meta.get("python_deps") or ()),
         hooks=_parse_hooks(meta.get("hooks")),
+        mcp_servers=parse_mcp_servers(meta.get("mcp_servers")),
     )
 
 
 def _parse_hooks(hooks: object) -> HookSpec | None:
     """Build a HookSpec from a well-formed mapping; drop anything else silently
-    (the mcp_servers precedent — validation, not parsing, is the loud path)."""
+    (a malformed block fails loudly in validate() instead — see _validate_hooks)."""
     if isinstance(hooks, dict) and hooks.get("module") and hooks.get("register"):
         return HookSpec(module=str(hooks["module"]), register=str(hooks["register"]))
     return None

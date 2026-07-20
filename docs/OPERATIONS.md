@@ -133,7 +133,8 @@ chief-pkg verify <name>
 
 `verify` is the install postcondition: registry entry present, each skill at
 `skills/<basename>/SKILL.md`, each config key in raw config, each secret file
-present, each `python_deps` entry importable. Exits 1 with a problem list.
+present, each `python_deps` entry importable, each declared `mcp_servers` entry
+present under `mcp_servers` in `config.yaml`. Exits 1 with a problem list.
 
 **Every invocation refreshes the clone** (clone-if-missing, then pull), and both
 are bounded and fail-soft — 30s clone, 10s pull, `GIT_TERMINAL_PROMPT=0`. The
