@@ -38,7 +38,9 @@ def make_commands(
         Classifier(FakeProvider([]), ClassifierRegistry(Path("classifiers")), "m"),
     )
     cron = CronService(factory, _no_wake)
-    commands = CommandSet(manager, monitors, cron, store=store)
+    commands = CommandSet(
+        manager, monitors, cron, store=store, model_aliases=frozenset({"opus"})
+    )
     return commands, manager, monitors, cron
 
 
@@ -115,6 +117,36 @@ async def test_model_command_shows_and_sets_with_persistence(
     commands2, manager2, *_ = make_commands(provider, store, factory)
     resumed = await manager2.get_or_create("cli:t", "cli")
     assert resumed.model == "big/model"
+
+
+async def test_model_command_rejects_a_name_that_routes_nowhere(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """The live bug: `/model sonnet` with no sonnet alias wedged the thread.
+
+    It reported success, persisted the override, and then every turn in that
+    thread died on `OpenRouter HTTP 400: sonnet is not a valid model ID`.
+    """
+    factory = make_session_factory(engine)
+    commands, manager, *_ = make_commands(FakeProvider([]), store, factory)
+
+    reply = await commands.run(msg("/model sonnet"))
+
+    assert isinstance(reply, str)
+    assert reply.startswith("error:")
+    assert "opus" in reply, "the error must name a model that does work"
+    session = await manager.get_or_create("cli:t", "cli")
+    assert session.model == "default-model", "a rejected name must not persist"
+
+
+async def test_model_command_accepts_a_configured_alias(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    commands, manager, *_ = make_commands(FakeProvider([]), store, factory)
+    assert await commands.run(msg("/model opus")) == "model set to opus for this thread"
+    session = await manager.get_or_create("cli:t", "cli")
+    assert session.model == "opus"
 
 
 async def test_clear_wipes_transcript_and_resets_live_session(

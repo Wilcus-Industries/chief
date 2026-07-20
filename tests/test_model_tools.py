@@ -23,7 +23,7 @@ def make_registry(store: MessageStore) -> tuple[ToolRegistry, SessionManager]:
         max_concurrent=4,
     )
     registry = ToolRegistry()
-    register_switch_model_tool(registry, manager)
+    register_switch_model_tool(registry, manager, model_aliases=frozenset({"opus"}))
     return registry, manager
 
 
@@ -46,6 +46,17 @@ async def test_switch_model_sets_the_thread_override(
     assert "opus" in result
     assert "next turn" in result
     assert await store.model_override("cli:t") == "opus"
+
+
+async def test_switch_model_rejects_a_name_that_routes_nowhere(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """Same wedge as `/model`, reachable by the agent instead of the owner."""
+    registry, _ = make_registry(store)
+    result = await registry.dispatch(switch_call("sonnet"), context=CTX)
+    assert result.startswith("error:")
+    assert "opus" in result
+    assert await store.model_override("cli:t") is None, "must not persist"
 
 
 async def test_switch_model_needs_a_session_context(store: MessageStore) -> None:

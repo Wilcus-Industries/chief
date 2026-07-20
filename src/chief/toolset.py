@@ -45,15 +45,18 @@ def register_native_tools(
     budget: Budget,
     root: Path,
     shell_guards: Sequence[ShellGuard] = (),
+    model_aliases: frozenset[str] = frozenset(),
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
     ``root`` is the repo root the file tools resolve relative paths against;
     ``agents_dir`` seeds the subagent registry for ``spawn_agent``;
-    ``shell_service`` owns the host shells the ``shell`` tool drives.
+    ``shell_service`` owns the host shells the ``shell`` tool drives;
+    ``model_aliases`` are the configured ``provider_aliases`` keys that
+    ``switch_model`` validates against.
     """
     register_session_tools(registry, manager)
-    register_switch_model_tool(registry, manager)
+    register_switch_model_tool(registry, manager, model_aliases=model_aliases)
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service)
     register_file_tools(registry, root)

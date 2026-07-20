@@ -12,6 +12,7 @@ from chief.agent.manager import SessionManager
 from chief.cron.service import CronService
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
+from chief.provider.model_names import UnknownModelError, validate_model_name
 from chief.skills import SkillLibrary
 
 CommandHandler = Callable[[str, Message], Awaitable[str]]
@@ -27,12 +28,14 @@ class CommandSet:
         cron: CronService,
         store: MessageStore,
         skills: SkillLibrary | None = None,
+        model_aliases: frozenset[str] = frozenset(),
     ) -> None:
         self._manager = manager
         self._monitors = monitors
         self._cron = cron
         self._store = store
         self._skills = skills
+        self._model_aliases = model_aliases
         self._commands: dict[str, CommandHandler] = {
             "help": self._help,
             "monitors": self._list_monitors,
@@ -119,5 +122,13 @@ class CommandSet:
         )
         if not args:
             return f"model: {session.model}"
-        await self._manager.set_model(message.thread_key, message.channel, args)
-        return f"model set to {args} for this thread"
+        try:
+            name = validate_model_name(
+                args,
+                aliases=self._model_aliases,
+                default_model=self._manager.default_model,
+            )
+        except UnknownModelError as exc:
+            return f"error: {exc}"
+        await self._manager.set_model(message.thread_key, message.channel, name)
+        return f"model set to {name} for this thread"
