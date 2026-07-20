@@ -28,6 +28,7 @@ from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
 from chief.hooks import HookRegistry
 from chief.hooks.loader import load_hooks
+from chief.install.updatecheck import session_start_notice
 from chief.monitors.service import MonitorService
 from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
@@ -86,6 +87,8 @@ async def _build_agent_core(
         disabled=config.hooks_disabled,
         data_root=Path("data/hooks"),
     )
+    # Core registers under a package name like anyone else; accessors sort by it.
+    hooks.register_session_start("core", session_start_notice(Path.cwd()))
 
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)

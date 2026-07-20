@@ -16,6 +16,7 @@ from chief.install.lifecycle import (
 from chief.install.service import ServiceManager
 from chief.install.units import default_runner
 from chief.install.update import update
+from chief.install.updatecheck import refresh
 from chief.install.wizard import WizardIO, run_wizard
 
 DEFAULT_CONFIG = Path("config.yaml")
@@ -59,6 +60,8 @@ def _build_parser() -> argparse.ArgumentParser:
     status.add_argument("--port", type=int, default=None)
     update_cmd = sub.add_parser("update", help="merge origin/main and restart")
     update_cmd.add_argument("--repo", type=Path, default=Path.cwd())
+    check = sub.add_parser("check-updates", help="is core behind origin/main?")
+    check.add_argument("--repo", type=Path, default=Path.cwd())
     uninstall_cmd = sub.add_parser("uninstall", help="remove service + launcher")
     uninstall_cmd.add_argument("--repo", type=Path, default=Path.cwd())
     uninstall_cmd.add_argument("--launcher", type=Path, default=DEFAULT_LAUNCHER)
@@ -117,6 +120,22 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             runner=default_runner,
             service=ServiceManager.detect(),
         )
+    if command == "check-updates":
+        # Synchronous on purpose: the daemon's hook reads the cache this writes,
+        # but someone typing the command wants an answer, not yesterday's.
+        status = refresh(args.repo)
+        if status is None:
+            print("could not check: git did not answer (offline? auth?)")
+            return 1
+        if status.behind <= 0:
+            print("up to date with origin/main.")
+            return 0
+        commits = "commit" if status.behind == 1 else "commits"
+        print(
+            f"{status.behind} {commits} behind origin/main ({status.target}) "
+            f"— run `chief update`."
+        )
+        return 0
     if command == "uninstall":
         return uninstall(
             service=ServiceManager.detect(),
