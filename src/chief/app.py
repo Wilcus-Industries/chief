@@ -15,7 +15,6 @@ from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
 from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
-from chief.approvals import Approval
 from chief.budget import Budget
 from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
@@ -25,7 +24,7 @@ from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.daemon import App
 from chief.dispatch import Dispatcher
-from chief.gate import GatedTools
+from chief.gate import GatedTools, approval_asker
 from chief.hooks import HookRegistry
 from chief.hooks.loader import load_hooks
 from chief.install.updatecheck import session_start_notice
@@ -67,6 +66,7 @@ async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
 async def _build_agent_core(
     config: Config, provider: Provider, store: MessageStore,
     factory: SessionFactory, gate: Gate, skills: SkillLibrary,
+    shell_service: ShellService,
 ) -> Core:
     """Budget, bus, registry, the manager/dispatcher/tools_factory trio, and the
     monitor/cron services. The trio stays in one scope so ``tools_factory``'s
@@ -98,18 +98,13 @@ async def _build_agent_core(
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)
 
-        async def ask(ctx: ToolContext, question: str) -> Approval:
-            send = dispatcher.adapter(ctx.channel).send
-            return await gate.approvals.ask(
-                ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
-            )
-
         async def announce(ctx: ToolContext, text: str) -> None:
             await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
 
         return GatedTools(
             registry=registry, policy=gate.policy, audit=gate.audit,
-            context=context, ask=ask, on_always=gate.allow_always,
+            context=context, ask=approval_asker(dispatcher, gate.approvals),
+            on_always=gate.allow_always,
             announce=announce if config.gate_announce else None,
         )
 
@@ -134,7 +129,8 @@ async def _build_agent_core(
     )
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(
-        factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours)
+        factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
+        run_command=shell_service.run,
     )
     return Core(budget, bus, registry, restart, manager, dispatcher, monitors, cron)
 
@@ -145,14 +141,17 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     engine, factory, store = await build_persistence(config)
     gate = build_gate(config)
     skills = SkillLibrary(config.skills_dir)
-    core = await _build_agent_core(config, provider, store, factory, gate, skills)
-
-    selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
+    # Built before the core: cron runs command schedules on these shells.
     shell_service = ShellService(
         workspace_dir=str(Path.cwd()),
         timeout_seconds=config.shell_timeout_seconds,
         output_limit=config.shell_output_limit,
     )
+    core = await _build_agent_core(
+        config, provider, store, factory, gate, skills, shell_service
+    )
+
+    selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
     # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
     model_aliases = frozenset(config.provider_aliases)
     register_native_tools(
@@ -172,6 +171,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         # owner's own handle out-of-band (imsg/osascript) — see owner_send_guard.
         shell_guards=(owner_send_guard(config.imessage_owner_handles),),
         model_aliases=model_aliases,
+        ask=approval_asker(core.dispatcher, gate.approvals),
     )
     commands = CommandSet(
         core.manager, core.monitors, core.cron, store, skills=skills,

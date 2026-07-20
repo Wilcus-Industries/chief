@@ -349,3 +349,96 @@ async def test_denied_card_blocks_the_tool(
         assert "denied by the gate" in denied["content"]
     finally:
         await shutdown(app, streams)
+
+
+def command_create(command: str) -> ToolCall:
+    return ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "prune the cache",
+            "spec": "0 4 * * *",
+            "command": command,
+        },
+    )
+
+
+async def test_scheduled_command_creation_raises_a_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # gate_approved=("schedule",) is load-bearing: the gate raises no card for
+    # this call, so any card that appears came from the tool itself.
+    command = "rm -rf /tmp/chief-cache"
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create(command),))],
+            text_turn("scheduled"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        card = (await read_finals(streams, 1))[0]
+        assert command in card["text"]
+        send_frame(streams, "yes", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        schedules = await app.cron_service.list_enabled()
+        assert len(schedules) == 1
+        assert schedules[0].command == command
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_declined_scheduled_command_creates_no_row(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create("rm -rf /tmp/x"),))],
+            text_turn("understood"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        await read_finals(streams, 1)  # the tool's card
+        send_frame(streams, "no", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "understood"
+        assert await app.cron_service.list_enabled() == []
+        result = provider.calls[1][-1]
+        assert result["role"] == "tool"
+        assert "not created" in result["content"]
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_prompt_schedule_creation_raises_no_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    create = ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "daily checkin",
+            "spec": "0 9 * * *",
+            "prompt": "say hi",
+        },
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(create,))], text_turn("scheduled")]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "remind me daily", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        assert len(await app.cron_service.list_enabled()) == 1
+    finally:
+        await shutdown(app, streams)
