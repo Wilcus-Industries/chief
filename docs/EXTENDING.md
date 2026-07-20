@@ -121,6 +121,7 @@ A package is a directory with `manifest.yaml`:
 | `secrets` | list[str] | filenames expected under `secrets/` |
 | `python_deps` | list[str] | **import** names (`yaml`), never dist names (`PyYAML`) |
 | `hooks` | mapping | `{module, register}` |
+| `mcp_servers` | mapping | `{<name>: {url}}` or `{<name>: {command}}` — exactly one |
 
 Plus `INSTALL.md` / `UNINSTALL.md`, and ideally an `install.sh` for the
 deterministic path.
