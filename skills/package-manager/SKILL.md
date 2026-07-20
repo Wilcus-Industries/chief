@@ -19,12 +19,22 @@ Run it with the `shell` tool (its cwd is the repo root):
 - `chief-pkg list` — every available package (bundled + cloned).
 - `chief-pkg search <query>` — match by name/description.
 - add `--installed` to either to see only what's installed.
+- `chief-pkg update` — pull the packages clone and report what moved.
 
 Each line shows the name, `[installed|available]`, source (`bundled`/`cloned`),
 and the **on-disk path** — read and edit the package right there. Bundled
 packages live under `packages/`; cloned ones under `data/packages/` (the CLI
 clones the chief-packages repo the first time it runs). Bundled wins a name
 collision.
+
+Every `chief-pkg` run pulls the clone first, so cloned packages are current
+without you asking. It fails soft — on a slow or offline network you get a
+warning on stderr and the previous clone, never a hang.
+
+**`chief-pkg update` is not `chief update`.** This one moves *cloned* packages
+only (data you read; nothing restarts). `chief update` moves core and the
+*bundled* packages — they live in core's own git repo — and restarts the
+daemon. A bundled package edit therefore needs `chief update`, not this.
 
 ## Install (follow the package's `INSTALL.md`)
 

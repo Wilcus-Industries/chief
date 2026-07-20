@@ -10,12 +10,12 @@ from pathlib import Path
 from chief.install.lifecycle import (
     DEFAULT_LAUNCHER,
     uninstall,
-    update,
     wait_for_health,
     web_url,
 )
 from chief.install.service import ServiceManager
 from chief.install.units import default_runner
+from chief.install.update import update
 from chief.install.wizard import WizardIO, run_wizard
 
 DEFAULT_CONFIG = Path("config.yaml")
