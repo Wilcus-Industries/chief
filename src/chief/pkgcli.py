@@ -94,10 +94,9 @@ def verify_install(
 ) -> list[str]:
     """Postcondition check for a package install; empty means fully installed.
 
-    Everything the manifest declares must actually have landed — half-installs
-    (skills copied but no registry entry, config keys missing) were silent
-    before: the hooks loader just skipped the package and discovery reported
-    it uninstalled.
+    Everything declared must actually land — a half-install (skills copied,
+    no registry entry; a config key missing) was silent before: the hooks
+    loader skipped the package and discovery reported it uninstalled.
     """
     problems = []
     if package.name not in installed:
@@ -123,6 +122,9 @@ def verify_install(
                 f"python dependency '{dep}' not importable (python_deps "
                 "lists import names) — add its distribution and `uv sync`"
             )
+    for server in package.mcp_servers:  # same dotted lookup as config_keys
+        if not _config_has(config_raw, f"mcp_servers.{server.name}"):
+            problems.append(f"mcp server '{server.name}' absent from config.yaml")
     return problems
 
 
@@ -166,9 +168,7 @@ def _run_verify(name: str, config: Config) -> None:
     package = library.get(name)
     if package is None:
         raise SystemExit(f"no such package: {name}")
-    problems = verify_install(
-        package, _load_installed(INSTALLED_REGISTRY), load_raw()
-    )
+    problems = verify_install(package, _load_installed(INSTALLED_REGISTRY), load_raw())
     if problems:
         print(f"{name}: install INCOMPLETE")
         for problem in problems:
