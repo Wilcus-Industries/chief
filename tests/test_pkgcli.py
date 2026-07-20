@@ -245,6 +245,65 @@ def test_verify_install_passes_when_everything_landed(tmp_path: Path) -> None:
     assert problems == []
 
 
+def _dotted_package(tmp_path: Path) -> Package:
+    """A package declaring a nested config key — what real manifests use."""
+    root = tmp_path / "packages" / "demo"
+    root.mkdir(parents=True)
+    (root / "manifest.yaml").write_text(
+        "name: demo\ndescription: d\nskills: []\n"
+        "config_keys: [imessage.enabled]\nsecrets: []\n"
+    )
+    return PackageLibrary((tmp_path / "packages",)).scan()[0]
+
+
+def test_verify_install_resolves_dotted_config_keys(tmp_path: Path) -> None:
+    # config_keys are dotted paths but config_raw is nested, so a flat
+    # membership test called every real key absent — build-imessage could
+    # never verify as installed however correct the config was.
+    problems = verify_install(
+        _dotted_package(tmp_path),
+        installed={"demo": {"source": "bundled"}},
+        config_raw={"imessage": {"enabled": True, "owner_handles": ["+1"]}},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert problems == []
+
+
+def test_verify_install_still_reports_a_genuinely_missing_dotted_key(
+    tmp_path: Path,
+) -> None:
+    package = _dotted_package(tmp_path)
+    absent: tuple[dict[str, object], ...] = (
+        {},
+        {"imessage": {}},
+        {"imessage": {"other": 1}},
+    )
+    for config in absent:
+        problems = verify_install(
+            package,
+            installed={"demo": {"source": "bundled"}},
+            config_raw=config,
+            skills_root=tmp_path / "skills",
+            secrets_root=tmp_path / "secrets",
+        )
+        assert problems == ["config key 'imessage.enabled' absent from config.yaml"]
+
+
+def test_verify_install_reports_dotted_key_whose_parent_is_not_a_mapping(
+    tmp_path: Path,
+) -> None:
+    # A scalar where a block belongs is a misconfiguration, not a crash.
+    problems = verify_install(
+        _dotted_package(tmp_path),
+        installed={"demo": {"source": "bundled"}},
+        config_raw={"imessage": "on"},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert problems == ["config key 'imessage.enabled' absent from config.yaml"]
+
+
 # --- registry loading is loud when it degrades to empty (audit M4) ----------
 
 
