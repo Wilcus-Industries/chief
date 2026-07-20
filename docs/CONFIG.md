@@ -81,8 +81,9 @@ Notes on specific keys:
   closed and no listener is built.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
-- **`quiet_hours` is `"HH:MM-HH:MM"`** and may span midnight; schedule fires
-  inside the window defer to its end.
+- **`quiet_hours` is `"HH:MM-HH:MM"`** and may span midnight; prompt-waking
+  schedule fires inside the window defer to its end (command schedules run
+  silently and are never deferred).
 
 ### The owner_handles coercion trap
 

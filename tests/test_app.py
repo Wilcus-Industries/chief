@@ -3,6 +3,7 @@ only the LLM provider swapped (PRD #183 testing seam)."""
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from chief.mcpclient.manager import ServerConfig
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
+from chief.shelltool import GUARD_REFUSED_EXIT_CODE
 from chief.wiring import build_mcp, build_provider
 
 from .fakes import FakeProvider, text_turn
@@ -349,3 +351,132 @@ async def test_denied_card_blocks_the_tool(
         assert "denied by the gate" in denied["content"]
     finally:
         await shutdown(app, streams)
+
+
+def command_create(command: str) -> ToolCall:
+    return ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "prune the cache",
+            "spec": "0 4 * * *",
+            "command": command,
+        },
+    )
+
+
+async def test_scheduled_command_creation_raises_a_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # gate_approved=("schedule",) is load-bearing: the gate raises no card for
+    # this call, so any card that appears came from the tool itself.
+    command = "rm -rf /tmp/chief-cache"
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create(command),))],
+            text_turn("scheduled"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        card = (await read_finals(streams, 1))[0]
+        assert command in card["text"]
+        send_frame(streams, "yes", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        schedules = await app.cron_service.list_enabled()
+        assert len(schedules) == 1
+        assert schedules[0].command == command
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_declined_scheduled_command_creates_no_row(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create("rm -rf /tmp/x"),))],
+            text_turn("understood"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        await read_finals(streams, 1)  # the tool's card
+        send_frame(streams, "no", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "understood"
+        assert await app.cron_service.list_enabled() == []
+        result = provider.calls[1][-1]
+        assert result["role"] == "tool"
+        assert "not created" in result["content"]
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_prompt_schedule_creation_raises_no_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    create = ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "daily checkin",
+            "spec": "0 9 * * *",
+            "prompt": "say hi",
+        },
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(create,))], text_turn("scheduled")]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "remind me daily", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        assert len(await app.cron_service.list_enabled()) == 1
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_scheduled_command_gets_the_owner_send_guard(
+    tmp_path: Path, sock_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The shell tool's echo-loop seatbelt must also cover cron's unattended
+    # runner — an approved schedule is otherwise a way around it, with nobody
+    # present to notice the loop start.
+    config = make_config(
+        tmp_path, sock_path, imessage_owner_handles=("+15551234567",)
+    )
+    app = await build_app(config, provider=FakeProvider([]))
+    marker = tmp_path / "sent.txt"
+    # Created before start(): the loop sleeps its full poll when it boots empty.
+    await app.cron_service.create(
+        description="page the owner",
+        spec="@every 0.05",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command=f"echo sent > {marker}; imsg send --to +15551234567 hi",
+    )
+    with caplog.at_level(logging.INFO, logger="chief.cron.service"):
+        await app.start()
+        streams = await asyncio.open_unix_connection(str(config.socket_path))
+        try:
+            for _ in range(200):
+                if any("command exit=" in r.getMessage() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            await shutdown(app, streams)
+    fired = [r.getMessage() for r in caplog.records if "command exit=" in r.message]
+    assert fired, "the command schedule never fired"
+    # Refused by the guard before reaching the shell — so `echo` never ran.
+    assert f"exit={GUARD_REFUSED_EXIT_CODE}" in fired[0]
+    assert not marker.exists()
