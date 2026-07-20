@@ -1,8 +1,0 @@
-name: apple-findmy
-description: Locate Apple devices and AirTags by driving FindMy.app with UI automation (peekaboo + AppleScript).
-dependencies: []
-mcp_servers: {}
-skills:
-  - skills/apple-findmy
-config_keys: []
-secrets: []
