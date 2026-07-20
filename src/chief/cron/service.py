@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 
 from chief.adapters.base import Message
-from chief.cron.timing import QuietHours, next_fire, utcnow
+from chief.cron.timing import QuietHours, next_fire, utcnow, validate_spec
 from chief.monitors.service import WakeAgent
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import ScheduleRow
@@ -66,6 +66,7 @@ class CronService:
         prompt: str = "",
         command: str | None = None,
     ) -> int:
+        validate_spec(spec)
         async with self._factory() as db:
             row = ScheduleRow(
                 description=description,
@@ -114,17 +115,33 @@ class CronService:
         now = utcnow()
         soonest = self._poll
         for schedule in await self.list_enabled():
-            anchor = self._anchor.setdefault(schedule.id, now)
-            # Quiet hours protect the owner's attention; a silent command has
-            # none to protect, so only prompt rows defer.
-            quiet = None if schedule.command else self._quiet
-            fire = next_fire(schedule.spec, anchor, quiet)
-            if fire <= now:
-                await self._fire(schedule)
-                self._anchor[schedule.id] = now
-                fire = next_fire(schedule.spec, now, quiet)
+            try:
+                fire = await self._advance(schedule, now)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A row whose spec predates validation (or was written by hand)
+                # raises every tick. Skipping it keeps one poison row from
+                # starving every schedule after it in the list.
+                logger.exception(
+                    "schedule %s skipped: %s", schedule.id, schedule.spec
+                )
+                continue
             soonest = min(soonest, (fire - now).total_seconds())
         return max(soonest, 0.01)
+
+    async def _advance(self, schedule: ScheduleRow, now: datetime) -> datetime:
+        """Fire ``schedule`` if it is due; return when it fires next."""
+        anchor = self._anchor.setdefault(schedule.id, now)
+        # Quiet hours protect the owner's attention; a silent command has none
+        # to protect, so only prompt rows defer.
+        quiet = None if schedule.command else self._quiet
+        fire = next_fire(schedule.spec, anchor, quiet)
+        if fire <= now:
+            await self._fire(schedule)
+            self._anchor[schedule.id] = now
+            fire = next_fire(schedule.spec, now, quiet)
+        return fire
 
     async def _fire(self, schedule: ScheduleRow) -> None:
         logger.info("schedule %s fired: %s", schedule.id, schedule.description)

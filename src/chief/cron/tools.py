@@ -6,6 +6,7 @@ from typing import Any
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.approvals import Approval
 from chief.cron.service import CronService
+from chief.cron.timing import validate_spec
 from chief.gate import AskApproval
 from chief.persistence.models import ScheduleRow
 from chief.provider.base import ToolSpec
@@ -68,13 +69,14 @@ def register_cron_tools(
         """
         if ask is None:
             return False
-        # json.dumps escapes newlines, so a multi-line command cannot draw its
-        # own "yes / no" line and bury the real payload above or below it. This
-        # card is the only control point for unattended shell execution — it
-        # must not be forgeable by the command it is asking about.
+        # json.dumps escapes newlines, so neither field can draw its own
+        # "yes / no" line and bury the real payload above or below it. This card
+        # is the only control point for unattended shell execution — it must not
+        # be forgeable by anything it is asking about.
         question = (
-            f"approve a scheduled command on [{spec}]? it will run unattended, "
-            f"with no approval when it fires:\n{json.dumps(command)}\nyes / no"
+            f"approve a scheduled command on {json.dumps(spec)}? it will run "
+            "unattended, with no approval when it fires:\n"
+            f"{json.dumps(command)}\nyes / no"
         )
         # ALWAYS has nothing to persist here — treat it as this one yes.
         return await ask(context, question) is not Approval.DENY
@@ -93,6 +95,12 @@ def register_cron_tools(
                 "error: create needs description, spec, and exactly one of "
                 "prompt or command"
             )
+        try:
+            validate_spec(spec)
+        except ValueError as exc:
+            # Reject before the card: an unparsable spec would otherwise both
+            # forge the card and wedge the schedule loop once persisted.
+            return f"error: {exc}"
         if command and not await _approve_command(context, spec, command):
             return "schedule not created: the owner declined the command"
         schedule_id = await service.create(
