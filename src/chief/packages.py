@@ -15,6 +15,9 @@ from pathlib import Path
 
 import yaml
 
+from chief.mcp_manifest import McpServerSpec as McpServerSpec
+from chief.mcp_manifest import parse_mcp_servers, validate_mcp_servers
+
 logger = logging.getLogger(__name__)
 
 CLONED_PACKAGES_DIR = Path("data/packages")
@@ -39,16 +42,6 @@ class HookSpec:
 
     module: str
     register: str
-
-
-@dataclass(frozen=True)
-class McpServerSpec:
-    """One MCP server a package declares — same shape as a ``config.yaml``
-    ``mcp_servers`` entry (``config.Config.mcp_servers``, ``wiring.build_mcp``)."""
-
-    name: str
-    url: str | None = None
-    command: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +110,7 @@ def _validate_manifest(manifest: Path) -> list[str]:
     if not str(meta.get("description") or "").strip():
         problems.append(f"{manifest}: missing 'description'")
     problems.extend(_validate_hooks(manifest, meta.get("hooks")))
-    problems.extend(_validate_mcp_servers(manifest, meta.get("mcp_servers")))
+    problems.extend(validate_mcp_servers(manifest, meta.get("mcp_servers")))
     return problems
 
 
@@ -135,26 +128,6 @@ def _validate_hooks(manifest: Path, hooks: object) -> list[str]:
     return []
 
 
-def _validate_mcp_servers(manifest: Path, mcp_servers: object) -> list[str]:
-    """A declared ``mcp_servers`` block must map to mappings, each setting
-    exactly one of ``url`` or ``command`` (``ServerConfig``'s own rule) —
-    malformed fails the done-check and is rolled back, same as ``hooks``."""
-    if mcp_servers is None:
-        return []
-    if not isinstance(mcp_servers, dict):
-        return [f"{manifest}: 'mcp_servers' must be a mapping"]
-    problems = []
-    for name, entry in mcp_servers.items():
-        if not isinstance(entry, dict):
-            problems.append(f"{manifest}: mcp_servers.{name} must be a mapping")
-        elif bool(str(entry.get("url") or "").strip()) == bool(entry.get("command")):
-            problems.append(  # neither set, or both set
-                f"{manifest}: mcp_servers.{name} must set exactly one of "
-                "'url' or 'command'"
-            )
-    return problems
-
-
 def _parse(manifest: Path) -> Package | None:
     try:
         meta = yaml.safe_load(manifest.read_text()) or {}
@@ -170,7 +143,7 @@ def _parse(manifest: Path) -> Package | None:
         secrets=tuple(meta.get("secrets") or ()),
         python_deps=tuple(meta.get("python_deps") or ()),
         hooks=_parse_hooks(meta.get("hooks")),
-        mcp_servers=_parse_mcp_servers(meta.get("mcp_servers")),
+        mcp_servers=parse_mcp_servers(meta.get("mcp_servers")),
     )
 
 
@@ -180,19 +153,3 @@ def _parse_hooks(hooks: object) -> HookSpec | None:
     if isinstance(hooks, dict) and hooks.get("module") and hooks.get("register"):
         return HookSpec(module=str(hooks["module"]), register=str(hooks["register"]))
     return None
-
-
-def _parse_mcp_servers(mcp_servers: object) -> tuple[McpServerSpec, ...]:
-    """Build one spec per well-formed entry; drop a malformed block/entry and
-    any unrecognized key inside one silently (validate() is the loud path)."""
-    if not isinstance(mcp_servers, dict):
-        return ()
-    return tuple(
-        McpServerSpec(
-            name=str(name),
-            url=entry.get("url"),
-            command=tuple(entry["command"]) if entry.get("command") else None,
-        )
-        for name, entry in mcp_servers.items()
-        if isinstance(entry, dict)
-    )
