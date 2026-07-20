@@ -17,12 +17,13 @@ Division of labour — do not blur these:
   thread with a dedicated Apple ID): the core iMessage adapter, automatically.
   It polls `chat.db`, runs a turn, and sends your reply back
   **auto-prefixed 🤖**. Never use `imsg` for this — see the loop rule below.
-- **Texting someone who is not the owner** (only when the owner asks): `imsg
-  send`. Their replies come back `is_from_me = 0` and are handled as strangers
-  (logged, not answered) — no echo loop.
+- **Texting someone who is not the owner, or a group** (only when the owner
+  asks): `imsg send`. Replies come back `is_from_me = 0` and are handled as
+  strangers (logged, not answered) — no echo loop.
 - **Reading other threads, history, or search**: `imsg` read commands. The core
-  adapter deliberately sees only the owner's self-chat; `imsg` can read every
-  conversation, so treat it as owner-directed only (below).
+  adapter sees inbound messages and the owner's self-chat, not the owner's own
+  outbound threads; `imsg` can read every conversation, so treat it as
+  owner-directed only (below).
 
 ## Never `imsg send` to an owner handle
 
@@ -42,9 +43,14 @@ that references an owner handle is refused before it runs.
 imsg send --to "+14155551212" --text "on my way"
 imsg send --to "Jane Appleseed" --text "running late"
 imsg send --to "+14155551212" --file ~/Desktop/photo.jpg --text "here"
+imsg send --chat-id 42 --text "running late"          # a group thread
 ```
 
 - `--to` takes a phone number, email, iMessage handle, or a Contacts name.
+- **Groups**: `--to` addresses a person, so it cannot reach a group. Target the
+  conversation instead — `--chat-id`, `--chat-identifier`, or `--chat-guid`,
+  discovered with `imsg chats --json`. This is the only way to text a group:
+  the core adapter reads groups but never sends into one.
 - Service defaults to auto (iMessage, falling back to SMS): force with
   `--service imessage|sms`, or `--no-sms-fallback` to fail rather than SMS.
 - Prefer an explicit `+E.164` number or email over a display name — names depend
