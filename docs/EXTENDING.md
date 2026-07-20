@@ -148,12 +148,13 @@ Hooks let a package contribute per-turn context without touching core. Declare a
 `hooks:` block in the manifest (`module` + `register`); `build_app` scans
 installed, non-disabled packages and calls each `register(context, hooks)`.
 
-Three kinds:
+Four kinds:
 
 ```python
 PreTurnHook      = Callable[[TurnContext], Awaitable[str | None]]
 SessionStartHook = Callable[[TurnContext], Awaitable[str | None]]
 PostTurnHook     = Callable[[TurnResult, list[dict[str, Any]]], Awaitable[None]]
+PostToolHook     = Callable[[ToolCall, str], Awaitable[Annotate | Veto | None]]
 ```
 
 `HookContext` gives a package `provider`, `models`, `config` (**sliced to just
@@ -179,6 +180,10 @@ Rules that matter:
   always landing.
 - Blocks are **sorted by package name** before rendering, so placement is
   deterministic regardless of load order.
+- A `post_tool` hook may **annotate** (a `<hook>` note above the verbatim
+  payload) or **veto** (the payload is withheld, the model gets your reason).
+  It cannot rewrite the payload — any other return value is ignored, and the
+  first veto wins.
 - Contributed text is escaped — `<hook>` delimiters are entity-escaped and the
   source attribute is slugged. **Contributed text may be attacker-influenced**
   (retrieved or relayed content), so the delimiter and attribution are trusted

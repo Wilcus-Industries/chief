@@ -1,10 +1,12 @@
 """HookRegistry: package-tagged agent-loop hook registrations.
 
-Three kinds, each an async callable a package registers under its name:
+Four kinds, each an async callable a package registers under its name:
 
 - ``pre_turn`` ``(turn) -> str | None`` — context added to every turn
 - ``session_start`` ``(turn) -> str | None`` — context on a thread's first turn
 - ``post_turn`` ``(result, messages) -> None`` — observes a finished turn
+- ``post_tool`` ``(call, result) -> Annotate | Veto | None`` — screens a tool
+  result before the model sees it (:mod:`chief.hooks.posttool`)
 
 Context hooks receive a :class:`TurnContext` (the inbound text, recent
 transcript, sender, thread, channel) so they can judge relevance and gate on
@@ -20,6 +22,7 @@ from typing import Any
 
 from chief.agent.loop import TurnResult
 from chief.hooks.context import TurnContext
+from chief.hooks.posttool import PostToolHook
 
 PreTurnHook = Callable[[TurnContext], Awaitable[str | None]]
 SessionStartHook = Callable[[TurnContext], Awaitable[str | None]]
@@ -33,6 +36,7 @@ class HookRegistry:
         self._pre_turn: list[tuple[str, PreTurnHook]] = []
         self._session_start: list[tuple[str, SessionStartHook]] = []
         self._post_turn: list[tuple[str, PostTurnHook]] = []
+        self._post_tool: list[tuple[str, PostToolHook]] = []
 
     def register_pre_turn(self, package: str, fn: PreTurnHook) -> None:
         self._pre_turn.append((package, fn))
@@ -43,6 +47,9 @@ class HookRegistry:
     def register_post_turn(self, package: str, fn: PostTurnHook) -> None:
         self._post_turn.append((package, fn))
 
+    def register_post_tool(self, package: str, fn: PostToolHook) -> None:
+        self._post_tool.append((package, fn))
+
     def pre_turn(self) -> list[tuple[str, PreTurnHook]]:
         return sorted(self._pre_turn, key=lambda entry: entry[0])
 
@@ -51,6 +58,9 @@ class HookRegistry:
 
     def post_turn(self) -> list[tuple[str, PostTurnHook]]:
         return sorted(self._post_turn, key=lambda entry: entry[0])
+
+    def post_tool(self) -> list[tuple[str, PostToolHook]]:
+        return sorted(self._post_tool, key=lambda entry: entry[0])
 
 
 class PackageHookRegistrar:
@@ -75,4 +85,8 @@ class PackageHookRegistrar:
 
     def post_turn(self, fn: PostTurnHook) -> PostTurnHook:
         self._registry.register_post_turn(self._package, fn)
+        return fn
+
+    def post_tool(self, fn: PostToolHook) -> PostToolHook:
+        self._registry.register_post_tool(self._package, fn)
         return fn
