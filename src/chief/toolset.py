@@ -20,6 +20,7 @@ from chief.budget import Budget
 from chief.cron.service import CronService
 from chief.cron.tools import register_cron_tools
 from chief.filetools import register_file_tools
+from chief.gate import AskApproval
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.provider.base import Provider
@@ -46,6 +47,7 @@ def register_native_tools(
     root: Path,
     shell_guards: Sequence[ShellGuard] = (),
     model_aliases: frozenset[str] = frozenset(),
+    ask: AskApproval | None = None,
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
@@ -53,12 +55,14 @@ def register_native_tools(
     ``agents_dir`` seeds the subagent registry for ``spawn_agent``;
     ``shell_service`` owns the host shells the ``shell`` tool drives;
     ``model_aliases`` are the configured ``provider_aliases`` keys that
-    ``switch_model`` validates against.
+    ``switch_model`` validates against; ``ask`` is the approval-card path the
+    ``schedule`` tool raises for command schedules (without it, creating one is
+    refused).
     """
     register_session_tools(registry, manager)
     register_switch_model_tool(registry, manager, model_aliases=model_aliases)
     register_monitor_tools(registry, monitor_service)
-    register_cron_tools(registry, cron_service)
+    register_cron_tools(registry, cron_service, ask=ask)
     register_file_tools(registry, root)
     register_shell_tool(registry, shell_service, guards=shell_guards)
     register_restart_tool(registry, selfedit_pipeline)
