@@ -25,7 +25,11 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
 from chief.gate import GatePolicy, load_approved, save_approved
-from chief.mcpclient.manager import McpManager, ServerConfig
+from chief.mcpclient.manager import (
+    McpManager,
+    ServerConfig,
+    server_config_from_entry,
+)
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -142,21 +146,15 @@ def build_mcp(
     config: Config, registry: ToolRegistry
 ) -> tuple[McpManager, tuple[ServerConfig, ...]]:
     """MCP servers are pure config: the agent adds one by editing the
-    ``mcp_servers`` key (then ``restart``), and it connects on the next boot."""
+    ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
+
+    An entry with a malformed ``timeout`` is dropped (logged, not raised) by
+    ``server_config_from_entry`` — see there for why.
+    """
     mcp_configs = tuple(
-        ServerConfig(
-            name=name,
-            url=entry.get("url"),
-            command=tuple(entry["command"]) if entry.get("command") else None,
-            env=dict(entry["env"]) if entry.get("env") else None,
-            cwd=entry.get("cwd"),
-            **(
-                {"timeout": float(entry["timeout"])}
-                if entry.get("timeout") is not None
-                else {}
-            ),
-        )
+        sc
         for name, entry in config.mcp_servers.items()
+        if (sc := server_config_from_entry(name, entry)) is not None
     )
     return McpManager(registry), mcp_configs
 
