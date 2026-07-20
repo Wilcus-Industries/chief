@@ -7,8 +7,8 @@ config, the secret, and the skill.
 1. Drop the proxy backend and its aliases from `config.yaml`. `config_apply`
    only merges, so remove them with your file tools: delete the
    `provider_backends.proxy` entry and every `provider_aliases` entry whose
-   `backend` is `proxy` (e.g. `opus`, `sonnet`). If those were the only
-   backends/aliases, remove the now-empty `provider_backends:` and
+   `backend` is `proxy` (by default `opus`, `sonnet`, `haiku`). If those were
+   the only backends/aliases, remove the now-empty `provider_backends:` and
    `provider_aliases:` keys entirely — an empty routing table restores the
    plain single-provider (OpenRouter) behavior.
 2. Move any thread that was pinned to a proxied alias back onto a default
