@@ -1,8 +1,0 @@
-name: claude-code
-description: Delegate coding tasks on other projects to the Claude Code CLI in one-shot print mode.
-dependencies: []
-mcp_servers: {}
-skills:
-  - skills/claude-code
-config_keys: []
-secrets: []

@@ -1,8 +1,0 @@
-name: maps
-description: Geocoding, nearby places, routes, and timezones via OpenStreetMap/OSRM — keyless, stdlib-only.
-dependencies: []
-mcp_servers: {}
-skills:
-  - skills/maps
-config_keys: []
-secrets: []
