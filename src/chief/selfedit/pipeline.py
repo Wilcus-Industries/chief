@@ -21,18 +21,16 @@ from pathlib import Path
 from chief.agent.tools import ToolContext
 from chief.audit import AuditLog
 from chief.config import load_config
+from chief.selfedit.checks import DEFAULT_CHECKS, validate_live_config
 from chief.selfedit.gitops import dirty_files, run_checks, run_git
-from chief.selfedit.notice import record_restart_origin
+from chief.selfedit.notice import RestartNotice
 from chief.selfedit.recovery import MARKER_NAME
 
 logger = logging.getLogger(__name__)
 
-# The project done-check (CLAUDE.md); injectable so tests use a fast stand-in.
-DEFAULT_CHECKS: tuple[tuple[str, ...], ...] = (
-    ("uv", "run", "pytest", "-q"),
-    ("uv", "run", "ruff", "check", "."),
-    ("uv", "run", "mypy", "."),
-)
+# What the pipeline calls to ask for a restart: the controller's ``request``,
+# handed the notice to write at the re-exec (see RestartController.request).
+RequestRestart = Callable[[RestartNotice | None], None]
 
 
 class SelfEditPipeline:
@@ -42,7 +40,7 @@ class SelfEditPipeline:
         self,
         repo_root: Path,
         audit: AuditLog,
-        restart: Callable[[], None],
+        restart: "RequestRestart",
         checks: tuple[tuple[str, ...], ...] = DEFAULT_CHECKS,
         validate_config: Callable[[], object] = load_config,
     ) -> None:
@@ -116,7 +114,7 @@ class SelfEditPipeline:
                 )
             return message
         self._consecutive_failures = 0
-        config_error = await self._validate_live_config()
+        config_error = await validate_live_config(self._validate_config)
         if config_error is not None:
             self._audit.record("restart", outcome="config_invalid")
             return (
@@ -133,8 +131,13 @@ class SelfEditPipeline:
             files=dirty,
         )
         logger.info("restart approved (%s); committed=%s", rationale, committed)
-        record_restart_origin(self._root, origin, rationale)
-        self._restart()
+        # The notice rides along to the exec rather than being written here:
+        # the exec is a whole turn plus the drain away, and a notice sitting
+        # on disk in between is claimed by whatever reboots first.
+        notice = None
+        if origin is not None:
+            notice = RestartNotice(origin.channel, origin.thread_key, rationale)
+        self._restart(notice)
         if committed:
             return "done-check green; committed and restarting into the new code"
         return "done-check green; no repo changes, restarting"
@@ -177,19 +180,6 @@ class SelfEditPipeline:
                 left = "\n".join(f"  {path}" for path in remaining)
                 message += f"\nuntracked files left in place:\n{left}"
             return message
-
-    async def _validate_live_config(self) -> str | None:
-        """Load the live config off the event loop; return the error on failure.
-
-        A config-only change writes no rollback marker (marker is commit-only)
-        and git can't rewind gitignored ``config.yaml`` anyway, so boot-side
-        recovery can't save a bad-config reboot — this pre-restart gate is the
-        only prevention. Any load exception aborts the restart."""
-        try:
-            await asyncio.to_thread(self._validate_config)
-        except Exception as exc:
-            return f"{type(exc).__name__}: {exc}"
-        return None
 
     async def _dirty_files(self) -> list[str]:
         return await dirty_files(self._root)

@@ -105,7 +105,7 @@ async def _build_agent_core(
             announce=announce if config.gate_announce else None,
         )
 
-    restart = RestartController()
+    restart = RestartController(repo_root=Path.cwd())
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
