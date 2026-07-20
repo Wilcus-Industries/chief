@@ -38,19 +38,24 @@ class MemorySettings:
     """How the package indexes and recalls: cadence, scope, and the models.
 
     ``ambient_n`` — the ambient recall hook fires every Nth owner turn.
-    ``window`` — transcript messages the judge sees. ``top_k`` — candidates
-    pre-fetched per query. ``injection_cap_tokens`` — recall injection ceiling.
+    ``window`` — transcript messages the relevance gate sees. ``top_k`` —
+    candidates pre-fetched per query, and so also the number of gate calls per
+    firing; small on purpose now that recall emits pointers rather than note
+    bodies. ``injection_cap_tokens`` — backstop ceiling on the pointer nudge.
     ``include``/``exclude`` — vault-relative path prefixes gating what indexes.
     ``vault_paths`` — the vault root; only the first entry is used (the code
     is single-vault end-to-end). ``writable_paths`` — where the agent
     may save notes (capability follows config; empty means read-only).
+
+    The gate's model is not configured here: it is the ``model:`` field of the
+    ``memory-relevance`` classifier definition, falling back to the daemon's
+    ``default_classifier`` role like every other classifier.
     """
 
     ambient_n: int = 5
     window: int = 30
-    top_k: int = 8
+    top_k: int = 3
     injection_cap_tokens: int = 1500
-    judge_role: str = "memory_judge"
     embed_model: str = "minishlab/potion-base-8M"
     include: tuple[str, ...] = ()
     exclude: tuple[str, ...] = _DEFAULT_EXCLUDE

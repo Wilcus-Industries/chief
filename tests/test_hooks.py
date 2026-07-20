@@ -13,6 +13,7 @@ from chief.agent.loop import TurnResult
 from chief.agent.manager import SessionManager
 from chief.agent.tools import ToolRegistry
 from chief.budget import Budget
+from chief.classifiers import Classifier, ClassifierRegistry
 from chief.dispatch import Dispatcher
 from chief.hooks import (
     HookRegistry,
@@ -353,6 +354,12 @@ GOOD_HOOK = (
     "    async def provide(turn):\n"
     "        return 'FIXTURE-CONTEXT'\n"
 )
+CLASSIFIER_HOOK = (
+    "def register(context, hooks):\n"
+    "    @hooks.pre_turn\n"
+    "    async def provide(turn):\n"
+    "        return await context.classifier.classify('relevance', turn.user_text)\n"
+)
 BROKEN_HOOK = "raise RuntimeError('boom on import')\n"
 
 
@@ -369,6 +376,7 @@ def write_hook_package(root: Path, name: str, body: str) -> None:
 def load_fixture_hooks(
     root: Path, engine: AsyncEngine, registry: HookRegistry,
     provider: FakeProvider, installed: dict[str, Any], disabled: tuple[str, ...],
+    classifiers: Path | None = None,
 ) -> None:
     load_hooks(
         library=PackageLibrary((root,)),
@@ -380,6 +388,11 @@ def load_fixture_hooks(
         raw_config={},
         disabled=disabled,
         data_root=root / "data" / "hooks",
+        classifier=Classifier(
+            provider,
+            ClassifierRegistry(classifiers or root / "classifiers"),
+            "test-model",
+        ),
     )
 
 
@@ -396,6 +409,38 @@ async def test_real_fixture_package_hook_reaches_the_provider(
     await session.run_turn("hi", noop_delta)
     assert '<hook source="fixture">\nFIXTURE-CONTEXT\n</hook>' in (
         provider.calls[0][0]["content"]
+    )
+
+
+async def test_hook_reaches_the_classifier_primitive(
+    store: MessageStore, engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A package hook classifies through its context, not a bespoke model call.
+
+    The classifier is core-internal; ``HookContext`` is how a package borrows it
+    without reimplementing prompt/label/retry handling (obsidian-memory's
+    relevance gate is the first caller).
+    """
+    write_hook_package(tmp_path, "gated", CLASSIFIER_HOOK)
+    defs = tmp_path / "classifiers"
+    defs.mkdir()
+    (defs / "relevance.md").write_text(
+        "---\nname: relevance\ndescription: is this relevant\n"
+        "labels: [RELEVANT, IRRELEVANT]\n---\nDecide relevance.\n"
+    )
+    registry = HookRegistry()
+    # First turn answers the classifier; the second is the agent's own reply.
+    provider = FakeProvider([text_turn("RELEVANT"), text_turn("ok")])
+    load_fixture_hooks(
+        tmp_path, engine, registry, provider, {"gated": {}}, (), classifiers=defs
+    )
+
+    manager = make_manager(provider, store, registry)
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("does this matter?", noop_delta)
+
+    assert '<hook source="gated">\nRELEVANT\n</hook>' in (
+        provider.calls[-1][0]["content"]
     )
 
 
@@ -463,6 +508,9 @@ async def test_unsafe_manifest_name_is_skipped_no_traversal(
             raw_config={},
             disabled=(),
             data_root=data_root,
+            classifier=Classifier(
+                FakeProvider([]), ClassifierRegistry(tmp_path / "cls"), "test-model"
+            ),
         )
     assert registry.pre_turn() == []
     assert any(r.levelno == logging.ERROR for r in caplog.records)

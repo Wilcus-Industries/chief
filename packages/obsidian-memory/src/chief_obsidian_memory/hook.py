@@ -1,10 +1,15 @@
 """The obsidian-memory agent-loop hooks: ambient recall + a standing reminder.
 
 ``register`` is the package entry point the boot loader calls. It stays light —
-config only — and defers every heavy import (the index, the judge, and through
+config only — and defers every heavy import (the index, the gate, and through
 them chromadb/model2vec) to the moment the recall hook actually fires, so boot
 never pays for the vector stack. Recall is owner-gated first of all: a non-owner
 turn (a monitor/cron ``system`` wake, a stranger) never reaches the vault.
+
+The relevance gate is core's classifier primitive, reached through
+``context.classifier`` — the package configures no judge model of its own, so
+the prompt lives in an owner-editable ``classifiers/memory-relevance.md``.
+Recall emits pointers (path + heading) and never note bodies; see ``judge``.
 """
 
 from __future__ import annotations
@@ -32,9 +37,6 @@ STANDING_REMINDER = (
 def register(context: HookContext, hooks: PackageHookRegistrar) -> None:
     """Wire the ambient recall pre_turn hook and the session-start reminder."""
     settings = MemorySettings.from_config(context.config.get("obsidian_memory"))
-    model = context.models.get(settings.judge_role) or context.models.get(
-        "default", ""
-    )
     index_home = index_home_for(context.data_dir)
     counters: dict[str, int] = {}
     # Guards the chroma index build/rebuild once two thread firings genuinely
@@ -52,10 +54,10 @@ def register(context: HookContext, hooks: PackageHookRegistrar) -> None:
         if (counters[turn.thread_key] - 1) % settings.ambient_n != 0:
             return None
         vault = _vault(settings)
-        if vault is None or not model:
+        if vault is None:
             return None
         return await _recall(
-            context, model, settings, index_home, vault, turn, build_lock
+            context, settings, index_home, vault, turn, build_lock
         )
 
     @hooks.session_start
@@ -67,7 +69,6 @@ def register(context: HookContext, hooks: PackageHookRegistrar) -> None:
 
 async def _recall(
     context: HookContext,
-    model: str,
     settings: MemorySettings,
     index_home: Path,
     vault: Path,
@@ -87,8 +88,7 @@ async def _recall(
     )
     transcript = format_transcript(turn.messages, turn.user_text, settings.window)
     return await run_judge(
-        context.provider, model, transcript, candidates,
-        settings.injection_cap_tokens,
+        context.classifier, transcript, candidates, settings.injection_cap_tokens
     )
 
 

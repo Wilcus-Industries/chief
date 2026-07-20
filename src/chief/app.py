@@ -76,6 +76,10 @@ async def _build_agent_core(
     bus = EventBus()
     registry = ToolRegistry()
     hooks = HookRegistry()
+    # Above load_hooks, not beside its monitor use below: hooks get this too.
+    classifier = Classifier(
+        provider, ClassifierRegistry(config.classifiers_dir),
+        config.models.get("default_classifier", config.default_model))
     load_hooks(
         library=PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
         installed=load_installed(INSTALLED_REGISTRY),
@@ -86,6 +90,7 @@ async def _build_agent_core(
         raw_config=load_raw(),
         disabled=config.hooks_disabled,
         data_root=Path("data/hooks"),
+        classifier=classifier,
     )
     # Core registers under a package name like anyone else; accessors sort by it.
     hooks.register_session_start("core", session_start_notice(Path.cwd()))
@@ -126,11 +131,6 @@ async def _build_agent_core(
     dispatcher = Dispatcher(
         manager, bus=bus, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
-    )
-    classifier = Classifier(
-        provider,
-        ClassifierRegistry(config.classifiers_dir),
-        config.models.get("default_classifier", config.default_model),
     )
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(

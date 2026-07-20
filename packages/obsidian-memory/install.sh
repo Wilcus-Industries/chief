@@ -21,6 +21,15 @@ dst="skills/obsidian-memory"
 mkdir -p "$dst"
 cp "$src/SKILL.md" "$dst/SKILL.md"
 
+# The relevance gate is a core classifier, so its definition has to live in the
+# classifiers dir, not the package. Never overwrite: the owner tunes this
+# prompt in place, and a re-install must not silently revert their edits.
+mkdir -p classifiers
+if [ ! -f classifiers/memory-relevance.md ]; then
+  cp packages/obsidian-memory/classifiers/memory-relevance.md \
+    classifiers/memory-relevance.md
+fi
+
 : "${VAULT_PATH:?set VAULT_PATH to the Obsidian vault directory}"
 
 # Build a YAML list of writable paths from the comma-separated input.
