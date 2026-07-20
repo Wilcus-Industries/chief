@@ -3,8 +3,10 @@
 A ``post_tool`` hook receives the :class:`ToolCall` and the result string a
 tool returned, and answers with one of exactly two powers:
 
-- :class:`Annotate` — prepend a name-attributed ``<hook>`` note to the
-  **unchanged** payload (tag it untrusted, tell the model how to treat it).
+- :class:`Annotate` — prepend a name-attributed ``<hook>`` note to the payload
+  (tag it untrusted, tell the model how to treat it). The payload keeps every
+  byte but its ``<hook>`` delimiters, which are neutralized so a tool result
+  cannot forge a block and impersonate a screener.
 - :class:`Veto` — withhold the payload entirely; the model gets the refusal
   and the hook's reason instead.
 
@@ -21,7 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from chief.agent.loop import PostTool
-from chief.hooks.runner import render_block
+from chief.hooks.runner import neutralize_hook_tags, render_block
 from chief.provider.base import ToolCall
 
 if TYPE_CHECKING:
@@ -61,6 +63,13 @@ async def run_post_tool(
     Hooks run in the registry's (package-name-sorted) order under ``timeout``.
     A raise, a timeout, or any non-verdict return value leaves the result
     untouched. The first :class:`Veto` returns immediately.
+
+    The payload is a tool result — attacker-influenced by definition — so it
+    carries the same anti-forgery invariant as a contribution: its
+    ``<hook``/``</hook`` sequences are neutralized before it is joined below
+    the annotation blocks. Without that, a fetched page could ship its own
+    ``<hook source="screener">`` and impersonate the very screener that is
+    meant to flag it. Every other byte passes through verbatim.
     """
     notes: list[tuple[str, str]] = []
     for name, fn in entries:
@@ -74,7 +83,7 @@ async def run_post_tool(
         if isinstance(verdict, Annotate):
             notes.append((name, verdict.note))
     blocks = [render_block(name, note).lstrip() for name, note in notes]
-    return "\n\n".join([*blocks, result])
+    return "\n\n".join([*blocks, neutralize_hook_tags(result)])
 
 
 def tool_screener(

@@ -63,15 +63,16 @@ async def run_post_turn(
 
 
 # The block delimiter and the name-attribution attribute are trusted structure;
-# a contribution's text/name must never be able to forge either. Contributed
-# text may be attacker-influenced (retrieved/relayed content, e.g. #207), so a
-# ``<hook``/``</hook`` in it is neutralized and a name is reduced to a slug.
+# no untrusted text may be able to forge either. Contributed text *and* tool
+# payloads may be attacker-influenced (retrieved/relayed content, e.g. #207),
+# so a ``<hook``/``</hook`` in them is neutralized and a name is reduced to a
+# slug.
 _HOOK_TAG = re.compile(r"<(/?hook)", re.IGNORECASE)
 _UNSAFE_NAME_CHAR = re.compile(r"[^a-zA-Z0-9._-]")
 
 
-def _escape_hook_tags(text: str) -> str:
-    """Entity-escape only ``<hook``/``</hook`` sequences so a contribution can't
+def neutralize_hook_tags(text: str) -> str:
+    """Entity-escape only ``<hook``/``</hook`` sequences so untrusted text can't
     break out of or forge a delimiter. All other text passes through verbatim."""
     return _HOOK_TAG.sub(r"&lt;\1", text)
 
@@ -100,7 +101,7 @@ def render_block(package: str, text: str) -> str:
     ``text`` are sanitized so neither can forge attribution or a delimiter.
     """
     source = sanitize_package_name(package)
-    body = _escape_hook_tags(text)
+    body = neutralize_hook_tags(text)
     return f'\n\n<hook source="{source}">\n{body}\n</hook>'
 
 
