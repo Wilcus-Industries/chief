@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, time
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -12,6 +13,7 @@ from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
 from chief.cron.tools import register_cron_tools
 from chief.persistence.db import make_session_factory
 from chief.provider.base import ToolCall
+from chief.shelltool import ShellService
 
 NOON = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
@@ -147,3 +149,146 @@ async def test_schedule_tool_create_list_delete(engine: AsyncEngine) -> None:
     assert await registry.dispatch(
         ToolCall(id="5", name="schedule", arguments={"action": "list"})
     ) == "no schedules"
+
+
+def make_shell(tmp_path: Path) -> ShellService:
+    return ShellService(
+        workspace_dir=str(tmp_path / "ws"),
+        timeout_seconds=5.0,
+        output_limit=10_000,
+    )
+
+
+async def wait_for_marker(marker: Path) -> None:
+    for _ in range(200):
+        if marker.exists():
+            return
+        await asyncio.sleep(0.02)
+
+
+async def test_command_schedule_runs_the_command_without_waking(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    shell = make_shell(tmp_path)
+    wake = WakeSink()
+    service = CronService(
+        make_session_factory(engine),
+        wake,
+        quiet=None,
+        poll_seconds=0.02,
+        run_command=shell.run,
+    )
+    marker = tmp_path / "fired.txt"
+    await service.create(
+        description="touch a file",
+        spec="@every 0.05",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command=f"echo fired > {marker}",
+    )
+    service.start()
+    try:
+        await wait_for_marker(marker)
+    finally:
+        await service.stop()
+        await shell.aclose()
+    assert marker.read_text().strip() == "fired"
+    assert wake.messages == []
+
+
+async def test_command_schedule_ignores_quiet_hours(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    # A prompt row would defer to 23:59; a silent command has no owner
+    # attention to protect, so it runs.
+    shell = make_shell(tmp_path)
+    service = CronService(
+        make_session_factory(engine),
+        WakeSink(),
+        quiet=parse_quiet_hours("00:00-23:59"),
+        poll_seconds=0.02,
+        run_command=shell.run,
+    )
+    marker = tmp_path / "quiet.txt"
+    await service.create(
+        description="run anyway",
+        spec="@every 0.05",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command=f"echo fired > {marker}",
+    )
+    service.start()
+    try:
+        await wait_for_marker(marker)
+    finally:
+        await service.stop()
+        await shell.aclose()
+    assert marker.read_text().strip() == "fired"
+
+
+async def test_command_schedule_needs_an_asker(engine: AsyncEngine) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)  # no asker wired
+    result = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="schedule",
+            arguments={
+                "action": "create",
+                "description": "d",
+                "spec": "@every 60",
+                "command": "ls",
+            },
+        ),
+        ToolContext(thread_key="cli:home", channel="cli"),
+    )
+    assert result.startswith("schedule not created")
+    assert await service.list_enabled() == []
+
+
+async def test_list_shows_a_command_schedule_created_outside_the_agent(
+    engine: AsyncEngine,
+) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    await service.create(
+        description="prune",
+        spec="0 4 * * *",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command="ls -la",
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    listing = await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={"action": "list"})
+    )
+    assert "ls -la" in listing
+
+
+async def test_create_rejects_both_prompt_and_command(engine: AsyncEngine) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    result = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="schedule",
+            arguments={
+                "action": "create",
+                "description": "d",
+                "spec": "@every 60",
+                "prompt": "p",
+                "command": "ls",
+            },
+        ),
+        ToolContext(thread_key="cli:home", channel="cli"),
+    )
+    assert result.startswith("error: create needs")
+    assert await service.list_enabled() == []

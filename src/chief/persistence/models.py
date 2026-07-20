@@ -55,7 +55,7 @@ class MonitorRow(_Stamped, Base):
 
 
 class ScheduleRow(_Stamped, Base):
-    """A cron/interval schedule that wakes a thread with a prompt."""
+    """A schedule that wakes a thread with a prompt, or runs a shell command."""
 
     __tablename__ = "schedules"
 
@@ -64,7 +64,10 @@ class ScheduleRow(_Stamped, Base):
     spec: Mapped[str] = mapped_column(String)
     wake_channel: Mapped[str] = mapped_column(String)
     wake_thread: Mapped[str] = mapped_column(String)
-    prompt: Mapped[str] = mapped_column(String)
+    prompt: Mapped[str] = mapped_column(String, default="")
+    # Exactly one of prompt/command is set: a command row fires unattended on
+    # its own shell and never wakes the agent, so it carries no prompt.
+    command: Mapped[str | None] = mapped_column(String, default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
