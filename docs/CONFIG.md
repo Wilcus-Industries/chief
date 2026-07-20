@@ -23,7 +23,11 @@ default is the inline literal in the `Config(...)` call.
 `mcp_servers` is the canonical case: no env override, no template entry, and
 `mcp_servers=dict(raw.get("mcp_servers") or {})`. Editing the `default_factory`
 in `config.py` is a **silent no-op**. To add an MCP server you edit `config.yaml`
-and restart.
+and restart. A stdio entry may also declare `env` (a `dict[str, str]`) and `cwd`
+(a string path) — `env` is opt-in, not inherited: the child process gets the
+MCP SDK's minimal default set (`PATH`, `HOME`, …) plus exactly the keys listed
+here, never the daemon's own environment. Omitting both behaves exactly as
+before.
 
 The same applies to `web_host`, `web_port`, `skills_dir`, `agents_dir`,
 `classifiers_dir`, and `imessage.db_path` — all have dataclass defaults but no
