@@ -4,6 +4,7 @@
 import asyncio
 import json
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from chief.provider.base import ToolCall
 from chief.selfedit import gitops
 from chief.selfedit.notice import (
     NOTICE_PATH,
+    NOTICE_TTL_SECONDS,
     RestartNotice,
     mark_notice_rolled_back,
     take_restart_notice,
@@ -53,11 +55,15 @@ def repo(tmp_path: Path) -> Path:
 
 
 class RestartSpy:
+    """Stands in for RestartController.request (which takes the notice)."""
+
     def __init__(self) -> None:
         self.called = False
+        self.notice: RestartNotice | None = None
 
-    def __call__(self) -> None:
+    def __call__(self, notice: RestartNotice | None = None) -> None:
         self.called = True
+        self.notice = notice
 
 
 def make_pipeline(
@@ -348,42 +354,94 @@ async def test_write_then_failed_restart_keeps_edit(
 # --- restart notice: reporting back to the requesting thread ---------------
 
 
-async def test_restart_records_the_requesting_thread(
+async def test_restart_hands_the_requesting_thread_to_the_reboot(
     repo: Path, tmp_path: Path
 ) -> None:
-    """The reboot must be able to answer where the restart was asked for."""
+    """The notice rides to the reboot — nothing on disk while the turn runs.
+
+    Between request and re-exec sit the rest of the turn and the drain; a
+    notice written here would be claimed by any unrelated reboot in that
+    window.
+    """
     pipeline, restart = make_pipeline(repo, tmp_path, "true")
     origin = ToolContext(thread_key="imessage:owner", channel="imessage")
     result = await pipeline.restart("config reload", origin=origin)
     assert "restarting" in result
     assert restart.called
-    notice = take_restart_notice(repo)
-    assert notice is not None
-    assert (notice.channel, notice.thread_key) == ("imessage", "imessage:owner")
-    assert notice.text().startswith("✅ restart success")
-    assert "config reload" in notice.text()
-    # Consumed on read: a later crash-restart must not resend it.
-    assert take_restart_notice(repo) is None
+    assert not (repo / NOTICE_PATH).exists()
+    assert restart.notice is not None
+    assert (restart.notice.channel, restart.notice.thread_key) == (
+        "imessage",
+        "imessage:owner",
+    )
+    assert "config reload" in restart.notice.text()
 
 
-async def test_failed_check_writes_no_notice(repo: Path, tmp_path: Path) -> None:
-    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+async def test_failed_check_hands_over_no_notice(
+    repo: Path, tmp_path: Path
+) -> None:
+    pipeline, restart = make_pipeline(repo, tmp_path, "false")
     origin = ToolContext(thread_key="cli:t", channel="cli")
     await pipeline.restart("broken", confirm=True, origin=origin)
+    assert not restart.called
     assert take_restart_notice(repo) is None
 
 
 async def test_restart_tool_passes_its_thread_through(
     repo: Path, tmp_path: Path
 ) -> None:
-    registry, _ = _edit_registry(repo, tmp_path, "true")
+    registry, restart = _edit_registry(repo, tmp_path, "true")
     await registry.dispatch(
         ToolCall(id="1", name="restart", arguments={"rationale": "reload"}),
         ToolContext(thread_key="web:main", channel="web"),
     )
+    assert restart.notice is not None
+    assert (restart.notice.channel, restart.notice.thread_key) == (
+        "web",
+        "web:main",
+    )
+
+
+async def test_controller_writes_the_notice_only_at_reboot_time(
+    repo: Path,
+) -> None:
+    """The disk write and the re-exec must be adjacent, not a drain apart."""
+    at_reboot: list[bool] = []
+    controller = RestartController(
+        lambda: at_reboot.append((repo / NOTICE_PATH).exists()), repo_root=repo
+    )
+    controller.request(RestartNotice("cli", "cli:t", "reload"))
+    # Requested, turn still running: nothing on disk for a stray reboot yet.
+    assert not (repo / NOTICE_PATH).exists()
+    await controller.fire_if_requested()
+    assert at_reboot == [True]
     notice = take_restart_notice(repo)
     assert notice is not None
-    assert (notice.channel, notice.thread_key) == ("web", "web:main")
+    assert notice.thread_key == "cli:t"
+
+
+async def test_controller_without_a_notice_writes_nothing(repo: Path) -> None:
+    controller = RestartController(lambda: None, repo_root=repo)
+    controller.request()
+    await controller.fire_if_requested()
+    assert take_restart_notice(repo) is None
+
+
+def test_stale_notice_is_dropped_unread(repo: Path) -> None:
+    """A reboot that never happened must not congratulate a later one."""
+    write_restart_notice(repo, RestartNotice("imessage", "+1555", "old news"))
+    path = repo / NOTICE_PATH
+    data = json.loads(path.read_text())
+    data["written_at"] = time.time() - (NOTICE_TTL_SECONDS + 1)
+    path.write_text(json.dumps(data))
+    assert take_restart_notice(repo) is None
+    # Dropped, not left to be claimed by the boot after this one either.
+    assert not path.exists()
+
+
+def test_fresh_notice_survives_the_ttl_check(repo: Path) -> None:
+    write_restart_notice(repo, RestartNotice("cli", "cli:t", "just now"))
+    assert take_restart_notice(repo) is not None
 
 
 def test_rolled_back_notice_reports_the_failure(repo: Path) -> None:

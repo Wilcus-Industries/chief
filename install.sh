@@ -112,7 +112,7 @@ chief — personal AI agent
   chief start      start the daemon (autostart service)
   chief stop       stop the daemon
   chief status     service + web UI state
-  chief update     jump to the newest tagged release (restart included)
+  chief update     merge origin/main, restart, roll back if unhealthy
   chief wizard     re-run the first-run wizard (password / key / budget cap)
   chief uninstall  remove service + launcher (--purge-data removes data too)
 USAGE
