@@ -105,7 +105,14 @@ async def test_switch_model_is_gated_and_persists_the_override(
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(switch,))], text_turn("switched")]
     )
-    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    # `opus` has to be a configured alias to be accepted — a bare name that
+    # routes nowhere is rejected before it can wedge the thread.
+    config = make_config(
+        tmp_path,
+        sock_path,
+        provider_aliases={"opus": AliasSpec(backend="proxy", model="claude-opus-4-8")},
+    )
+    app, streams = await boot(config, provider)
     try:
         send_frame(streams, "use opus please", thread="t1")
         card = (await read_finals(streams, 1))[0]

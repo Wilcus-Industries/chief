@@ -315,3 +315,127 @@ async def test_monitor_tool_rejects_undeclared_fire_label(
         context,
     )
     assert "fire_label" in result and "wake-judge" in result
+
+
+async def test_pattern_monitor_can_match_on_sender(engine: AsyncEngine) -> None:
+    """#235: a pattern monitor could only ever see `text`.
+
+    Asking to wake on a specific contact silently never fired, because the
+    event's `text` is just the message body — the sender is a separate field.
+    """
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="imessage")
+
+    created = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "wake on Daniel",
+                "pattern": r"\+15551234567",
+                "field": "sender",
+            },
+        ),
+        context,
+    )
+    assert created == "monitor #1 created"
+
+    await bus.publish(
+        Event(
+            type="message.inbound",
+            channel="imessage",
+            payload={
+                "thread_key": "imessage:+15551234567",
+                "sender": "+15551234567",
+                "text": "Chastain?",  # body alone would never match the pattern
+            },
+        )
+    )
+    assert len(wake.messages) == 1, "sender-matched monitor must fire"
+
+
+async def test_pattern_monitor_rejects_an_unmatchable_field(
+    engine: AsyncEngine,
+) -> None:
+    """A typo'd field would match "" forever and never fire — fail loudly."""
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="imessage")
+
+    result = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "typo",
+                "pattern": "x",
+                "field": "from",
+            },
+        ),
+        context,
+    )
+    assert result.startswith("error:")
+    assert "from" in result
+    assert "sender" in result, "the error must list the fields that do work"
+
+
+async def test_field_without_pattern_is_rejected(engine: AsyncEngine) -> None:
+    """`field` only means anything for the pattern form."""
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="imessage")
+
+    result = await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "x",
+                "instruction": "wake on anything",
+                "field": "sender",
+            },
+        ),
+        context,
+    )
+    assert result.startswith("error:")
+    assert "field" in result and "pattern" in result
+
+
+async def test_pattern_defaults_to_text_field(engine: AsyncEngine) -> None:
+    """Backward compatible: omitting `field` keeps matching on text."""
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="imessage")
+
+    await registry.dispatch(
+        ToolCall(
+            id="1",
+            name="monitor",
+            arguments={
+                "action": "create",
+                "description": "urgent watcher",
+                "pattern": "urgent",
+            },
+        ),
+        context,
+    )
+    await bus.publish(
+        Event(
+            type="message.inbound",
+            channel="imessage",
+            payload={"thread_key": "t", "sender": "+1", "text": "urgent thing"},
+        )
+    )
+    assert len(wake.messages) == 1
