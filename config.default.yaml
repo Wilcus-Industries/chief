@@ -46,9 +46,14 @@ max_concurrent_sessions: 4
 # card on the session's surface; unanswered cards deny after 10 minutes. A "*"
 # in `approved` auto-approves EVERY tool (the "full permissions" switch);
 # `never` always wins over it. Keep gates on until behavioral guardrails land.
+# `announce` posts a one-line "⚙ <tool> <args>" notice on the session's surface
+# for every call that does NOT raise a card — so an approved or "always
+# allow"ed tool is still visible instead of running silently. Set false for
+# quiet channels.
 gate:
   never: []
   approved: []
+  announce: true
 
 # OpenRouter dollars per calendar month. cap_usd 0 = unlimited (bootstrap
 # sets a real cap); crossing warn_ratio notifies the owner.

@@ -49,6 +49,7 @@ def make_gated(
     answer: Approval,
     *,
     on_always: object = None,
+    announced: list[str] | None = None,
 ) -> tuple[GatedTools, list[str]]:
     registry = ToolRegistry()
 
@@ -69,6 +70,10 @@ def make_gated(
         questions.append(question)
         return answer
 
+    async def announce(context: ToolContext, text: str) -> None:
+        assert announced is not None
+        announced.append(text)
+
     gated = GatedTools(
         registry=registry,
         policy=make_policy(),
@@ -76,6 +81,7 @@ def make_gated(
         context=CONTEXT,
         ask=ask,
         on_always=on_always,  # type: ignore[arg-type]
+        announce=announce if announced is not None else None,
     )
     return gated, questions
 
@@ -166,6 +172,77 @@ async def test_audit_records_each_outcome(tmp_path: Path) -> None:
         "gray": "card:once",
         "peek": "read_only",
     }
+
+
+async def test_approved_call_is_announced(tmp_path: Path) -> None:
+    """An always/approved tool is no longer silent — it announces itself."""
+    announced: list[str] = []
+    gated, questions = make_gated(tmp_path, Approval.DENY, announced=announced)
+    await gated.dispatch(ToolCall(id="1", name="echo", arguments={"text": "x"}))
+    assert questions == []
+    assert announced == ['⚙ echo {"text": "x"}']
+
+
+async def test_read_only_and_denied_calls_are_announced(tmp_path: Path) -> None:
+    announced: list[str] = []
+    gated, _ = make_gated(tmp_path, Approval.DENY, announced=announced)
+    await gated.dispatch(ToolCall(id="1", name="peek", arguments={}))
+    await gated.dispatch(ToolCall(id="2", name="rm_rf", arguments={}))
+    assert announced == ["⚙ peek {}", "⚙ rm_rf {} — denied by the gate"]
+
+
+async def test_card_call_is_not_double_announced(tmp_path: Path) -> None:
+    """The card already shows the call; a notice would duplicate it."""
+    announced: list[str] = []
+    gated, questions = make_gated(tmp_path, Approval.ONCE, announced=announced)
+    await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
+    assert len(questions) == 1
+    assert announced == []
+
+
+async def test_unknown_tool_is_not_announced(tmp_path: Path) -> None:
+    announced: list[str] = []
+    gated, _ = make_gated(tmp_path, Approval.ONCE, announced=announced)
+    await gated.dispatch(ToolCall(id="1", name="phantom", arguments={}))
+    assert announced == []
+
+
+async def test_long_arguments_are_truncated(tmp_path: Path) -> None:
+    announced: list[str] = []
+    gated, _ = make_gated(tmp_path, Approval.DENY, announced=announced)
+    await gated.dispatch(
+        ToolCall(id="1", name="echo", arguments={"text": "x" * 500})
+    )
+    assert len(announced[0]) < 200
+    assert announced[0].endswith("…")
+
+
+async def test_announce_failure_does_not_break_the_call(tmp_path: Path) -> None:
+    """A dead channel must not turn a working tool call into an error."""
+    registry = ToolRegistry()
+
+    async def echo(text: str = "") -> str:
+        return f"ran:{text}"
+
+    registry.register(
+        Tool(spec=ToolSpec(name="echo", description=".", parameters={}), handler=echo)
+    )
+
+    async def ask(context: ToolContext, question: str) -> Approval:
+        return Approval.DENY
+
+    async def announce(context: ToolContext, text: str) -> None:
+        raise RuntimeError("channel is gone")
+
+    gated = GatedTools(
+        registry=registry,
+        policy=make_policy(),
+        audit=AuditLog(tmp_path / "audit.jsonl"),
+        context=CONTEXT,
+        ask=ask,
+        announce=announce,
+    )
+    assert await gated.dispatch(ToolCall(id="1", name="echo", arguments={})) == "ran:"
 
 
 def test_approved_store_round_trips(tmp_path: Path) -> None:

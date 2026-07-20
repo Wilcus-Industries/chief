@@ -73,6 +73,9 @@ class Config:
     provider_aliases: dict[str, "AliasSpec"] = field(default_factory=dict)
     gate_never: tuple[str, ...] = ()
     gate_approved: tuple[str, ...] = ()
+    # Announce every non-card tool call on the session's own surface, so an
+    # approved / "always allow"ed tool stays visible instead of silent.
+    gate_announce: bool = True
     budget_cap_usd: float = 0.0
     budget_warn_ratio: float = 0.8
     quiet_hours: str = ""
@@ -170,6 +173,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         provider_aliases=_parse_aliases(raw.get("provider_aliases") or {}),
         gate_never=tuple(gate.get("never") or ()),
         gate_approved=tuple(gate.get("approved") or ()),
+        gate_announce=bool(gate.get("announce", True)),
         budget_cap_usd=float(budget.get("cap_usd", 0.0)),
         budget_warn_ratio=float(budget.get("warn_ratio", 0.8)),
         quiet_hours=str(raw.get("quiet_hours") or ""),
