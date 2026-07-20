@@ -59,7 +59,9 @@ file before you change it.
 - **Restart pipeline (the self-edit seatbelt)** — `src/chief/selfedit/`
   (`pipeline.py` runs the done-check against your working tree, commits + writes
   the rollback marker on green, keeps your edits on red; `recovery.py` handles
-  restart/rollback). The `restart` tool is your only way to make edits live.
+  restart/rollback; `notice.py` records the thread that asked, so the rebooted
+  daemon reports "restart success" — or the rollback — back there). The
+  `restart` tool is your only way to make edits live.
 - **Boot wiring** — `src/chief/app.py` (`build_app`, the table of contents) with
   the infrastructure phases (persistence, gate, MCP, adapters) in
   `src/chief/wiring.py`. The entrypoint (`src/chief/entrypoint.py`) takes a
