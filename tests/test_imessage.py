@@ -205,6 +205,21 @@ async def test_group_participants_share_one_thread_key(tmp_path: Path) -> None:
     ]
 
 
+async def test_group_sender_is_never_mapped_to_owner(tmp_path: Path) -> None:
+    """Even when a group message carries an owner handle, it maps to the raw
+    sender. Sender ``owner`` takes the dispatcher's owner path — a turn, then
+    a reply to thread_key — and thread_key here is a group the one-to-one
+    send path cannot address. Groups must stay on the stranger path."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "owner talking in a group", group=True)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [(m.sender, m.thread_key) for m in harness.delivered] == [
+        (OWNER, "group;+;room")
+    ]
+
+
 async def test_chief_own_group_send_never_polls_back(tmp_path: Path) -> None:
     """Chief texts a group out-of-band via the imsg CLI. That row lands
     is_from_me=1 outside the owner self-chat, so the scope predicate drops

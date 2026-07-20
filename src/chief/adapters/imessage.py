@@ -255,6 +255,12 @@ class IMessageAdapter(Adapter):
         if from_me and not in_self:
             return None  # owner->friend sent copy: not the self-chat
         if group_chat is not None:
+            # Raw sender, never "owner", even for an owner handle: sender
+            # "owner" takes the dispatcher's owner path, which runs a turn and
+            # replies to thread_key — and a group thread_key is a chat the
+            # one-to-one send path cannot address. It also means nobody in a
+            # group can present as the owner; group text is uniformly
+            # untrusted, and owner instructions arrive only via the self-chat.
             return Message(
                 channel=self.name, sender=sender, thread_key=group_chat, text=text
             )
