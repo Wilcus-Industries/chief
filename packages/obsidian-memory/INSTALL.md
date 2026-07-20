@@ -37,9 +37,10 @@ and config (steps 6–7), then build the first index and verify (steps 8–9).
    recommended: versioned, diffable), **iCloud**, **Obsidian Sync**, or
    **none**. This is the owner's setup, not chief's; just record it so the skill
    can advise.
-3. **Layout.** Read `docs/best-practices.md` with the owner and pick a note
-   organization — PARA, Zettelkasten, MOC/atomic, or daily-notes. Fill in the
-   gaps: which folders exist, where new notes go.
+3. **Layout.** Read `packages/obsidian-memory/docs/best-practices.md` with the
+   owner and pick a note organization — PARA, Zettelkasten, MOC/atomic, or
+   daily-notes. Fill in the gaps: which folders exist, where new notes go.
+   Read that path exactly; do not write the file if it is missing.
 4. **Index scope.** Confirm the include/exclude prefixes. The defaults exclude
    `.obsidian/`, `templates/`, and `attachments/`; add any private folders the
    owner does not want recalled.
