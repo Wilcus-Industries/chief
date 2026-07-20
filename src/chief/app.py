@@ -150,6 +150,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         timeout_seconds=config.shell_timeout_seconds,
         output_limit=config.shell_output_limit,
     )
+    # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
+    model_aliases = frozenset(config.provider_aliases)
     register_native_tools(
         core.registry,
         manager=core.manager,
@@ -166,8 +168,12 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         # Mechanical echo-loop seatbelt: shell commands must not message the
         # owner's own handle out-of-band (imsg/osascript) — see owner_send_guard.
         shell_guards=(owner_send_guard(config.imessage_owner_handles),),
+        model_aliases=model_aliases,
     )
-    commands = CommandSet(core.manager, core.monitors, core.cron, store, skills=skills)
+    commands = CommandSet(
+        core.manager, core.monitors, core.cron, store, skills=skills,
+        model_aliases=model_aliases,
+    )
     core.dispatcher.set_commands(commands)
     mcp_manager, mcp_configs = build_mcp(config, core.registry)
     adapters = build_adapters(config, core, store, commands)

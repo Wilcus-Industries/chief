@@ -9,6 +9,7 @@ records an override and does not race the in-flight transcript commit.
 from chief.agent.manager import SessionManager
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
+from chief.provider.model_names import UnknownModelError, validate_model_name
 
 _SPEC = ToolSpec(
     name="switch_model",
@@ -32,14 +33,22 @@ _SPEC = ToolSpec(
 
 
 def register_switch_model_tool(
-    registry: ToolRegistry, manager: SessionManager
+    registry: ToolRegistry,
+    manager: SessionManager,
+    model_aliases: frozenset[str] = frozenset(),
 ) -> None:
     """Expose the approval-gated ``switch_model`` tool backed by the manager."""
 
     async def switch_model(model: str, context: ToolContext | None = None) -> str:
         if context is None:
             return "error: switch_model needs a session context"
-        await manager.set_model(context.thread_key, context.channel, model)
-        return f"model set to '{model}' for this thread; takes effect next turn"
+        try:
+            name = validate_model_name(
+                model, aliases=model_aliases, default_model=manager.default_model
+            )
+        except UnknownModelError as exc:
+            return f"error: {exc}"
+        await manager.set_model(context.thread_key, context.channel, name)
+        return f"model set to '{name}' for this thread; takes effect next turn"
 
     registry.register(Tool(_SPEC, switch_model, wants_context=True))

@@ -94,6 +94,11 @@ class SessionManager:
         """Every known thread — the agent's own `session` list tool."""
         return await self._store.list_sessions()
 
+    @property
+    def default_model(self) -> str:
+        """The model a thread runs on with no override — see ``set_model``."""
+        return self._default_model
+
     async def set_model(self, thread_key: str, channel: str, model: str) -> None:
         """Owner per-thread model override: live session + persisted row."""
         session = await self.get_or_create(thread_key, channel)
