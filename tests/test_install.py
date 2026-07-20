@@ -149,18 +149,42 @@ def test_service_definitions_wrap_the_launcher(tmp_path: Path) -> None:
 
 
 class FakeRunner:
-    """Records argv calls; scripted stdout per command head."""
+    """Records argv calls; scripted stdout/returncode per command substring."""
 
-    def __init__(self, stdout: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        stdout: dict[str, str] | None = None,
+        fails: dict[str, str] | None = None,
+    ) -> None:
         self.calls: list[list[str]] = []
         self._stdout = stdout or {}
+        self._fails = fails or {}
 
     def __call__(self, argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
         self.calls.append(list(argv))
+        joined = " ".join(argv)
+        for key, err in self._fails.items():
+            if key in joined:
+                return subprocess.CompletedProcess(list(argv), 1, "", err)
         for key, out in self._stdout.items():
-            if key in " ".join(argv):
+            if key in joined:
                 return subprocess.CompletedProcess(list(argv), 0, out, "")
         return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+
+def _update_repo(tmp_path: Path) -> ServiceManager:
+    """A service manager with an installed unit, so update tries a restart."""
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=FakeRunner(), uid=1000
+    )
+    manager.unit_path.parent.mkdir(parents=True, exist_ok=True)
+    manager.unit_path.write_text("unit")
+    return manager
+
+
+# rev-parse HEAD then origin/main: differing shas mean there is something
+# to merge. Ordered stdout keys would be ambiguous, so key on the full argv.
+AHEAD = {"rev-parse HEAD": "old\n", "rev-parse origin/main": "new\n"}
 
 
 def test_linux_service_install_writes_unit_and_enables(tmp_path: Path) -> None:
@@ -175,42 +199,130 @@ def test_linux_service_install_writes_unit_and_enables(tmp_path: Path) -> None:
     assert "systemctl --user enable --now chief.service" in joined
 
 
-def test_update_checks_out_latest_tag_and_restarts(tmp_path: Path) -> None:
-    runner = FakeRunner(
-        stdout={"tag --sort": "v0.3.0\nv0.2.0\n", "describe": "v0.2.0"}
-    )
-    manager = ServiceManager(
-        platform="linux", home=tmp_path, runner=runner, uid=1000
-    )
-    manager.unit_path.parent.mkdir(parents=True)
-    manager.unit_path.write_text("unit")
+def test_update_merges_origin_main_and_restarts(tmp_path: Path) -> None:
+    """Merge, never checkout: self-edit means the install always carries local
+    commits, and a tag checkout would throw them out of the working tree."""
+    runner = FakeRunner(stdout=AHEAD)
+    manager = _update_repo(tmp_path)
     said: list[str] = []
     assert (
         update(
-            repo_dir=tmp_path, runner=runner, service=manager, say=said.append
+            repo_dir=tmp_path,
+            runner=runner,
+            service=manager,
+            say=said.append,
+            healthy=lambda: True,
         )
         == 0
     )
     joined = [" ".join(c) for c in runner.calls]
-    assert any("checkout v0.3.0" in c for c in joined)
+    assert any("merge -X theirs --no-edit origin/main" in c for c in joined)
+    assert not any("checkout" in c for c in joined)
     assert any("uv sync" in c for c in joined)
-    assert not any("migrate" in c for c in joined)
     assert "autostart service restarted." in said
 
 
-def test_update_with_no_tags_fails_cleanly(tmp_path: Path) -> None:
-    runner = FakeRunner()
-    manager = ServiceManager(
-        platform="linux", home=tmp_path, runner=runner, uid=1000
+def test_update_no_op_when_already_at_origin_main(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        stdout={"rev-parse HEAD": "same\n", "rev-parse origin/main": "same\n"}
     )
     said: list[str] = []
     assert (
         update(
-            repo_dir=tmp_path, runner=runner, service=manager, say=said.append
+            repo_dir=tmp_path,
+            runner=runner,
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: True,
+        )
+        == 0
+    )
+    assert not any("merge" in " ".join(c) for c in runner.calls)
+    assert any("already up to date" in line for line in said)
+
+
+def test_update_refuses_a_dirty_tracked_tree(tmp_path: Path) -> None:
+    """Untracked installed skills are normal and must not block; modified
+    tracked files would be silently clobbered by -X theirs, so refuse."""
+    runner = FakeRunner(stdout={**AHEAD, "status --porcelain": " M src/x.py\n"})
+    said: list[str] = []
+    assert (
+        update(
+            repo_dir=tmp_path,
+            runner=runner,
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: True,
         )
         == 1
     )
-    assert any("no release tags" in line for line in said)
+    assert not any("merge" in " ".join(c) for c in runner.calls)
+    assert any("uncommitted" in line for line in said)
+
+
+def test_update_aborts_a_conflicted_merge(tmp_path: Path) -> None:
+    runner = FakeRunner(stdout=AHEAD, fails={"merge -X theirs": "CONFLICT"})
+    said: list[str] = []
+    assert (
+        update(
+            repo_dir=tmp_path,
+            runner=runner,
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: True,
+        )
+        == 1
+    )
+    assert any("merge --abort" in " ".join(c) for c in runner.calls)
+
+
+def test_update_rolls_back_when_the_daemon_comes_up_unhealthy(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(stdout=AHEAD)
+    said: list[str] = []
+    assert (
+        update(
+            repo_dir=tmp_path,
+            runner=runner,
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: False,
+        )
+        == 1
+    )
+    joined = [" ".join(c) for c in runner.calls]
+    assert any("reset --hard old" in c for c in joined)
+    assert any("rolled back" in line for line in said)
+
+
+def test_update_resyncs_installed_skills_from_packages(tmp_path: Path) -> None:
+    """Installed skills are copies. Without this they silently go stale — a
+    package skill edit deploys as code but never reaches the agent."""
+    pkg = tmp_path / "packages" / "build-imessage" / "skills" / "imsg"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text("new text")
+    installed = tmp_path / "skills" / "imsg"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("stale text")
+    # A packaged skill that was never installed stays uninstalled.
+    other = tmp_path / "packages" / "maps" / "skills" / "maps"
+    other.mkdir(parents=True)
+    (other / "SKILL.md").write_text("maps")
+    said: list[str] = []
+    assert (
+        update(
+            repo_dir=tmp_path,
+            runner=FakeRunner(stdout=AHEAD),
+            service=_update_repo(tmp_path),
+            say=said.append,
+            healthy=lambda: True,
+        )
+        == 0
+    )
+    assert (installed / "SKILL.md").read_text() == "new text"
+    assert not (tmp_path / "skills" / "maps").exists()
+    assert any("imsg" in line for line in said)
 
 
 def test_uninstall_purge_needs_confirmation(tmp_path: Path) -> None:
