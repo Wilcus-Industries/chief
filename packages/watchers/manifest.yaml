@@ -1,0 +1,8 @@
+name: watchers
+description: Poll RSS feeds, JSON APIs, and GitHub repos on a schedule with watermark dedup — notify only on new items.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/watchers
+config_keys: []
+secrets: []
