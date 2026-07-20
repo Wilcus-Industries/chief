@@ -3,15 +3,21 @@
 Discovery only — ``search <query>`` and ``list``, each with ``--installed``.
 Output names each package with its description, source (bundled vs cloned),
 installed status, and on-disk path, so the agent reads and edits it in place.
-The CLI owns a local clone of the chief-packages repo (clone-if-missing, no
-auto-pull) and reads across two roots — bundled ``packages/`` and the clone —
-bundled winning name collisions. Install/uninstall are document-driven; there
-is no ``pull`` or ``remove`` here (PRD #198).
+The CLI owns a local clone of the chief-packages repo and reads across two
+roots — bundled ``packages/`` and the clone — bundled winning name collisions.
+Install/uninstall are document-driven; there is no ``remove`` here (PRD #198).
+
+The clone is refreshed on **every** invocation, and ``update`` does the same
+thing explicitly and reports what moved. The split from ``chief update``
+matters: that one moves core (plus the bundled packages, same repo) and
+restarts the daemon; this one only moves the clone, which is data the agent
+reads — no running code changes, so nothing restarts. Both the auto-pull and
+the one-time clone are bounded and fail soft: a stale clone beats a wedged CLI,
+and ``chief-pkg`` runs through the single dispatcher, so hanging here hangs the
+whole daemon.
 """
 
 import argparse
-import os
-import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,13 +25,10 @@ from pathlib import Path
 
 from chief.config import Config, load_config, load_raw
 from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary, dep_importable
+from chief.pkgsync import clone_if_missing, pull_clone
 from chief.registry_apply import load_installed as _load_installed
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")
-
-#: Hard ceiling on the one-time clone so a stalled network or auth prompt can never
-#: wedge `chief-pkg` (and, through the single dispatcher, the whole daemon).
-CLONE_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -37,34 +40,6 @@ class Row:
     source: str
     installed: bool
     path: Path
-
-
-def clone_if_missing(repo_url: str, dest: Path) -> None:
-    """Clone the chief-packages repo once; never fail OR hang the CLI if it can't.
-
-    The remote may not exist yet, so a clone failure is a warning, not an error —
-    discovery still works over the bundled root alone. ``GIT_TERMINAL_PROMPT=0`` stops
-    git blocking forever on an interactive auth prompt, and a hard ``timeout`` bounds a
-    stalled network; either way discovery falls back to bundled-only.
-    """
-    if dest.exists() or not repo_url:
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        result = subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, str(dest)],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            timeout=CLONE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"warning: clone of {repo_url} timed out after "
-              f"{CLONE_TIMEOUT_SECONDS:g}s", file=sys.stderr)
-        return
-    if result.returncode != 0:
-        print(f"warning: could not clone {repo_url}: {result.stderr.strip()}",
-              file=sys.stderr)
 
 
 def discover(
@@ -158,6 +133,9 @@ def _run(argv: list[str], rows: list[Row]) -> str:
     search.add_argument("--installed", action="store_true")
     listing = sub.add_parser("list", help="list all packages")
     listing.add_argument("--installed", action="store_true")
+    # Handled in main() before we get here; declared so it shows up in --help.
+    sub.add_parser("update", help="pull the packages clone and report")
+    sub.add_parser("verify", help="check a package is fully installed")
     args = parser.parse_args(argv)
     if args.installed:
         rows = [r for r in rows if r.installed]
@@ -186,6 +164,12 @@ def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
     config = load_config()
     clone_if_missing(config.packages_repo, CLONED_PACKAGES_DIR)
+    # Every invocation refreshes the clone: the agent reads packages straight
+    # off disk, so a stale clone silently serves yesterday's skills.
+    summary = pull_clone(CLONED_PACKAGES_DIR)
+    if args[:1] == ["update"]:
+        print(f"packages: {summary}")
+        return
     if args[:1] == ["verify"]:
         if len(args) != 2:
             raise SystemExit("usage: chief-pkg verify <name>")
