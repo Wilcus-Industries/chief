@@ -18,12 +18,17 @@ from chief.provider.base import (
 
 
 class FakeProvider:
-    """Plays back scripted event streams, one script entry per model call."""
+    """Plays back scripted event streams, one script entry per model call.
+
+    ``tool_specs`` holds the tool specs offered on each call, so a boot test
+    can prove which tools actually reached the model.
+    """
 
     def __init__(self, script: list[list[ProviderEvent]]) -> None:
         self._script = list(script)
         self.calls: list[list[dict[str, Any]]] = []
         self.models: list[str] = []
+        self.tool_specs: list[list[ToolSpec]] = []
         # Optional handshake for concurrency tests: when set, each call waits
         # here after recording itself, so tests control interleaving.
         self.gate: asyncio.Event | None = None
@@ -37,6 +42,7 @@ class FakeProvider:
     ) -> AsyncIterator[ProviderEvent]:
         self.models.append(model)
         self.calls.append([dict(m) for m in messages])
+        self.tool_specs.append(list(tools))
         if self.gate is not None:
             await self.gate.wait()
         for event in self._script.pop(0):
