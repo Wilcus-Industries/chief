@@ -68,6 +68,23 @@ def _under(package: Package, root: Path) -> bool:
         return False
 
 
+def _config_has(config_raw: Mapping[str, object], key: str) -> bool:
+    """Is a manifest's dotted ``config_keys`` entry present in the raw config?
+
+    Manifests declare keys the way ``config_apply`` takes them
+    (``imessage.enabled``) while the raw config is nested, so a flat
+    membership test called every nested key absent — no package declaring one
+    could ever verify as installed. A non-mapping partway down is a
+    misconfiguration, reported like an absent key rather than raised.
+    """
+    node: object = config_raw
+    for part in key.split("."):
+        if not isinstance(node, Mapping) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
 def verify_install(
     package: Package,
     installed: Mapping[str, object],
@@ -95,7 +112,7 @@ def verify_install(
         if not (skills_root / name / "SKILL.md").exists():
             problems.append(f"skill '{name}' missing at {skills_root / name}")
     for key in package.config_keys:
-        if key not in config_raw:
+        if not _config_has(config_raw, key):
             problems.append(f"config key '{key}' absent from config.yaml")
     for secret in package.secrets:
         if not (secrets_root / secret).exists():
