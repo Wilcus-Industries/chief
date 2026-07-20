@@ -26,11 +26,20 @@ RECONNECT_DELAY_SECONDS = 5.0
 
 @dataclass(frozen=True)
 class ServerConfig:
-    """One MCP server: exactly one of url (HTTP) or command (stdio)."""
+    """One MCP server: exactly one of url (HTTP) or command (stdio).
+
+    ``env`` and ``cwd`` apply to stdio servers only. Environment is opt-in:
+    the child gets the SDK's minimal inherited set (``PATH``, `HOME`, etc.)
+    plus exactly the keys in ``env`` — never the daemon's full environment —
+    so a package can hand a server a credentials path without a wrapper
+    script and an operator can audit the grant by reading ``config.yaml``.
+    """
 
     name: str
     url: str | None = None
     command: tuple[str, ...] | None = None
+    env: dict[str, str] | None = None
+    cwd: str | None = None
 
 
 class McpManager:
@@ -90,7 +99,10 @@ class McpManager:
                 )
             elif config.command:
                 params = StdioServerParameters(
-                    command=config.command[0], args=list(config.command[1:])
+                    command=config.command[0],
+                    args=list(config.command[1:]),
+                    env=config.env,
+                    cwd=config.cwd,
                 )
                 read, write = await stack.enter_async_context(stdio_client(params))
             else:

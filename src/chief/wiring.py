@@ -148,6 +148,8 @@ def build_mcp(
             name=name,
             url=entry.get("url"),
             command=tuple(entry["command"]) if entry.get("command") else None,
+            env=dict(entry["env"]) if entry.get("env") else None,
+            cwd=entry.get("cwd"),
         )
         for name, entry in config.mcp_servers.items()
     )
