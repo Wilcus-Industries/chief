@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="stop the daemon via the service")
     status = sub.add_parser("status", help="service + web UI state")
     status.add_argument("--port", type=int, default=None)
-    update_cmd = sub.add_parser("update", help="jump to the newest tagged release")
+    update_cmd = sub.add_parser("update", help="merge origin/main and restart")
     update_cmd.add_argument("--repo", type=Path, default=Path.cwd())
     uninstall_cmd = sub.add_parser("uninstall", help="remove service + launcher")
     uninstall_cmd.add_argument("--repo", type=Path, default=Path.cwd())
