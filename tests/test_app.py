@@ -8,13 +8,15 @@ from typing import Any
 
 import pytest
 
+from chief.agent.tools import ToolRegistry
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
+from chief.mcpclient.manager import ServerConfig
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
-from chief.wiring import build_provider
+from chief.wiring import build_mcp, build_provider
 
 from .fakes import FakeProvider, text_turn
 
@@ -102,6 +104,41 @@ def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
     )
     with pytest.raises(ValueError, match="opus.*typo"):
         build_provider(config)
+
+
+def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
+    config = Config(
+        mcp_servers={
+            "http_server": {"url": "http://127.0.0.1:9000"},
+            "stdio_server": {
+                "command": ["python", "server.py"],
+                "env": {"API_KEY": "secret"},
+                "cwd": "/srv/mcp",
+            },
+            "bare_stdio": {"command": ["mcp-tool"]},
+        }
+    )
+    _, mcp_configs = build_mcp(config, ToolRegistry())
+    by_name = {sc.name: sc for sc in mcp_configs}
+
+    assert by_name["http_server"] == ServerConfig(
+        name="http_server", url="http://127.0.0.1:9000"
+    )
+    assert by_name["stdio_server"] == ServerConfig(
+        name="stdio_server",
+        command=("python", "server.py"),
+        env={"API_KEY": "secret"},
+        cwd="/srv/mcp",
+    )
+    # No env/cwd declared: both stay None, not empty collections.
+    assert by_name["bare_stdio"] == ServerConfig(
+        name="bare_stdio", command=("mcp-tool",)
+    )
+
+
+def test_build_mcp_empty_config_yields_no_servers() -> None:
+    _, mcp_configs = build_mcp(Config(), ToolRegistry())
+    assert mcp_configs == ()
 
 
 async def test_switch_model_is_gated_and_persists_the_override(
