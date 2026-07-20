@@ -2,7 +2,8 @@
 
 ``build_app`` reads as a table of contents — each phase is a helper called in
 order. Persistence, gate, MCP, and adapters live in ``chief.wiring``; the
-default toolset in ``chief.toolset``; the agent-core closure trap stays here.
+default toolset in ``chief.toolset``; hook assembly in ``chief.hooks.boot``;
+the agent-core closure trap stays here.
 Tests boot exactly this wiring with only the provider swapped for the
 deterministic fake (the one scripted fake CI allows, PRD #183).
 """
@@ -18,23 +19,18 @@ from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
 from chief.approvals import Approval
 from chief.budget import Budget
 from chief.bus import EventBus
-from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
-from chief.config import Config, load_raw
+from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
-from chief.hooks import HookRegistry
-from chief.hooks.loader import load_hooks
-from chief.install.updatecheck import session_start_notice
+from chief.hooks.boot import build_hooks
 from chief.monitors.service import MonitorService
-from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
-from chief.registry_apply import INSTALLED_REGISTRY, load_installed
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.shellprompt import shell_prompt_line
@@ -75,25 +71,7 @@ async def _build_agent_core(
     budget = Budget(factory, config.budget_cap_usd, config.budget_warn_ratio)
     bus = EventBus()
     registry = ToolRegistry()
-    hooks = HookRegistry()
-    # Above load_hooks, not beside its monitor use below: hooks get this too.
-    classifier = Classifier(
-        provider, ClassifierRegistry(config.classifiers_dir),
-        config.models.get("default_classifier", config.default_model))
-    load_hooks(
-        library=PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
-        installed=load_installed(INSTALLED_REGISTRY),
-        registry=hooks,
-        provider=provider,
-        models=config.models,
-        budget=budget,
-        raw_config=load_raw(),
-        disabled=config.hooks_disabled,
-        data_root=Path("data/hooks"),
-        classifier=classifier,
-    )
-    # Core registers under a package name like anyone else; accessors sort by it.
-    hooks.register_session_start("core", session_start_notice(Path.cwd()))
+    hooks, classifier = build_hooks(config, provider, budget)
 
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)

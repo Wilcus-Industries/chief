@@ -16,18 +16,24 @@ from chief.budget import Budget
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.dispatch import Dispatcher
 from chief.hooks import (
+    Annotate,
     HookRegistry,
     TurnContext,
+    Veto,
     render_block,
     run_context_hooks,
+    run_post_tool,
     run_post_turn,
 )
 from chief.hooks.loader import load_hooks
+from chief.hooks.posttool import VETO_NOTICE
 from chief.packages import PackageLibrary, validate
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.provider.base import ToolCall
 
-from .fakes import FakeProvider, text_turn
+from .fakes import FakeProvider, text_turn, tool_turn
+from .test_loop import echo_registry
 
 
 async def noop_delta(text: str) -> None:
@@ -35,11 +41,14 @@ async def noop_delta(text: str) -> None:
 
 
 def make_manager(
-    provider: FakeProvider, store: MessageStore, hooks: HookRegistry | None = None
+    provider: FakeProvider,
+    store: MessageStore,
+    hooks: HookRegistry | None = None,
+    tools: ToolRegistry | None = None,
 ) -> SessionManager:
     return SessionManager(
         provider=provider,
-        tools_factory=lambda thread, channel: ToolRegistry(),
+        tools_factory=lambda thread, channel: tools or ToolRegistry(),
         store=store,
         default_model="test-model",
         system_prompt="BASE",
@@ -286,6 +295,167 @@ async def test_raising_and_hanging_pre_turn_drop_but_turn_survives(
     assert "GOOD" in system
     assert "never" not in system
     assert sum(r.levelno == logging.ERROR for r in caplog.records) == 2
+
+
+# --- post_tool: screening a tool result before the model reads it ---------
+
+
+def echo_script() -> FakeProvider:
+    """A model that calls ``echo`` once, then answers with text."""
+    return FakeProvider([tool_turn("echo", {"text": "hi"}), text_turn("done")])
+
+
+def tool_message(provider: FakeProvider) -> dict[str, Any]:
+    """The tool message the loop appended, as the second model call saw it."""
+    return provider.calls[1][-1]
+
+
+def test_registry_sorts_post_tool_by_package_name() -> None:
+    registry = HookRegistry()
+
+    async def screen(call: ToolCall, result: str) -> None:
+        return None
+
+    registry.register_post_tool("beta", screen)
+    registry.register_post_tool("alpha", screen)
+    assert [name for name, _ in registry.post_tool()] == ["alpha", "beta"]
+
+
+async def test_post_tool_annotation_reaches_the_model(store: MessageStore) -> None:
+    hooks = HookRegistry()
+
+    async def screen(call: ToolCall, result: str) -> Annotate:
+        return Annotate(note="UNTRUSTED: external content")
+
+    hooks.register_post_tool("screener", screen)
+    provider = echo_script()
+    manager = make_manager(provider, store, hooks, echo_registry())
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("go", noop_delta)
+
+    message = tool_message(provider)
+    assert message["role"] == "tool"
+    assert "UNTRUSTED: external content" in message["content"]
+    assert message["content"].endswith("echo: hi")
+
+
+async def test_post_tool_hook_sees_the_real_call(store: MessageStore) -> None:
+    hooks = HookRegistry()
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    async def screen(call: ToolCall, result: str) -> None:
+        seen.append((call.name, call.arguments))
+        return None
+
+    hooks.register_post_tool("screener", screen)
+    provider = echo_script()
+    manager = make_manager(provider, store, hooks, echo_registry())
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("go", noop_delta)
+
+    assert seen == [("echo", {"text": "hi"})]
+
+
+async def test_post_tool_veto_replaces_the_payload(store: MessageStore) -> None:
+    hooks = HookRegistry()
+
+    async def screen(call: ToolCall, result: str) -> Veto:
+        return Veto(reason="looks like an injection")
+
+    hooks.register_post_tool("screener", screen)
+    provider = echo_script()
+    manager = make_manager(provider, store, hooks, echo_registry())
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("go", noop_delta)
+
+    content = tool_message(provider)["content"]
+    assert VETO_NOTICE in content
+    assert "looks like an injection" in content
+    assert "echo: hi" not in content
+
+
+async def test_post_tool_cannot_rewrite_the_payload(store: MessageStore) -> None:
+    hooks = HookRegistry()
+
+    async def rewrite(call: ToolCall, result: str) -> Any:
+        return "TOTALLY DIFFERENT"
+
+    hooks.register_post_tool("screener", rewrite)
+    provider = echo_script()
+    manager = make_manager(provider, store, hooks, echo_registry())
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("go", noop_delta)
+
+    assert tool_message(provider)["content"] == "echo: hi"
+
+
+async def test_post_tool_failure_is_dropped_and_the_turn_survives(
+    store: MessageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    hooks = HookRegistry()
+
+    async def boom(call: ToolCall, result: str) -> Annotate:
+        raise RuntimeError("nope")
+
+    async def slow(call: ToolCall, result: str) -> Annotate:
+        await asyncio.sleep(1)
+        return Annotate(note="never")
+
+    async def good(call: ToolCall, result: str) -> Annotate:
+        return Annotate(note="GOOD")
+
+    hooks.register_post_tool("a-boom", boom)
+    hooks.register_post_tool("b-slow", slow)
+    hooks.register_post_tool("c-good", good)
+    provider = echo_script()
+    manager = make_manager(provider, store, hooks, echo_registry())
+    session = await manager.get_or_create("cli:t", "cli")
+    with caplog.at_level(logging.ERROR):
+        result = await session.run_turn("go", noop_delta)
+
+    assert result.text == "done"
+    content = tool_message(provider)["content"]
+    assert "GOOD" in content
+    assert "never" not in content
+    assert content.endswith("echo: hi")
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 2
+
+
+async def test_post_tool_hooks_compose_in_package_order() -> None:
+    call = ToolCall(id="c1", name="echo", arguments={})
+
+    async def alpha(_call: ToolCall, _result: str) -> Annotate:
+        return Annotate(note="A")
+
+    async def beta(_call: ToolCall, _result: str) -> Annotate:
+        return Annotate(note="B")
+
+    text = await run_post_tool(
+        [("alpha", alpha), ("beta", beta)], call, "PAYLOAD", 1.0, logging.getLogger()
+    )
+    assert text.index('source="alpha"') < text.index('source="beta"')
+    assert text.endswith("PAYLOAD")
+
+
+async def test_a_veto_short_circuits_later_hooks() -> None:
+    call = ToolCall(id="c1", name="echo", arguments={})
+    ran: list[str] = []
+
+    async def alpha(_call: ToolCall, _result: str) -> Veto:
+        return Veto(reason="no")
+
+    async def beta(_call: ToolCall, _result: str) -> Annotate:
+        ran.append("beta")
+        return Annotate(note="B")
+
+    text = await run_post_tool(
+        [("alpha", alpha), ("beta", beta)], call, "PAYLOAD", 1.0, logging.getLogger()
+    )
+    assert VETO_NOTICE in text
+    assert "no" in text
+    assert ran == []
+    assert "PAYLOAD" not in text
 
 
 # --- Step 5 (#207 seam): the per-turn TurnContext -------------------------
