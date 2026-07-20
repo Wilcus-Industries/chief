@@ -1,5 +1,7 @@
 """Package conventions: manifest parsing and two-root scan (bundled wins)."""
 
+import re
+import subprocess
 from pathlib import Path
 
 from chief.packages import HookSpec, PackageLibrary, validate
@@ -140,3 +142,93 @@ def test_anthropic_oauth_install_fails_fast_on_dead_proxy(tmp_path: Path) -> Non
     assert "did not answer" in result.stderr  # type: ignore[attr-defined]
     assert not (tmp_path / "config.yaml").exists()
     assert not (tmp_path / "skills").exists()
+
+
+# --- installer static checks ------------------------------------------------
+#
+# Package installers are the one executable surface the done-check never runs:
+# they are shell, they mutate the repo, and the agent self-edits them. A broken
+# one stays silent until an owner installs. Both checks below are cheap and
+# catch the two failure modes that actually shipped (see git log for the
+# obsidian-memory installer chief edited into an unrunnable state).
+
+# ${x:-}, ${x:?}, ${x:+} supply or demand a value, so an unassigned name there
+# is deliberate — that is how an installer declares an env parameter.
+_GUARDED = re.compile(r"\$\{(\w+)\s*:[-?+]")
+_USED = re.compile(r"\$\{(\w+)[}\s:]|\$(\w+)")
+# A bare NAME= anywhere, so `if ! served=$(...)` and `x=1; y=2` both count.
+# Deliberately lax: over-counting an assignment only makes this check quieter,
+# while under-counting would cry wolf on every installer.
+_ASSIGNED = re.compile(r"(?<![\w$-])(\w+)=(?!=)")
+_FOR = re.compile(r"^\s*for\s+(\w+)\s+in\b", re.M)
+# `read -r a b c` binds every trailing name, not just the first.
+_READ = re.compile(r"\bread\s+((?:-\w+\s+)*)([\w\s]+)")
+# Set by the shell itself, never assigned by the script.
+_SHELL_PROVIDED = {
+    "BASH_SOURCE", "HOME", "IFS", "PATH", "PWD", "USER", "UID", "OSTYPE",
+    "RANDOM", "LINENO", "FUNCNAME", "SHELL", "TMPDIR", "HOSTNAME", "PS1",
+}
+
+
+def _installers() -> list[Path]:
+    found = sorted(REPO_PACKAGES.glob("*/install.sh"))
+    assert found, "no package installers found — glob or layout changed"
+    return found
+
+
+def unguarded_undefined_vars(script: str) -> set[str]:
+    """Names expanded bare (no ``:-``/``:?``/``:+``) and never assigned.
+
+    This is the shape that broke the obsidian-memory installer: a self-edit
+    deleted the loop building ``writable_yaml`` while leaving ``$writable_yaml``
+    in the config_apply call below it. Under ``set -u`` that aborts the install.
+    ``bash -n`` cannot see it — the syntax is perfectly valid.
+    """
+    guarded = set(_GUARDED.findall(script))
+    assigned = set(_ASSIGNED.findall(script)) | set(_FOR.findall(script))
+    for _flags, names in _READ.findall(script):
+        assigned |= set(names.split())
+    used = {a or b for a, b in _USED.findall(script)}
+    return used - guarded - assigned - _SHELL_PROVIDED - {""}
+
+
+def test_every_package_installer_is_syntactically_valid() -> None:
+    broken = []
+    for path in _installers():
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            broken.append(f"{path.parent.name}: {result.stderr.strip()}")
+    assert not broken, "installers with shell syntax errors:\n" + "\n".join(broken)
+
+
+def test_every_package_installer_defines_the_vars_it_expands() -> None:
+    offenders = []
+    for path in _installers():
+        missing = unguarded_undefined_vars(path.read_text())
+        if missing:
+            offenders.append(f"{path.parent.name}: {sorted(missing)}")
+    assert not offenders, (
+        "installers expanding names they never assign and do not guard with "
+        "${x:-}/${x:?} — fatal under `set -u`:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_check_catches_the_bug_that_shipped() -> None:
+    """Guard the guard, using the real regression.
+
+    Reduced from the installer the agent self-edited: the writable_yaml builder
+    is gone, its use is not.
+    """
+    broken = (
+        'set -euo pipefail\n'
+        'WRITABLE_PATHS="${WRITABLE_PATHS:-}"\n'
+        ': "${VAULT_PATH:?set VAULT_PATH}"\n'
+        'uv run python -m chief.config_apply '
+        '"obsidian_memory.writable_paths=$writable_yaml"\n'
+    )
+    assert unguarded_undefined_vars(broken) == {"writable_yaml"}
+    # The env parameters it *does* guard are not flagged.
+    assert "VAULT_PATH" not in unguarded_undefined_vars(broken)
+    assert "WRITABLE_PATHS" not in unguarded_undefined_vars(broken)
