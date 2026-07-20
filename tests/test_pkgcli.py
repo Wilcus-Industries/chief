@@ -441,3 +441,42 @@ def test_verify_install_handles_dotted_dep_with_absent_parent(
         secrets_root=tmp_path / "secrets",
     )
     assert any("definitely_missing_dep_xyz.sub" in p for p in problems)
+
+
+def test_verify_fails_a_manifest_declared_server_that_never_reached_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The reading under test: a manifest-declared MCP server that was never
+    # wired into config.yaml cannot come up, and the install postcondition
+    # reports that instead of reporting success. Driven through the CLI's own
+    # verify path over real on-disk manifest/registry/config files.
+    from chief.config import load_config
+    from chief.pkgcli import _run_verify
+
+    monkeypatch.chdir(tmp_path)
+    pkg = tmp_path / "packages" / "mcpfixture"
+    pkg.mkdir(parents=True)
+    # No skills/secrets/config_keys/python_deps: the MCP server is the only
+    # postcondition that can fail.
+    (pkg / "manifest.yaml").write_text(
+        "name: mcpfixture\ndescription: d\n"
+        "mcp_servers:\n  testsrv:\n    command: [echo, hi]\n"
+    )
+    (tmp_path / "data").mkdir()
+    # Registered — the only thing missing is the server itself.
+    (tmp_path / "data" / "installed.yaml").write_text(
+        "mcpfixture:\n  source: bundled\n"
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_verify("mcpfixture", load_config())
+    assert exit_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "install INCOMPLETE" in out
+    assert "mcp server 'testsrv' absent from config.yaml" in out
+
+    (tmp_path / "config.yaml").write_text(
+        "mcp_servers:\n  testsrv:\n    command: [echo, hi]\n"
+    )
+    _run_verify("mcpfixture", load_config())
+    assert "verified" in capsys.readouterr().out
