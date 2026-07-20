@@ -6,7 +6,7 @@ reboot into the change. There is no ``self_edit`` or ``install_package`` tool
 anymore; editing is ordinary file work and installing is document-driven.
 """
 
-from chief.agent.tools import Tool, ToolRegistry
+from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
 from chief.selfedit.pipeline import SelfEditPipeline
 
@@ -50,11 +50,15 @@ _REVERT_SPEC = ToolSpec(
 def register_restart_tool(registry: ToolRegistry, pipeline: SelfEditPipeline) -> None:
     """Expose the ``restart`` + ``revert_edits`` tools backed by the pipeline."""
 
-    async def restart(rationale: str, confirm: bool = False) -> str:
-        return await pipeline.restart(rationale, confirm)
+    async def restart(
+        rationale: str, confirm: bool = False, context: ToolContext | None = None
+    ) -> str:
+        # ``context`` is the calling thread, recorded so the rebooted daemon
+        # reports "restart success" back where the restart was asked for.
+        return await pipeline.restart(rationale, confirm, context)
 
     async def revert_edits() -> str:
         return await pipeline.revert_edits()
 
-    registry.register(Tool(_RESTART_SPEC, restart))
+    registry.register(Tool(_RESTART_SPEC, restart, wants_context=True))
     registry.register(Tool(_REVERT_SPEC, revert_edits))

@@ -4,11 +4,33 @@ import asyncio
 import logging
 import signal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
+from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
 
+if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
+    from chief.daemon import App
+
 logger = logging.getLogger(__name__)
+
+
+async def report_restart(app: "App", repo_root: Path) -> None:
+    """Tell the thread that asked for the restart that chief is back.
+
+    Runs once the adapters are serving, so the owner does not have to poke
+    the thread to find out whether the daemon returned. Best effort: a
+    missing channel or a dead adapter must not take the fresh boot down.
+    """
+    notice = take_restart_notice(repo_root)
+    if notice is None:
+        return
+    try:
+        adapter = app.dispatcher.adapter(notice.channel)
+        await adapter.send(notice.thread_key, notice.text())
+    except Exception:
+        logger.exception("could not report the restart on %s", notice.channel)
 
 
 async def amain() -> None:
@@ -36,9 +58,13 @@ async def amain() -> None:
     except Exception:
         # A failed boot right after a self-edit rolls back and re-execs.
         if rollback_if_marked(repo_root):
+            # The next boot reports the rollback on the requesting thread
+            # instead of a "restart success" that never happened.
+            mark_notice_rolled_back(repo_root)
             restart_daemon()
         raise
     clear_marker(repo_root)
+    await report_restart(app, repo_root)
     logger.info("chief up — socket at %s", config.socket_path)
 
     stop = asyncio.Event()
