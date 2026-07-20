@@ -9,12 +9,19 @@ from pathlib import Path
 
 import pytest
 
-from chief.agent.tools import ToolRegistry
+from chief.agent.tools import ToolContext, ToolRegistry
 from chief.audit import AuditLog
 from chief.config import ConfigError
 from chief.filetools import register_file_tools
 from chief.provider.base import ToolCall
 from chief.selfedit import gitops
+from chief.selfedit.notice import (
+    NOTICE_PATH,
+    RestartNotice,
+    mark_notice_rolled_back,
+    take_restart_notice,
+    write_restart_notice,
+)
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import (
     MARKER_NAME,
@@ -336,6 +343,66 @@ async def test_write_then_failed_restart_keeps_edit(
     assert result.startswith("error: done-check failed")
     assert (repo / "greeting.txt").read_text() == "still here\n"
     assert not restart.called
+
+
+# --- restart notice: reporting back to the requesting thread ---------------
+
+
+async def test_restart_records_the_requesting_thread(
+    repo: Path, tmp_path: Path
+) -> None:
+    """The reboot must be able to answer where the restart was asked for."""
+    pipeline, restart = make_pipeline(repo, tmp_path, "true")
+    origin = ToolContext(thread_key="imessage:owner", channel="imessage")
+    result = await pipeline.restart("config reload", origin=origin)
+    assert "restarting" in result
+    assert restart.called
+    notice = take_restart_notice(repo)
+    assert notice is not None
+    assert (notice.channel, notice.thread_key) == ("imessage", "imessage:owner")
+    assert notice.text().startswith("✅ restart success")
+    assert "config reload" in notice.text()
+    # Consumed on read: a later crash-restart must not resend it.
+    assert take_restart_notice(repo) is None
+
+
+async def test_failed_check_writes_no_notice(repo: Path, tmp_path: Path) -> None:
+    pipeline, _ = make_pipeline(repo, tmp_path, "false")
+    origin = ToolContext(thread_key="cli:t", channel="cli")
+    await pipeline.restart("broken", confirm=True, origin=origin)
+    assert take_restart_notice(repo) is None
+
+
+async def test_restart_tool_passes_its_thread_through(
+    repo: Path, tmp_path: Path
+) -> None:
+    registry, _ = _edit_registry(repo, tmp_path, "true")
+    await registry.dispatch(
+        ToolCall(id="1", name="restart", arguments={"rationale": "reload"}),
+        ToolContext(thread_key="web:main", channel="web"),
+    )
+    notice = take_restart_notice(repo)
+    assert notice is not None
+    assert (notice.channel, notice.thread_key) == ("web", "web:main")
+
+
+def test_rolled_back_notice_reports_the_failure(repo: Path) -> None:
+    write_restart_notice(
+        repo, RestartNotice(channel="cli", thread_key="cli:t", rationale="risky")
+    )
+    mark_notice_rolled_back(repo)
+    notice = take_restart_notice(repo)
+    assert notice is not None
+    assert notice.rolled_back
+    assert notice.text().startswith("⚠️ restart failed")
+
+
+def test_unreadable_notice_is_consumed_not_raised(repo: Path) -> None:
+    path = repo / NOTICE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    assert take_restart_notice(repo) is None
+    assert not path.exists()
 
 
 # --- recovery.py: rollback marker + restart controller ---------------------

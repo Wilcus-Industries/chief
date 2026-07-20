@@ -46,13 +46,19 @@ def send_frame(streams: Streams, text: str, thread: str = "t1") -> None:
     streams[1].write(json.dumps({"thread": thread, "text": text}).encode() + b"\n")
 
 
-async def read_finals(streams: Streams, count: int) -> list[dict[str, Any]]:
+async def read_finals(
+    streams: Streams, count: int, *, announcements: bool = False
+) -> list[dict[str, Any]]:
+    """Read ``count`` final frames. Gate tool-call announcements ("⚙ …") are
+    skipped unless asked for — one precedes every non-card gated call."""
     finals: list[dict[str, Any]] = []
     while len(finals) < count:
         line = await asyncio.wait_for(streams[0].readline(), timeout=5)
         assert line, "connection closed early"
         frame = json.loads(line)
-        if frame["type"] == "final":
+        if frame["type"] != "final":
+            continue
+        if announcements or not frame["text"].startswith("⚙"):
             finals.append(frame)
     return finals
 
@@ -196,6 +202,51 @@ async def test_agent_reads_a_bundled_package_manifest(
         assert result["role"] == "tool"
         assert "build-imessage" in result["content"]
         assert "screening" in result["content"]
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_uncarded_tool_call_is_announced_on_the_channel(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    """A call that needs no approval still shows up on the owner's surface."""
+    call = ToolCall(
+        id="c1",
+        name="read_file",
+        arguments={"path": "packages/build-imessage/manifest.yaml"},
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        send_frame(streams, "read it", thread="t1")
+        frames = await read_finals(streams, 2, announcements=True)
+        assert frames[0]["thread"] == "cli:t1"
+        assert frames[0]["text"].startswith("⚙ read_file")
+        assert "manifest.yaml" in frames[0]["text"]
+        assert frames[1]["text"] == "done"
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_announcements_are_off_when_configured(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    call = ToolCall(
+        id="c1",
+        name="read_file",
+        arguments={"path": "packages/build-imessage/manifest.yaml"},
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+    )
+    config = make_config(tmp_path, sock_path, gate_announce=False)
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "read it", thread="t1")
+        frames = await read_finals(streams, 1, announcements=True)
+        assert frames[0]["text"] == "done"
     finally:
         await shutdown(app, streams)
 

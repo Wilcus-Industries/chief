@@ -18,9 +18,11 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+from chief.agent.tools import ToolContext
 from chief.audit import AuditLog
 from chief.config import load_config
 from chief.selfedit.gitops import dirty_files, run_checks, run_git
+from chief.selfedit.notice import record_restart_origin
 from chief.selfedit.recovery import MARKER_NAME
 
 logger = logging.getLogger(__name__)
@@ -60,24 +62,28 @@ class SelfEditPipeline:
         # each lap burns a full pytest+ruff+mypy run while the owner is blind.
         self._consecutive_failures = 0
 
-    async def restart(self, rationale: str, confirm: bool = False) -> str:
+    async def restart(
+        self, rationale: str, confirm: bool = False, origin: ToolContext | None = None
+    ) -> str:
         """Run the done-check against the working tree, then restart on green.
 
-        A dirty tree first requires confirmation: the changed-file list is
-        returned (before any check runs — checks are expensive) and the agent
-        must call again with ``confirm=True``. This stops working-tree debris
-        from being silently swept into a commit whose rationale describes a
-        different change (mislabeled history poisons later debugging).
+        A dirty tree first requires confirmation: the changed-file list comes
+        back (before any expensive check) and the agent must call again with
+        ``confirm=True`` — so working-tree debris is never swept into a commit
+        whose rationale describes a different change.
 
-        Green: commit the tree (if it changed), write the rollback marker, and
-        request a restart into the new code. Red: keep the edits in place and
-        return the failure output. A no-op (no repo changes) is allowed — it
-        still restarts, covering config reloads and script-only installs.
+        Green: commit (if dirty), write the rollback marker, request the
+        restart. Red: keep the edits and return the failure. A no-op restart
+        is allowed, covering config reloads and script-only installs.
+        ``origin`` is the calling thread, recorded so the rebooted daemon
+        reports back there instead of leaving the owner to poke the thread.
         """
         async with self._lock:
-            return await self._guarded_restart(rationale, confirm)
+            return await self._guarded_restart(rationale, confirm, origin)
 
-    async def _guarded_restart(self, rationale: str, confirm: bool) -> str:
+    async def _guarded_restart(
+        self, rationale: str, confirm: bool, origin: ToolContext | None = None
+    ) -> str:
         dirty = await self._dirty_files()
         if dirty and not confirm:
             file_list = "\n".join(f"  {path}" for path in dirty)
@@ -94,7 +100,7 @@ class SelfEditPipeline:
                 "rationale that honestly describes it."
             )
         base = (await self._git("rev-parse", "HEAD")).strip()
-        failure = await self._run_checks()
+        failure = await run_checks(self._checks, self._root)
         if failure is not None:
             self._consecutive_failures += 1
             self._audit.record(
@@ -127,6 +133,7 @@ class SelfEditPipeline:
             files=dirty,
         )
         logger.info("restart approved (%s); committed=%s", rationale, committed)
+        record_restart_origin(self._root, origin, rationale)
         self._restart()
         if committed:
             return "done-check green; committed and restarting into the new code"
@@ -162,9 +169,7 @@ class SelfEditPipeline:
             await self._git("checkout", "HEAD", "--", ".")
             remaining = await self._dirty_files()
             reverted = [path for path in dirty if path not in remaining]
-            self._audit.record(
-                "revert_edits", outcome="reverted", files=reverted
-            )
+            self._audit.record("revert_edits", outcome="reverted", files=reverted)
             self._consecutive_failures = 0
             lines = "\n".join(f"  {path}" for path in reverted) or "  (none)"
             message = f"reverted tracked files to HEAD:\n{lines}"
@@ -185,9 +190,6 @@ class SelfEditPipeline:
         except Exception as exc:
             return f"{type(exc).__name__}: {exc}"
         return None
-
-    async def _run_checks(self) -> str | None:
-        return await run_checks(self._checks, self._root)
 
     async def _dirty_files(self) -> list[str]:
         return await dirty_files(self._root)
