@@ -101,7 +101,7 @@ case "\$CMD" in
   run)
     exec "\$UV_BIN" run python -m chief.entrypoint
     ;;
-  start|stop|status|update|wizard|uninstall)
+  start|stop|status|update|check-updates|wizard|uninstall)
     shift
     exec "\$UV_BIN" run python -m chief.install "\$CMD" "\$@"
     ;;
@@ -113,6 +113,7 @@ chief — personal AI agent
   chief stop       stop the daemon
   chief status     service + web UI state
   chief update     merge origin/main, restart, roll back if unhealthy
+  chief check-updates  report how far core trails origin/main (no changes)
   chief wizard     re-run the first-run wizard (password / key / budget cap)
   chief uninstall  remove service + launcher (--purge-data removes data too)
 USAGE
