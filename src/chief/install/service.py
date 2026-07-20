@@ -128,6 +128,28 @@ class ServiceManager:
         else:
             self._checked(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME])
 
+    def restart(self) -> None:
+        """Restart in place — never stop() then start().
+
+        On darwin ``kickstart -k`` SIGKILLs and relaunches atomically. A
+        bootout first is what breaks: the graceful drain leaves an orphan
+        half-holding the label, the follow-up bootstrap fails, and the daemon
+        stays down while the caller sees a clean return.
+        """
+        if self.platform == "darwin":
+            killed = self.runner(
+                ["launchctl", "kickstart", "-k", self._domain_target]
+            )
+            if killed.returncode == 0:
+                return
+            # Label not loaded at all (e.g. after an explicit `chief stop`).
+            self.runner(
+                ["launchctl", "bootstrap", f"gui/{self.uid}", str(self.plist_path)]
+            )
+            self._checked(["launchctl", "kickstart", self._domain_target])
+        else:
+            self._checked(["systemctl", "--user", "restart", SYSTEMD_UNIT_NAME])
+
     def status(self) -> str:
         if not self.installed:
             return "not installed"
