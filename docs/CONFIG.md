@@ -27,7 +27,13 @@ and restart. A stdio entry may also declare `env` (a `dict[str, str]`) and `cwd`
 (a string path) — `env` is opt-in, not inherited: the child process gets the
 MCP SDK's minimal default set (`PATH`, `HOME`, …) plus exactly the keys listed
 here, never the daemon's own environment. Omitting both behaves exactly as
-before.
+before. An entry may also declare `timeout` (seconds, any numeric type) —
+how long `McpManager.connect` waits for that one server to become ready
+before failing loudly; a server that resolves or builds dependencies on its
+first launch can outrun the default. Omitting it gets
+`DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.manager`). A
+timed-out connect cancels its supervising task and raises naming the server;
+the daemon logs it and keeps booting the rest.
 
 The same applies to `web_host`, `web_port`, `skills_dir`, `agents_dir`,
 `classifiers_dir`, and `imessage.db_path` — all have dataclass defaults but no

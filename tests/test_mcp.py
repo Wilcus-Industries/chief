@@ -4,6 +4,7 @@ Servers are pure config now (no add_mcp_server tool) — the manager connects
 whatever ``config.mcp_servers`` declares at boot.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -46,6 +47,33 @@ mcp.run()
 def write_server(tmp_path: Path) -> tuple[str, ...]:
     script = tmp_path / "server.py"
     script.write_text(SERVER_SCRIPT)
+    return (sys.executable, str(script))
+
+
+# Sleeps before it even builds its MCP app, so the client's handshake blocks
+# for the full delay — a real slow first launch, not a patched clock.
+SLOW_SERVER_SCRIPT = """
+import time
+
+from mcp.server.fastmcp import FastMCP
+
+time.sleep(1.0)
+
+mcp = FastMCP("slowsrv")
+
+
+@mcp.tool()
+def ping() -> str:
+    return "pong"
+
+
+mcp.run()
+"""
+
+
+def write_slow_server(tmp_path: Path) -> tuple[str, ...]:
+    script = tmp_path / "slow_server.py"
+    script.write_text(SLOW_SERVER_SCRIPT)
     return (sys.executable, str(script))
 
 
@@ -144,5 +172,66 @@ async def test_no_env_or_cwd_behaves_as_before(tmp_path: Path) -> None:
             ServerConfig(name="testsrv", command=write_server(tmp_path))
         )
         assert count == 3
+    finally:
+        await manager.stop()
+
+
+def test_server_declaring_no_timeout_gets_30_seconds() -> None:
+    assert ServerConfig(name="testsrv", command=("noop",)).timeout == 30.0
+
+
+async def test_slow_real_server_exceeding_timeout_fails_loudly_and_cancels_task(
+    tmp_path: Path,
+) -> None:
+    """A real, genuinely slow subprocess (not a patched clock) blows a short
+    configured timeout: the connect fails loudly naming the server, its
+    supervising task is gone (asserted against the live event loop, not
+    inferred from the manager's own bookkeeping), and the manager still
+    works for other servers afterward."""
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    other_tasks_before = {
+        t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+    }
+    try:
+        with pytest.raises(TimeoutError, match="slowsrv"):
+            await manager.connect(
+                ServerConfig(
+                    name="slowsrv",
+                    command=write_slow_server(tmp_path),
+                    timeout=0.3,
+                )
+            )
+        leaked = {
+            t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+        } - other_tasks_before
+        assert leaked == set()
+
+        # The rest of the daemon boots fine: a second, healthy server still
+        # connects and registers its tools on the very same manager.
+        count = await manager.connect(
+            ServerConfig(name="testsrv", command=write_server(tmp_path))
+        )
+        assert count == 3
+        assert any(s.name == "mcp_testsrv_add" for s in registry.specs())
+    finally:
+        await manager.stop()
+
+
+async def test_timeout_longer_than_default_connects_once_ready(
+    tmp_path: Path,
+) -> None:
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    try:
+        count = await manager.connect(
+            ServerConfig(
+                name="slowsrv",
+                command=write_slow_server(tmp_path),
+                timeout=35.0,
+            )
+        )
+        assert count == 1
+        assert any(s.name == "mcp_slowsrv_ping" for s in registry.specs())
     finally:
         await manager.stop()

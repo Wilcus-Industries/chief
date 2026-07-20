@@ -116,6 +116,7 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
                 "command": ["python", "server.py"],
                 "env": {"API_KEY": "secret"},
                 "cwd": "/srv/mcp",
+                "timeout": 90,
             },
             "bare_stdio": {"command": ["mcp-tool"]},
         }
@@ -131,16 +132,50 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
         command=("python", "server.py"),
         env={"API_KEY": "secret"},
         cwd="/srv/mcp",
+        timeout=90.0,
     )
-    # No env/cwd declared: both stay None, not empty collections.
+    # No env/cwd/timeout declared: both stay None, timeout defaults to 30s.
     assert by_name["bare_stdio"] == ServerConfig(
         name="bare_stdio", command=("mcp-tool",)
     )
+    assert by_name["bare_stdio"].timeout == 30.0
 
 
 def test_build_mcp_empty_config_yields_no_servers() -> None:
     _, mcp_configs = build_mcp(Config(), ToolRegistry())
     assert mcp_configs == ()
+
+
+def test_build_mcp_rejects_non_numeric_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": "not-a-number"},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
+
+
+def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": 0},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
 
 
 async def test_switch_model_is_gated_and_persists_the_override(
