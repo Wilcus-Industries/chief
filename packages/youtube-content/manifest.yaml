@@ -1,0 +1,10 @@
+name: youtube-content
+description: Fetch YouTube transcripts and turn them into summaries, chapters, or quotes.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/youtube-content
+config_keys: []
+secrets: []
+python_deps:
+  - youtube_transcript_api

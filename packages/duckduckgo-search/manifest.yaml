@@ -1,0 +1,10 @@
+name: duckduckgo-search
+description: Free web search (text/news) via the ddgs CLI — no API key.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/duckduckgo-search
+config_keys: []
+secrets: []
+python_deps:
+  - ddgs

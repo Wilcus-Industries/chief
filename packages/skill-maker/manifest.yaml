@@ -1,0 +1,8 @@
+name: skill-maker
+description: How chief authors its own skills and packages — structure, validators, and writing-quality rules for crystallizing a workflow into a SKILL.md.
+dependencies: []
+mcp_servers: {}
+skills:
+  - skills/skill-maker
+config_keys: []
+secrets: []
