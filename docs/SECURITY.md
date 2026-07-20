@@ -222,9 +222,13 @@ it:
 
 **Creation is the only control point.** The `schedule` tool raises its own card
 before the row exists — independent of the gate's approved list, and refused
-outright when no asker is wired. The card renders the command through
-`json.dumps`, so a multi-line command cannot draw its own `yes / no` line and
-bury the real payload around it.
+outright when no asker is wired. The card renders **both** the command and the
+spec through `json.dumps`, so neither can draw its own `yes / no` line and bury
+the real payload around it. Creation also parses the spec (`validate_spec`) and
+refuses an unparsable one *before* the card — so a forged spec never renders, and
+never persists a row that would raise on every tick of the schedule loop. A row
+that raises anyway (written by hand, or predating this check) is logged and
+skipped per schedule, so it cannot starve the schedules after it.
 
 **Both shell paths carry the same guards.** `shell_guards` (today: the iMessage
 `owner_send_guard` echo-loop seatbelt) are wired into the `shell` tool *and*, via

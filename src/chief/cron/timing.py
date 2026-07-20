@@ -28,6 +28,18 @@ def next_fire(spec: str, after: datetime, quiet: QuietHours | None) -> datetime:
     return defer_quiet(fire, quiet)
 
 
+def validate_spec(spec: str) -> None:
+    """Raise ``ValueError`` unless ``spec`` can actually be scheduled.
+
+    Creation is the only place a spec is checked before it reaches the loop, so
+    an unparsable one persisted here would raise on every tick forever.
+    """
+    try:
+        next_fire(spec, utcnow(), None)
+    except Exception as exc:  # croniter raises its own family of errors
+        raise ValueError(f"bad schedule spec {spec!r}") from exc
+
+
 def defer_quiet(fire: datetime, quiet: QuietHours | None) -> datetime:
     """Push a fire time inside the quiet window to the window's end."""
     if quiet is None:
