@@ -64,12 +64,8 @@ async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
 
 
 async def _build_agent_core(
-    config: Config,
-    provider: Provider,
-    store: MessageStore,
-    factory: SessionFactory,
-    gate: Gate,
-    skills: SkillLibrary,
+    config: Config, provider: Provider, store: MessageStore,
+    factory: SessionFactory, gate: Gate, skills: SkillLibrary,
 ) -> Core:
     """Budget, bus, registry, the manager/dispatcher/tools_factory trio, and the
     monitor/cron services. The trio stays in one scope so ``tools_factory``'s
@@ -100,9 +96,13 @@ async def _build_agent_core(
                 ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
             )
 
+        async def announce(ctx: ToolContext, text: str) -> None:
+            await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
+
         return GatedTools(
             registry=registry, policy=gate.policy, audit=gate.audit,
             context=context, ask=ask, on_always=gate.allow_always,
+            announce=announce if config.gate_announce else None,
         )
 
     restart = RestartController()
