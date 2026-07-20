@@ -22,6 +22,7 @@ from chief.provider.base import ToolSpec
 logger = logging.getLogger(__name__)
 
 RECONNECT_DELAY_SECONDS = 5.0
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,11 @@ class ServerConfig:
     plus exactly the keys in ``env`` — never the daemon's full environment —
     so a package can hand a server a credentials path without a wrapper
     script and an operator can audit the grant by reading ``config.yaml``.
+
+    ``timeout`` bounds how long ``connect`` waits for this server to become
+    ready — a server that resolves or builds dependencies on first launch can
+    outrun the default. A server declaring none gets
+    ``DEFAULT_CONNECT_TIMEOUT_SECONDS``.
     """
 
     name: str
@@ -40,6 +46,7 @@ class ServerConfig:
     command: tuple[str, ...] | None = None
     env: dict[str, str] | None = None
     cwd: str | None = None
+    timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
 
 
 class McpManager:
@@ -50,15 +57,30 @@ class McpManager:
         self._sessions: dict[str, ClientSession] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def connect(self, config: ServerConfig, timeout: float = 30.0) -> int:
-        """Start supervising a server; returns its tool count once ready."""
+    async def connect(self, config: ServerConfig) -> int:
+        """Start supervising a server; returns its tool count once ready.
+
+        A server that never reaches ``ready`` within ``config.timeout`` fails
+        loudly and its supervising task is cancelled and awaited before this
+        raises — otherwise that task would keep retrying forever, leaked,
+        with nothing left holding a reference to stop it.
+        """
         if config.name in self._tasks:
             raise ValueError(f"mcp server '{config.name}' already connected")
         ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-        self._tasks[config.name] = asyncio.create_task(
-            self._supervise(config, ready)
-        )
-        return await asyncio.wait_for(ready, timeout)
+        task = asyncio.create_task(self._supervise(config, ready))
+        self._tasks[config.name] = task
+        try:
+            return await asyncio.wait_for(ready, config.timeout)
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._tasks.pop(config.name, None)
+            self._sessions.pop(config.name, None)
+            raise TimeoutError(
+                f"mcp server {config.name} did not connect within "
+                f"{config.timeout:g}s"
+            ) from None
 
     async def stop(self) -> None:
         for task in self._tasks.values():
@@ -76,6 +98,17 @@ class McpManager:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    # A cancel delivered mid-teardown can surface as an
+                    # ordinary exception instead of CancelledError itself —
+                    # e.g. a stdio transport's task group wraps a sibling's
+                    # BrokenResourceError around the very cancellation that
+                    # caused it. Honor the pending cancel rather than
+                    # treating this as a connection failure to retry, or the
+                    # retry loop spins up a fresh, uncancellable subprocess
+                    # (connect()'s single task.cancel() is already spent).
+                    raise asyncio.CancelledError() from None
                 logger.exception(
                     "mcp server %s connection failed; retrying in %ss",
                     config.name,

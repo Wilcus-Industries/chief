@@ -150,6 +150,11 @@ def build_mcp(
             command=tuple(entry["command"]) if entry.get("command") else None,
             env=dict(entry["env"]) if entry.get("env") else None,
             cwd=entry.get("cwd"),
+            **(
+                {"timeout": float(entry["timeout"])}
+                if entry.get("timeout") is not None
+                else {}
+            ),
         )
         for name, entry in config.mcp_servers.items()
     )

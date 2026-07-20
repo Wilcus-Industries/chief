@@ -114,6 +114,7 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
                 "command": ["python", "server.py"],
                 "env": {"API_KEY": "secret"},
                 "cwd": "/srv/mcp",
+                "timeout": 90,
             },
             "bare_stdio": {"command": ["mcp-tool"]},
         }
@@ -129,11 +130,13 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
         command=("python", "server.py"),
         env={"API_KEY": "secret"},
         cwd="/srv/mcp",
+        timeout=90.0,
     )
-    # No env/cwd declared: both stay None, not empty collections.
+    # No env/cwd/timeout declared: both stay None, timeout defaults to 30s.
     assert by_name["bare_stdio"] == ServerConfig(
         name="bare_stdio", command=("mcp-tool",)
     )
+    assert by_name["bare_stdio"].timeout == 30.0
 
 
 def test_build_mcp_empty_config_yields_no_servers() -> None:
