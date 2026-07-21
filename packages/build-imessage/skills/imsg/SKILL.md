@@ -71,6 +71,26 @@ imsg search --query "invoice" --match contains --json
 `--json` prints one JSON object per line (pipe to `jq -s` for an array). Add
 `--attachments` to include file metadata.
 
+## Contact memory — check before you send
+
+Before composing a message to any non-owner contact, run a memory search for
+that person so you can match their tone and reference relevant context:
+
+```
+uv run chief-memory search "<contact name or handle>"
+```
+
+Then open any hit that looks relevant (family profile, past context, etc.) with
+`read_file`. Key notes to know:
+
+- **Family contacts**: `inbox/family-contacts.md` — covers Will's parents, Papa,
+  uncles, cousins, Brady, Henry, and per-person tone guidance.
+- **Interaction style policy**: `inbox/imessage-interaction-style.md` — covers
+  the general tone tiers (elder family vs. casual contacts vs. Will himself).
+
+Apply what you find: match tone, reference details they've shared, and write the
+message as Will's agent, not as a generic bot.
+
 ## Rules
 
 - **Owner-directed only.** `imsg` can read and send across the owner's entire
