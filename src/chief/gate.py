@@ -17,8 +17,9 @@ from enum import Enum
 from pathlib import Path
 
 from chief.agent.tools import ToolContext, ToolDispatcher
-from chief.approvals import Approval
+from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
+from chief.dispatch import Dispatcher
 from chief.provider.base import ToolCall, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,22 @@ class GatePolicy:
 AskApproval = Callable[[ToolContext, str], Awaitable[Approval]]
 AllowAlways = Callable[[str], None]
 Announce = Callable[[ToolContext, str], Awaitable[None]]
+
+
+def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskApproval:
+    """The card path: ask on the calling thread's own surface.
+
+    Shared by the gate's own gray-zone cards and by tools that raise their own
+    card (``schedule``'s command creation), so both reach the owner the same way.
+    """
+
+    async def ask(ctx: ToolContext, question: str) -> Approval:
+        send = dispatcher.adapter(ctx.channel).send
+        return await approvals.ask(
+            ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
+        )
+
+    return ask
 
 
 def announce_text(call: ToolCall, *, denied: bool = False) -> str:

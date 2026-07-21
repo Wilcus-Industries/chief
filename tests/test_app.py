@@ -3,18 +3,22 @@ only the LLM provider swapped (PRD #183 testing seam)."""
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from chief.agent.tools import ToolRegistry
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
+from chief.mcpclient.manager import ServerConfig
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
-from chief.wiring import build_provider
+from chief.shelltool import GUARD_REFUSED_EXIT_CODE
+from chief.wiring import build_mcp, build_provider
 
 from .fakes import FakeProvider, text_turn
 
@@ -102,6 +106,76 @@ def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
     )
     with pytest.raises(ValueError, match="opus.*typo"):
         build_provider(config)
+
+
+def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
+    config = Config(
+        mcp_servers={
+            "http_server": {"url": "http://127.0.0.1:9000"},
+            "stdio_server": {
+                "command": ["python", "server.py"],
+                "env": {"API_KEY": "secret"},
+                "cwd": "/srv/mcp",
+                "timeout": 90,
+            },
+            "bare_stdio": {"command": ["mcp-tool"]},
+        }
+    )
+    _, mcp_configs = build_mcp(config, ToolRegistry())
+    by_name = {sc.name: sc for sc in mcp_configs}
+
+    assert by_name["http_server"] == ServerConfig(
+        name="http_server", url="http://127.0.0.1:9000"
+    )
+    assert by_name["stdio_server"] == ServerConfig(
+        name="stdio_server",
+        command=("python", "server.py"),
+        env={"API_KEY": "secret"},
+        cwd="/srv/mcp",
+        timeout=90.0,
+    )
+    # No env/cwd/timeout declared: both stay None, timeout defaults to 30s.
+    assert by_name["bare_stdio"] == ServerConfig(
+        name="bare_stdio", command=("mcp-tool",)
+    )
+    assert by_name["bare_stdio"].timeout == 30.0
+
+
+def test_build_mcp_empty_config_yields_no_servers() -> None:
+    _, mcp_configs = build_mcp(Config(), ToolRegistry())
+    assert mcp_configs == ()
+
+
+def test_build_mcp_rejects_non_numeric_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": "not-a-number"},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
+
+
+def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = Config(
+        mcp_servers={
+            "good": {"url": "http://127.0.0.1:9000"},
+            "bad": {"url": "http://127.0.0.1:9001", "timeout": 0},
+        }
+    )
+    with caplog.at_level("WARNING"):
+        _, mcp_configs = build_mcp(config, ToolRegistry())
+    names = {sc.name for sc in mcp_configs}
+    assert names == {"good"}
+    assert "bad" in caplog.text
 
 
 async def test_switch_model_is_gated_and_persists_the_override(
@@ -312,3 +386,132 @@ async def test_denied_card_blocks_the_tool(
         assert "denied by the gate" in denied["content"]
     finally:
         await shutdown(app, streams)
+
+
+def command_create(command: str) -> ToolCall:
+    return ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "prune the cache",
+            "spec": "0 4 * * *",
+            "command": command,
+        },
+    )
+
+
+async def test_scheduled_command_creation_raises_a_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # gate_approved=("schedule",) is load-bearing: the gate raises no card for
+    # this call, so any card that appears came from the tool itself.
+    command = "rm -rf /tmp/chief-cache"
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create(command),))],
+            text_turn("scheduled"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        card = (await read_finals(streams, 1))[0]
+        assert command in card["text"]
+        send_frame(streams, "yes", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        schedules = await app.cron_service.list_enabled()
+        assert len(schedules) == 1
+        assert schedules[0].command == command
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_declined_scheduled_command_creates_no_row(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(command_create("rm -rf /tmp/x"),))],
+            text_turn("understood"),
+        ]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "prune the cache nightly", thread="t1")
+        await read_finals(streams, 1)  # the tool's card
+        send_frame(streams, "no", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "understood"
+        assert await app.cron_service.list_enabled() == []
+        result = provider.calls[1][-1]
+        assert result["role"] == "tool"
+        assert "not created" in result["content"]
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_prompt_schedule_creation_raises_no_card(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    create = ToolCall(
+        id="c1",
+        name="schedule",
+        arguments={
+            "action": "create",
+            "description": "daily checkin",
+            "spec": "0 9 * * *",
+            "prompt": "say hi",
+        },
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(create,))], text_turn("scheduled")]
+    )
+    config = make_config(tmp_path, sock_path, gate_approved=("schedule",))
+    app, streams = await boot(config, provider)
+    try:
+        send_frame(streams, "remind me daily", thread="t1")
+        final = (await read_finals(streams, 1))[0]
+        assert final["text"] == "scheduled"
+        assert len(await app.cron_service.list_enabled()) == 1
+    finally:
+        await shutdown(app, streams)
+
+
+async def test_scheduled_command_gets_the_owner_send_guard(
+    tmp_path: Path, sock_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The shell tool's echo-loop seatbelt must also cover cron's unattended
+    # runner — an approved schedule is otherwise a way around it, with nobody
+    # present to notice the loop start.
+    config = make_config(
+        tmp_path, sock_path, imessage_owner_handles=("+15551234567",)
+    )
+    app = await build_app(config, provider=FakeProvider([]))
+    marker = tmp_path / "sent.txt"
+    # Created before start(): the loop sleeps its full poll when it boots empty.
+    await app.cron_service.create(
+        description="page the owner",
+        spec="@every 0.05",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        command=f"echo sent > {marker}; imsg send --to +15551234567 hi",
+    )
+    with caplog.at_level(logging.INFO, logger="chief.cron.service"):
+        await app.start()
+        streams = await asyncio.open_unix_connection(str(config.socket_path))
+        try:
+            for _ in range(200):
+                if any("command exit=" in r.getMessage() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            await shutdown(app, streams)
+    fired = [r.getMessage() for r in caplog.records if "command exit=" in r.message]
+    assert fired, "the command schedule never fired"
+    # Refused by the guard before reaching the shell — so `echo` never ran.
+    assert f"exit={GUARD_REFUSED_EXIT_CODE}" in fired[0]
+    assert not marker.exists()

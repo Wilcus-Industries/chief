@@ -30,7 +30,7 @@ def _isolate_installed_packages(
 ) -> None:
     """Point ``build_app``'s package discovery at empty dirs.
 
-    ``_build_agent_core`` resolves the installed registry and the cloned
+    ``chief.hooks.boot.build_hooks`` resolves the installed registry and the cloned
     package dir from cwd-relative module constants, so a test booting the real
     app loaded whatever the *operator* had installed. That made the suite's
     result a function of the box: green on a dev clone with no
@@ -44,8 +44,10 @@ def _isolate_installed_packages(
     own roots, so nothing legitimately depends on these constants.
     """
     empty = tmp_path_factory.mktemp("no-packages")
-    monkeypatch.setattr("chief.app.CLONED_PACKAGES_DIR", empty / "cloned")
-    monkeypatch.setattr("chief.app.INSTALLED_REGISTRY", empty / "installed.yaml")
+    monkeypatch.setattr("chief.hooks.boot.CLONED_PACKAGES_DIR", empty / "cloned")
+    monkeypatch.setattr(
+        "chief.hooks.boot.INSTALLED_REGISTRY", empty / "installed.yaml"
+    )
 
 
 @pytest.fixture

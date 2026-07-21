@@ -69,13 +69,24 @@ implements the provider seam so integration tests drive the **real daemon
 round-trip with only the model call swapped**.
 
 Its script is a `list[list[ProviderEvent]]`, one entry per model call. It records
-`.calls` and `.models`, and exposes an optional `.gate: asyncio.Event` so
-concurrency tests can control interleaving. Helpers: `text_turn(text)` and
-`tool_turn(name, arguments, call_id)`.
+`.calls`, `.models`, and `.tool_specs` (the tool specs offered on each call, so a
+test can assert *which* tools reached the model), and exposes an optional
+`.gate: asyncio.Event` so concurrency tests can control interleaving. Helpers:
+`text_turn(text)` and `tool_turn(name, arguments, call_id)`.
 
 `tests/test_app.py` is the whole-daemon seam: `build_app(config,
 provider=FakeProvider(...))` → `app.start()` → a real `asyncio.open_unix_connection`
 to the socket.
+
+`tests/test_mcp_boot.py` combines both seams: it boots that daemon against a
+**real stdio MCP subprocess declared by a real package manifest** — nothing mocks
+the subprocess, its environment, or the package's `post_tool` hook. Reuse its
+`install_mcp_package` helper to write a package and mark it installed; because
+`conftest.py` isolates boots from the operator's install state, the roots go in
+explicitly (`Config.packages_dir` plus a re-pointed
+`chief.hooks.boot.INSTALLED_REGISTRY`). Note an MCP tool is not `read_only`, so
+any scripted `tool_turn` against one needs it in `gate_approved` or the gate
+raises an approval card and the script desyncs.
 
 Mock external dependencies (network, filesystem, services) — but prefer this seam
 over mocking chief's own internals.

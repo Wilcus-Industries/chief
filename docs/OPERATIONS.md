@@ -122,6 +122,17 @@ healthy.
 
 Cloned packages update separately via `chief-pkg update`, which restarts nothing.
 
+### There are no migrations — new columns are a manual deploy step
+
+The schema is created at boot, so an update that adds a column leaves an existing
+`data/chief.db` without it, and every read of that table raises `no such column`.
+Run the `ALTER TABLE` by hand at deploy; each such commit says which one in its
+message (most recently `ALTER TABLE schedules ADD COLUMN command VARCHAR`).
+
+The cron loop survives this rather than dying silently — a failed tick is logged
+and retried on the next poll — but **schedules stay broken until you run the
+ALTER**, so treat the log line as the alarm it is.
+
 ## Package CLI — `chief-pkg`
 
 ```
@@ -133,7 +144,8 @@ chief-pkg verify <name>
 
 `verify` is the install postcondition: registry entry present, each skill at
 `skills/<basename>/SKILL.md`, each config key in raw config, each secret file
-present, each `python_deps` entry importable. Exits 1 with a problem list.
+present, each `python_deps` entry importable, each declared `mcp_servers` entry
+present under `mcp_servers` in `config.yaml`. Exits 1 with a problem list.
 
 **Every invocation refreshes the clone** (clone-if-missing, then pull), and both
 are bounded and fail-soft — 30s clone, 10s pull, `GIT_TERMINAL_PROMPT=0`. The

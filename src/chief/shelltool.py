@@ -8,7 +8,7 @@ an approval card on every command until the owner "always allow"s it, exactly li
 by the daemon at shutdown; the prompt-side labels live in :mod:`chief.shellprompt`.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -117,6 +117,43 @@ _SHELL_SPEC = ToolSpec(
 #: owner-handle echo loop) — keep them few and specific.
 ShellGuard = Callable[[str], str | None]
 
+#: Exit code reported for a command a guard refused — nothing ran.
+GUARD_REFUSED_EXIT_CODE = 126
+
+
+def refuse(guards: Sequence[ShellGuard], command: str) -> str | None:
+    """First guard refusal for ``command``, or ``None`` when all of them pass."""
+    for guard in guards:
+        refusal = guard(command)
+        if refusal is not None:
+            return refusal
+    return None
+
+
+def guarded_runner(
+    service: "ShellService", guards: Sequence[ShellGuard] = ()
+) -> Callable[[str, str], Awaitable[dict[str, Any]]]:
+    """Wrap :meth:`ShellService.run` so an *unattended* caller gets the guards too.
+
+    The guards are wired into the ``shell`` tool, so a caller that reaches
+    ``ShellService.run`` directly (cron's command schedules) would otherwise
+    bypass seatbelts like the iMessage owner-handle echo loop — and do it with
+    nobody watching. A refusal returns a normal result dict, never a raise.
+    """
+
+    async def run(thread_key: str, command: str) -> dict[str, Any]:
+        refusal = refuse(guards, command)
+        if refusal is not None:
+            return {
+                "stdout": "",
+                "stderr": refusal,
+                "exit_code": GUARD_REFUSED_EXIT_CODE,
+                "truncated": False,
+            }
+        return await service.run(thread_key, command)
+
+    return run
+
 
 def register_shell_tool(
     registry: ToolRegistry,
@@ -135,10 +172,9 @@ def register_shell_tool(
         timeout: float | None = None,
         context: ToolContext | None = None,
     ) -> str:
-        for guard in guards:
-            refusal = guard(command)
-            if refusal is not None:
-                return refusal
+        refusal = refuse(guards, command)
+        if refusal is not None:
+            return refusal
         thread_key = context.thread_key if context is not None else "default"
         try:
             result = await service.run(thread_key, command, timeout=timeout)

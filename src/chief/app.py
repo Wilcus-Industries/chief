@@ -2,7 +2,8 @@
 
 ``build_app`` reads as a table of contents — each phase is a helper called in
 order. Persistence, gate, MCP, and adapters live in ``chief.wiring``; the
-default toolset in ``chief.toolset``; the agent-core closure trap stays here.
+default toolset in ``chief.toolset``; hook assembly in ``chief.hooks.boot``;
+the agent-core closure trap stays here.
 Tests boot exactly this wiring with only the provider swapped for the
 deterministic fake (the one scripted fake CI allows, PRD #183).
 """
@@ -15,30 +16,24 @@ from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
 from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
-from chief.approvals import Approval
 from chief.budget import Budget
 from chief.bus import EventBus
-from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
-from chief.config import Config, load_raw
+from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.daemon import App
 from chief.dispatch import Dispatcher
-from chief.gate import GatedTools
-from chief.hooks import HookRegistry
-from chief.hooks.loader import load_hooks
-from chief.install.updatecheck import session_start_notice
+from chief.gate import GatedTools, approval_asker
+from chief.hooks.boot import build_hooks
 from chief.monitors.service import MonitorService
-from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
-from chief.registry_apply import INSTALLED_REGISTRY, load_installed
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.shellprompt import shell_prompt_line
-from chief.shelltool import ShellService
+from chief.shelltool import ShellGuard, ShellService, guarded_runner
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
 from chief.toolset import register_native_tools
@@ -67,6 +62,7 @@ async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
 async def _build_agent_core(
     config: Config, provider: Provider, store: MessageStore,
     factory: SessionFactory, gate: Gate, skills: SkillLibrary,
+    shell_service: ShellService, shell_guards: tuple[ShellGuard, ...],
 ) -> Core:
     """Budget, bus, registry, the manager/dispatcher/tools_factory trio, and the
     monitor/cron services. The trio stays in one scope so ``tools_factory``'s
@@ -75,41 +71,18 @@ async def _build_agent_core(
     budget = Budget(factory, config.budget_cap_usd, config.budget_warn_ratio)
     bus = EventBus()
     registry = ToolRegistry()
-    hooks = HookRegistry()
-    # Above load_hooks, not beside its monitor use below: hooks get this too.
-    classifier = Classifier(
-        provider, ClassifierRegistry(config.classifiers_dir),
-        config.models.get("default_classifier", config.default_model))
-    load_hooks(
-        library=PackageLibrary((config.packages_dir, CLONED_PACKAGES_DIR)),
-        installed=load_installed(INSTALLED_REGISTRY),
-        registry=hooks,
-        provider=provider,
-        models=config.models,
-        budget=budget,
-        raw_config=load_raw(),
-        disabled=config.hooks_disabled,
-        data_root=Path("data/hooks"),
-        classifier=classifier,
-    )
-    # Core registers under a package name like anyone else; accessors sort by it.
-    hooks.register_session_start("core", session_start_notice(Path.cwd()))
+    hooks, classifier = build_hooks(config, provider, budget)
 
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)
-
-        async def ask(ctx: ToolContext, question: str) -> Approval:
-            send = dispatcher.adapter(ctx.channel).send
-            return await gate.approvals.ask(
-                ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
-            )
 
         async def announce(ctx: ToolContext, text: str) -> None:
             await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
 
         return GatedTools(
             registry=registry, policy=gate.policy, audit=gate.audit,
-            context=context, ask=ask, on_always=gate.allow_always,
+            context=context, ask=approval_asker(dispatcher, gate.approvals),
+            on_always=gate.allow_always,
             announce=announce if config.gate_announce else None,
         )
 
@@ -134,7 +107,8 @@ async def _build_agent_core(
     )
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(
-        factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours)
+        factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
+        run_command=guarded_runner(shell_service, shell_guards),
     )
     return Core(budget, bus, registry, restart, manager, dispatcher, monitors, cron)
 
@@ -145,14 +119,19 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     engine, factory, store = await build_persistence(config)
     gate = build_gate(config)
     skills = SkillLibrary(config.skills_dir)
-    core = await _build_agent_core(config, provider, store, factory, gate, skills)
-
-    selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
+    # Built before the core: cron runs command schedules on these shells.
     shell_service = ShellService(
         workspace_dir=str(Path.cwd()),
         timeout_seconds=config.shell_timeout_seconds,
         output_limit=config.shell_output_limit,
     )
+    # Echo-loop seatbelt on BOTH shell paths: the tool and cron's runner.
+    shell_guards = (owner_send_guard(config.imessage_owner_handles),)
+    core = await _build_agent_core(
+        config, provider, store, factory, gate, skills, shell_service, shell_guards
+    )
+
+    selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
     # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
     model_aliases = frozenset(config.provider_aliases)
     register_native_tools(
@@ -168,10 +147,9 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         default_model=config.default_model,
         budget=core.budget,
         root=Path.cwd(),
-        # Mechanical echo-loop seatbelt: shell commands must not message the
-        # owner's own handle out-of-band (imsg/osascript) — see owner_send_guard.
-        shell_guards=(owner_send_guard(config.imessage_owner_handles),),
+        shell_guards=shell_guards,
         model_aliases=model_aliases,
+        ask=approval_asker(core.dispatcher, gate.approvals),
     )
     commands = CommandSet(
         core.manager, core.monitors, core.cron, store, skills=skills,

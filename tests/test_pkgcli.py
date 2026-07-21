@@ -346,6 +346,60 @@ def test_load_installed_invalid_yaml_is_empty_but_loud(
     assert str(registry) in caplog.text
 
 
+def _mcp_package(tmp_path: Path) -> Package:
+    root = tmp_path / "packages" / "withmcp"
+    root.mkdir(parents=True)
+    (root / "manifest.yaml").write_text(
+        "name: withmcp\ndescription: d\n"
+        "mcp_servers:\n  fetch:\n    command: [npx, fetch-mcp]\n"
+    )
+    return PackageLibrary((tmp_path / "packages",)).scan()[0]
+
+
+def test_verify_install_reports_a_declared_mcp_server_absent_from_config(
+    tmp_path: Path,
+) -> None:
+    package = _mcp_package(tmp_path)
+    problems = verify_install(
+        package,
+        installed={"withmcp": {"source": "bundled"}},
+        config_raw={},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert problems == ["mcp server 'fetch' absent from config.yaml"]
+
+
+def test_verify_install_passes_when_the_mcp_server_is_configured(
+    tmp_path: Path,
+) -> None:
+    package = _mcp_package(tmp_path)
+    problems = verify_install(
+        package,
+        installed={"withmcp": {"source": "bundled"}},
+        config_raw={"mcp_servers": {"fetch": {"command": ["npx", "fetch-mcp"]}}},
+        skills_root=tmp_path / "skills",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert problems == []
+
+
+def test_verify_install_ignores_mcp_servers_when_package_declares_none(
+    tmp_path: Path,
+) -> None:
+    # Every bundled package currently declares `mcp_servers: {}` — verify must
+    # stay clean for them regardless of what's in config.yaml.
+    package = _manifest_package(tmp_path)
+    problems = verify_install(
+        package,
+        installed={"demo": {"source": "bundled"}},
+        config_raw={"mcp_servers": {}},
+        skills_root=tmp_path / "skills" / "demo",
+        secrets_root=tmp_path / "secrets",
+    )
+    assert not any("mcp server" in p for p in problems)
+
+
 def test_verify_install_checks_python_deps_importable(tmp_path: Path) -> None:
     root = tmp_path / "packages" / "depdemo"
     root.mkdir(parents=True)
@@ -387,3 +441,42 @@ def test_verify_install_handles_dotted_dep_with_absent_parent(
         secrets_root=tmp_path / "secrets",
     )
     assert any("definitely_missing_dep_xyz.sub" in p for p in problems)
+
+
+def test_verify_fails_a_manifest_declared_server_that_never_reached_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The reading under test: a manifest-declared MCP server that was never
+    # wired into config.yaml cannot come up, and the install postcondition
+    # reports that instead of reporting success. Driven through the CLI's own
+    # verify path over real on-disk manifest/registry/config files.
+    from chief.config import load_config
+    from chief.pkgcli import _run_verify
+
+    monkeypatch.chdir(tmp_path)
+    pkg = tmp_path / "packages" / "mcpfixture"
+    pkg.mkdir(parents=True)
+    # No skills/secrets/config_keys/python_deps: the MCP server is the only
+    # postcondition that can fail.
+    (pkg / "manifest.yaml").write_text(
+        "name: mcpfixture\ndescription: d\n"
+        "mcp_servers:\n  testsrv:\n    command: [echo, hi]\n"
+    )
+    (tmp_path / "data").mkdir()
+    # Registered — the only thing missing is the server itself.
+    (tmp_path / "data" / "installed.yaml").write_text(
+        "mcpfixture:\n  source: bundled\n"
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run_verify("mcpfixture", load_config())
+    assert exit_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "install INCOMPLETE" in out
+    assert "mcp server 'testsrv' absent from config.yaml" in out
+
+    (tmp_path / "config.yaml").write_text(
+        "mcp_servers:\n  testsrv:\n    command: [echo, hi]\n"
+    )
+    _run_verify("mcpfixture", load_config())
+    assert "verified" in capsys.readouterr().out
