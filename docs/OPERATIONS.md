@@ -6,7 +6,7 @@ containers, no migrations — the schema is created at boot by the new tree's co
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/CrazyWillBear/chief/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Wilcus-Industries/chief/main/bootstrap.sh | bash
 ```
 
 `bootstrap.sh` accepts `--dir DIR`, `--ref TAG`, `--no-service`, `--no-launch`,
