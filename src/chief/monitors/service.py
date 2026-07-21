@@ -20,6 +20,7 @@ from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierDef
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
+from chief.persistence.store import MessageStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class MonitorService:
         classifier: Classifier,
     ) -> None:
         self._factory = factory
+        self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._classifier = classifier
         bus.subscribe(self._on_event)
@@ -68,6 +70,19 @@ class MonitorService:
                 select(MonitorRow).where(MonitorRow.enabled).order_by(MonitorRow.id)
             )
             return list(rows)
+
+    async def retarget(
+        self, monitor_id: int, wake_channel: str, wake_thread: str
+    ) -> bool:
+        """Re-point which session a monitor wakes. False if no such monitor."""
+        async with self._factory() as db:
+            row = await db.get(MonitorRow, monitor_id)
+            if row is None:
+                return False
+            row.wake_channel = wake_channel
+            row.wake_thread = wake_thread
+            await db.commit()
+            return True
 
     async def delete(self, monitor_id: int) -> bool:
         async with self._factory() as db:

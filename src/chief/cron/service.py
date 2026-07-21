@@ -13,6 +13,7 @@ from chief.cron.timing import QuietHours, next_fire, utcnow, validate_spec
 from chief.monitors.service import WakeAgent
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import ScheduleRow
+from chief.persistence.store import MessageStore
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class CronService:
         run_command: RunCommand | None = None,
     ) -> None:
         self._factory = factory
+        self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._quiet = quiet
         self._poll = poll_seconds
@@ -79,6 +81,19 @@ class CronService:
             db.add(row)
             await db.commit()
             return row.id
+
+    async def retarget(
+        self, schedule_id: int, wake_channel: str, wake_thread: str
+    ) -> bool:
+        """Re-point which session a schedule wakes. False if no such schedule."""
+        async with self._factory() as db:
+            row = await db.get(ScheduleRow, schedule_id)
+            if row is None:
+                return False
+            row.wake_channel = wake_channel
+            row.wake_thread = wake_thread
+            await db.commit()
+            return True
 
     async def list_enabled(self) -> list[ScheduleRow]:
         async with self._factory() as db:

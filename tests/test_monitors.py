@@ -11,6 +11,7 @@ from chief.classifiers import Classifier, ClassifierRegistry
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.persistence.db import make_session_factory
+from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall
 
 from .fakes import FakeProvider, text_turn
@@ -247,6 +248,101 @@ async def test_monitor_tools_create_list_delete(engine: AsyncEngine) -> None:
     assert await registry.dispatch(
         ToolCall(id="5", name="monitor", arguments={"action": "list"})
     ) == "no monitors"
+
+
+async def test_monitor_tool_create_targets_another_session(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """`target_session` routes the wake to a different, known session, which
+    keeps its own channel."""
+    await store.ensure_session("web:errands", "web")
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    created = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "urgent watcher",
+            "pattern": "urgent", "target_session": "web:errands"}),
+        context,
+    )
+    assert created == "monitor #1 created"
+    await bus.publish(inbound("this is URGENT"))
+    assert len(wake.messages) == 1
+    assert wake.messages[0].thread_key == "web:errands"
+    assert wake.messages[0].channel == "web"
+
+
+async def test_monitor_tool_create_registers_an_unknown_target(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """An unknown `target_session` is registered under the caller's channel and
+    the tool says so."""
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    created = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "urgent watcher",
+            "pattern": "urgent", "target_session": "web:new"}),
+        context,
+    )
+    assert created == "monitor #1 created (registered new session 'web:new')"
+    assert await store.channel("web:new") == "cli"
+    await bus.publish(inbound("this is URGENT"))
+    assert wake.messages[0].thread_key == "web:new"
+    assert wake.messages[0].channel == "cli"
+
+
+async def test_monitor_tool_retarget_repoints_the_wake(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    await store.ensure_session("web:errands", "web")
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "urgent watcher",
+            "pattern": "urgent"}),
+        context,
+    )
+    retargeted = await registry.dispatch(
+        ToolCall(id="2", name="monitor", arguments={
+            "action": "retarget", "monitor_id": 1,
+            "target_session": "web:errands"}),
+        context,
+    )
+    assert retargeted == "monitor #1 now wakes web:errands"
+    listing = await registry.dispatch(
+        ToolCall(id="3", name="monitor", arguments={"action": "list"})
+    )
+    assert "web:errands" in listing
+    await bus.publish(inbound("this is URGENT"))
+    assert wake.messages[0].thread_key == "web:errands"
+    assert wake.messages[0].channel == "web"
+
+
+async def test_monitor_tool_retarget_unknown_id(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "retarget", "monitor_id": 999, "target_session": "x:y"}),
+        context,
+    )
+    assert result == "error: no such monitor"
 
 
 async def test_monitor_tool_classifier_form(engine: AsyncEngine) -> None:

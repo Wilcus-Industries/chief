@@ -67,6 +67,24 @@ class MessageStore:
             row = await db.get(SessionRow, thread_key)
             return row.channel if row else None
 
+    async def resolve_wake_target(
+        self, target: str | None, default_channel: str, default_thread: str
+    ) -> tuple[str, str, bool]:
+        """Pick the (channel, thread) a monitor or schedule should wake.
+
+        No target means the caller's own thread. A target that already has a
+        session keeps that session's own channel; an unknown one is registered
+        as a new session under ``default_channel``. The bool reports whether a
+        new session row was created, so the caller can say so.
+        """
+        if not target:
+            return default_channel, default_thread, False
+        existing = await self.channel(target)
+        if existing is not None:
+            return existing, target, False
+        await self.ensure_session(target, default_channel)
+        return default_channel, target, True
+
     async def model_override(self, thread_key: str) -> str | None:
         """The owner's per-thread model override, if any."""
         async with self._factory() as db:

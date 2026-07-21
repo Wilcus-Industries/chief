@@ -3,13 +3,9 @@
 from typing import Any
 
 from chief.agent.tools import Tool, ToolContext, ToolRegistry
+from chief.monitors.predicate import MATCHABLE_FIELDS, build_predicate
 from chief.monitors.service import MonitorService
 from chief.provider.base import ToolSpec
-
-# The `message.inbound` payload keys a `pattern` monitor can match on — see
-# Dispatcher._publish_inbound. A pattern searches exactly ONE of these, so a
-# field outside the set would match "" forever and never fire (#235).
-MATCHABLE_FIELDS = ("text", "sender", "thread_key")
 
 _SPEC = ToolSpec(
     name="monitor",
@@ -23,13 +19,20 @@ _SPEC = ToolSpec(
         "yes/no judgment via the built-in wake-judge classifier), or "
         "`classifier` (a named categorical classifier, which requires "
         "`fire_label` — the label that fires the monitor). Plus optional "
-        "`watch_channel` (defaults to this thread's channel). "
-        "action=list takes nothing. action=delete needs `monitor_id`."
+        "`watch_channel` (defaults to this thread's channel) and "
+        "`target_session` (a thread_key; which session the wake runs in, "
+        "default this thread — an unknown key registers a new session). "
+        "action=list takes nothing. action=delete needs `monitor_id`. "
+        "action=retarget needs `monitor_id` and re-points the wake to "
+        "`target_session` (default this thread)."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "list", "delete"]},
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "delete", "retarget"],
+            },
             "description": {"type": "string"},
             "pattern": {"type": "string"},
             "field": {
@@ -43,6 +46,13 @@ _SPEC = ToolSpec(
             "watch_channel": {
                 "type": "string",
                 "description": "channel to watch; defaults to this thread's channel",
+            },
+            "target_session": {
+                "type": "string",
+                "description": (
+                    "thread_key of the session to wake; defaults to this "
+                    "thread. An unknown key registers a new session."
+                ),
             },
             "monitor_id": {"type": "integer"},
         },
@@ -63,60 +73,51 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         fire_label: str | None,
         watch_channel: str | None,
         field: str | None,
+        target_session: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
         if not description:
             return "error: create needs a description"
-        forms = [pattern, instruction, classifier]
-        if sum(form is not None for form in forms) != 1:
-            return "error: give exactly one of pattern, instruction, or classifier"
-        if classifier is not None and not fire_label:
-            return "error: classifier needs a fire_label"
-        if field is not None and pattern is None:
-            return "error: field only applies to the pattern form"
-        if field is not None and field not in MATCHABLE_FIELDS:
-            return (
-                f"error: '{field}' is not a matchable event field "
-                f"({', '.join(MATCHABLE_FIELDS)})"
-            )
-        predicate: dict[str, Any]
-        if pattern is not None:
-            predicate = {
-                "kind": "code",
-                "field": field or "text",
-                "pattern": pattern,
-            }
-        elif instruction is not None:
-            predicate = {
-                "kind": "classifier",
-                "classifier": "wake-judge",
-                "fire_label": "YES",
-                "instruction": instruction,
-            }
-        else:
-            assert classifier is not None  # the exactly-one check guarantees it
-            definition = service.classifier_def(classifier)
-            if definition is None:
-                return f"error: unknown classifier '{classifier}'"
-            if fire_label not in definition.labels:
-                return (
-                    f"error: fire_label '{fire_label}' is not a declared label "
-                    f"of '{classifier}' ({', '.join(definition.labels)})"
-                )
-            predicate = {
-                "kind": "classifier",
-                "classifier": classifier,
-                "fire_label": fire_label,
-            }
+        predicate = build_predicate(
+            pattern, instruction, classifier, fire_label, field,
+            service.classifier_def,
+        )
+        if isinstance(predicate, str):
+            return predicate  # a validation error
+        wake_channel, wake_thread, created = await service.store.resolve_wake_target(
+            target_session, context.channel, context.thread_key
+        )
         monitor_id = await service.create(
             description=description,
             watch_channel=watch_channel or context.channel,
-            wake_channel=context.channel,
-            wake_thread=context.thread_key,
+            wake_channel=wake_channel,
+            wake_thread=wake_thread,
             predicate=predicate,
         )
-        return f"monitor #{monitor_id} created"
+        line = f"monitor #{monitor_id} created"
+        if created:
+            line += f" (registered new session '{wake_thread}')"
+        return line
+
+    async def _retarget(
+        context: ToolContext | None,
+        monitor_id: Any,
+        target_session: str | None,
+    ) -> str:
+        if context is None:
+            return "error: retarget needs a session context"
+        if not isinstance(monitor_id, int):
+            return "error: retarget needs monitor_id"
+        wake_channel, wake_thread, created = await service.store.resolve_wake_target(
+            target_session, context.channel, context.thread_key
+        )
+        if not await service.retarget(monitor_id, wake_channel, wake_thread):
+            return "error: no such monitor"
+        line = f"monitor #{monitor_id} now wakes {wake_thread}"
+        if created:
+            line += f" (registered new session '{wake_thread}')"
+        return line
 
     async def _list() -> str:
         rows = await service.list_enabled()
@@ -138,6 +139,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         watch_channel: str | None = None,
         monitor_id: Any = None,
         field: str | None = None,
+        target_session: str | None = None,
     ) -> str:
         if action == "create":
             return await _create(
@@ -149,7 +151,10 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
                 fire_label,
                 watch_channel,
                 field,
+                target_session,
             )
+        if action == "retarget":
+            return await _retarget(context, monitor_id, target_session)
         if action == "list":
             return await _list()
         if action == "delete":
