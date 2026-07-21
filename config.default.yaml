@@ -98,3 +98,18 @@ imessage:
   enabled: false
   owner_handles: []
   poll_seconds: 2
+
+# Context compaction: when a thread's transcript nears the model's context
+# window, the old messages are folded into one summary note and the tail kept.
+# Threshold = ratio * window. The window tracks the thread's CURRENT model,
+# resolved per turn: a `windows` override wins; else it is fetched once from
+# OpenRouter's /models metadata (only for OpenRouter-backed models); else
+# `default_window`. Set a `windows` entry for any model on a non-OpenRouter
+# backend (a local proxy), whose window can't be fetched. `/compact` forces a
+# compaction now regardless of the threshold.
+compaction:
+  ratio: 0.95
+  keep_recent: 20
+  default_window: 60000
+  windows: {}
+  #   opus: 200000

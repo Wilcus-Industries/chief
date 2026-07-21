@@ -19,8 +19,9 @@ _SPEC = ToolSpec(
         "exactly one of `prompt` (wakes this thread to do it, deferring out "
         "of quiet hours) or `command` (runs a shell command unattended — no "
         "model turn, no approval at fire time, so creating one asks the "
-        "owner first and ignores quiet hours). action=list takes nothing. "
-        "action=delete needs `schedule_id`."
+        "owner first and ignores quiet hours). All times are UTC — convert a "
+        "local wall-clock time to UTC before building the cron spec. "
+        "action=list takes nothing. action=delete needs `schedule_id`."
     ),
     parameters={
         "type": "object",

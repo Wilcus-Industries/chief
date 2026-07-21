@@ -1,22 +1,27 @@
 """Context compaction: fold old history into a system note, keep the tail.
 
-When a thread's transcript outgrows the threshold, everything but the most
-recent messages is summarized by the model into one system note that then
-leads the transcript; the persisted history is truncated to match. Token
-counts are a chars/4 estimate — coarse, but it only needs to keep us far
-from the window edge. The constants are deliberate self-edit targets, not
-config keys.
+When a thread's transcript nears the model's context window, everything but the
+most recent messages is summarized by the model into one system note that then
+leads the transcript; the persisted history is truncated to match. Token counts
+are a chars/4 estimate — coarse, but it only needs to keep us far from the
+window edge.
+
+The threshold is ``ratio * window``, where the window tracks the thread's
+*current* model (resolved per turn by :class:`~chief.agent.windows.WindowResolver`)
+and ``ratio``/``keep_recent`` come from the ``compaction:`` config block — all
+owner-configurable. ``force=True`` (the ``/compact`` command, nightly autocompact)
+bypasses the threshold and compacts whatever old history exists.
 """
 
 import json
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 from chief.provider.base import Completion, Provider
 
 logger = logging.getLogger(__name__)
 
-TOKEN_THRESHOLD = 60_000
+DEFAULT_RATIO = 0.95
 KEEP_RECENT = 20
 NOTE_PREFIX = "[compacted history summary]\n"
 
@@ -26,6 +31,12 @@ SUMMARY_INSTRUCTION = (
     "(names, paths, numbers, decisions). Drop pleasantries and dead ends. "
     "Write a dense note, not prose for a human."
 )
+
+
+class WindowSource(Protocol):
+    """Resolves a model name to its context window in tokens."""
+
+    async def resolve(self, model: str) -> int: ...
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
@@ -40,21 +51,33 @@ class Compactor:
         self,
         provider: Provider,
         model: str,
+        resolver: WindowSource,
         *,
-        threshold: int = TOKEN_THRESHOLD,
+        ratio: float = DEFAULT_RATIO,
         keep_recent: int = KEEP_RECENT,
     ) -> None:
         self._provider = provider
         self._model = model
-        self._threshold = threshold
+        self._resolver = resolver
+        self._ratio = ratio
         self._keep_recent = keep_recent
 
     async def compact(
-        self, messages: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        force: bool = False,
     ) -> list[dict[str, Any]] | None:
-        """The compacted transcript, or None when under the threshold."""
-        if estimate_tokens(messages) < self._threshold:
-            return None
+        """The compacted transcript, or None when nothing needs compacting.
+
+        ``model`` is the thread's current model, used to look up the window;
+        it defaults to the summarizer model. ``force`` bypasses the threshold.
+        """
+        if not force:
+            window = await self._resolver.resolve(model or self._model)
+            if estimate_tokens(messages) < int(self._ratio * window):
+                return None
         split = self._split_index(messages)
         old, recent = messages[:split], messages[split:]
         if not old:

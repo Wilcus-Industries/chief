@@ -75,6 +75,10 @@ template line.
 | `imessage.owner_handles` | `imessage_owner_handles` | `tuple` | `()` | — |
 | `imessage.db_path` | `imessage_db_path` | `Path` | `~/Library/Messages/chat.db` | — |
 | `imessage.poll_seconds` | `imessage_poll_seconds` | `float` | `2.0` | — |
+| `compaction.ratio` | `compaction_ratio` | `float` | `0.95` | — |
+| `compaction.keep_recent` | `compaction_keep_recent` | `int` | `20` | — |
+| `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
+| `compaction.windows.<model>` | `compaction_windows` | `dict[str,int]` | `{}` | — |
 
 `Config.default_model` is a derived property: `self.models["default"]`.
 
@@ -90,6 +94,13 @@ Notes on specific keys:
 - **`quiet_hours` is `"HH:MM-HH:MM"`** and may span midnight; prompt-waking
   schedule fires inside the window defer to its end (command schedules run
   silently and are never deferred).
+- **`compaction` threshold = `ratio * window`**, measured on messages only. The
+  window tracks the thread's *current* model, resolved per turn: a
+  `compaction.windows.<model>` override wins; else it is fetched once from
+  OpenRouter's `/models` metadata (OpenRouter-backed models only); else
+  `default_window`. Set a `windows` entry for any model on a non-OpenRouter
+  backend (a local proxy). `/compact` (and `chief compact <thread>`) forces a
+  compaction now regardless of the threshold.
 
 ### The owner_handles coercion trap
 
