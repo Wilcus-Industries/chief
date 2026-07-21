@@ -36,6 +36,23 @@ def test_reindex_then_search_prints_note_paths(
     assert "roof.md" in out
 
 
+def test_search_prints_openable_absolute_paths(
+    vault: Path, tmp_path: Path, warm_cache: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The path on each hit line must be directly openable — an absolute path the
+    # agent can read_file without guessing the vault root (the old vault-relative
+    # path made it flail: read_file, "no such file", find, retry).
+    assert cli.main(_args(vault, tmp_path, "reindex")) == 0
+    capsys.readouterr()
+    assert cli.main(_args(vault, tmp_path, "search", "leaking roof in the rain")) == 0
+    line = capsys.readouterr().out.splitlines()[0]
+    path_str = line.split("  ", 1)[1].split(" :: ")[0]
+    hit = Path(path_str)
+    assert hit.is_absolute()
+    assert hit.is_file()
+    assert hit.name == "roof.md"
+
+
 def test_reindex_picks_up_an_out_of_band_change(
     vault: Path, tmp_path: Path, warm_cache: None, capsys: pytest.CaptureFixture[str]
 ) -> None:

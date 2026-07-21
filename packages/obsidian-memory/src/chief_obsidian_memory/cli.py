@@ -87,8 +87,11 @@ def _search(args: argparse.Namespace) -> int:
             f"no matches (vault={_vault(settings)}, index={_index_home(args)})"
         )
         return 0
+    vault = _vault(settings)
     for hit in hits:
-        print(f"{hit.score:.3f}  {hit.note_path} :: {hit.heading}")
+        # Absolute path so the agent read_files it directly — a vault-relative
+        # path does not resolve from the repo root the daemon runs in.
+        print(f"{hit.score:.3f}  {vault / hit.note_path} :: {hit.heading}")
     return 0
 
 
@@ -102,16 +105,18 @@ def _reindex(args: argparse.Namespace) -> int:
 
 
 def _links(args: argparse.Namespace) -> int:
+    vault = _vault(_settings(args))
     for note_path in _graph(args).neighbors(args.note, args.hops):
-        print(note_path)
+        print(vault / note_path)
     return 0
 
 
 def _related(args: argparse.Namespace) -> int:
+    vault = _vault(_settings(args))
     for note_path in related(
         _index(args), _graph(args), args.query, args.k, args.hops
     ):
-        print(note_path)
+        print(vault / note_path)
     return 0
 
 

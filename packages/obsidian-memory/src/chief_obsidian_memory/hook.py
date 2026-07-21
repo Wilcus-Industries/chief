@@ -88,7 +88,8 @@ async def _recall(
     )
     transcript = format_transcript(turn.messages, turn.user_text, settings.window)
     return await run_judge(
-        context.classifier, transcript, candidates, settings.injection_cap_tokens
+        context.classifier, transcript, candidates,
+        settings.injection_cap_tokens, vault,
     )
 
 
