@@ -15,6 +15,7 @@ from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
 from chief.cron.tools import register_cron_tools
 from chief.persistence.db import make_session_factory
 from chief.persistence.models import ScheduleRow
+from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall
 from chief.shelltool import ShellService
 
@@ -152,6 +153,177 @@ async def test_schedule_tool_create_list_delete(engine: AsyncEngine) -> None:
     assert await registry.dispatch(
         ToolCall(id="5", name="schedule", arguments={"action": "list"})
     ) == "no schedules"
+
+
+async def test_schedule_tool_create_targets_another_session(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """`target_session` routes a prompt schedule's wake to a known session,
+    which keeps its own channel."""
+    await store.ensure_session("web:errands", "web")
+    wake = WakeSink()
+    service = CronService(
+        make_session_factory(engine), wake, quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+
+    created = await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "errand", "spec": "@every 0.05",
+            "prompt": "do it", "target_session": "web:errands"}),
+        context,
+    )
+    assert created == "schedule #1 created"
+    service.start()
+    try:
+        await asyncio.wait_for(wake.fired.wait(), timeout=2)
+    finally:
+        await service.stop()
+    assert wake.messages[0].thread_key == "web:errands"
+    assert wake.messages[0].channel == "web"
+
+
+async def test_schedule_tool_create_rejects_an_unknown_target(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    result = await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "errand", "spec": "0 9 * * *",
+            "prompt": "do it", "target_session": "web:new"}),
+        context,
+    )
+    assert result == "error: no such session 'web:new'"
+    assert await store.channel("web:new") is None
+    assert await service.list_enabled() == []
+
+
+async def test_schedule_tool_command_rejects_a_target(
+    engine: AsyncEngine,
+) -> None:
+    """A command schedule wakes no session, so target_session is refused."""
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    result = await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "d", "spec": "@every 60",
+            "command": "ls", "target_session": "web:x"}),
+        ToolContext(thread_key="cli:home", channel="cli"),
+    )
+    assert result.startswith("error:")
+    assert "target_session" in result
+    assert await service.list_enabled() == []
+
+
+async def test_schedule_tool_retarget_repoints_the_wake(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    await store.ensure_session("web:errands", "web")
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "standup", "spec": "0 9 * * *",
+            "prompt": "post"}),
+        context,
+    )
+    retargeted = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 1,
+            "target_session": "web:errands"}),
+        context,
+    )
+    assert retargeted == "schedule #1 now wakes web:errands"
+    rows = await service.list_enabled()
+    assert (rows[0].wake_thread, rows[0].wake_channel) == ("web:errands", "web")
+
+
+async def test_schedule_tool_retarget_unknown_id_leaves_no_orphan(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """A retarget of a missing schedule must not register its target session."""
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    result = await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 999, "target_session": "x:y"}),
+        ToolContext(thread_key="cli:home", channel="cli"),
+    )
+    assert result == "error: no such schedule"
+    assert await store.channel("x:y") is None
+
+
+async def test_schedule_tool_retarget_rejects_an_unknown_target(
+    engine: AsyncEngine,
+) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "standup", "spec": "0 9 * * *",
+            "prompt": "post"}),
+        context,
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 1,
+            "target_session": "web:ghost"}),
+        context,
+    )
+    assert result == "error: no such session 'web:ghost'"
+
+
+async def test_schedule_tool_retarget_rejects_a_command_schedule(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """Retargeting a command schedule is refused and writes nothing — the wake
+    fields stay dead and no target session is registered."""
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+
+    async def ask(context: ToolContext, question: str) -> Approval:
+        return Approval.ONCE
+
+    registry = ToolRegistry()
+    register_cron_tools(registry, service, ask=ask)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "prune", "spec": "0 4 * * *",
+            "command": "ls"}),
+        context,
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 1, "target_session": "web:x"}),
+        context,
+    )
+    assert "command schedule wakes no session" in result
+    assert await store.channel("web:x") is None
+    rows = await service.list_enabled()
+    assert (rows[0].wake_thread, rows[0].wake_channel) == ("cli:home", "cli")
 
 
 def make_shell(tmp_path: Path) -> ShellService:

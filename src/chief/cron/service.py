@@ -1,4 +1,7 @@
 """Cron service: persists schedules and wakes the agent when they fire."""
+# styleguide: file-length — one cohesive schedule service; the persistence CRUD
+# and the fire loop share _factory/_wake/_quiet/_anchor state, so splitting them
+# scatters the lifecycle across files for no real gain.
 
 import asyncio
 import logging
@@ -13,6 +16,7 @@ from chief.cron.timing import QuietHours, next_fire, utcnow, validate_spec
 from chief.monitors.service import WakeAgent
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import ScheduleRow
+from chief.persistence.store import MessageStore
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,7 @@ class CronService:
         run_command: RunCommand | None = None,
     ) -> None:
         self._factory = factory
+        self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._quiet = quiet
         self._poll = poll_seconds
@@ -79,6 +84,28 @@ class CronService:
             db.add(row)
             await db.commit()
             return row.id
+
+    async def retarget(
+        self, schedule_id: int, target: str | None,
+        default_channel: str, default_thread: str,
+    ) -> tuple[str, str]:
+        """Re-point a schedule's wake. Returns (status, wake_thread), status
+        ``ok`` | ``missing`` | ``command`` | ``unknown-target``. Resolve runs
+        only after the checks, so a rejected retarget writes nothing."""
+        async with self._factory() as db:
+            row = await db.get(ScheduleRow, schedule_id)
+            if row is None:
+                return "missing", ""
+            if row.command:  # command rows wake no session
+                return "command", ""
+            resolved = await self.store.resolve_wake_target(
+                target, default_channel, default_thread
+            )
+            if resolved is None:
+                return "unknown-target", ""
+            row.wake_channel, row.wake_thread = resolved
+            await db.commit()
+            return "ok", resolved[1]
 
     async def list_enabled(self) -> list[ScheduleRow]:
         async with self._factory() as db:

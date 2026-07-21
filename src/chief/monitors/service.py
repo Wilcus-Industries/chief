@@ -20,6 +20,7 @@ from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierDef
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
+from chief.persistence.store import MessageStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class MonitorService:
         classifier: Classifier,
     ) -> None:
         self._factory = factory
+        self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._classifier = classifier
         bus.subscribe(self._on_event)
@@ -68,6 +70,29 @@ class MonitorService:
                 select(MonitorRow).where(MonitorRow.enabled).order_by(MonitorRow.id)
             )
             return list(rows)
+
+    async def retarget(
+        self, monitor_id: int, target: str | None,
+        default_channel: str, default_thread: str,
+    ) -> tuple[str, str]:
+        """Re-point which session a monitor wakes.
+
+        Returns ``(status, wake_thread)``: status is ``"ok"``, ``"missing"``,
+        or ``"unknown-target"``. The target is resolved only after the row is
+        found, so a rejected retarget writes nothing.
+        """
+        async with self._factory() as db:
+            row = await db.get(MonitorRow, monitor_id)
+            if row is None:
+                return "missing", ""
+            resolved = await self.store.resolve_wake_target(
+                target, default_channel, default_thread
+            )
+            if resolved is None:
+                return "unknown-target", ""
+            row.wake_channel, row.wake_thread = resolved
+            await db.commit()
+            return "ok", resolved[1]
 
     async def delete(self, monitor_id: int) -> bool:
         async with self._factory() as db:
