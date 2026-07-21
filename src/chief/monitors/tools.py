@@ -20,8 +20,8 @@ _SPEC = ToolSpec(
         "`classifier` (a named categorical classifier, which requires "
         "`fire_label` — the label that fires the monitor). Plus optional "
         "`watch_channel` (defaults to this thread's channel) and "
-        "`target_session` (a thread_key; which session the wake runs in, "
-        "default this thread — an unknown key registers a new session). "
+        "`target_session` (an existing session's thread_key; which session the "
+        "wake runs in, default this thread). "
         "action=list takes nothing. action=delete needs `monitor_id`. "
         "action=retarget needs `monitor_id` and re-points the wake to "
         "`target_session` (default this thread)."
@@ -50,8 +50,8 @@ _SPEC = ToolSpec(
             "target_session": {
                 "type": "string",
                 "description": (
-                    "thread_key of the session to wake; defaults to this "
-                    "thread. An unknown key registers a new session."
+                    "thread_key of an existing session to wake; defaults to "
+                    "this thread. Must already exist (see the session tool)."
                 ),
             },
             "monitor_id": {"type": "integer"},
@@ -85,9 +85,12 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         )
         if isinstance(predicate, str):
             return predicate  # a validation error
-        wake_channel, wake_thread, created = await service.store.resolve_wake_target(
+        resolved = await service.store.resolve_wake_target(
             target_session, context.channel, context.thread_key
         )
+        if resolved is None:
+            return f"error: no such session '{target_session}'"
+        wake_channel, wake_thread = resolved
         monitor_id = await service.create(
             description=description,
             watch_channel=watch_channel or context.channel,
@@ -95,10 +98,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             wake_thread=wake_thread,
             predicate=predicate,
         )
-        line = f"monitor #{monitor_id} created"
-        if created:
-            line += f" (registered new session '{wake_thread}')"
-        return line
+        return f"monitor #{monitor_id} created"
 
     async def _retarget(
         context: ToolContext | None,
@@ -109,15 +109,14 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return "error: retarget needs a session context"
         if not isinstance(monitor_id, int):
             return "error: retarget needs monitor_id"
-        status, wake_thread, created = await service.retarget(
+        status, wake_thread = await service.retarget(
             monitor_id, target_session, context.channel, context.thread_key
         )
         if status == "missing":
             return "error: no such monitor"
-        line = f"monitor #{monitor_id} now wakes {wake_thread}"
-        if created:
-            line += f" (registered new session '{wake_thread}')"
-        return line
+        if status == "unknown-target":
+            return f"error: no such session '{target_session}'"
+        return f"monitor #{monitor_id} now wakes {wake_thread}"
 
     async def _list() -> str:
         rows = await service.list_enabled()

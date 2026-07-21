@@ -275,28 +275,28 @@ async def test_monitor_tool_create_targets_another_session(
     assert wake.messages[0].channel == "web"
 
 
-async def test_monitor_tool_create_registers_an_unknown_target(
+async def test_monitor_tool_create_rejects_an_unknown_target(
     engine: AsyncEngine, store: MessageStore
 ) -> None:
-    """An unknown `target_session` is registered under the caller's channel and
-    the tool says so."""
+    """An unknown `target_session` is refused, not silently created — no monitor
+    and no session are registered."""
     bus = EventBus()
     service, wake = make_service(engine, bus)
     registry = ToolRegistry()
     register_monitor_tools(registry, service)
     context = ToolContext(thread_key="cli:home", channel="cli")
 
-    created = await registry.dispatch(
+    result = await registry.dispatch(
         ToolCall(id="1", name="monitor", arguments={
             "action": "create", "description": "urgent watcher",
             "pattern": "urgent", "target_session": "web:new"}),
         context,
     )
-    assert created == "monitor #1 created (registered new session 'web:new')"
-    assert await store.channel("web:new") == "cli"
+    assert result == "error: no such session 'web:new'"
+    assert await store.channel("web:new") is None
+    assert await service.list_enabled() == []
     await bus.publish(inbound("this is URGENT"))
-    assert wake.messages[0].thread_key == "web:new"
-    assert wake.messages[0].channel == "cli"
+    assert wake.messages == []
 
 
 async def test_monitor_tool_retarget_repoints_the_wake(
@@ -347,6 +347,28 @@ async def test_monitor_tool_retarget_unknown_id_leaves_no_orphan(
     )
     assert result == "error: no such monitor"
     assert await store.channel("x:y") is None
+
+
+async def test_monitor_tool_retarget_rejects_an_unknown_target(
+    engine: AsyncEngine,
+) -> None:
+    bus = EventBus()
+    service, _ = make_service(engine, bus)
+    registry = ToolRegistry()
+    register_monitor_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="monitor", arguments={
+            "action": "create", "description": "w", "pattern": "urgent"}),
+        context,
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="monitor", arguments={
+            "action": "retarget", "monitor_id": 1,
+            "target_session": "web:ghost"}),
+        context,
+    )
+    assert result == "error: no such session 'web:ghost'"
 
 
 async def test_monitor_tool_classifier_form(engine: AsyncEngine) -> None:

@@ -69,21 +69,21 @@ class MessageStore:
 
     async def resolve_wake_target(
         self, target: str | None, default_channel: str, default_thread: str
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str] | None:
         """Pick the (channel, thread) a monitor or schedule should wake.
 
-        No target means the caller's own thread. A target that already has a
-        session keeps that session's own channel; an unknown one is registered
-        as a new session under ``default_channel``. The bool reports whether a
-        new session row was created, so the caller can say so.
+        No target means the caller's own thread. A named target must already be
+        a known session; its own channel is used, so the wake routes to the
+        adapter that owns it. Returns ``None`` if the target names no existing
+        session — the caller turns that into an error rather than silently
+        creating a new (possibly external) recipient.
         """
         if not target:
-            return default_channel, default_thread, False
-        existing = await self.channel(target)
-        if existing is not None:
-            return existing, target, False
-        await self.ensure_session(target, default_channel)
-        return default_channel, target, True
+            return default_channel, default_thread
+        channel = await self.channel(target)
+        if channel is None:
+            return None
+        return channel, target
 
     async def model_override(self, thread_key: str) -> str | None:
         """The owner's per-thread model override, if any."""

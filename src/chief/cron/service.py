@@ -88,23 +88,24 @@ class CronService:
     async def retarget(
         self, schedule_id: int, target: str | None,
         default_channel: str, default_thread: str,
-    ) -> tuple[str, str, bool]:
-        """Re-point a schedule's wake. Returns (status, wake_thread, created),
-        status ``ok`` | ``missing`` | ``command``. Resolve runs only after the
-        checks, so a rejected retarget writes nothing (no orphan session)."""
+    ) -> tuple[str, str]:
+        """Re-point a schedule's wake. Returns (status, wake_thread), status
+        ``ok`` | ``missing`` | ``command`` | ``unknown-target``. Resolve runs
+        only after the checks, so a rejected retarget writes nothing."""
         async with self._factory() as db:
             row = await db.get(ScheduleRow, schedule_id)
             if row is None:
-                return "missing", "", False
+                return "missing", ""
             if row.command:  # command rows wake no session
-                return "command", "", False
-            channel, thread, created = await self.store.resolve_wake_target(
+                return "command", ""
+            resolved = await self.store.resolve_wake_target(
                 target, default_channel, default_thread
             )
-            row.wake_channel = channel
-            row.wake_thread = thread
+            if resolved is None:
+                return "unknown-target", ""
+            row.wake_channel, row.wake_thread = resolved
             await db.commit()
-            return "ok", thread, created
+            return "ok", resolved[1]
 
     async def list_enabled(self) -> list[ScheduleRow]:
         async with self._factory() as db:

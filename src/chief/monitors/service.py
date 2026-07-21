@@ -74,24 +74,25 @@ class MonitorService:
     async def retarget(
         self, monitor_id: int, target: str | None,
         default_channel: str, default_thread: str,
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str]:
         """Re-point which session a monitor wakes.
 
-        Returns ``(status, wake_thread, created)``: status is ``"ok"`` or
-        ``"missing"``. The target is resolved only after the row is found, so a
-        retarget of a missing monitor writes nothing (no orphan session).
+        Returns ``(status, wake_thread)``: status is ``"ok"``, ``"missing"``,
+        or ``"unknown-target"``. The target is resolved only after the row is
+        found, so a rejected retarget writes nothing.
         """
         async with self._factory() as db:
             row = await db.get(MonitorRow, monitor_id)
             if row is None:
-                return "missing", "", False
-            channel, thread, created = await self.store.resolve_wake_target(
+                return "missing", ""
+            resolved = await self.store.resolve_wake_target(
                 target, default_channel, default_thread
             )
-            row.wake_channel = channel
-            row.wake_thread = thread
+            if resolved is None:
+                return "unknown-target", ""
+            row.wake_channel, row.wake_thread = resolved
             await db.commit()
-            return "ok", thread, created
+            return "ok", resolved[1]
 
     async def delete(self, monitor_id: int) -> bool:
         async with self._factory() as db:

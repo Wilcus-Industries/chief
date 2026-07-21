@@ -185,7 +185,7 @@ async def test_schedule_tool_create_targets_another_session(
     assert wake.messages[0].channel == "web"
 
 
-async def test_schedule_tool_create_registers_an_unknown_target(
+async def test_schedule_tool_create_rejects_an_unknown_target(
     engine: AsyncEngine, store: MessageStore
 ) -> None:
     service = CronService(
@@ -194,16 +194,15 @@ async def test_schedule_tool_create_registers_an_unknown_target(
     registry = ToolRegistry()
     register_cron_tools(registry, service)
     context = ToolContext(thread_key="cli:home", channel="cli")
-    created = await registry.dispatch(
+    result = await registry.dispatch(
         ToolCall(id="1", name="schedule", arguments={
             "action": "create", "description": "errand", "spec": "0 9 * * *",
             "prompt": "do it", "target_session": "web:new"}),
         context,
     )
-    assert created == "schedule #1 created (registered new session 'web:new')"
-    assert await store.channel("web:new") == "cli"
-    rows = await service.list_enabled()
-    assert (rows[0].wake_thread, rows[0].wake_channel) == ("web:new", "cli")
+    assert result == "error: no such session 'web:new'"
+    assert await store.channel("web:new") is None
+    assert await service.list_enabled() == []
 
 
 async def test_schedule_tool_command_rejects_a_target(
@@ -269,6 +268,30 @@ async def test_schedule_tool_retarget_unknown_id_leaves_no_orphan(
     )
     assert result == "error: no such schedule"
     assert await store.channel("x:y") is None
+
+
+async def test_schedule_tool_retarget_rejects_an_unknown_target(
+    engine: AsyncEngine,
+) -> None:
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+    registry = ToolRegistry()
+    register_cron_tools(registry, service)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "standup", "spec": "0 9 * * *",
+            "prompt": "post"}),
+        context,
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 1,
+            "target_session": "web:ghost"}),
+        context,
+    )
+    assert result == "error: no such session 'web:ghost'"
 
 
 async def test_schedule_tool_retarget_rejects_a_command_schedule(
