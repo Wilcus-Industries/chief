@@ -105,6 +105,17 @@ class SessionManager:
         session.model = model
         await self._store.set_model_override(thread_key, model)
 
+    async def compact(self, thread_key: str) -> str:
+        """Force-compact one thread's transcript now (the ``/compact`` command
+        and nightly autocompact). Operates on the live session so the in-memory
+        history is folded too — a store-only compaction would be clobbered by
+        the cached session's next commit. Refuses to create an unknown thread."""
+        channel = await self._store.channel(thread_key)
+        if channel is None:
+            return f"no such thread: {thread_key}"
+        session = await self.get_or_create(thread_key, channel)
+        return await session.compact()
+
     async def clear(self, thread_key: str) -> bool:
         """Wipe a thread's transcript (keep the row) and drop its cached session.
 

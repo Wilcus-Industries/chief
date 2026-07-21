@@ -1,9 +1,8 @@
 """Per-thread session: serial turn queue over a persisted transcript.
 
-The system prompt is injected at call time rather than stored, so prompt
-edits apply to existing threads on the next turn. The budget is checked
-before each turn and recorded after.
-"""
+The system prompt is injected at call time rather than stored, so prompt edits
+apply to existing threads on the next turn. The budget is checked before each
+turn and recorded after."""
 
 import asyncio
 import logging
@@ -74,8 +73,7 @@ class Session:
 
     @property
     def busy(self) -> bool:
-        """True while a turn is in flight (the per-thread lock is held for the
-        whole of ``run_turn``)."""
+        """True while a turn is in flight (the lock is held across ``run_turn``)."""
         return self._lock.locked()
 
     @property
@@ -89,18 +87,14 @@ class Session:
         """Queue one user turn; returns once the model finishes its reply.
 
         ``sender`` (``"owner"``, ``"system"``, or a stranger id) is carried to
-        the context hooks so private-data hooks can gate on who is speaking;
-        it defaults to the owner. The per-thread lock is taken before the
-        global semaphore so queued turns on one busy thread can't starve every
-        concurrency slot.
-        """
+        the context hooks so private-data hooks can gate on who speaks. The
+        per-thread lock is taken before the global semaphore so queued turns on
+        one busy thread can't starve every concurrency slot."""
         async with self._lock:
             async with self._semaphore:
-                # Held new turns wait here while a restart drains; active ones
-                # are tracked so the restart waits for this turn to commit. The
-                # restart itself fires at the outermost boundary (dispatcher /
-                # imessage poll) once the reply — and the inbound cursor — are
-                # durable too, never here where the reply is still un-sent.
+                # New turns wait here while a restart drains; active ones are
+                # tracked so it waits for this turn to commit. The restart fires
+                # at the outermost boundary, once the reply/cursor are durable.
                 await self._gate.enter_turn()
                 try:
                     return await self._one_turn(user_text, on_delta, sender)
@@ -116,7 +110,7 @@ class Session:
             if self._downgrade_model is None:
                 return await refuse_over_budget(self._commit, user_text, status)
             model = self._downgrade_model
-        await self._maybe_compact()
+        await self._run_compaction()
         system = await self._assemble_system(user_text, sender)
         transcript = [
             {"role": "system", "content": system},
@@ -130,9 +124,7 @@ class Session:
             messages=transcript,
             tools=self._tools,
             on_delta=on_delta,
-            post_tool=tool_screener(
-                self._hooks, self._hooks_timeout_seconds, logger
-            ),
+            post_tool=tool_screener(self._hooks, self._hooks_timeout_seconds, logger),
         )
         new_messages = [{"role": "user", "content": user_text}, *transcript[baseline:]]
         await self._commit(new_messages)
@@ -145,15 +137,19 @@ class Session:
 
     async def _assemble_system(self, user_text: str, sender: str) -> str:
         """The full system prompt, composed fresh each turn (never persisted):
-        the soul on top, then the base prompt + origin note, then each installed
-        package's context contribution as a name-sorted <hook> block. session_
-        start blocks are added only on a thread's first turn of the process.
-
-        The per-turn :class:`TurnContext` handed to the context hooks carries
-        ``self._messages`` as-is — the transcript *before* this user turn is
-        appended — so a hook judges relevance against the conversation so far."""
+        soul, base prompt + origin note, then each package's <hook> block
+        (session_start blocks only on a thread's first turn). The per-turn
+        :class:`TurnContext` carries ``self._messages`` before this user turn."""
         first_turn = not self._session_started
         self._session_started = True
+        # Base prompt + a note of the origin channel so the agent knows which
+        # device it's speaking through; soul and package hooks layer on top.
+        base = self._system_prompt
+        if self._origin_channel:
+            base += (
+                f"\n\nYou are talking with the owner over "
+                f"the '{self._origin_channel}' channel."
+            )
         turn = TurnContext(
             user_text=user_text,
             messages=self._messages,
@@ -162,7 +158,7 @@ class Session:
             channel=self._origin_channel,
         )
         return await assemble_system(
-            base=self._base_system(),
+            base=base,
             soul_reader=self._read_soul,
             hooks=self._hooks,
             turn=turn,
@@ -171,27 +167,32 @@ class Session:
             logger=logger,
         )
 
-    def _base_system(self) -> str:
-        """The base prompt plus a note of the thread's origin channel so the
-        agent knows which device it's speaking through. Soul and package hooks
-        layer on top in :meth:`_assemble_system`."""
-        prompt = self._system_prompt
-        if self._origin_channel:
-            prompt = (
-                f"{prompt}\n\nYou are talking with the owner over "
-                f"the '{self._origin_channel}' channel."
-            )
-        return prompt
-
-    async def _maybe_compact(self) -> None:
-        """Fold old history into a note when the transcript outgrows the
-        window; the persisted transcript is truncated to match."""
+    async def _run_compaction(self, *, force: bool = False) -> bool:
+        """Fold old history into a leading note when the transcript nears the
+        window (always, when ``force``); True when it changed the transcript."""
         if self._compactor is None:
-            return
-        compacted = await self._compactor.compact(self._messages)
-        if compacted is not None:
-            self._messages = compacted
-            await self._store.replace(self.thread_key, compacted)
+            return False
+        compacted = await self._compactor.compact(
+            self._messages, model=self.model, force=force
+        )
+        if compacted is None:
+            return False
+        self._messages = compacted
+        await self._store.replace(self.thread_key, compacted)
+        return True
+
+    async def compact(self) -> str:
+        """Force-compact now (``/compact``, nightly autocompact), bypassing the
+        threshold. Refuses mid-turn rather than block the caller."""
+        if self._compactor is None:
+            return "compaction is not configured"
+        if self._lock.locked():
+            return "thread is mid-turn — try again shortly"
+        async with self._lock:
+            before = len(self._messages)
+            if not await self._run_compaction(force=True):
+                return "nothing to compact"
+            return f"compacted {before} messages into {len(self._messages)}"
 
     async def _commit(self, new_messages: list[dict[str, Any]]) -> None:
         self._messages.extend(new_messages)

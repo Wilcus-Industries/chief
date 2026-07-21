@@ -30,6 +30,16 @@ def test_ensure_config_creates_from_template_when_missing(tmp_path: Path) -> Non
     assert config.read_text() == CONFIG
 
 
+def test_compact_subcommand_reports_a_dead_daemon(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No daemon listening on the socket → the one-shot client fails cleanly
+    # with a non-zero exit rather than a traceback.
+    rc = main(["compact", "+15551234567", "--socket", str(tmp_path / "no.sock")])
+    assert rc == 1
+    assert "is chief running?" in capsys.readouterr().err
+
+
 def test_ensure_config_keeps_existing_config(tmp_path: Path) -> None:
     # config.yaml is install-local state: the wizard edits it in place, so a
     # re-run must never clobber the owner's configured values.

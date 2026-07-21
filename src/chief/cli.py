@@ -8,6 +8,8 @@ import asyncio
 import json
 import sys
 
+from chief.socket_client import encode
+
 
 def main() -> None:
     """Entry point for the ``chief-cli`` script."""
@@ -34,7 +36,7 @@ async def _repl(socket_path: str, thread: str) -> None:
         text = await loop.run_in_executor(None, lambda: input("> "))
         if not text.strip():
             continue
-        writer.write(json.dumps({"thread": thread, "text": text}).encode() + b"\n")
+        writer.write(encode(thread, text))
         await writer.drain()
         await _print_reply(reader)
 

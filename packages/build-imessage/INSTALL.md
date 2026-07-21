@@ -33,7 +33,7 @@ stay airtight.
 ## Steps
 
 Gather the parameters first (steps 1–3), run the deterministic install once
-(step 4), then do the interactive and customizable parts (steps 5–8).
+(step 4), then do the interactive and customizable parts (steps 5–9).
 
 1. **Ask the owner which setup they want** (explain the two above):
    same-account self-DM (default) or a dedicated Apple ID. This decides what
@@ -94,3 +94,25 @@ Gather the parameters first (steps 1–3), run the deterministic install once
    "<their handle>" --text "test from chief"` — and confirm it lands. Never
    `imsg send` to an owner handle (it bypasses the 🤖 echo guard and loops; see
    the imsg skill).
+9. **Offer nightly compaction of the self-chat thread** (default: yes). The
+   iMessage self-chat is long-lived — it never gets a fresh start the way a new
+   web buffer does — so its transcript grows until compaction trips. A nightly
+   forced compaction keeps it lean and cheap. It is the **customizable** piece,
+   not baked into install.sh:
+   - Explain it in one line and ask the owner to opt out if they'd rather not.
+     If they decline, stop here.
+   - Ask what **local** hour they want it to run (default: 3 AM — quiet, and
+     compaction is a silent shell command that ignores quiet hours anyway).
+   - **Convert that local hour to UTC** — cron specs are UTC (see the schedule
+     tool). E.g. 3 AM in UTC−7 is `10` UTC → spec `0 10 * * *`. (This drifts
+     ±1h across DST; that's fine for an overnight job. Redo it if the owner
+     later cares.)
+   - Create the schedule with the `schedule` tool: a **command** row (approval
+     card fires — the owner is here to approve) running
+     `chief compact <owner-handle>`, where `<owner-handle>` is the self-chat
+     handle from step 2 (the thread_key is that bare handle). Example:
+     `action=create`, `description="nightly self-chat compaction"`,
+     `spec="0 10 * * *"`, `command="chief compact +15551234567"`.
+   - The command talks to the running daemon over its socket and force-compacts
+     the thread in-process, so the live session is folded too. Confirm the row
+     with `/schedules`.
