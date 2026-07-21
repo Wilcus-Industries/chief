@@ -8,7 +8,7 @@
 # Re-runs are idempotent: an existing clone is updated, never destroyed.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/CrazyWillBear/chief/main/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Wilcus-Industries/chief/main/bootstrap.sh | bash
 #   curl -fsSL .../bootstrap.sh | bash -s -- [flags]
 #
 #   --dir DIR          install location (default: ~/.local/share/chief)
@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-CHIEF_REPO_URL="${CHIEF_REPO_URL:-https://github.com/CrazyWillBear/chief.git}"
+CHIEF_REPO_URL="${CHIEF_REPO_URL:-https://github.com/Wilcus-Industries/chief.git}"
 # Parameterized so tests can point OS detection at a fixture file.
 CHIEF_OS_RELEASE="${CHIEF_OS_RELEASE:-/etc/os-release}"
 
