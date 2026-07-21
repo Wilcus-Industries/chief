@@ -1,4 +1,7 @@
 """Cron service: persists schedules and wakes the agent when they fire."""
+# styleguide: file-length — one cohesive schedule service; the persistence CRUD
+# and the fire loop share _factory/_wake/_quiet/_anchor state, so splitting them
+# scatters the lifecycle across files for no real gain.
 
 import asyncio
 import logging
@@ -83,17 +86,25 @@ class CronService:
             return row.id
 
     async def retarget(
-        self, schedule_id: int, wake_channel: str, wake_thread: str
-    ) -> bool:
-        """Re-point which session a schedule wakes. False if no such schedule."""
+        self, schedule_id: int, target: str | None,
+        default_channel: str, default_thread: str,
+    ) -> tuple[str, str, bool]:
+        """Re-point a schedule's wake. Returns (status, wake_thread, created),
+        status ``ok`` | ``missing`` | ``command``. Resolve runs only after the
+        checks, so a rejected retarget writes nothing (no orphan session)."""
         async with self._factory() as db:
             row = await db.get(ScheduleRow, schedule_id)
             if row is None:
-                return False
-            row.wake_channel = wake_channel
-            row.wake_thread = wake_thread
+                return "missing", "", False
+            if row.command:  # command rows wake no session
+                return "command", "", False
+            channel, thread, created = await self.store.resolve_wake_target(
+                target, default_channel, default_thread
+            )
+            row.wake_channel = channel
+            row.wake_thread = thread
             await db.commit()
-            return True
+            return "ok", thread, created
 
     async def list_enabled(self) -> list[ScheduleRow]:
         async with self._factory() as db:

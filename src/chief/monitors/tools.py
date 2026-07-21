@@ -109,10 +109,10 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return "error: retarget needs a session context"
         if not isinstance(monitor_id, int):
             return "error: retarget needs monitor_id"
-        wake_channel, wake_thread, created = await service.store.resolve_wake_target(
-            target_session, context.channel, context.thread_key
+        status, wake_thread, created = await service.retarget(
+            monitor_id, target_session, context.channel, context.thread_key
         )
-        if not await service.retarget(monitor_id, wake_channel, wake_thread):
+        if status == "missing":
             return "error: no such monitor"
         line = f"monitor #{monitor_id} now wakes {wake_thread}"
         if created:

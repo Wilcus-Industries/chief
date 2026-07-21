@@ -253,7 +253,10 @@ async def test_schedule_tool_retarget_repoints_the_wake(
     assert (rows[0].wake_thread, rows[0].wake_channel) == ("web:errands", "web")
 
 
-async def test_schedule_tool_retarget_unknown_id(engine: AsyncEngine) -> None:
+async def test_schedule_tool_retarget_unknown_id_leaves_no_orphan(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """A retarget of a missing schedule must not register its target session."""
     service = CronService(
         make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
     )
@@ -265,6 +268,39 @@ async def test_schedule_tool_retarget_unknown_id(engine: AsyncEngine) -> None:
         ToolContext(thread_key="cli:home", channel="cli"),
     )
     assert result == "error: no such schedule"
+    assert await store.channel("x:y") is None
+
+
+async def test_schedule_tool_retarget_rejects_a_command_schedule(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """Retargeting a command schedule is refused and writes nothing — the wake
+    fields stay dead and no target session is registered."""
+    service = CronService(
+        make_session_factory(engine), WakeSink(), quiet=None, poll_seconds=0.02
+    )
+
+    async def ask(context: ToolContext, question: str) -> Approval:
+        return Approval.ONCE
+
+    registry = ToolRegistry()
+    register_cron_tools(registry, service, ask=ask)
+    context = ToolContext(thread_key="cli:home", channel="cli")
+    await registry.dispatch(
+        ToolCall(id="1", name="schedule", arguments={
+            "action": "create", "description": "prune", "spec": "0 4 * * *",
+            "command": "ls"}),
+        context,
+    )
+    result = await registry.dispatch(
+        ToolCall(id="2", name="schedule", arguments={
+            "action": "retarget", "schedule_id": 1, "target_session": "web:x"}),
+        context,
+    )
+    assert "command schedule wakes no session" in result
+    assert await store.channel("web:x") is None
+    rows = await service.list_enabled()
+    assert (rows[0].wake_thread, rows[0].wake_channel) == ("cli:home", "cli")
 
 
 def make_shell(tmp_path: Path) -> ShellService:

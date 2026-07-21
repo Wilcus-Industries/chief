@@ -331,7 +331,10 @@ async def test_monitor_tool_retarget_repoints_the_wake(
     assert wake.messages[0].channel == "web"
 
 
-async def test_monitor_tool_retarget_unknown_id(engine: AsyncEngine) -> None:
+async def test_monitor_tool_retarget_unknown_id_leaves_no_orphan(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """A retarget of a missing monitor must not register its target session."""
     bus = EventBus()
     service, _ = make_service(engine, bus)
     registry = ToolRegistry()
@@ -343,6 +346,7 @@ async def test_monitor_tool_retarget_unknown_id(engine: AsyncEngine) -> None:
         context,
     )
     assert result == "error: no such monitor"
+    assert await store.channel("x:y") is None
 
 
 async def test_monitor_tool_classifier_form(engine: AsyncEngine) -> None:

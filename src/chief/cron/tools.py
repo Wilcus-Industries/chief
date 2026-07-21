@@ -61,6 +61,11 @@ _SPEC = ToolSpec(
 )
 
 
+_COMMAND_TARGET_ERROR = (
+    "error: a command schedule wakes no session, so target_session does not apply"
+)
+
+
 def _row_line(row: ScheduleRow) -> str:
     target = f"runs `{row.command}`" if row.command else f"wakes {row.wake_thread}"
     return f"#{row.id} [{row.spec}] {row.description} -> {target}"
@@ -76,12 +81,9 @@ def register_cron_tools(
     """
 
     async def _approve_command(context: ToolContext, spec: str, command: str) -> bool:
-        """Ask the owner before a command schedule exists.
-
-        A scheduled command runs with nobody present, so creation is the only
-        control point. No asker wired means no way to ask — refuse, rather than
-        let a missing control read as permission.
-        """
+        """Ask the owner before a command schedule exists — a command runs with
+        nobody present, so creation is the only control point; no asker wired
+        means refuse, rather than let a missing control read as permission."""
         if ask is None:
             return False
         # json.dumps escapes newlines, so neither field can draw its own
@@ -112,10 +114,7 @@ def register_cron_tools(
                 "prompt or command"
             )
         if command and target_session:
-            return (
-                "error: a command schedule wakes no session, so "
-                "target_session does not apply"
-            )
+            return _COMMAND_TARGET_ERROR
         try:
             validate_spec(spec)
         except ValueError as exc:
@@ -149,11 +148,13 @@ def register_cron_tools(
             return "error: retarget needs a session context"
         if not isinstance(schedule_id, int):
             return "error: retarget needs schedule_id"
-        wake_channel, wake_thread, created = await service.store.resolve_wake_target(
-            target_session, context.channel, context.thread_key
+        status, wake_thread, created = await service.retarget(
+            schedule_id, target_session, context.channel, context.thread_key
         )
-        if not await service.retarget(schedule_id, wake_channel, wake_thread):
+        if status == "missing":
             return "error: no such schedule"
+        if status == "command":
+            return _COMMAND_TARGET_ERROR
         line = f"schedule #{schedule_id} now wakes {wake_thread}"
         if created:
             line += f" (registered new session '{wake_thread}')"
