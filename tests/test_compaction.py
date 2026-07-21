@@ -86,6 +86,17 @@ async def test_force_compacts_below_threshold() -> None:
     assert compacted[0]["content"] == NOTE_PREFIX + "forced summary"
 
 
+async def test_empty_summary_aborts_instead_of_destroying_history() -> None:
+    # A model refusal / content-filter yields an empty summary. Truncating to an
+    # empty note would permanently discard the history for nothing — abort.
+    provider = FakeProvider([text_turn("")])
+    messages = chat(20)
+    compactor = Compactor(
+        provider, "m", FixedWindow(10_000_000), ratio=0.95, keep_recent=4
+    )
+    assert await compactor.compact(messages, force=True) is None
+
+
 async def test_compacts_old_history_into_a_leading_note() -> None:
     provider = FakeProvider([text_turn("the dense summary")])
     messages = chat(20)

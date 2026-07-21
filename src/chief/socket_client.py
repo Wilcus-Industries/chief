@@ -14,12 +14,15 @@ def encode(thread: str, text: str) -> bytes:
     return json.dumps({"thread": thread, "text": text}).encode() + b"\n"
 
 
-async def send_once(socket_path: str, thread: str, text: str) -> str:
+async def send_once(
+    socket_path: str, thread: str, text: str, *, read_timeout: float = 300.0
+) -> str:
     """Send one message, return the daemon's final reply text, and disconnect.
 
     Deltas (if any) are accumulated; the final frame's own text wins when set.
-    Raises :class:`ConnectionError` if the daemon is unreachable or hangs up
-    before replying.
+    Raises :class:`ConnectionError` if the daemon is unreachable, sends a
+    malformed frame, or stays silent past ``read_timeout`` seconds (so a manual
+    ``chief compact`` at a terminal can't hang forever).
     """
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path)
@@ -31,12 +34,24 @@ async def send_once(socket_path: str, thread: str, text: str) -> str:
         writer.write(encode(thread, text))
         await writer.drain()
         streamed: list[str] = []
-        while line := await reader.readline():
-            frame = json.loads(line)
+        while True:
+            try:
+                line = await asyncio.wait_for(
+                    reader.readline(), timeout=read_timeout
+                )
+            except TimeoutError as exc:
+                raise ConnectionError(
+                    f"daemon silent for {read_timeout:.0f}s — giving up"
+                ) from exc
+            if not line:
+                raise ConnectionError("daemon closed the connection before replying")
+            try:
+                frame = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ConnectionError(f"daemon sent a malformed frame: {exc}") from exc
             if frame.get("type") == "delta":
                 streamed.append(frame.get("text", ""))
             else:
                 return frame.get("text") or "".join(streamed)
-        raise ConnectionError("daemon closed the connection before replying")
     finally:
         writer.close()

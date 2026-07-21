@@ -11,9 +11,13 @@ window is resolved in three tiers, cheapest first:
 3. a coded ``default_window`` fallback, used for anything unknown or when the
    fetch is unavailable.
 
-The fetch is best-effort: any failure returns the fallback and leaves the table
-unfetched so a later turn can retry. The raw ``/models`` payload (1-2 MB) is
-discarded — only the ``{id: context_length}`` projection (tens of KB) is kept.
+The fetch is best-effort and happens **at most once** per process: a failure
+caches an empty table so every later turn falls straight through to
+``default_window`` rather than re-hitting the network — ``resolve()`` runs on
+every non-forced turn under the session lock, so a persistent ``/models`` outage
+must not tax each turn with a wasted (up to ~40s) round-trip. The raw ``/models``
+payload (1-2 MB) is discarded — only the ``{id: context_length}`` projection
+(tens of KB) is kept.
 """
 
 import asyncio
@@ -64,11 +68,11 @@ class WindowResolver:
         async with self._lock:
             if self._table is not None:
                 return self._table
-            fetched = await self._fetch()
-            if fetched is None:
-                return {}  # failed; leave unfetched so a later turn retries
-            self._table = fetched
-            return fetched
+            # Cache the result either way — an empty table on failure so a
+            # persistent /models outage falls back to default_window until
+            # restart instead of re-fetching (under the session lock) every turn.
+            self._table = await self._fetch() or {}
+            return self._table
 
     async def _fetch(self) -> dict[str, int] | None:
         """Fetch and project OpenRouter ``/models`` to ``{id: context_length}``."""

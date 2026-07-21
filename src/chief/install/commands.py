@@ -174,9 +174,12 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         # clobbered by that session's next commit). The socket forces a `cli:`
         # thread, so the target thread rides as the `/compact` argument.
         socket_path = args.socket or str(load_config().socket_path)
+        # Per-pid thread id: the socket adapter keeps only the last writer per
+        # thread_key, so two concurrent `chief compact` runs must not collide.
+        job_thread = f"compact-job-{os.getpid()}"
         try:
             reply = asyncio.run(
-                send_once(socket_path, "compact-job", f"/compact {args.thread}")
+                send_once(socket_path, job_thread, f"/compact {args.thread}")
             )
         except ConnectionError as exc:
             print(f"error: {exc}", file=sys.stderr)

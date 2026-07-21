@@ -204,6 +204,14 @@ def test_compaction_yaml_override(tmp_path: Path) -> None:
     }
 
 
+def test_compaction_ratio_out_of_range_raises(tmp_path: Path) -> None:
+    for bad in ("0", "1.5", "-0.2"):
+        path = tmp_path / "config.yaml"
+        path.write_text(f"compaction:\n  ratio: {bad}\n")
+        with pytest.raises(ConfigError, match="compaction.ratio"):
+            load_config(path)
+
+
 def test_load_raw_missing_path_is_empty(tmp_path: Path) -> None:
     assert load_raw(tmp_path / "missing.yaml") == {}
 

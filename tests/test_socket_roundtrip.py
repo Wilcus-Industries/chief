@@ -133,6 +133,46 @@ async def test_malformed_frame_is_dropped_and_connection_survives(
     assert frames[-1]["text"] == "hello owner"
 
 
+async def test_send_once_read_timeout_raises_connection_error(
+    sock_path: Path,
+) -> None:
+    """A daemon that accepts but never replies must not hang the client."""
+    from chief.socket_client import send_once
+
+    async def silent(_r: asyncio.StreamReader, _w: asyncio.StreamWriter) -> None:
+        await asyncio.sleep(5)
+
+    server = await asyncio.start_unix_server(silent, str(sock_path))
+    try:
+        with pytest.raises(ConnectionError, match="silent"):
+            await send_once(str(sock_path), "t", "hi", read_timeout=0.05)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_send_once_malformed_frame_raises_connection_error(
+    sock_path: Path,
+) -> None:
+    """A malformed reply surfaces as ConnectionError, not a raw JSONDecodeError."""
+    from chief.socket_client import send_once
+
+    async def garbage(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readline()
+        writer.write(b"not json\n")
+        await writer.drain()
+
+    server = await asyncio.start_unix_server(garbage, str(sock_path))
+    try:
+        with pytest.raises(ConnectionError, match="malformed"):
+            await send_once(str(sock_path), "t", "hi")
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
 async def test_send_once_compacts_a_named_thread(
     store: MessageStore, sock_path: Path
 ) -> None:

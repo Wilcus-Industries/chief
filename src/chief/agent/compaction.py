@@ -83,6 +83,12 @@ class Compactor:
         if not old:
             return None
         summary = await self._summarize(old)
+        if not summary:
+            # A model refusal / content-filter / empty stream yields no summary.
+            # Truncating to an empty note would permanently discard the history
+            # for nothing — especially bad on the unattended nightly force path.
+            logger.warning("compaction aborted: summarizer returned empty")
+            return None
         logger.info(
             "compacted %d messages into a note, kept %d", len(old), len(recent)
         )
