@@ -9,6 +9,10 @@
 #   VAULT_PATH      absolute path to the Obsidian vault directory (required)
 #   WRITABLE_PATHS  comma-separated, vault-relative dirs the agent may write to
 #                   (optional; empty = read-only recall, capability follows this)
+#   GATE_MODEL      model id for the relevance gate classifier, chosen at the
+#                   install interview (optional; default openai/gpt-4.1-nano, a
+#                   fast/cheap OpenRouter model). Only applied on first install,
+#                   when the classifier def is seeded — never overwrites edits.
 #
 # The done-check gates the restart, but config.yaml is gitignored — a bad
 # config write is NOT rolled back (the pre-restart config gate is the only
@@ -28,6 +32,13 @@ mkdir -p classifiers
 if [ ! -f classifiers/memory-relevance.md ]; then
   cp packages/obsidian-memory/classifiers/memory-relevance.md \
     classifiers/memory-relevance.md
+  # Pin the interview-chosen gate model into the freshly seeded def. The source
+  # already carries the default; rewrite the one frontmatter line so a custom
+  # choice sticks. sed -i.bak keeps this portable across GNU and BSD/macOS sed.
+  gate_model="${GATE_MODEL:-openai/gpt-4.1-nano}"
+  sed -i.bak -E "s|^model:.*|model: ${gate_model}|" \
+    classifiers/memory-relevance.md
+  rm -f classifiers/memory-relevance.md.bak
 fi
 
 : "${VAULT_PATH:?set VAULT_PATH to the Obsidian vault directory}"

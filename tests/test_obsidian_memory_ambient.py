@@ -94,6 +94,16 @@ def _owner(text: str, messages: list[dict[str, Any]] | None = None) -> TurnConte
     return TurnContext(text, messages or [], "owner", "cli:t", "cli")
 
 
+def test_shipped_gate_pins_a_fast_model() -> None:
+    # The gate defaults to a cheap OpenRouter model rather than inheriting the
+    # agent's default_classifier role (Opus over the serializing OAuth proxy).
+    # Not an alias -> the router sends it to the default backend (OpenRouter).
+    registry = ClassifierRegistry(Path("packages/obsidian-memory/classifiers"))
+    definition = registry.get("memory-relevance")
+    assert definition is not None
+    assert definition.model == "openai/gpt-4.1-nano"
+
+
 async def test_counter_fires_on_1_6_11_and_is_silent_between(
     vault: Path, tmp_path: Path, engine: AsyncEngine
 ) -> None:

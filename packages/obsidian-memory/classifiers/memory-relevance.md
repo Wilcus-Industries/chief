@@ -2,6 +2,7 @@
 name: memory-relevance
 description: Whether one vault note is worth nudging the agent to read this turn.
 labels: [RELEVANT, IRRELEVANT]
+model: openai/gpt-4.1-nano
 ---
 You decide whether one note from the owner's Obsidian vault is worth surfacing
 to an assistant right now.
