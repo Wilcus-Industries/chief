@@ -292,7 +292,8 @@ async def test_run_judge_truncates_to_the_token_cap(tmp_path: Path) -> None:
     judge = FakeProvider([text_turn("RELEVANT")])
     huge = SearchHit("big.md", "H" * 5000, "body", 0.9)
     out = await run_judge(
-        _classifier(judge, tmp_path), "transcript", [huge], cap_tokens=10
+        _classifier(judge, tmp_path), "transcript", [huge], cap_tokens=10,
+        vault=tmp_path,
     )
     assert out is not None
     assert len(out) <= 10 * 4 + 1  # cap in chars, plus the ellipsis
@@ -308,11 +309,14 @@ async def test_irrelevant_candidates_are_dropped(tmp_path: Path) -> None:
         SearchHit("roof.md", "Roof repair", "body", 0.8),
     ]
     out = await run_judge(
-        _classifier(judge, tmp_path), "transcript", hits, cap_tokens=1500
+        _classifier(judge, tmp_path), "transcript", hits, cap_tokens=1500,
+        vault=tmp_path,
     )
     assert out is not None
     assert "roof.md" in out
     assert "noise.md" not in out
+    # The nudge points at an absolute path the agent can open directly.
+    assert str(tmp_path / "roof.md") in out
 
 
 def test_importing_hook_module_does_not_import_the_vector_stack() -> None:

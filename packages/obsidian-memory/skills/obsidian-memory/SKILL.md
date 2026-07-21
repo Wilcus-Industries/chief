@@ -1,6 +1,6 @@
 ---
 name: obsidian-memory
-description: Owner's Obsidian vault memory. Not a tool — recall/save run as shell commands (`uv run chief-memory ...`); conventions, CLI, ambient policy.
+description: Owner's Obsidian vault memory. Not a tool — recall via the `uv run chief-memory search` shell command; conventions, CLI, ambient policy.
 ---
 
 # Obsidian vault memory
@@ -26,21 +26,26 @@ strings (they read the index, never the model):
 - `uv run chief-memory reindex` — rebuild after bulk external edits (the index
   self-heals single out-of-band edits at query time, so this is rarely needed).
 
-So to recall who the owner is, the action is: `shell` tool →
-`uv run chief-memory search "owner"`. Never a tool named after this package.
+The verbs are exactly `search`, `related`, `links`, `reindex` — **there is no
+`recall` subcommand** (a bare `chief-memory recall` errors). So to recall who
+the owner is, the action is: `shell` tool → `uv run chief-memory search "owner"`.
+Never a tool named after this package, and never import its Python modules —
+only the CLI above.
 
-Every result line names its **source note path** — cite it, and open the note
-with your file tools when you need the full context, not just the chunk.
+Every result line is `<score>  <absolute note path> :: <heading>`. The path is
+**absolute and directly openable** — pass it straight to your `read_file` tool
+for the full note; do not prepend a directory or `find` it. Cite the note by its
+path when you use it.
 
 ## Ambient recall (automatic)
 
 Every few owner turns, a `<hook source="obsidian-memory">` block may appear in
 your context listing a few notes that passed the `memory-relevance` gate.
 
-Those are **pointers, not content** — a path and a heading, nothing more. If a
-note looks like it would help, open it with your file tools; if it doesn't,
-ignore it and say nothing. Never claim to know what a note says on the strength
-of its heading alone: you have not read it yet.
+Those are **pointers, not content** — an absolute path and a heading, nothing
+more. If a note looks like it would help, open the path directly with `read_file`;
+if it doesn't, ignore it and say nothing. Never claim to know what a note says on
+the strength of its heading alone: you have not read it yet.
 
 The block fires **only on owner turns** — never on a monitor/cron wake or a
 stranger — because the vault is private. You never need to trigger it; it is

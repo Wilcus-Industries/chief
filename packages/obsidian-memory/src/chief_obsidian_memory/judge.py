@@ -20,6 +20,7 @@ no re-ranking: the gate only removes, and search order survives.
 """
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from chief.classifiers import Classifier, ClassifierError
@@ -33,7 +34,8 @@ RELEVANT = "RELEVANT"
 
 _NUDGE_HEADER = (
     "Possibly relevant notes in the owner's Obsidian vault. These are pointers, "
-    "not content — read a note with your file tools only if it would help:"
+    "not content — each line is an absolute path; open one with your file tools "
+    "(read_file) only if it would help:"
 )
 
 
@@ -53,9 +55,11 @@ async def run_judge(
     transcript: str,
     candidates: "list[SearchHit]",
     cap_tokens: int,
+    vault: Path,
 ) -> str | None:
     """Gate each candidate concurrently; return the pointer nudge, or ``None``
-    when nothing survives."""
+    when nothing survives. ``vault`` is the vault root the pointers resolve
+    against, so each nudge names an absolute, directly-openable path."""
     if not candidates:
         return None
     verdicts = await asyncio.gather(
@@ -64,7 +68,7 @@ async def run_judge(
     kept = [hit for hit, keep in zip(candidates, verdicts, strict=True) if keep]
     if not kept:
         return None
-    return _truncate(_format(kept), cap_tokens)
+    return _truncate(_format(kept, vault), cap_tokens)
 
 
 async def _relevant(
@@ -90,8 +94,13 @@ def _payload(transcript: str, hit: "SearchHit") -> str:
     )
 
 
-def _format(candidates: "list[SearchHit]") -> str:
-    body = "\n".join(f"- {c.note_path} :: {c.heading}" for c in candidates)
+def _format(candidates: "list[SearchHit]", vault: Path) -> str:
+    # Absolute path, not the vault-relative one: the agent opens a nudge with its
+    # file tools, and a bare `contacts/family.md` does not resolve from the repo
+    # root it runs in — it would (and did) flail finding the note.
+    body = "\n".join(
+        f"- {vault / c.note_path} :: {c.heading}" for c in candidates
+    )
     return f"{_NUDGE_HEADER}\n{body}"
 
 
