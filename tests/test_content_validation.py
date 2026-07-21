@@ -66,6 +66,16 @@ def test_unclosed_frontmatter_is_flagged(tmp_path: Path) -> None:
     assert len(problems) == 1
 
 
+def test_validate_checks_a_lowercase_skill_file(tmp_path: Path) -> None:
+    # A mis-cased skill.md must still be validated, not silently skipped —
+    # the done-check would otherwise pass over a malformed skill on Linux.
+    skill_dir = tmp_path / "hollow"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text("---\nname: x\ndescription: y\n---\n\n")
+    problems = skills.validate(tmp_path)
+    assert any("body" in p for p in problems)
+
+
 def test_valid_manifest_passes(tmp_path: Path) -> None:
     pkg = tmp_path / "good"
     pkg.mkdir()
