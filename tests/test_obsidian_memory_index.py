@@ -30,6 +30,14 @@ def test_chunk_note_keeps_pre_heading_content_as_leading_chunk() -> None:
     assert chunks[1].heading == "First"
 
 
+def test_recall_defaults_are_tuned_small() -> None:
+    # Tuned for the fast gate: a short transcript window and few candidates keep
+    # each firing cheap (see the memory-relevance model default).
+    settings = MemorySettings()
+    assert settings.window == 10
+    assert settings.top_k == 2
+
+
 def test_iter_notes_excludes_obsidian_templates_attachments(vault: Path) -> None:
     settings = MemorySettings()
     paths = {rel for rel, _ in iter_notes(vault, settings)}

@@ -25,8 +25,8 @@ State these to the owner and get an explicit yes; do not install silently.
 
 ## Steps
 
-Gather the parameters through the interview (steps 1–5), add the dependencies
-and config (steps 6–7), then build the first index and verify (steps 8–9).
+Gather the parameters through the interview (steps 1–6), add the dependencies
+and config (steps 7–8), then build the first index and verify (steps 9–10).
 
 1. **Vault mode.** Ask whether chief should use the owner's **existing** vault
    or **create a new one** for chief (which the owner can also open in
@@ -47,34 +47,43 @@ and config (steps 6–7), then build the first index and verify (steps 8–9).
 5. **Writable paths.** Ask whether chief may *save* notes and, if so, into which
    vault-relative folder(s) (e.g. `inbox/`, `chief/`). Empty means **read-only**
    recall — chief recalls but never writes. Capability follows this config.
-6. **Add the Python dependencies (guarded self-edit).** With your file tools,
+6. **Gate model.** Ask which model runs the ambient relevance gate — a binary
+   RELEVANT/IRRELEVANT judgement made once per candidate, several times per
+   firing. The default is **`openai/gpt-4.1-nano`** (fast, cheap, via
+   OpenRouter — the router sends any non-aliased model there). Recommend the
+   default; a small model is right for a binary gate, and pinning it keeps the
+   gate off the agent's big `default_classifier` model (which can route over a
+   serializing proxy and blow the hook timeout). Record the owner's choice and
+   pass it as `GATE_MODEL` in the next step.
+7. **Add the Python dependencies (guarded self-edit).** With your file tools,
    add the subpackage to the project's runtime dependencies so the running
    daemon can import the hook, then sync:
    - Ensure `pyproject.toml` depends on `chief-obsidian-memory` (it ships as an
      editable path source under `[tool.uv.sources]`). If it is only in the dev
      group, add it to `[project.dependencies]` so production runs load it.
    - Run `uv sync` with the `shell` tool to install the vector stack.
-7. **Write the config, deterministically.** Run
+8. **Write the config, deterministically.** Run
    `VAULT_PATH="<abs vault path>" WRITABLE_PATHS="<comma-sep dirs or empty>"
+   GATE_MODEL="<model from step 6, or omit for the default>"
    bash packages/obsidian-memory/install.sh` with the `shell` tool. It copies
    the skill and sets `obsidian_memory.vault_paths` + `.writable_paths` via
    `chief.config_apply`, seeds the `memory-relevance` classifier definition
-   into `classifiers/` (never overwriting an existing one), and records the
-   install in `data/installed.yaml` via `chief.registry_apply`. Tune
-   `obsidian_memory.ambient_n` (recall cadence), `.top_k` (candidates fetched,
-   and so gate calls per firing), `.include`/`.exclude`, and
+   into `classifiers/` (never overwriting an existing one) with its `model:`
+   pinned to `GATE_MODEL`, and records the install in `data/installed.yaml` via
+   `chief.registry_apply`. Tune `obsidian_memory.ambient_n` (recall cadence),
+   `.top_k` (candidates fetched, and so gate calls per firing),
+   `.window` (transcript messages the gate sees), `.include`/`.exclude`, and
    `.injection_cap_tokens` with
    `uv run python -m chief.config_apply obsidian_memory.<key>=<value>` if the
    owner wants non-defaults — never append blocks to config.yaml by hand.
-   The gate's *prompt and model* are not config: edit
-   `classifiers/memory-relevance.md` (its `model:` frontmatter falls back to
-   the `default_classifier` role).
-8. **Port an existing memory store (best-effort, if present).** If a `memory`
+   The gate's *prompt* is not config: edit `classifiers/memory-relevance.md`
+   directly (and its `model:` line to change the gate model after install).
+9. **Port an existing memory store (best-effort, if present).** If a `memory`
    (or similar markdown-notes) package is installed, offer to copy its notes
    into the vault so nothing is lost. The competing package stays installed and
    usable — do not remove or modify it; the owner picks which to keep. Skip this
    step entirely if no such package exists.
-9. **Build and verify.** `restart` to bring the config, deps, and hook live.
+10. **Build and verify.** `restart` to bring the config, deps, and hook live.
    Then build the first index and confirm recall:
    - `uv run chief-memory reindex --vault "<abs vault path>"` — reports the
      chunk count. (The first run downloads the embedding model.)

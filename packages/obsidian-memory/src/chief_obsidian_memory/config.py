@@ -48,13 +48,15 @@ class MemorySettings:
     may save notes (capability follows config; empty means read-only).
 
     The gate's model is not configured here: it is the ``model:`` field of the
-    ``memory-relevance`` classifier definition, falling back to the daemon's
-    ``default_classifier`` role like every other classifier.
+    ``memory-relevance`` classifier definition, which the install seeds to a
+    fast OpenRouter model (``openai/gpt-4.1-nano``) rather than the daemon's
+    ``default_classifier`` role — a binary gate does not need the agent's big
+    model, and that role often routes over a serializing proxy.
     """
 
     ambient_n: int = 5
-    window: int = 30
-    top_k: int = 3
+    window: int = 10
+    top_k: int = 2
     injection_cap_tokens: int = 1500
     embed_model: str = "minishlab/potion-base-8M"
     include: tuple[str, ...] = ()
