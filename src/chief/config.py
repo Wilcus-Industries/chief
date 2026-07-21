@@ -207,7 +207,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
         imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
-        compaction_ratio=float(compaction.get("ratio", 0.95)),
+        compaction_ratio=_parse_ratio(compaction.get("ratio", 0.95)),
         compaction_keep_recent=int(compaction.get("keep_recent", 20)),
         compaction_default_window=int(compaction.get("default_window", 60_000)),
         compaction_windows=_parse_windows(compaction.get("windows") or {}),
@@ -295,3 +295,15 @@ def _parse_aliases(raw: dict[str, Any]) -> dict[str, AliasSpec]:
 def _parse_windows(raw: dict[str, Any]) -> dict[str, int]:
     """Coerce the ``compaction.windows`` override map to ``model-name -> tokens``."""
     return {str(name): int(tokens) for name, tokens in raw.items()}
+
+
+def _parse_ratio(raw: Any) -> float:
+    """Coerce ``compaction.ratio`` and clamp it to ``(0, 1]``.
+
+    ``0`` (or negative) would fire compaction every turn; ``>1`` would silently
+    disable threshold compaction — both foot-guns, so reject at boot instead.
+    """
+    ratio = float(raw)
+    if not 0 < ratio <= 1:
+        raise ConfigError(f"compaction.ratio must be in (0, 1], got {ratio}")
+    return ratio

@@ -88,16 +88,14 @@ async def test_table_is_fetched_once_and_cached() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_failure_falls_back_and_may_retry() -> None:
+async def test_fetch_failure_is_cached_and_not_retried() -> None:
     calls: list[int] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         calls.append(1)
-        if len(calls) == 1:
-            return httpx.Response(500)
-        return httpx.Response(200, json=MODELS_JSON)
+        return httpx.Response(500)
 
     resolver = _resolver(httpx.MockTransport(handle), default_window=9_000)
     assert await resolver.resolve("qwen/qwen3-coder") == 9_000  # 500 -> default
-    assert await resolver.resolve("qwen/qwen3-coder") == 128_000  # retry succeeds
-    assert sum(calls) == 2
+    assert await resolver.resolve("qwen/qwen3-coder") == 9_000  # cached, no retry
+    assert sum(calls) == 1  # a failed fetch caches empty; every turn must not refetch
