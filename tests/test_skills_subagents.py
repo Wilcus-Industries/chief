@@ -49,6 +49,23 @@ def test_empty_library_adds_nothing_to_the_prompt(tmp_path: Path) -> None:
     assert SkillLibrary(tmp_path / "nowhere").prompt_lines() == ""
 
 
+def test_library_scans_a_lowercase_skill_file(tmp_path: Path) -> None:
+    # SKILL.md is the convention, but the loader must not silently drop a
+    # stray skill.md: the glob is case-sensitive on Linux, so a mis-cased
+    # file that works on a Mac would vanish in production otherwise.
+    skill_dir = tmp_path / "skills" / "greet"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "skill.md").write_text(SKILL_MD)
+    assert [s.name for s in SkillLibrary(tmp_path / "skills").scan()] == ["greet"]
+
+
+def test_library_ignores_a_non_skill_markdown_file(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "greet"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "README.md").write_text(SKILL_MD)
+    assert SkillLibrary(tmp_path / "skills").scan() == []
+
+
 async def test_load_skill_tool_returns_the_body(tmp_path: Path) -> None:
     registry = ToolRegistry()
     register_skill_tools(registry, make_skills(tmp_path))

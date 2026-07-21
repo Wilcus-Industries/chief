@@ -17,6 +17,9 @@ workflow; this file covers how code is written.
   reason to exist; split when it accumulates unrelated concerns.
 - **Self-documenting code:** prefer clear names and small functions over explanatory
   comments. Reach for a comment only when the code can't speak for itself.
+- **Skill files are `SKILL.md`** — uppercase, always, in both the repo and every
+  installed copy. The loader matches case-insensitively so a stray `skill.md` still
+  works, but `SKILL.md` is the one written form; do not introduce a new case.
 
 ## Comments, docs & typing
 
