@@ -79,7 +79,7 @@ through the adapter named on the `Message` that started it.
   `src/chief/shelltool.py` over `src/chief/shellhost.py` +
   `src/chief/shellframe.py`.
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py` (`/help`,
-  `/clear`, `/prune`, `/model`, …). These run *before* a turn.
+  `/clear`, `/prune`, `/model`, `/compact`, …). These run *before* a turn.
 - **Packages** — bundled under `packages/`, cloned under `data/packages/`; loader
   is `src/chief/packages.py`. Discover with `chief-pkg` (`src/chief/pkgcli.py`).
   Install/uninstall are **document-driven** — follow the package's `INSTALL.md`

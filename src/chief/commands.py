@@ -43,6 +43,7 @@ class CommandSet:
             "model": self._model,
             "clear": self._clear,
             "prune": self._prune,
+            "compact": self._compact,
         }
 
     def register(self, name: str, handler: CommandHandler) -> None:
@@ -115,6 +116,14 @@ class CommandSet:
         if skipped:
             return f"pruned {pruned} web buffer(s), skipped {skipped} mid-turn"
         return f"pruned {pruned} web buffer(s)"
+
+    async def _compact(self, args: str, message: Message) -> str:
+        """Force-compact a thread now, bypassing the size threshold.
+
+        No argument compacts THIS thread; an argument names a target thread_key
+        (how the nightly ``chief compact <handle>`` job, arriving on a ``cli:``
+        socket thread, aims at the owner's self-chat)."""
+        return await self._manager.compact(args or message.thread_key)
 
     async def _model(self, args: str, message: Message) -> str:
         session = await self._manager.get_or_create(

@@ -1,12 +1,14 @@
 """The ``python -m chief.install`` CLI: parser + dispatch over lifecycle ops."""
 
 import argparse
+import asyncio
 import os
 import sys
 import webbrowser
 from collections.abc import Sequence
 from pathlib import Path
 
+from chief.config import load_config
 from chief.install.lifecycle import (
     DEFAULT_LAUNCHER,
     uninstall,
@@ -18,6 +20,7 @@ from chief.install.units import default_runner
 from chief.install.update import update
 from chief.install.updatecheck import refresh
 from chief.install.wizard import WizardIO, run_wizard
+from chief.socket_client import send_once
 
 DEFAULT_CONFIG = Path("config.yaml")
 DEFAULT_CONFIG_TEMPLATE = Path("config.default.yaml")
@@ -72,6 +75,15 @@ def _build_parser() -> argparse.ArgumentParser:
     health.add_argument("--port", type=int, default=None)
     open_cmd = sub.add_parser("open-browser", help="open the web UI")
     open_cmd.add_argument("--port", type=int, default=None)
+    compact_cmd = sub.add_parser(
+        "compact", help="force-compact a thread's history via the running daemon"
+    )
+    compact_cmd.add_argument(
+        "thread", help="thread_key to compact (e.g. the iMessage self-chat handle)"
+    )
+    compact_cmd.add_argument(
+        "--socket", default=None, help="daemon socket path (default: from config)"
+    )
     return parser
 
 
@@ -155,6 +167,24 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         url = web_url(args.port)
         opened = webbrowser.open(url)
         print(url if opened else f"open {url} yourself (no browser found)")
+        return 0
+    if command == "compact":
+        # A one-shot socket client: the compaction runs in the live daemon so
+        # the cached in-memory session is folded too (a bare DB rewrite would be
+        # clobbered by that session's next commit). The socket forces a `cli:`
+        # thread, so the target thread rides as the `/compact` argument.
+        socket_path = args.socket or str(load_config().socket_path)
+        # Per-pid thread id: the socket adapter keeps only the last writer per
+        # thread_key, so two concurrent `chief compact` runs must not collide.
+        job_thread = f"compact-job-{os.getpid()}"
+        try:
+            reply = asyncio.run(
+                send_once(socket_path, job_thread, f"/compact {args.thread}")
+            )
+        except ConnectionError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(reply)
         return 0
     raise AssertionError(f"unhandled command: {command}")
 

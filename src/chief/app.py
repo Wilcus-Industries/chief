@@ -16,6 +16,7 @@ from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
 from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
+from chief.agent.windows import WindowResolver
 from chief.budget import Budget
 from chief.bus import EventBus
 from chief.commands import CommandSet
@@ -87,6 +88,13 @@ async def _build_agent_core(
         )
 
     restart = RestartController(repo_root=Path.cwd())
+    window_resolver = WindowResolver(
+        windows=config.compaction_windows,
+        default_window=config.compaction_default_window,
+        aliases=config.provider_aliases.keys(),
+        base_url=config.provider_base_url,
+        api_key=config.openrouter_api_key,
+    )
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
@@ -96,7 +104,13 @@ async def _build_agent_core(
         max_concurrent=config.max_concurrent_sessions,
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
-        compactor=Compactor(provider, config.default_model),
+        compactor=Compactor(
+            provider,
+            config.default_model,
+            window_resolver,
+            ratio=config.compaction_ratio,
+            keep_recent=config.compaction_keep_recent,
+        ),
         restart_gate=restart,
         hooks=hooks,
         hooks_timeout_seconds=config.hooks_timeout_seconds,

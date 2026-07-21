@@ -19,13 +19,21 @@ _SPEC = ToolSpec(
         "exactly one of `prompt` (wakes this thread to do it, deferring out "
         "of quiet hours) or `command` (runs a shell command unattended — no "
         "model turn, no approval at fire time, so creating one asks the "
-        "owner first and ignores quiet hours). action=list takes nothing. "
-        "action=delete needs `schedule_id`."
+        "owner first and ignores quiet hours). All times are UTC — convert a "
+        "local wall-clock time to UTC before building the cron spec. A "
+        "`prompt` schedule takes an optional `target_session` (an existing "
+        "session's thread_key; which session it wakes, default this thread). "
+        "action=list takes nothing. action=delete needs `schedule_id`. "
+        "action=retarget needs `schedule_id` and re-points a prompt "
+        "schedule's wake to `target_session` (default this thread)."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["create", "list", "delete"]},
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "delete", "retarget"],
+            },
             "description": {"type": "string"},
             "spec": {"type": "string"},
             "prompt": {
@@ -39,10 +47,22 @@ _SPEC = ToolSpec(
                     "thread; creating one always asks the owner first"
                 ),
             },
+            "target_session": {
+                "type": "string",
+                "description": (
+                    "thread_key of an existing session a prompt schedule "
+                    "wakes; defaults to this thread. Not valid with `command`."
+                ),
+            },
             "schedule_id": {"type": "integer"},
         },
         "required": ["action"],
     },
+)
+
+
+_COMMAND_TARGET_ERROR = (
+    "error: a command schedule wakes no session, so target_session does not apply"
 )
 
 
@@ -61,12 +81,9 @@ def register_cron_tools(
     """
 
     async def _approve_command(context: ToolContext, spec: str, command: str) -> bool:
-        """Ask the owner before a command schedule exists.
-
-        A scheduled command runs with nobody present, so creation is the only
-        control point. No asker wired means no way to ask — refuse, rather than
-        let a missing control read as permission.
-        """
+        """Ask the owner before a command schedule exists — a command runs with
+        nobody present, so creation is the only control point; no asker wired
+        means refuse, rather than let a missing control read as permission."""
         if ask is None:
             return False
         # json.dumps escapes newlines, so neither field can draw its own
@@ -87,6 +104,7 @@ def register_cron_tools(
         spec: str | None,
         prompt: str | None,
         command: str | None,
+        target_session: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
@@ -95,6 +113,8 @@ def register_cron_tools(
                 "error: create needs description, spec, and exactly one of "
                 "prompt or command"
             )
+        if command and target_session:
+            return _COMMAND_TARGET_ERROR
         try:
             validate_spec(spec)
         except ValueError as exc:
@@ -103,15 +123,41 @@ def register_cron_tools(
             return f"error: {exc}"
         if command and not await _approve_command(context, spec, command):
             return "schedule not created: the owner declined the command"
+        resolved = await service.store.resolve_wake_target(
+            target_session, context.channel, context.thread_key
+        )
+        if resolved is None:
+            return f"error: no such session '{target_session}'"
+        wake_channel, wake_thread = resolved
         schedule_id = await service.create(
             description=description,
             spec=spec,
-            wake_channel=context.channel,
-            wake_thread=context.thread_key,
+            wake_channel=wake_channel,
+            wake_thread=wake_thread,
             prompt=prompt or "",
             command=command,
         )
         return f"schedule #{schedule_id} created"
+
+    async def _retarget(
+        context: ToolContext | None,
+        schedule_id: Any,
+        target_session: str | None,
+    ) -> str:
+        if context is None:
+            return "error: retarget needs a session context"
+        if not isinstance(schedule_id, int):
+            return "error: retarget needs schedule_id"
+        status, wake_thread = await service.retarget(
+            schedule_id, target_session, context.channel, context.thread_key
+        )
+        if status == "missing":
+            return "error: no such schedule"
+        if status == "command":
+            return _COMMAND_TARGET_ERROR
+        if status == "unknown-target":
+            return f"error: no such session '{target_session}'"
+        return f"schedule #{schedule_id} now wakes {wake_thread}"
 
     async def _list() -> str:
         rows = await service.list_enabled()
@@ -127,9 +173,14 @@ def register_cron_tools(
         prompt: str | None = None,
         command: str | None = None,
         schedule_id: Any = None,
+        target_session: str | None = None,
     ) -> str:
         if action == "create":
-            return await _create(context, description, spec, prompt, command)
+            return await _create(
+                context, description, spec, prompt, command, target_session
+            )
+        if action == "retarget":
+            return await _retarget(context, schedule_id, target_session)
         if action == "list":
             return await _list()
         if action == "delete":

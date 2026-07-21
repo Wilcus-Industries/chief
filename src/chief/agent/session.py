@@ -1,5 +1,8 @@
 """Per-thread session: serial turn queue over a persisted transcript.
 
+styleguide: file-length — one cohesive Session class (turn queue, budget,
+compaction, prompt assembly); splitting it would scatter one lifecycle.
+
 The system prompt is injected at call time rather than stored, so prompt
 edits apply to existing threads on the next turn. The budget is checked
 before each turn and recorded after.
@@ -188,10 +191,29 @@ class Session:
         window; the persisted transcript is truncated to match."""
         if self._compactor is None:
             return
-        compacted = await self._compactor.compact(self._messages)
+        compacted = await self._compactor.compact(self._messages, model=self.model)
         if compacted is not None:
             self._messages = compacted
             await self._store.replace(self.thread_key, compacted)
+
+    async def compact(self) -> str:
+        """Force a compaction now, bypassing the threshold (the ``/compact``
+        command and nightly autocompact). Refuses mid-turn rather than block on
+        the turn lock, so a caller never hangs behind a long reply."""
+        if self._compactor is None:
+            return "compaction is not configured"
+        if self._lock.locked():
+            return "thread is mid-turn — try again in a moment"
+        async with self._lock:
+            before = len(self._messages)
+            compacted = await self._compactor.compact(
+                self._messages, model=self.model, force=True
+            )
+            if compacted is None:
+                return "nothing to compact"
+            self._messages = compacted
+            await self._store.replace(self.thread_key, compacted)
+            return f"compacted {before} messages into {len(compacted)}"
 
     async def _commit(self, new_messages: list[dict[str, Any]]) -> None:
         self._messages.extend(new_messages)

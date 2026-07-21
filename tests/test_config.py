@@ -175,6 +175,43 @@ def test_hooks_yaml_override(tmp_path: Path) -> None:
     assert config.hooks_disabled == ("foo",)
 
 
+def test_compaction_defaults(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.compaction_ratio == 0.95
+    assert config.compaction_keep_recent == 20
+    assert config.compaction_default_window == 60_000
+    assert config.compaction_windows == {}
+
+
+def test_compaction_yaml_override(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "compaction:\n"
+        "  ratio: 0.8\n"
+        "  keep_recent: 10\n"
+        "  default_window: 100000\n"
+        "  windows:\n"
+        "    anthropic/claude-opus-4: 200000\n"
+        "    opus: 200000\n"
+    )
+    config = load_config(path)
+    assert config.compaction_ratio == 0.8
+    assert config.compaction_keep_recent == 10
+    assert config.compaction_default_window == 100_000
+    assert config.compaction_windows == {
+        "anthropic/claude-opus-4": 200_000,
+        "opus": 200_000,
+    }
+
+
+def test_compaction_ratio_out_of_range_raises(tmp_path: Path) -> None:
+    for bad in ("0", "1.5", "-0.2"):
+        path = tmp_path / "config.yaml"
+        path.write_text(f"compaction:\n  ratio: {bad}\n")
+        with pytest.raises(ConfigError, match="compaction.ratio"):
+            load_config(path)
+
+
 def test_load_raw_missing_path_is_empty(tmp_path: Path) -> None:
     assert load_raw(tmp_path / "missing.yaml") == {}
 

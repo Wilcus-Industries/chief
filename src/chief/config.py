@@ -98,6 +98,14 @@ class Config:
         default_factory=lambda: Path.home() / "Library/Messages/chat.db"
     )
     imessage_poll_seconds: float = 2.0
+    # Context compaction: fold old history into a summary note when a thread's
+    # transcript nears the model's context window. Threshold = ratio * window;
+    # the window is the thread's *current* model's, resolved per turn (config
+    # override -> OpenRouter metadata -> default_window fallback).
+    compaction_ratio: float = 0.95
+    compaction_keep_recent: int = 20
+    compaction_default_window: int = 60_000
+    compaction_windows: dict[str, int] = field(default_factory=dict)
 
     @property
     def default_model(self) -> str:
@@ -157,6 +165,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     imessage = raw.get("imessage") or {}
     shell = raw.get("shell") or {}
     hooks = raw.get("hooks") or {}
+    compaction = raw.get("compaction") or {}
     return Config(
         models=models,
         temperature=temperature,
@@ -198,6 +207,10 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
         imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
+        compaction_ratio=_parse_ratio(compaction.get("ratio", 0.95)),
+        compaction_keep_recent=int(compaction.get("keep_recent", 20)),
+        compaction_default_window=int(compaction.get("default_window", 60_000)),
+        compaction_windows=_parse_windows(compaction.get("windows") or {}),
     )
 
 
@@ -277,3 +290,20 @@ def _parse_aliases(raw: dict[str, Any]) -> dict[str, AliasSpec]:
         name: AliasSpec(backend=str(spec["backend"]), model=str(spec["model"]))
         for name, spec in raw.items()
     }
+
+
+def _parse_windows(raw: dict[str, Any]) -> dict[str, int]:
+    """Coerce the ``compaction.windows`` override map to ``model-name -> tokens``."""
+    return {str(name): int(tokens) for name, tokens in raw.items()}
+
+
+def _parse_ratio(raw: Any) -> float:
+    """Coerce ``compaction.ratio`` and clamp it to ``(0, 1]``.
+
+    ``0`` (or negative) would fire compaction every turn; ``>1`` would silently
+    disable threshold compaction — both foot-guns, so reject at boot instead.
+    """
+    ratio = float(raw)
+    if not 0 < ratio <= 1:
+        raise ConfigError(f"compaction.ratio must be in (0, 1], got {ratio}")
+    return ratio

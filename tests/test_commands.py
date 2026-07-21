@@ -5,6 +5,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
+from chief.agent.compaction import NOTE_PREFIX, Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.tools import ToolRegistry
 from chief.bus import EventBus
@@ -17,7 +18,34 @@ from chief.persistence.db import SessionFactory, make_session_factory
 from chief.persistence.store import MessageStore
 
 from .fakes import FakeProvider, text_turn
+from .test_compaction import FixedWindow, chat
 from .test_dispatch import RecordingAdapter
+
+
+def make_commands_with_compactor(
+    provider: FakeProvider, store: MessageStore, factory: SessionFactory
+) -> tuple[CommandSet, SessionManager]:
+    """Like ``make_commands`` but wires a force-only Compactor (huge window, so
+    only ``/compact`` ever fires) — for exercising the /compact handler."""
+    manager = SessionManager(
+        provider=provider,
+        tools_factory=lambda thread, channel: ToolRegistry(),
+        store=store,
+        default_model="default-model",
+        system_prompt="s",
+        max_concurrent=4,
+        compactor=Compactor(provider, "m", FixedWindow(10_000_000), keep_recent=4),
+    )
+    monitors = MonitorService(
+        factory,
+        EventBus(),
+        _no_wake,
+        Classifier(FakeProvider([]), ClassifierRegistry(Path("classifiers")), "m"),
+    )
+    commands = CommandSet(
+        manager, monitors, CronService(factory, _no_wake), store=store
+    )
+    return commands, manager
 
 
 def make_commands(
@@ -70,7 +98,7 @@ async def test_help_lists_commands(engine: AsyncEngine, store: MessageStore) -> 
     commands, *_ = make_commands(FakeProvider([]), store, make_session_factory(engine))
     reply = await commands.run(msg("/help"))
     assert isinstance(reply, str)
-    for name in ("/help", "/monitors", "/schedules", "/model"):
+    for name in ("/help", "/monitors", "/schedules", "/model", "/compact"):
         assert name in reply
 
 
@@ -208,6 +236,52 @@ async def test_prune_skips_a_busy_buffer(
     threads = {s["thread"] for s in await store.list_sessions()}
     assert "web:busy" in threads
     assert "web:scratch" not in threads
+
+
+async def test_compact_forces_this_thread(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    provider = FakeProvider([text_turn("the note")])
+    commands, manager = make_commands_with_compactor(provider, store, factory)
+    history = chat(20)
+    await store.ensure_session("cli:t", "cli")
+    await store.append("cli:t", history)
+    session = await manager.get_or_create("cli:t", "cli")  # cache it live
+
+    reply = await commands.run(msg("/compact"))
+
+    assert isinstance(reply, str) and reply.startswith("compacted")
+    persisted = await store.load("cli:t")
+    assert persisted[0]["content"].startswith(NOTE_PREFIX + "the note")
+    # the live session was folded too, not just the DB
+    assert session._messages[0]["content"].startswith(NOTE_PREFIX + "the note")
+
+
+async def test_compact_targets_a_named_thread(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    factory = make_session_factory(engine)
+    provider = FakeProvider([text_turn("group note")])
+    commands, manager = make_commands_with_compactor(provider, store, factory)
+    await store.ensure_session("+15551234567", "imessage")
+    await store.append("+15551234567", chat(20))
+
+    # arrives on a cli: socket thread but names the imessage self-chat target
+    reply = await commands.run(msg("/compact +15551234567"))
+
+    assert isinstance(reply, str) and reply.startswith("compacted")
+    persisted = await store.load("+15551234567")
+    assert persisted[0]["content"].startswith(NOTE_PREFIX + "group note")
+
+
+async def test_compact_unknown_thread_reports_cleanly(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    commands, _ = make_commands_with_compactor(
+        FakeProvider([]), store, make_session_factory(engine)
+    )
+    assert await commands.run(msg("/compact no:such")) == "no such thread: no:such"
 
 
 async def test_dispatcher_answers_commands_without_a_turn(
