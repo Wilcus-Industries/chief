@@ -17,6 +17,21 @@ from chief.provider.base import ToolSpec
 logger = logging.getLogger(__name__)
 
 
+def _skill_files(root: Path) -> list[Path]:
+    """Every ``<dir>/SKILL.md`` under ``root``, matched case-insensitively.
+
+    ``SKILL.md`` is the convention, but ``Path.glob`` is case-sensitive on
+    Linux — so a stray ``skill.md`` that loads fine on a Mac would silently
+    vanish in production. Match on the lowered name so the filesystem's
+    case-sensitivity never decides whether a skill exists.
+    """
+    return sorted(
+        path
+        for path in root.glob("*/*.md")
+        if path.name.lower() == "skill.md"
+    )
+
+
 @dataclass(frozen=True)
 class Skill:
     name: str
@@ -35,7 +50,7 @@ class SkillLibrary:
 
     def scan(self) -> list[Skill]:
         skills = []
-        for skill_file in sorted(self._root.glob("*/SKILL.md")):
+        for skill_file in _skill_files(self._root):
             skill = _parse(skill_file)
             if skill is not None:
                 skills.append(skill)
@@ -65,7 +80,7 @@ def validate(root: Path) -> list[str]:
     rolled back rather than merged (issue #186).
     """
     problems: list[str] = []
-    for skill_file in sorted(root.glob("*/SKILL.md")):
+    for skill_file in _skill_files(root):
         problems.extend(_validate_skill(skill_file))
     return problems
 
