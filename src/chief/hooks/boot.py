@@ -14,7 +14,7 @@ from chief.config import Config, load_raw
 from chief.hooks.loader import load_hooks
 from chief.hooks.registry import HookRegistry
 from chief.install.updatecheck import session_start_notice
-from chief.packages import CLONED_PACKAGES_DIR, PackageLibrary
+from chief.pkg import CLONED_PACKAGES_DIR, PackageLibrary
 from chief.provider.base import Provider
 from chief.registry_apply import INSTALLED_REGISTRY, load_installed
 

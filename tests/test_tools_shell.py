@@ -10,17 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from chief.agent.tools import ToolContext, ToolRegistry
 from chief.provider.base import ToolCall
-from chief.shellframe import (
+from chief.tools import ToolContext, ToolRegistry
+from chief.tools.shell.frame import (
     SHELL_DIED_EXIT_CODE,
     SYNTAX_ERROR_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
     resolve_shell,
 )
-from chief.shellhost import ShellHost
-from chief.shellprompt import host_label, shell_label, shell_prompt_line
-from chief.shelltool import (
+from chief.tools.shell.host import ShellHost
+from chief.tools.shell.prompt import host_label, shell_label, shell_prompt_line
+from chief.tools.shell.service import (
     ShellService,
     format_shell_result,
     register_shell_tool,
@@ -216,7 +216,7 @@ async def test_per_call_timeout_overrides_service_default(tmp_path: Path) -> Non
 
 
 def test_shell_spec_exposes_optional_timeout() -> None:
-    from chief.shelltool import _SHELL_SPEC
+    from chief.tools.shell.service import _SHELL_SPEC
 
     props = _SHELL_SPEC.parameters["properties"]
     assert "timeout" in props
@@ -275,14 +275,14 @@ async def test_syntax_check_timeout_lets_the_command_proceed(
 ) -> None:
     # A parse-check process that never returns must not hang the real command forever
     # — it is killed by its own bounded timeout and treated as "no syntax error found".
-    from chief import shellframe
+    from chief.tools.shell import frame
 
     hang_script = tmp_path / "hang_shell.sh"
     hang_script.write_text("#!/bin/sh\nsleep 30\n")
     hang_script.chmod(0o755)
-    monkeypatch.setattr(shellframe, "_SYNTAX_CHECK_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(frame, "_SYNTAX_CHECK_TIMEOUT_SECONDS", 0.2)
 
-    result = await shellframe._shell_syntax_error((str(hang_script),), "echo hi")
+    result = await frame._shell_syntax_error((str(hang_script),), "echo hi")
 
     assert result is None
 

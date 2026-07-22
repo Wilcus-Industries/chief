@@ -15,20 +15,20 @@ from pathlib import Path
 from chief.agent.manager import SessionManager
 from chief.agent.model_tools import register_switch_model_tool
 from chief.agent.session_tools import register_session_tools
-from chief.agent.tools import ToolRegistry
 from chief.budget import Budget
 from chief.cron.service import CronService
 from chief.cron.tools import register_cron_tools
-from chief.filetools import register_file_tools
 from chief.gate import AskApproval
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.tools import register_restart_tool
-from chief.shelltool import ShellGuard, ShellService, register_shell_tool
 from chief.skills import SkillLibrary, register_skill_tools
 from chief.subagents import AgentRegistry, register_spawn_tool
+from chief.tools import ToolRegistry
+from chief.tools.files import register_file_tools
+from chief.tools.shell.service import ShellGuard, ShellService, register_shell_tool
 
 
 def register_native_tools(

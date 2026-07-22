@@ -4,7 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from chief.packages import HookSpec, McpServerSpec, PackageLibrary, validate
+from chief.pkg import HookSpec, McpServerSpec, PackageLibrary, validate
 
 REPO_PACKAGES = Path(__file__).parent.parent / "packages"
 

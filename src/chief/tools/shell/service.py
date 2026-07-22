@@ -1,21 +1,23 @@
-"""The owner's ``shell`` tool: the registry-facing surface over :mod:`chief.shellhost`.
+"""The owner's ``shell`` tool: the registry-facing surface over the persistent
+host shell (:mod:`chief.tools.shell.host`).
 
 ``register_shell_tool`` wires a single ``shell`` tool with ``wants_context=True`` so one
 registered tool routes each call to its own thread's persistent shell by ``thread_key``.
 ``shell`` mutates the host and so is not read-only — the gate (:mod:`chief.gate`) raises
 an approval card on every command until the owner "always allow"s it, exactly like
 ``write_file``/``edit_file``/``restart``. ``ShellService`` owns the shells and is closed
-by the daemon at shutdown; the prompt-side labels live in :mod:`chief.shellprompt`.
+by the daemon at shutdown; the prompt-side labels live in
+:mod:`chief.tools.shell.prompt`.
 """
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
-from chief.shellhost import ShellHost
-from chief.shellprompt import HOST_SHELL_CONTRACT
+from chief.tools import Tool, ToolContext, ToolRegistry
+from chief.tools.shell.host import ShellHost
+from chief.tools.shell.prompt import HOST_SHELL_CONTRACT
 
 
 def format_shell_result(result: dict[str, Any]) -> str:
@@ -44,9 +46,9 @@ def format_shell_result(result: dict[str, Any]) -> str:
 class ShellService:
     """Workspace + limits for the host shell; owns the live per-thread shells.
 
-    Creates one :class:`~chief.shellhost.ShellHost` lazily (so the shell binary is
-    resolved only when a command actually runs). The daemon calls :meth:`aclose` at
-    shutdown to tear the shells down cleanly.
+    Creates one :class:`~chief.tools.shell.host.ShellHost` lazily (so the shell
+    binary is resolved only when a command actually runs). The daemon calls
+    :meth:`aclose` at shutdown to tear the shells down cleanly.
     """
 
     workspace_dir: str

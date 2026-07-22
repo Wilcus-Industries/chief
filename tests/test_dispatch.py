@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
-from chief.agent.tools import Tool, ToolRegistry
 from chief.approvals import Approval, ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
@@ -16,6 +15,7 @@ from chief.persistence.store import MessageStore
 from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
+from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn, tool_turn
 

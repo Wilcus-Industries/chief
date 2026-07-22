@@ -18,7 +18,7 @@ from chief.classifiers import Classifier
 from chief.hooks.context import HookContext
 from chief.hooks.registry import HookRegistry, PackageHookRegistrar
 from chief.hooks.runner import is_safe_package_name
-from chief.packages import HookSpec, PackageLibrary
+from chief.pkg import HookSpec, PackageLibrary
 from chief.provider.base import Provider
 
 logger = logging.getLogger(__name__)

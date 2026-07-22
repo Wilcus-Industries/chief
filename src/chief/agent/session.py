@@ -17,7 +17,6 @@ from chief.agent.compaction import Compactor
 from chief.agent.loop import OnDelta, TurnResult, run_turn
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, _NullGate
-from chief.agent.tools import ToolDispatcher
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
 from chief.hooks import (
@@ -29,6 +28,7 @@ from chief.hooks import (
 )
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
+from chief.tools import ToolDispatcher
 
 logger = logging.getLogger(__name__)
 

@@ -3,8 +3,8 @@
 from typing import Any
 
 from chief.agent.loop import run_turn
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import Completion, TextDelta, ToolCall, ToolSpec, Usage
+from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
 

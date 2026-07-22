@@ -16,11 +16,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from chief.agent.tools import ToolContext, ToolDispatcher
 from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
 from chief.provider.base import ToolCall, ToolSpec
+from chief.tools import ToolContext, ToolDispatcher
 
 logger = logging.getLogger(__name__)
 

@@ -7,9 +7,9 @@ records an override and does not race the in-flight transcript commit.
 """
 
 from chief.agent.manager import SessionManager
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
 from chief.provider.model_names import UnknownModelError, validate_model_name
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 _SPEC = ToolSpec(
     name="switch_model",

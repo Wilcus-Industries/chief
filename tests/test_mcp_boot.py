@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
-from chief.packages import McpServerSpec, PackageLibrary
+from chief.pkg import McpServerSpec, PackageLibrary
 
 from .fakes import FakeProvider, text_turn, tool_turn
 from .test_app import boot, make_config, read_finals, send_frame, shutdown

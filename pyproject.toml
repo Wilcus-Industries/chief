@@ -22,7 +22,7 @@ dependencies = [
 
 [project.scripts]
 chief-cli = "chief.cli:main"
-chief-pkg = "chief.pkgcli:main"
+chief-pkg = "chief.pkg.cli:main"
 
 [dependency-groups]
 dev = [

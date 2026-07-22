@@ -215,7 +215,7 @@ Default bind is `127.0.0.1:8130` — loopback only. `web_password` is deliberate
 `/app.css` and `/app.js` are intentionally unauthenticated; every other route
 re-checks `is_authed`.
 
-## Scheduled shell commands — `cron/tools.py`, `shelltool.py`
+## Scheduled shell commands — `cron/tools.py`, `tools/shell/service.py`
 
 A `command` schedule runs arbitrary shell with nobody present, so two things hold
 it:

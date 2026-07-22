@@ -3,10 +3,10 @@
 from pathlib import Path
 
 from chief.adapters.base import Message
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import Completion, ToolCall, ToolSpec
 from chief.skills import SkillLibrary, register_skill_tools
 from chief.subagents import AgentRegistry, FilteredTools, register_spawn_tool
+from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
 

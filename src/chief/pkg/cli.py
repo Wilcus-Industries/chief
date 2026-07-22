@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chief.config import Config, load_config, load_raw
-from chief.packages import CLONED_PACKAGES_DIR, Package, PackageLibrary, dep_importable
-from chief.pkgsync import clone_if_missing, pull_clone
+from chief.pkg import CLONED_PACKAGES_DIR, Package, PackageLibrary, dep_importable
+from chief.pkg.sync import clone_if_missing, pull_clone
 from chief.registry_apply import load_installed as _load_installed
 
 INSTALLED_REGISTRY = Path("data/installed.yaml")

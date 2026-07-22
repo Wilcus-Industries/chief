@@ -2,7 +2,7 @@
 
 ``build_app`` reads as a table of contents — each phase is a helper called in
 order. Persistence, gate, MCP, and adapters live in ``chief.wiring``; the
-default toolset in ``chief.toolset``; hook assembly in ``chief.hooks.boot``;
+default toolset in ``chief.tools.native``; hook assembly in ``chief.hooks.boot``;
 the agent-core closure trap stays here.
 Tests boot exactly this wiring with only the provider swapped for the
 deterministic fake (the one scripted fake CI allows, PRD #183).
@@ -15,7 +15,6 @@ from chief.adapters.imessage import owner_send_guard
 from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
-from chief.agent.tools import ToolContext, ToolDispatcher, ToolRegistry
 from chief.agent.windows import WindowResolver
 from chief.budget import Budget
 from chief.bus import EventBus
@@ -33,11 +32,12 @@ from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
-from chief.shellprompt import shell_prompt_line
-from chief.shelltool import ShellGuard, ShellService, guarded_runner
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
-from chief.toolset import register_native_tools
+from chief.tools import ToolContext, ToolDispatcher, ToolRegistry
+from chief.tools.native import register_native_tools
+from chief.tools.shell.prompt import shell_prompt_line
+from chief.tools.shell.service import ShellGuard, ShellService, guarded_runner
 from chief.wiring import (
     Core,
     Gate,

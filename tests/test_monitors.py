@@ -5,7 +5,6 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
-from chief.agent.tools import ToolContext, ToolRegistry
 from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.monitors.service import MonitorService
@@ -13,6 +12,7 @@ from chief.monitors.tools import register_monitor_tools
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall
+from chief.tools import ToolContext, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
 

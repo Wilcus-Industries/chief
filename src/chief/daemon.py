@@ -14,7 +14,7 @@ from chief.dispatch import Dispatcher
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
-from chief.shelltool import ShellService
+from chief.tools.shell.service import ShellService
 from chief.web.adapter import WebAdapter
 from chief.web.server import WebServer
 

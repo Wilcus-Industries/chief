@@ -1,14 +1,14 @@
 """System-prompt lines describing the host shell: OS, dialect, and contract.
 
-Split from :mod:`chief.shelltool` (which owns the tool + service) so the prompt
-concerns live apart from dispatch; ``HOST_SHELL_CONTRACT`` is single-sourced
+Split from :mod:`chief.tools.shell.service` (which owns the tool + service) so the
+prompt concerns live apart from dispatch; ``HOST_SHELL_CONTRACT`` is single-sourced
 here and quoted by the tool description so the two can't drift.
 """
 
 import platform
 from pathlib import Path
 
-from chief.shellframe import resolve_shell
+from chief.tools.shell.frame import resolve_shell
 
 #: The host shell's invariants, single-sourced so the tool description and the
 #: system prompt can't drift: the owner's real machine; chain steps in one command.

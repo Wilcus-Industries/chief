@@ -4,9 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.agent.manager import SessionManager
 from chief.agent.session_tools import register_session_tools
-from chief.agent.tools import ToolContext, ToolRegistry
 from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall
+from chief.tools import ToolContext, ToolRegistry
 
 from .fakes import FakeProvider
 

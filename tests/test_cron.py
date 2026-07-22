@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
-from chief.agent.tools import ToolContext, ToolRegistry
 from chief.approvals import Approval
 from chief.cron.service import CronService
 from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
@@ -17,7 +16,8 @@ from chief.persistence.db import make_session_factory
 from chief.persistence.models import ScheduleRow
 from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall
-from chief.shelltool import ShellService
+from chief.tools import ToolContext, ToolRegistry
+from chief.tools.shell.service import ShellService
 
 NOON = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 

@@ -16,8 +16,8 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import TextContent
 
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import ToolSpec
+from chief.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 

@@ -10,10 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from chief.agent.tools import ToolContext, ToolRegistry
 from chief.audit import AuditLog
 from chief.config import ConfigError
-from chief.filetools import register_file_tools
 from chief.provider.base import ToolCall
 from chief.selfedit import gitops
 from chief.selfedit.notice import (
@@ -32,6 +30,8 @@ from chief.selfedit.recovery import (
     rollback_if_marked,
 )
 from chief.selfedit.tools import register_restart_tool
+from chief.tools import ToolContext, ToolRegistry
+from chief.tools.files import register_file_tools
 
 
 def git(repo: Path, *args: str) -> str:

@@ -186,7 +186,7 @@ tool name is recorded and passed through to the registry for a helpful error —
 **a hallucinated name never raises an approval card**. See
 [SECURITY.md](./SECURITY.md) for the decision table.
 
-`ToolRegistry.dispatch` (`agent/tools.py`) **never raises**: `TypeError` becomes
+`ToolRegistry.dispatch` (`tools/registry.py`) **never raises**: `TypeError` becomes
 a bad-arguments string, anything else becomes an error string. Tool handlers
 follow the same rule — return error strings, don't raise.
 

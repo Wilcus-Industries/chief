@@ -7,9 +7,9 @@ import pytest
 import yaml
 
 from chief import registry_apply
-from chief.packages import Package, PackageLibrary
-from chief.pkgcli import discover, render, verify_install
-from chief.pkgsync import clone_if_missing, pull_clone
+from chief.pkg import Package, PackageLibrary
+from chief.pkg.cli import discover, render, verify_install
+from chief.pkg.sync import clone_if_missing, pull_clone
 
 
 def write_package(root: Path, name: str, description: str) -> None:
@@ -451,7 +451,7 @@ def test_verify_fails_a_manifest_declared_server_that_never_reached_config(
     # reports that instead of reporting success. Driven through the CLI's own
     # verify path over real on-disk manifest/registry/config files.
     from chief.config import load_config
-    from chief.pkgcli import _run_verify
+    from chief.pkg.cli import _run_verify
 
     monkeypatch.chdir(tmp_path)
     pkg = tmp_path / "packages" / "mcpfixture"

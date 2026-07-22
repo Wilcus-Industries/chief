@@ -71,17 +71,18 @@ through the adapter named on the `Message` that started it.
 - **Skills** — one directory per skill under `skills/`, each a `SKILL.md`.
   Loader/validator: `src/chief/skills.py`. The prompt carries only one-liners;
   `load_skill` pulls a full body.
-- **Native tools** — registry and dispatch in `src/chief/agent/tools.py`. The
-  default set is assembled by `register_native_tools` in `src/chief/toolset.py`
-  and wired at boot in `src/chief/app.py`. Each tool's spec + handler lives with
-  its feature (`src/chief/monitors/tools.py`,
-  `src/chief/agent/session_tools.py`). The host `shell` tool is
-  `src/chief/shelltool.py` over `src/chief/shellhost.py` +
-  `src/chief/shellframe.py`.
+- **Native tools** — registry and dispatch in `src/chief/tools/registry.py`
+  (re-exported from `src/chief/tools/`). The default set is assembled by
+  `register_native_tools` in `src/chief/tools/native.py` and wired at boot in
+  `src/chief/app.py`. Each tool's spec + handler lives with its feature
+  (`src/chief/monitors/tools.py`, `src/chief/agent/session_tools.py`); the
+  featureless file tools are `src/chief/tools/files.py`. The host `shell` tool
+  is `src/chief/tools/shell/service.py` over `src/chief/tools/shell/host.py` +
+  `src/chief/tools/shell/frame.py`.
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py` (`/help`,
   `/clear`, `/prune`, `/model`, `/compact`, …). These run *before* a turn.
 - **Packages** — bundled under `packages/`, cloned under `data/packages/`; loader
-  is `src/chief/packages.py`. Discover with `chief-pkg` (`src/chief/pkgcli.py`).
+  is `src/chief/pkg/loader.py`. Discover with `chief-pkg` (`src/chief/pkg/cli.py`).
   Install/uninstall are **document-driven** — follow the package's `INSTALL.md`
   with your file tools, record installs via `chief.registry_apply`, then
   `restart`.

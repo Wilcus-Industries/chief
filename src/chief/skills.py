@@ -11,8 +11,8 @@ from pathlib import Path
 
 import yaml
 
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import ToolSpec
+from chief.tools import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 

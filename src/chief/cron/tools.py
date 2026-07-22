@@ -3,13 +3,13 @@
 import json
 from typing import Any
 
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.approvals import Approval
 from chief.cron.service import CronService
 from chief.cron.timing import validate_spec
 from chief.gate import AskApproval
 from chief.persistence.models import ScheduleRow
 from chief.provider.base import ToolSpec
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 _SPEC = ToolSpec(
     name="schedule",

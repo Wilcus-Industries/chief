@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.approvals import Approval
 from chief.audit import AuditLog
 from chief.gate import (
@@ -14,6 +13,7 @@ from chief.gate import (
     save_approved,
 )
 from chief.provider.base import ToolCall, ToolSpec
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 CONTEXT = ToolContext(thread_key="cli:t", channel="cli")
 

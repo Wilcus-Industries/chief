@@ -2,12 +2,12 @@
 
 Host-native — a real subprocess of the daemon, no sandbox, no RPC. :class:`_Shell` owns
 one long-lived shell whose ``export``/``cd``/jobs persist across commands; each command
-is parse-checked (:func:`~chief.shellframe._shell_syntax_error`) then framed with a
-unique sentinel carrying ``$?`` so the readers know where output ends and can recover
+is parse-checked (:func:`~chief.tools.shell.frame._shell_syntax_error`) then framed with
+a unique sentinel carrying ``$?`` so the readers know where output ends and can recover
 the exit code. A per-command timeout SIGINTs then respawns a hung shell (state lost); a
 shell that dies mid-command yields a distinct non-zero code, never a bogus 0.
 :class:`ShellHost` keeps one shell per thread key. Framing primitives live in
-:mod:`chief.shellframe`; the tool surface in :mod:`chief.shelltool`.
+:mod:`chief.tools.shell.frame`; the tool surface in :mod:`chief.tools.shell.service`.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ import secrets
 import signal
 from pathlib import Path
 
-from chief.shellframe import (
+from chief.tools.shell.frame import (
     ENCODING,
     SHELL_DIED_EXIT_CODE,
     STREAM_LIMIT,

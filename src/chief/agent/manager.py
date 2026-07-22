@@ -7,11 +7,11 @@ from typing import Any
 from chief.agent.compaction import Compactor
 from chief.agent.restart_gate import RestartGate
 from chief.agent.session import Session
-from chief.agent.tools import ToolDispatcher
 from chief.budget import Budget
 from chief.hooks import HookRegistry
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
+from chief.tools import ToolDispatcher
 
 # Builds the (possibly gated) tool dispatcher for one session's context.
 ToolsFactory = Callable[[str, str], ToolDispatcher]

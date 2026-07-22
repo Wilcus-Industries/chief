@@ -6,9 +6,9 @@ reboot into the change. There is no ``self_edit`` or ``install_package`` tool
 anymore; editing is ordinary file work and installing is document-driven.
 """
 
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
 from chief.selfedit.pipeline import SelfEditPipeline
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 _RESTART_SPEC = ToolSpec(
     name="restart",

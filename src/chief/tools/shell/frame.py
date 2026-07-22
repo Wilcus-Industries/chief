@@ -1,10 +1,11 @@
-"""Stateless framing primitives for the host shell driver (:mod:`chief.shellhost`).
+"""Stateless framing primitives for the host shell driver
+(:mod:`chief.tools.shell.host`).
 
 The wire protocol between the daemon and a persistent shell: which shell to spawn
 (:func:`resolve_shell`), the exit-code conventions, the output accumulator/cap
 (:class:`_Acc`), the drain-end signal (:class:`_DrainEnd`), and the ``-n`` pre-flight
 parse check (:func:`_shell_syntax_error`). No process state lives here — that is
-:class:`~chief.shellhost._Shell`.
+:class:`~chief.tools.shell.host._Shell`.
 """
 
 import asyncio
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("chief.shellframe")
+logger = logging.getLogger("chief.tools.shell.frame")
 
 #: Encoding for everything crossing the shell's pipes.
 ENCODING = "utf-8"

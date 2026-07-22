@@ -7,7 +7,7 @@ back instead of merged (issue #186).
 
 from pathlib import Path
 
-from chief import classifiers, packages, skills
+from chief import classifiers, pkg, skills
 
 REPO = Path(__file__).parent.parent
 
@@ -77,25 +77,25 @@ def test_validate_checks_a_lowercase_skill_file(tmp_path: Path) -> None:
 
 
 def test_valid_manifest_passes(tmp_path: Path) -> None:
-    pkg = tmp_path / "good"
-    pkg.mkdir()
-    (pkg / "manifest.yaml").write_text("name: good\ndescription: a package\n")
-    assert packages.validate((tmp_path,)) == []
+    pkg_dir = tmp_path / "good"
+    pkg_dir.mkdir()
+    (pkg_dir / "manifest.yaml").write_text("name: good\ndescription: a package\n")
+    assert pkg.validate((tmp_path,)) == []
 
 
 def test_manifest_missing_description_is_flagged(tmp_path: Path) -> None:
-    pkg = tmp_path / "bad"
-    pkg.mkdir()
-    (pkg / "manifest.yaml").write_text("name: bad\n")
-    problems = packages.validate((tmp_path,))
+    pkg_dir = tmp_path / "bad"
+    pkg_dir.mkdir()
+    (pkg_dir / "manifest.yaml").write_text("name: bad\n")
+    problems = pkg.validate((tmp_path,))
     assert any("description" in p for p in problems)
 
 
 def test_invalid_manifest_yaml_is_flagged(tmp_path: Path) -> None:
-    pkg = tmp_path / "broken"
-    pkg.mkdir()
-    (pkg / "manifest.yaml").write_text("name: [unterminated\n")
-    problems = packages.validate((tmp_path,))
+    pkg_dir = tmp_path / "broken"
+    pkg_dir.mkdir()
+    (pkg_dir / "manifest.yaml").write_text("name: [unterminated\n")
+    problems = pkg.validate((tmp_path,))
     assert any("yaml" in p.lower() for p in problems)
 
 
@@ -125,4 +125,4 @@ def test_bundled_skills_are_wellformed() -> None:
 
 
 def test_bundled_manifests_are_wellformed() -> None:
-    assert packages.validate((REPO / "packages",)) == []
+    assert pkg.validate((REPO / "packages",)) == []

@@ -2,7 +2,7 @@
 
 ``McpServerSpec`` matches ``config.yaml``'s own ``mcp_servers`` entry (see
 ``config.Config.mcp_servers``, ``wiring.build_mcp``). Split out of
-``chief.packages`` (issue #238) so both the validate() and parse() sides of
+``chief.pkg`` (issue #238) so both the validate() and parse() sides of
 this one concern — and their shared shape checks — have a file of their own.
 """
 

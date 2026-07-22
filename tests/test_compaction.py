@@ -5,8 +5,8 @@ from typing import Any
 
 from chief.agent.compaction import NOTE_PREFIX, Compactor, estimate_tokens
 from chief.agent.session import Session
-from chief.agent.tools import ToolRegistry
 from chief.persistence.store import MessageStore
+from chief.tools import ToolRegistry
 
 from .fakes import FakeProvider, text_turn
 

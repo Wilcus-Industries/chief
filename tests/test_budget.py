@@ -3,11 +3,11 @@
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.agent.manager import SessionManager
-from chief.agent.tools import ToolRegistry
 from chief.budget import Budget, BudgetState
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Completion, TextDelta, Usage
+from chief.tools import ToolRegistry
 
 from .fakes import FakeProvider
 

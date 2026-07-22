@@ -9,7 +9,6 @@ from typing import Any
 
 import pytest
 
-from chief.agent.tools import ToolRegistry
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
@@ -17,7 +16,8 @@ from chief.mcpclient.manager import ServerConfig
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
-from chief.shelltool import GUARD_REFUSED_EXIT_CODE
+from chief.tools import ToolRegistry
+from chief.tools.shell.service import GUARD_REFUSED_EXIT_CODE
 from chief.wiring import build_mcp, build_provider
 
 from .fakes import FakeProvider, text_turn

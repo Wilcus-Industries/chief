@@ -12,8 +12,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from chief.agent.tools import ToolDispatcher
 from chief.provider.base import Completion, Provider, TextDelta, ToolCall, Usage
+from chief.tools import ToolDispatcher
 
 OnDelta = Callable[[str], Awaitable[None]]
 

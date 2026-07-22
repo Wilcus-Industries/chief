@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from chief.adapters.base import Message
 from chief.agent.compaction import NOTE_PREFIX, Compactor
 from chief.agent.manager import SessionManager
-from chief.agent.tools import ToolRegistry
 from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.commands import CommandSet
@@ -16,6 +15,7 @@ from chief.dispatch import Dispatcher
 from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory, make_session_factory
 from chief.persistence.store import MessageStore
+from chief.tools import ToolRegistry
 
 from .fakes import FakeProvider, text_turn
 from .test_compaction import FixedWindow, chat

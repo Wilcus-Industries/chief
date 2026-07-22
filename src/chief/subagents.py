@@ -12,9 +12,9 @@ from pathlib import Path
 import yaml
 
 from chief.agent.loop import run_turn
-from chief.agent.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
 from chief.budget import Budget
 from chief.provider.base import Provider, ToolCall, ToolSpec
+from chief.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,8 @@
 """Native tool for the agent to manage its own sessions (threads)."""
 
 from chief.agent.manager import SessionManager
-from chief.agent.tools import Tool, ToolContext, ToolRegistry
 from chief.provider.base import ToolSpec
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 _SPEC = ToolSpec(
     name="session",

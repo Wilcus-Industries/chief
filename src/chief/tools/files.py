@@ -11,8 +11,8 @@ the approval gate is the only guard on where writes land (guardrails: #197).
 import re
 from pathlib import Path
 
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import ToolSpec
+from chief.tools import Tool, ToolRegistry
 
 GREP_MATCH_CAP = 200
 

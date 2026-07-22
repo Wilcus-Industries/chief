@@ -4,7 +4,7 @@ A package is a directory holding a ``manifest.yaml`` (name, description,
 skills, config keys, secrets), an ``INSTALL.md`` the agent walks through to
 install with the file tools, and an ``UNINSTALL.md`` whose final step deletes
 itself as the completion signal. Discovery is done by the ``chief-pkg`` CLI
-(see ``chief.pkgcli``); this module just parses manifests and scans the two
+(see ``chief.pkg.cli``); this module just parses manifests and scans the two
 roots — bundled ``packages/`` and the local clone of the chief-packages repo.
 """
 

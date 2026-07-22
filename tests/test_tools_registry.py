@@ -2,8 +2,8 @@
 
 import pytest
 
-from chief.agent.tools import Tool, ToolRegistry
 from chief.provider.base import ToolCall, ToolSpec
+from chief.tools import Tool, ToolRegistry
 
 ECHO_SPEC = ToolSpec(
     name="echo",

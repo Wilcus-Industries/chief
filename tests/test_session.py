@@ -4,10 +4,10 @@ import asyncio
 from typing import Any
 
 from chief.agent.manager import SessionManager
-from chief.agent.tools import Tool, ToolRegistry
 from chief.persistence.store import MessageStore
 from chief.provider.base import ToolSpec
 from chief.selfedit.recovery import RestartController
+from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn, tool_turn
 

@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from chief.agent.tools import ToolRegistry
-from chief.filetools import register_file_tools
 from chief.provider.base import ToolCall
+from chief.tools import ToolRegistry
+from chief.tools.files import register_file_tools
 
 
 def make_registry(root: Path) -> ToolRegistry:

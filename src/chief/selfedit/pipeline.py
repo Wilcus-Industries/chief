@@ -18,13 +18,13 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from chief.agent.tools import ToolContext
 from chief.audit import AuditLog
 from chief.config import load_config
 from chief.selfedit.checks import DEFAULT_CHECKS, validate_live_config
 from chief.selfedit.gitops import dirty_files, run_checks, run_git
 from chief.selfedit.notice import RestartNotice
 from chief.selfedit.recovery import MARKER_NAME
+from chief.tools import ToolContext
 
 logger = logging.getLogger(__name__)
 

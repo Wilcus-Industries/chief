@@ -57,7 +57,7 @@ is injected only into tools with `wants_context=True`.
 Dispatch **never raises** — a missing tool, bad arguments (`TypeError`), or a
 handler exception all come back as error strings. Assert on the string.
 
-`tests/test_shelltool.py` has a compact `_call()` helper worth copying.
+`tests/test_tools_shell.py` has a compact `_call()` helper worth copying.
 `tests/test_mcp.py` goes further: it writes a real `FastMCP` stdio server to
 `tmp_path`, connects, asserts the tool appears as `mcp_testsrv_add`, and
 dispatches it end-to-end.
@@ -107,11 +107,11 @@ correctness rather than for observing an async write, fix the code instead.
 - **`test_architecture_docs.py`** — `docs/ARCHITECTURE.md` must exist, and the
   `self-edit` skill body must reference it. **If you restructure these docs, this
   test is the tripwire.**
-- **`test_packages.py`** — real bundled manifests stay well-formed and
+- **`test_pkg_loader.py`** — real bundled manifests stay well-formed and
   `validate()` returns clean.
 
 ## Scale
 
 44 test files, 467 test functions. The heaviest are `test_selfedit.py` (34),
-`test_shelltool.py` (32), `test_config.py` (27), `test_imessage.py` (25),
-`test_hooks.py` (23), `test_pkgcli.py` (22).
+`test_tools_shell.py` (32), `test_config.py` (27), `test_imessage.py` (25),
+`test_hooks.py` (23), `test_pkg_cli.py` (22).

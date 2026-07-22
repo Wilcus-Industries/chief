@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from chief.agent.tools import ToolRegistry
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.provider.base import ToolCall
+from chief.tools import ToolRegistry
 
 SERVER_SCRIPT = """
 import os

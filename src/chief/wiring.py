@@ -3,7 +3,7 @@
 Persistence, the gate/approval layer, MCP config, and the channel adapters —
 each a small helper so ``chief.app.build_app`` reads as a table of contents.
 The agent core (the manager/dispatcher/tools_factory closure trap) and the
-default toolset live next door in ``chief.app`` and ``chief.toolset``.
+default toolset live next door in ``chief.app`` and ``chief.tools.native``.
 """
 
 import sys
@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
 from chief.agent.manager import SessionManager
-from chief.agent.tools import ToolRegistry
 from chief.approvals import ApprovalBroker
 from chief.audit import AuditLog
 from chief.budget import Budget
@@ -42,6 +41,7 @@ from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
 from chief.selfedit.recovery import RestartController
+from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth, load_or_create_secret

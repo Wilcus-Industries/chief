@@ -19,8 +19,8 @@ Two repo-wide constraints that shape every recipe:
 1. Write the `ToolSpec` + async handler in a `register_<name>_tools(registry, ...)`
    function. **Mirror `src/chief/monitors/tools.py`** — one tool, an `action`
    enum, per-action inner coroutines, validation returning error *strings*.
-2. Call it from `register_native_tools` in `src/chief/toolset.py`, passing deps
-   through from `build_app`.
+2. Call it from `register_native_tools` in `src/chief/tools/native.py`, passing
+   deps through from `build_app`.
 3. Set `wants_context=True` if the handler needs `thread_key` / `channel`.
 4. Add an integration test that dispatches a **real `ToolCall` through a real
    `ToolRegistry`** (see `tests/test_session_tools.py`).
