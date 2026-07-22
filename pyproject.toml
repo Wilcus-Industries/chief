@@ -58,6 +58,9 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 packages = ["chief"]
 strict = true
+# Exclude runtime state dirs — data/ contains installed package hooks that
+# collide with same-named source files (e.g. duplicate "hooks" module).
+exclude = ["^data/", "^packages/"]
 
 # pyyaml ships no inline stubs for the bare `import yaml` module name;
 # croniter ships no py.typed at all.
@@ -72,6 +75,8 @@ module = [
     "model2vec.*",
     "obsidiantools.*",
     "networkx.*",
+    # obsidian-memory package ships no py.typed; its tests import it directly
+    "chief_obsidian_memory.*",
 ]
 ignore_missing_imports = true
 
