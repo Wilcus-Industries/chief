@@ -1,15 +1,21 @@
-"""Messages ``chat.db`` read layer: the poll query and body decoding.
+"""Messages ``chat.db`` read layer: poll query + executor, cursor, decoding.
 
-Split out of ``imessage.py`` to keep that file under the length cap. Two
-concerns live here:
+Split out of ``imessage.py`` to keep that file under the length cap. The
+concerns living here:
 
-* the SQL that selects candidate rows past the cursor, and
+* the SQL that selects candidate rows past the cursor, and the read-only
+  sqlite executors that run it (:func:`fetch_rows`, :func:`head_rowid`);
+* the persisted rowid cursor (:class:`RowCursor`) the at-most-once contract
+  hangs on;
 * extracting a row's text — which on modern macOS is NOT always in
   ``message.text``. The owner's own sends (``is_from_me = 1``, i.e. every
   self-DM to chief) store their body only in ``message.attributedBody``, an
   Apple ``streamtyped`` (NSAttributedString) blob with ``text`` left NULL. A
   poller that read ``text`` alone silently dropped every self-DM.
 """
+
+import sqlite3
+from pathlib import Path
 
 # Candidate rows past the cursor. A row qualifies when it is a real inbound
 # text (is_from_me = 0) OR it lives in the owner's self-chat
@@ -113,3 +119,55 @@ def text_of(text: object, body: object) -> str:
     if isinstance(body, (bytes, bytearray)):
         return decode_attributed_body(bytes(body))
     return ""
+
+
+#: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date).
+PolledRow = tuple[int, str, str, int, str | None, int, int]
+
+
+def fetch_rows(
+    db_path: Path, owner_handles: frozenset[str], after: int
+) -> list[PolledRow]:
+    """Run :data:`POLL_QUERY` read-only and coerce the rows (sync; callers
+    thread it off the loop)."""
+    handles = tuple(owner_handles)
+    scope = ",".join("?" for _ in handles) if handles else "NULL"
+    query = POLL_QUERY.format(scope=scope)
+    params: tuple[object, ...] = (*handles, after, POLL_BATCH_LIMIT)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        cur = conn.execute(query, params)
+        return [
+            (
+                int(r[0]), str(r[1]), text_of(r[2], r[6]), int(r[3]),
+                None if r[4] is None else str(r[4]), int(r[5]), int(r[7]),
+            )
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def head_rowid(db_path: Path) -> int:
+    """The store's current max rowid — where a first boot starts (no replay)."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        return int(conn.execute(HEAD_QUERY).fetchone()[0])
+    finally:
+        conn.close()
+
+
+class RowCursor:
+    """The persisted rowid cursor; saving at read is the at-most-once contract."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def load(self) -> int:
+        if self._path.exists():
+            return int(self._path.read_text().strip() or 0)
+        return 0
+
+    def save(self, value: int) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(str(value))

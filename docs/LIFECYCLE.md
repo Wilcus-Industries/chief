@@ -39,8 +39,9 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    jump to the max ROWID; history is never replayed.**
 2. `_poll_loop()` ticks every `poll_seconds` (default 2.0), swallowing per-tick
    errors so one bad row can't kill the poller.
-3. `poll_once()` → `_fetch()` runs `POLL_QUERY` (`imessage_store.py`) against a
-   **read-only** sqlite URI (`mode=ro`) in a thread, `LIMIT POLL_BATCH_LIMIT`.
+3. `poll_once()` → `fetch_rows()` runs `POLL_QUERY` (both in
+   `imessage_store.py`) against a **read-only** sqlite URI (`mode=ro`) in a
+   thread, `LIMIT POLL_BATCH_LIMIT`.
 4. Per row, **the cursor is saved BEFORE the turn runs**. This is the
    at-most-once invariant: a hard crash mid-turn drops that row rather than
    answering it twice. Graceful restarts drain instead (§6).

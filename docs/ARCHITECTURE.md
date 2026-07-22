@@ -50,7 +50,9 @@ through the adapter named on the `Message` that started it.
   `MessageRow`) in `src/chief/persistence/models.py`; every read/write op is a
   method on `MessageStore` in `src/chief/persistence/store.py`. `SessionManager`
   (`src/chief/agent/manager.py`) wraps the store with a live-session cache.
-- **Config keys** — `src/chief/config.py` (the `Config` dataclass + loader). Add
+- **Config keys** — `src/chief/config/` (`schema.py` holds the `Config`
+  dataclass, `load.py` the loader, `write.py` the merge writer; the public
+  surface re-exports from `chief.config`). Add
   a key here. **But note the dataclass-default trap** in [CONFIG.md](./CONFIG.md):
   `load_config` passes every field explicitly, so editing a `default_factory` is
   a silent no-op. `mcp_servers` in particular is a runtime value read straight

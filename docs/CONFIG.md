@@ -22,7 +22,8 @@ default is the inline literal in the `Config(...)` call.
 
 `mcp_servers` is the canonical case: no env override, no template entry, and
 `mcp_servers=dict(raw.get("mcp_servers") or {})`. Editing the `default_factory`
-in `config.py` is a **silent no-op**. To add an MCP server you edit `config.yaml`
+in `config/schema.py` without touching the `Config(...)` call in
+`config/load.py` is a **silent no-op**. To add an MCP server you edit `config.yaml`
 and restart. A stdio entry may also declare `env` (a `dict[str, str]`) and `cwd`
 (a string path) — `env` is opt-in, not inherited: the child process gets the
 MCP SDK's minimal default set (`PATH`, `HOME`, …) plus exactly the keys listed

@@ -11,7 +11,7 @@ deterministic fake (the one scripted fake CI allows, PRD #183).
 import logging
 from pathlib import Path
 
-from chief.adapters.imessage import owner_send_guard
+from chief.adapters.imessage_send import owner_send_guard
 from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
 from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
