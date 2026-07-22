@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,7 +37,10 @@ def test_compact_subcommand_reports_a_dead_daemon(
 ) -> None:
     # No daemon listening on the socket → the one-shot client fails cleanly
     # with a non-zero exit rather than a traceback.
-    rc = main(["compact", "+15551234567", "--socket", str(tmp_path / "no.sock")])
+    # Use /tmp directly: pytest's deep tmp_path exceeds macOS's 104-char AF_UNIX limit.
+    with tempfile.TemporaryDirectory(dir="/tmp") as td:
+        sock_path = os.path.join(td, "no.sock")
+    rc = main(["compact", "+15551234567", "--socket", sock_path])
     assert rc == 1
     assert "is chief running?" in capsys.readouterr().err
 
