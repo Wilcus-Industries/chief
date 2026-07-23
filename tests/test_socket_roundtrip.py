@@ -3,8 +3,9 @@ outbound frames, with committed DB state. Only the LLM provider is faked
 (PRD #183 testing seam)."""
 
 import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,25 @@ from chief.tools import Tool, ToolRegistry
 from .fakes import FakeProvider, text_turn
 
 Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
+
+ConnHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
+
+
+@contextlib.asynccontextmanager
+async def unix_server(handler: ConnHandler, path: Path) -> AsyncIterator[None]:
+    """Run a throwaway unix server for the length of a `with` block.
+
+    Teardown is bounded: on CPython 3.12 ``Server.wait_closed()`` blocks forever
+    when a client closed the connection mid-exchange (as these send_once tests
+    do on purpose), so cap the wait instead of hanging the whole suite.
+    """
+    server = await asyncio.start_unix_server(handler, str(path))
+    try:
+        yield
+    finally:
+        server.close()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(server.wait_closed(), timeout=1.0)
 
 
 def clock_registry() -> ToolRegistry:
@@ -142,13 +162,9 @@ async def test_send_once_read_timeout_raises_connection_error(
     async def silent(_r: asyncio.StreamReader, _w: asyncio.StreamWriter) -> None:
         await asyncio.sleep(5)
 
-    server = await asyncio.start_unix_server(silent, str(sock_path))
-    try:
+    async with unix_server(silent, sock_path):
         with pytest.raises(ConnectionError, match="silent"):
             await send_once(str(sock_path), "t", "hi", read_timeout=0.05)
-    finally:
-        server.close()
-        await server.wait_closed()
 
 
 async def test_send_once_malformed_frame_raises_connection_error(
@@ -164,13 +180,9 @@ async def test_send_once_malformed_frame_raises_connection_error(
         writer.write(b"not json\n")
         await writer.drain()
 
-    server = await asyncio.start_unix_server(garbage, str(sock_path))
-    try:
+    async with unix_server(garbage, sock_path):
         with pytest.raises(ConnectionError, match="malformed"):
             await send_once(str(sock_path), "t", "hi")
-    finally:
-        server.close()
-        await server.wait_closed()
 
 
 async def test_send_once_compacts_a_named_thread(
