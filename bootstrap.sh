@@ -117,10 +117,14 @@ ensure_uv() {
   ok "uv"
 }
 
-# Clone (or update) the repo and pin it to a release tag. Never destroys local
-# state: a dirty tree skips the checkout with a warning.
+# Clone (or update) the repo. Fresh clones pin to a release tag on a real
+# branch — self-edit and `chief update` both commit to the current checkout,
+# so a detached HEAD would strand their commits on no branch. Never destroys
+# local state: a dirty tree is left alone, an existing branch checkout stays
+# put (`chief update` moves it forward), and a legacy detached HEAD is
+# adopted onto `main` in place without moving the working tree.
 fetch_repo() {
-  local dir="$1" ref="${2:-}"
+  local dir="$1" ref="${2:-}" fresh=""
   if [ -d "$dir/.git" ]; then
     say "existing install found at $dir — updating"
     git -C "$dir" fetch --tags --force origin
@@ -128,20 +132,24 @@ fetch_repo() {
     say "cloning chief to $dir"
     mkdir -p "$(dirname "$dir")"
     git clone "$CHIEF_REPO_URL" "$dir"
+    fresh=1
   fi
   local tag="$ref"
   if [ -z "$tag" ]; then
     tag="$(git -C "$dir" tag --sort=-v:refname | head -n1)"
   fi
-  if [ -n "$tag" ]; then
-    if [ -n "$(git -C "$dir" status --porcelain)" ]; then
-      miss "local changes in $dir — leaving the current checkout as-is"
-    else
-      git -C "$dir" checkout --quiet "$tag"
-      ok "at release $tag"
-    fi
-  else
+  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+    miss "local changes in $dir — leaving the current checkout as-is"
+  elif [ -n "$fresh" ] && [ -n "$tag" ]; then
+    git -C "$dir" checkout --quiet -B main "$tag"
+    ok "at release $tag (on branch main)"
+  elif [ -n "$fresh" ]; then
     miss "no release tags yet — using the default branch tip"
+  elif ! git -C "$dir" symbolic-ref -q HEAD >/dev/null; then
+    git -C "$dir" checkout --quiet -B main
+    ok "detached HEAD adopted onto branch main — 'chief update' moves it forward"
+  else
+    ok "existing checkout kept — 'chief update' moves it forward"
   fi
 }
 
