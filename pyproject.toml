@@ -1,7 +1,10 @@
 [project]
 name = "chief"
-version = "0.2.0"
+version = "0.3.0"
 description = "Self-editing agent harness with package-based capabilities."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "William Chastain" }]
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
@@ -19,6 +22,11 @@ dependencies = [
     # The MCP client seam (HTTP + stdio) speaks through the official SDK.
     "mcp>=1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Wilcus-Industries/chief"
+Issues = "https://github.com/Wilcus-Industries/chief/issues"
+Packages = "https://github.com/Wilcus-Industries/chief-packages"
 
 [project.scripts]
 chief-cli = "chief.cli:main"

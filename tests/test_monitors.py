@@ -473,7 +473,7 @@ async def test_pattern_monitor_can_match_on_sender(engine: AsyncEngine) -> None:
             payload={
                 "thread_key": "imessage:+15551234567",
                 "sender": "+15551234567",
-                "text": "Chastain?",  # body alone would never match the pattern
+                "text": "You around?",  # body alone would never match the pattern
             },
         )
     )

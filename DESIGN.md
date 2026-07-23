@@ -1,8 +1,7 @@
 # DESIGN.md — chief, recoded
 
 Target architecture for the greenfield rewrite ("chief-recode"). This replaces the
-previous S0→M13 design entirely. The old tree lives in git history (`git show
-01d9e3f~1:DESIGN.md` for the retired plan).
+previous S0→M13 design entirely; the retired plan lives in git history.
 
 ## Vision
 
@@ -12,7 +11,7 @@ configures — and *builds* — its own integrations. Nothing channel-specific i
 hardcoded into the core. When the agent needs to watch a channel, it puts a monitor
 on it; when it needs a new channel, it builds an adapter from a package skill.
 
-macOS boxes (e.g. the Mac mini this instance runs on) get a few extra defaults —
+macOS boxes (e.g. an always-on Mac mini) get a few extra defaults —
 the iMessage adapter and the screening package it depends on; everything else Apple
 comes as packages. Linux gets the same core, just without the macOS defaults.
 
@@ -60,9 +59,9 @@ The agent loop is ours, built on a provider seam:
   deltas stream out to the session's adapter.
 - **Session persistence/resume** — conversation state survives daemon restart.
 - **Context compaction** — auto-summarize long threads to stay in window.
-- **MCP client (HTTP + stdio)** — speaks MCP to external servers: HTTP for the
-  docker sidecars (Google, Playwright), stdio for the wider ecosystem (the daemon
-  spawns and supervises server child processes — lifecycle, restart on crash).
+- **MCP client (HTTP + stdio)** — speaks MCP to external servers: HTTP for remote
+  servers, stdio for the wider ecosystem (the daemon spawns and supervises server
+  child processes — lifecycle, restart on crash).
   In-process tools register through a small native tool interface.
 
 ### Sessions
@@ -156,12 +155,12 @@ pointer plus a few bundled defaults.
 
 - `manifest` — name, MCP servers to register, skills to link, config keys, secrets
   needed, **dependencies** (other packages).
-- `INSTALL.md` — steps the agent follows for the messy real-world parts (docker pull,
+- `INSTALL.md` — steps the agent follows for the messy real-world parts (the
   OAuth dance, brew install, macOS permission prompts).
 
 **Two kinds:**
 
-1. **Install packages** — wire up existing capability (Google MCP sidecars, browser,
+1. **Install packages** — wire up existing capability (Google MCP servers, browser,
    push notifications, injection screening, memory systems).
 2. **BUILD-\* skills** — guide the agent to *write real code* (e.g. a new channel
    adapter) into the harness dir, loaded only after the guarded pipeline passes.
@@ -222,7 +221,7 @@ walking the Full Disk Access / Automation permission steps interactively.
 
 ## v1 acceptance (the demo that retires old chief)
 
-Fresh install on the mini → onboard via web UI → agent sets up iMessage
+Fresh install on a Mac → onboard via web UI → agent sets up iMessage
 (whitelist tier) → owner texts it and it answers → owner asks for a monitor on a
 thread and a recurring errand, both fire correctly → agent installs the Google
 package and reads the calendar.
@@ -244,5 +243,5 @@ package and reads the calendar.
 
 Design doc (this) → PRD via `/to-prd` → slices via `/to-issues` → build via
 `/orchestrate`. TDD throughout; unit/contract tests in CI from commit one; live
-e2e suites on the mini (channel builds, package installs) run on-demand, not
-CI-blocking.
+e2e suites on a live macOS box (channel builds, package installs) run on-demand,
+not CI-blocking.

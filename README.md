@@ -71,7 +71,7 @@ From a clone, `./install.sh` does the same without the prerequisite step.
 
 ```
 chief status     # service + web UI state
-chief update     # move to the newest tagged release and restart
+chief update     # merge the latest origin/main, restart, roll back if unhealthy
 chief stop       # stop the daemon (chief start brings it back)
 chief run        # run in the foreground instead of the service
 chief wizard     # re-run the first-run wizard
@@ -102,7 +102,8 @@ lines so the core stays small enough to read.
 
 More detail is in [DESIGN.md](./DESIGN.md) and [docs/](./docs) (ARCHITECTURE,
 LIFECYCLE, SUBSYSTEMS, SECURITY, CONFIG, OPERATIONS, EXTENDING, TESTING).
-Contributions follow [STYLEGUIDE.md](./STYLEGUIDE.md) and the same done-check.
+Contributions follow [CONTRIBUTING.md](./CONTRIBUTING.md) and
+[STYLEGUIDE.md](./STYLEGUIDE.md), with the same done-check.
 Releases are git tags.
 
 ## Security and privacy

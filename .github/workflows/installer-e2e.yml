@@ -6,9 +6,9 @@
 # THIS checkout via CHIEF_REPO_URL so the run tests the commit under review, not
 # old main. Assertions: the daemon boots, the web UI answers, and the wizard-set
 # owner credential logs in. The autostart service is skipped (no systemd inside
-# the container — the systemd/launchd paths are unit-tested, and launchd gets the
-# live Mac mini run); the first-chat round-trip needs live model credentials and
-# is covered by the keyed runs, not here.
+# the container — the systemd/launchd paths are unit-tested, and launchd is
+# exercised on a live macOS install); the first-chat round-trip needs live model
+# credentials and is covered by the keyed runs, not here.
 name: Installer E2E (opt-in)
 
 on:
@@ -22,8 +22,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
 
       # actions/checkout leaves a detached HEAD; give the container's clone a
       # real branch to resolve as origin/HEAD.

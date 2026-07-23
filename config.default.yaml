@@ -70,7 +70,7 @@ quiet_hours: ""
 # run). Discover with `chief-pkg list`/`search`; install/uninstall are
 # document-driven (see the package-manager skill).
 packages_dir: packages
-packages_repo: https://github.com/CrazyWillBear/chief-packages
+packages_repo: https://github.com/Wilcus-Industries/chief-packages
 
 # The host `shell` tool. It runs commands on the owner's machine (the gate still
 # asks before each one until "always allow"ed). timeout_seconds is the DEFAULT bound

@@ -112,6 +112,6 @@ correctness rather than for observing an async write, fix the code instead.
 
 ## Scale
 
-44 test files, 467 test functions. The heaviest are `test_selfedit.py` (34),
-`test_tools_shell.py` (32), `test_config.py` (27), `test_imessage.py` (25),
-`test_hooks.py` (23), `test_pkg_cli.py` (22).
+Dozens of test files, hundreds of test functions; the heaviest cover self-edit,
+the shell tool, config, and iMessage. Count them live (`uv run pytest
+--collect-only -q`) rather than trusting any number written here.

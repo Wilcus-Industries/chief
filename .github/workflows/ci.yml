@@ -13,9 +13,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          # vendor/chief-skills/upstream is a submodule; tests depend on it.
-          submodules: true
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -36,43 +33,3 @@ jobs:
       # opt-in installer-e2e workflow.
       - name: shellcheck installer scripts
         run: shellcheck bootstrap.sh install.sh
-
-  # Host-native smoke test. Core no longer ships as a container (it runs natively
-  # via the `chief` launcher / `python -m chief.entrypoint`), so the smoke test
-  # asserts the two boot invariants directly on the runner:
-  #   1. migrate-on-start — the entrypoint runs `alembic upgrade head` and logs
-  #      "migration complete" BEFORE handing off to the app (which then exits
-  #      non-zero on the runner's missing secrets — expected and harmless).
-  #   2. the MCP sidecar compose file is structurally valid for every profile.
-  smoke-test:
-    name: Host smoke test — migrate-on-start + compose config
-    needs: done-check
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Assert migration runs before app
-        run: |
-          logs=$(DB_PATH=/tmp/smoke-chief.db uv run python -m chief.entrypoint 2>&1 || true)
-          echo "--- entrypoint logs ---"
-          echo "$logs"
-          echo "--- end logs ---"
-          if echo "$logs" | grep -qF 'migration complete'; then
-            echo "PASS: migration log found — alembic ran before app handoff"
-          else
-            echo "FAIL: 'migration complete' not found in entrypoint output" >&2
-            exit 1
-          fi
-          test -f /tmp/smoke-chief.db || { echo "FAIL: sqlite file missing" >&2; exit 1; }
-
-      - name: Validate the MCP compose stack
-        run: docker compose --profile google --profile playwright config --quiet

@@ -84,7 +84,7 @@ class Config:
     classifiers_dir: Path = Path("classifiers")
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
     packages_dir: Path = Path("packages")
-    packages_repo: str = "https://github.com/CrazyWillBear/chief-packages"
+    packages_repo: str = "https://github.com/Wilcus-Industries/chief-packages"
     shell_timeout_seconds: float = 20.0
     shell_output_limit: int = 30_000
     hooks_timeout_seconds: float = 10.0

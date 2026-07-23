@@ -127,7 +127,7 @@ Cloned packages update separately via `chief-pkg update`, which restarts nothing
 The schema is created at boot, so an update that adds a column leaves an existing
 `data/chief.db` without it, and every read of that table raises `no such column`.
 Run the `ALTER TABLE` by hand at deploy; each such commit says which one in its
-message (most recently `ALTER TABLE schedules ADD COLUMN command VARCHAR`).
+message.
 
 The cron loop survives this rather than dying silently — a failed tick is logged
 and retried on the next poll — but **schedules stay broken until you run the
