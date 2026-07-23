@@ -1,6 +1,6 @@
 ---
 name: build-imessage
-description: Operate the iMessage channel — same-account self-DM, notify tiers, monitors.
+description: Operate the iMessage channel — same-account self-DM, owner-driven engagement, monitors.
 ---
 
 # iMessage channel policy
@@ -16,8 +16,9 @@ predicate admits `is_from_me = 1` rows only from the self-chat.
 The adapter is a dumb pipe: owner self-chat texts run a normal turn; a
 stranger inbound (someone texting the owner directly on a dedicated-ID setup,
 `is_from_me = 0`) is logged and published to the event bus, never answered.
-Notify tiers are **your** policy, built with monitors on the `imessage`
-channel — no code changes involved.
+Waking on anyone but the owner is **your** policy, built with monitors on the
+`imessage` channel — no code changes involved. By default there are none: see
+"Owner-driven engagement" below.
 
 ## Group chats
 
@@ -50,29 +51,37 @@ auto-adds. That prefix is the **sole** filter stopping your own replies from
 re-dispatching in an infinite self-reply loop. Never strip it, never imitate
 it in another channel, never send an unprefixed reply into the self-chat.
 
-## Tier → monitor recipes
+## Owner-driven engagement
 
-Owner messages carry sender `owner`; third-party events carry the raw handle
-in the `sender` payload field. Always exclude `owner` so a tier monitor never
-double-fires on messages that already ran a turn.
+**By default chief texts only the owner.** No monitor is installed, so no
+non-owner message wakes you — every stranger and group inbound just lands in
+the log. There is no menu of notify tiers to pick at install; you build a
+monitor only when, and exactly as, the owner asks.
 
-- **notify-all**: one monitor, code predicate on `sender` with pattern
-  `^(?!owner$)` — every third-party text wakes you.
-- **notify-all + cheap screen**: same, but a `model` predicate instead:
-  instruction like "Sender is not the owner and this message is worth waking
-  the owner's agent for (time-sensitive, important, or actionable). Ignore
-  chatter." — runs on the default_classifier role.
-- **notify-whitelist**: code predicate on `sender` with pattern
-  `^(\+15550001111|friend@example\.com)$` — regex-escape the handles.
-- **no-notify**: no monitor.
+When the owner asks you to text or engage a specific person or group, build
+**one monitor scoped to that single chat** and drive outbound through the
+`imsg` CLI (imsg skill). Prefer running that engagement in a **fresh dedicated
+session** for the chat, so an untrusted third-party conversation stays isolated
+from the owner's self-chat context.
 
-The same three tiers work for groups — swap the matched field from `sender`
-to `thread_key`. A group whitelist is a code predicate on `thread_key` with
-pattern `^(3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c|…)$`; notify-all-groups plus a cheap
-screen is the model predicate with "this group message is worth waking the
-owner's agent for". A group's traffic is chattier than a 1:1, so prefer a
-whitelist or a screen over notify-all — every message in every group the
-owner is in otherwise lands in the stranger log.
+How to build the monitor the owner asked for — owner messages carry sender
+`owner`; third-party events carry the raw handle in the `sender` payload field
+(for a group, the participant handle, with the group in `thread_key`). Always
+exclude `owner` from the predicate so the monitor never double-fires on
+messages that already ran a turn.
+
+- **A specific person** — code predicate on `sender`, pattern
+  `^\+15550001111$` (regex-escape the handle); match several with
+  `^(\+15550001111|friend@example\.com)$`.
+- **A specific group** — code predicate on `thread_key`, pattern
+  `^3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c$` (the group's opaque hex id; resolve it
+  first, see "Group chats").
+- **Optional cheap screen** — instead of (or narrowing) a code match, a
+  `model` predicate is a cheap first-pass filter: instruction like "Sender is
+  not the owner and this message is worth waking the owner's agent for
+  (time-sensitive, important, or actionable). Ignore chatter." — runs on the
+  default_classifier role. Useful for a chatty chat the owner still wants
+  watched.
 
 Set `wake_thread` to the owner's self-chat handle and `wake_channel` to
 `imessage` so wakes land where the owner reads.

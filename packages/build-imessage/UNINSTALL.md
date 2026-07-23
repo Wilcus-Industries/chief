@@ -10,8 +10,8 @@ skill, so it can be re-enabled later by reinstalling.
 2. Delete the installed skill dirs `skills/build-imessage/` and `skills/imsg/`.
 3. Deregister: `uv run python -m chief.registry_apply build-imessage --remove`. (Leave
    `screening` unless the owner also wants it gone — see its `UNINSTALL.md`.)
-4. Remove the notify-tier monitor you created for iMessage, if any (use the
-   `monitor` tool to delete it).
+4. Remove any monitors you built for this channel at the owner's request (the
+   per-chat engagement monitors), if any — use the `monitor` tool to delete them.
 5. Delete this `UNINSTALL.md` (`packages/build-imessage/UNINSTALL.md`) — its
    absence signals the uninstall completed.
 6. `restart` to bring the change live. The owner may also revoke Full Disk
