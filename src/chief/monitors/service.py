@@ -107,6 +107,12 @@ class MonitorService:
         return self._classifier.definition(name)
 
     async def _on_event(self, event: Event) -> None:
+        # Monitors watch inbound channel events only. Outbound events (chief's
+        # own replies, published so the web cockpit can mirror them) must never
+        # fire one — an imessage monitor with a ``^(?!owner$)`` predicate would
+        # match the outbound payload's empty sender and self-wake in a loop.
+        if event.type != "message.inbound":
+            return
         # Owner messages already dispatch a turn on every channel, so a monitor
         # firing on them would double-wake the agent. Strangers (published but
         # never dispatched) are the intended trigger.

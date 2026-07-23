@@ -72,8 +72,10 @@ body{
   text-transform:uppercase; margin-bottom:.15rem;}
 .msg.owner .who{color:var(--orange);}
 .msg.chief .who{color:var(--aqua);}
+.msg.peer .who{color:var(--yellow);}
 .msg.owner .who::before{content:"owner\\2009>\\2009";}
 .msg.chief .who::before{content:"chief\\2009>\\2009";}
+.msg.peer .who::after{content:"\\2009>\\2009";}
 .empty{color:var(--faint); padding:1.3rem;}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}

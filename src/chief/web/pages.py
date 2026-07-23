@@ -44,8 +44,7 @@ CHAT_PAGE = """<!doctype html>
   </nav>
   <section id="pane">
     <div id="log"></div>
-    <div id="readonly" hidden>attached read-only &mdash; this conversation
-      lives on another channel.</div>
+    <div id="readonly" hidden>group thread &mdash; view only; send with imsg.</div>
     <form id="f" autocomplete="off">
       <span class="sigil" id="sigil">owner&gt;</span>
       <input id="input" name="text"

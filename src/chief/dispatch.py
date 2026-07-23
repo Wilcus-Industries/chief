@@ -130,6 +130,13 @@ class Dispatcher:
         async def on_delta(text: str) -> None:
             await adapter.send_delta(message.thread_key, text)
 
+        async def send_out(text: str) -> None:
+            # Deliver on the origin channel, then publish the same text as an
+            # outbound event so the web cockpit can mirror a reply that went to
+            # another channel (iMessage) and never touched its own adapter.
+            await adapter.send(message.thread_key, text)
+            await self._publish_outbound(message, text)
+
         try:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender
@@ -138,15 +145,24 @@ class Dispatcher:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
             logger.exception("turn failed for thread %s", message.thread_key)
-            await adapter.send(message.thread_key, f"error: {exc}")
+            await send_out(f"error: {exc}")
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
             logger.exception("turn failed for thread %s", message.thread_key)
-            await adapter.send(
-                message.thread_key, "error: something went wrong running that turn"
-            )
+            await send_out("error: something went wrong running that turn")
             return
-        await adapter.send(message.thread_key, result.text)
+        await send_out(result.text)
         if result.notice:
-            await adapter.send(message.thread_key, result.notice)
+            await send_out(result.notice)
+
+    async def _publish_outbound(self, message: Message, text: str) -> None:
+        if self._bus is None:
+            return
+        await self._bus.publish(
+            Event(
+                type="message.outbound",
+                channel=message.channel,
+                payload={"thread_key": message.thread_key, "text": text},
+            )
+        )

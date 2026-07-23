@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 
 from starlette.applications import Starlette
@@ -27,6 +28,10 @@ from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.script import SCRIPT
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript
+
+# An iMessage group's thread_key is an opaque 32-char hex chat id; a 1:1 key is
+# a phone/email handle. Groups have no core send path (see the send route).
+_GROUP_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
 def build_web_app(
@@ -72,11 +77,21 @@ def build_web_app(
         if not auth.is_authed(request):
             return unauthorized()
         body = await request.json()
-        thread = str(body.get("thread") or "main")
+        # The client sends the thread's real key; the channel is resolved from
+        # the store (the device that owns the thread), never trusted from the
+        # client. An unknown thread is a fresh web scratch buffer.
+        thread_key = str(body.get("thread") or "web:main")
+        channel = await store.channel(thread_key) or adapter.name
+        if channel == "imessage" and _GROUP_RE.match(thread_key):
+            # A group's send path is imsg (owner-directed), not the core
+            # one-to-one adapter; the cockpit keeps groups view-only.
+            return PlainTextResponse(
+                "group threads are view-only — send with imsg", status_code=400
+            )
         message = Message(
-            channel=adapter.name,
+            channel=channel,
             sender="owner",
-            thread_key=f"web:{thread}",
+            thread_key=thread_key,
             text=str(body["text"]),
         )
         asyncio.get_running_loop().create_task(handle(message))

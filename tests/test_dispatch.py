@@ -222,5 +222,28 @@ async def test_owner_message_is_published_system_wake_is_not(
     dispatcher.register(RecordingAdapter())
     await dispatcher.handle(owner_message("from owner"))
     await dispatcher.handle(owner_message("wake!", sender="system"))
-    assert [e.payload["text"] for e in seen] == ["from owner"]
+    inbound = [e.payload["text"] for e in seen if e.type == "message.inbound"]
+    assert inbound == ["from owner"]
     assert len(provider.calls) == 2  # both still ran turns
+
+
+async def test_outbound_reply_is_published_for_the_web_mirror(
+    store: MessageStore,
+) -> None:
+    """Every reply is published as ``message.outbound`` so the web cockpit can
+    mirror a turn that went out on another channel (iMessage)."""
+    bus = EventBus()
+    seen: list[Event] = []
+
+    async def collector(event: Event) -> None:
+        seen.append(event)
+
+    bus.subscribe(collector)
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), bus=bus)
+    dispatcher.register(RecordingAdapter())
+    await dispatcher.handle(owner_message("hi"))
+    outbound = [e for e in seen if e.type == "message.outbound"]
+    assert len(outbound) == 1
+    assert outbound[0].channel == "cli"
+    assert outbound[0].payload == {"thread_key": "cli:t", "text": "hello back"}

@@ -9,6 +9,9 @@ let live = null;
 
 const bare = (tk) => tk.startsWith("web:") ? tk.slice(4) : null;
 const label = (tk) => bare(tk) ?? tk;
+const GROUP_RE = /^[0-9a-f]{32}$/i;
+/* a group has no core send path (imsg only) — the one view-only case */
+const isGroup = (s) => !!s && s.channel === "imessage" && GROUP_RE.test(s.thread);
 const span = (cls, text) => {
   const s = document.createElement("span");
   if (cls) s.className = cls;
@@ -50,7 +53,7 @@ function setStatus(tk){
   const s = state.sessions.find((x) => x.thread === tk);
   el("buf-seg").textContent = label(tk);
   el("model-seg").textContent = "model " + ((s && s.model) || "default");
-  const ro = s && s.channel !== "web";
+  const ro = isGroup(s);
   el("readonly").hidden = !ro;
   el("f").classList.toggle("disabled", !!ro);
   input.disabled = !!ro;
@@ -69,11 +72,12 @@ async function switchTo(tk){
   if (!input.disabled) input.focus();
 }
 
-function addMsg(role, text){
+function addMsg(role, text, who){
   const empty = log.querySelector(".empty"); if (empty) empty.remove();
   const d = document.createElement("div"); d.className = "msg " + role;
   const body = span(null, text);
-  d.append(span("who"), body); log.appendChild(d);
+  /* owner/chief label via CSS ::before; peer carries its sender handle */
+  d.append(span("who", who), body); log.appendChild(d);
   log.scrollTop = log.scrollHeight; return body;
 }
 
@@ -91,6 +95,8 @@ function connect(){
       if (!live) live = addMsg("chief", ""); live.textContent += f.text;
     } else if (f.type === "final"){
       if (live){ live.textContent = f.text; live = null; } else addMsg("chief", f.text);
+    } else if (f.type === "peer"){
+      live = null; addMsg("peer", f.text, f.sender);  // the other party
     }
     log.scrollTop = log.scrollHeight;
   };
@@ -114,7 +120,7 @@ el("f").onsubmit = async (e) => {
   const text = input.value.trim(); if (!text || input.disabled) return;
   addMsg("owner", text); input.value = ""; hidePop();
   await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
-    body: JSON.stringify({thread: bare(state.current), text})});
+    body: JSON.stringify({thread: state.current, text})});
 };
 
 /* ---- readline-style completion ---- */

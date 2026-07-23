@@ -97,6 +97,31 @@ async def test_owner_events_are_skipped_strangers_still_fire(
     assert len(wake.messages) == 1
 
 
+async def test_outbound_events_never_fire_a_monitor(
+    engine: AsyncEngine,
+) -> None:
+    """Chief's own replies are published as ``message.outbound`` for the web
+    mirror. Their payload has no sender, so a ``^(?!owner$)``-style predicate
+    would match — the service must skip every non-inbound event."""
+    bus = EventBus()
+    service, wake = make_service(engine, bus)
+    await service.create(
+        description="watch for urgent",
+        watch_channel="imessage",
+        wake_channel="cli",
+        wake_thread="cli:home",
+        predicate=CODE_PREDICATE,
+    )
+    await bus.publish(
+        Event(
+            type="message.outbound",
+            channel="imessage",
+            payload={"thread_key": "imessage:x", "text": "urgent!"},
+        )
+    )
+    assert wake.messages == []
+
+
 async def test_monitor_ignores_other_channels(engine: AsyncEngine) -> None:
     bus = EventBus()
     service, wake = make_service(engine, bus)
