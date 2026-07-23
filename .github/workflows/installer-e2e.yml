@@ -43,8 +43,8 @@ jobs:
               chief status
               cd "$HOME/.local/share/chief"
 
-              echo "--- web UI serves the login page ---"
-              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8130/login)
+              echo "--- web UI serves the login page at / ---"
+              code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8130/)
               test "$code" = 200
 
               echo "--- wizard-set credential logs in ---"
@@ -53,8 +53,8 @@ jobs:
                 http://127.0.0.1:8130/login)
               test "$code" = 303
 
-              echo "--- authenticated chat page renders ---"
-              curl -sf -b /tmp/jar http://127.0.0.1:8130/chat | grep -qi chat
+              echo "--- authenticated chat surface renders at / ---"
+              curl -sf -b /tmp/jar http://127.0.0.1:8130/ | grep -qi chat
 
               echo "PASS: one-liner → daemon up → web UI chatting surface live"
             '
