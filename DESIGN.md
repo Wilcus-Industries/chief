@@ -179,13 +179,13 @@ the owner picks one at onboarding.
 
 ### BUILD-IMESSAGE (the archetype)
 
-Helps the agent build/configure its own iMessage system. Owner picks a notify tier:
-
-- **notify-all** — every inbound wakes the agent (most expensive);
-- **notify-whitelist** — only listed handles/threads wake it, rest logged;
-- **no-notify** — nothing wakes it; the agent reads on demand or via its own monitors;
-- plus an optional **cheap-model screen** on notify-all: a haiku-class "worth waking?"
-  judgment before the real model spends.
+Helps the agent build/configure its own iMessage system. By default chief texts
+only the owner — a third party's message is logged, never auto-answered, and no
+monitor is created at install. When the owner asks chief to engage a specific
+person or group, the skill has it build **one monitor scoped to that chat** (a
+code predicate on the sender/thread, or an optional cheap-model "worth waking?"
+screen), ideally in a fresh dedicated session so untrusted third-party context
+stays isolated from the owner's self-chat.
 
 ### Agent-built code trust
 
@@ -216,15 +216,16 @@ arrives as package-registered tools.
 
 `install.sh` brings up the daemon + web UI (always works, any platform). The first
 conversation *is* onboarding: the agent introduces itself, offers packages, and when
-the owner says "set up iMessage" it runs BUILD-IMESSAGE — asking the notify tier and
-walking the Full Disk Access / Automation permission steps interactively.
+the owner says "set up iMessage" it runs BUILD-IMESSAGE — walking the Full Disk
+Access / Automation permission steps interactively (chief texts only the owner by
+default; engaging anyone else is a later, owner-driven ask).
 
 ## v1 acceptance (the demo that retires old chief)
 
-Fresh install on a Mac → onboard via web UI → agent sets up iMessage
-(whitelist tier) → owner texts it and it answers → owner asks for a monitor on a
-thread and a recurring errand, both fire correctly → agent installs the Google
-package and reads the calendar.
+Fresh install on a Mac → onboard via web UI → agent sets up iMessage → owner
+texts it and it answers → owner asks for a monitor on a thread and a recurring
+errand, both fire correctly → agent installs the Google package and reads the
+calendar.
 
 ## What dies (vs. the old tree)
 
