@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
-from chief.bus import EventBus
+from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
@@ -106,7 +106,7 @@ async def test_send_requires_auth(web: WebParts) -> None:
 async def test_send_dispatches_an_owner_message(web: WebParts) -> None:
     client, *_ = web
     await login(client)
-    response = await client.post("/send", json={"thread": "main", "text": "hi"})
+    response = await client.post("/send", json={"thread": "web:main", "text": "hi"})
     assert response.status_code == 202
     await asyncio.sleep(0)  # let the dispatched task run
     assert len(HANDLED) == 1
@@ -115,6 +115,46 @@ async def test_send_dispatches_an_owner_message(web: WebParts) -> None:
     assert message.sender == "owner"
     assert message.thread_key == "web:main"
     assert message.text == "hi"
+
+
+async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post("/send", json={"text": "hi"})
+    assert response.status_code == 202
+    await asyncio.sleep(0)
+    assert HANDLED[0].channel == "web"
+    assert HANDLED[0].thread_key == "web:main"
+
+
+async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
+    """A non-web thread keeps its real key and its origin channel (resolved from
+    the store), so the turn's reply exits on that channel — not a web buffer."""
+    client, _adapter, _monitors, store, _ = web
+    await store.ensure_session("+15551234567", "imessage")
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "+15551234567", "text": "on my way"}
+    )
+    assert response.status_code == 202
+    await asyncio.sleep(0)
+    message = HANDLED[0]
+    assert message.channel == "imessage"
+    assert message.thread_key == "+15551234567"  # no web: prefix
+    assert message.sender == "owner"
+
+
+async def test_send_refuses_a_group_thread(web: WebParts) -> None:
+    """Groups have no core send path (imsg only); the cockpit keeps them view-
+    only, and the route refuses a send rather than run an undeliverable turn."""
+    client, _adapter, _monitors, store, _ = web
+    group = "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c"
+    await store.ensure_session(group, "imessage")
+    await login(client)
+    response = await client.post("/send", json={"thread": group, "text": "hey all"})
+    assert response.status_code == 400
+    await asyncio.sleep(0)
+    assert HANDLED == []
 
 
 async def test_adapter_broadcasts_frames_to_listeners() -> None:
@@ -129,6 +169,61 @@ async def test_adapter_broadcasts_frames_to_listeners() -> None:
     adapter.drop(queue)
     await adapter.send("web:main", "gone")
     assert queue.empty()
+
+
+async def test_mirror_relays_peer_inbound_and_outbound() -> None:
+    """With a bus, the adapter mirrors another channel's traffic: a non-owner
+    inbound becomes a peer frame, chief's reply a final frame."""
+    bus = EventBus()
+    adapter = WebAdapter(bus)
+    await adapter.start()
+    queue = adapter.listen()
+    await bus.publish(
+        Event(
+            type="message.inbound",
+            channel="imessage",
+            payload={"thread_key": "+1", "sender": "+1", "text": "hi there"},
+        )
+    )
+    await bus.publish(
+        Event(
+            type="message.outbound",
+            channel="imessage",
+            payload={"thread_key": "+1", "text": "hello back"},
+        )
+    )
+    assert queue.get_nowait() == {
+        "type": "peer", "thread": "+1", "text": "hi there", "sender": "+1"
+    }
+    assert queue.get_nowait() == {
+        "type": "final", "thread": "+1", "text": "hello back"
+    }
+    await adapter.stop()
+
+
+async def test_mirror_skips_owner_inbound_and_web_channel() -> None:
+    """Owner inbound is shown optimistically by the browser (skip, no dup); web
+    threads use the direct send path, so their bus events never re-mirror."""
+    bus = EventBus()
+    adapter = WebAdapter(bus)
+    await adapter.start()
+    queue = adapter.listen()
+    await bus.publish(
+        Event(
+            type="message.inbound",
+            channel="imessage",
+            payload={"thread_key": "+1", "sender": "owner", "text": "drive"},
+        )
+    )
+    await bus.publish(
+        Event(
+            type="message.outbound",
+            channel="web",
+            payload={"thread_key": "web:main", "text": "reply"},
+        )
+    )
+    assert queue.empty()
+    await adapter.stop()
 
 
 async def test_events_requires_auth(web: WebParts) -> None:

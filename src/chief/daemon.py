@@ -42,6 +42,7 @@ class App:
 
     async def start(self) -> None:
         await self.socket_adapter.start()
+        await self.web_adapter.start()
         if self.imessage_adapter is not None:
             await self.imessage_adapter.start()
         self.cron_service.start()

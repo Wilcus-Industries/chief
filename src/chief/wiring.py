@@ -184,7 +184,9 @@ def build_adapters(
         )
         dispatcher.register(imessage_adapter)
 
-    web_adapter = WebAdapter()
+    # The bus lets the web adapter mirror other channels' traffic (iMessage) to
+    # the cockpit; web threads still use its direct send path.
+    web_adapter = WebAdapter(core.bus)
     dispatcher.register(web_adapter)
     web_server: WebServer | None = None
     if config.web_password:

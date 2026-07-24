@@ -178,6 +178,51 @@ def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
     assert "bad" in caplog.text
 
 
+async def test_web_mirror_is_wired_by_app_start(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Regression: App.start() must call web_adapter.start() so the mirror
+    # subscribes to the bus. Without it the cockpit never sees traffic on any
+    # non-web channel — the whole "drive any thread from the web" slice is dead
+    # in the real daemon even though hand-started-adapter unit tests pass.
+    app, streams = await boot(make_config(tmp_path, sock_path), FakeProvider([]))
+    queue = app.web_adapter.listen()
+    try:
+        await app.bus.publish(
+            Event(
+                type="message.inbound",
+                channel="imessage",
+                payload={
+                    "thread_key": "imessage:+15551112222",
+                    "sender": "+15551112222",
+                    "text": "hey",
+                },
+            )
+        )
+        await app.bus.publish(
+            Event(
+                type="message.outbound",
+                channel="imessage",
+                payload={"thread_key": "imessage:+15551112222", "text": "hi back"},
+            )
+        )
+        peer = await asyncio.wait_for(queue.get(), timeout=5)
+        final = await asyncio.wait_for(queue.get(), timeout=5)
+        assert peer == {
+            "type": "peer",
+            "thread": "imessage:+15551112222",
+            "text": "hey",
+            "sender": "+15551112222",
+        }
+        assert final == {
+            "type": "final",
+            "thread": "imessage:+15551112222",
+            "text": "hi back",
+        }
+    finally:
+        await shutdown(app, streams)
+
+
 async def test_switch_model_is_gated_and_persists_the_override(
     tmp_path: Path, sock_path: Path
 ) -> None:
