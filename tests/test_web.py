@@ -229,6 +229,40 @@ async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> Non
     ]
 
 
+async def test_events_thread_param_subscribes_to_that_thread(
+    web: WebParts,
+) -> None:
+    """The client-facing join: GET /events?thread= must feed the param straight
+    into hub.listen(thread) so a rich to_watchers frame for that thread reaches
+    this client. A param-name mismatch between the JS and the route would leave
+    the listener on the coarse (None) subscription — the rich frame would never
+    arrive and this assertion would fail (not hang: the hub close ends it)."""
+    client, _, _, _, _, hub = web
+    await login(client)
+
+    async def feed() -> None:
+        while not hub._watchers:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.to_watchers("cli:home", {"type": "final", "thread": "cli:home",
+                                     "text": "done"})
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events?thread=cli:home") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "final", "thread": "cli:home", "text": "done"},
+    ]
+
+
 async def test_monitor_list_route(web: WebParts) -> None:
     client, _, monitors, _store, _, _ = web
     await login(client)

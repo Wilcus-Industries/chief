@@ -350,9 +350,12 @@ class _WebAdapter(RecordingAdapter):
     name = "web"
 
 
-async def test_web_origin_turn_does_not_tick(store: MessageStore) -> None:
-    """A web-origin turn streams its own delta/final; the dispatcher must not
-    also tick it, or the browser would double-count its own thread."""
+async def test_web_origin_turn_still_emits_the_coarse_tick(
+    store: MessageStore,
+) -> None:
+    """A web-origin turn streams its own rich final through the adapter, but
+    still emits the one coarse tick so other tabs get the unread/reorder/
+    snippet (an un-focused or abandoned web buffer would go dark otherwise)."""
     hub = ObserverHub()
     provider = FakeProvider([text_turn("hello back")])
     dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
@@ -361,4 +364,28 @@ async def test_web_origin_turn_does_not_tick(store: MessageStore) -> None:
     await dispatcher.handle(
         Message(channel="web", sender="owner", thread_key="web:main", text="hi")
     )
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "web:main",
+        "channel": "web", "preview": "hello back",
+    }
     assert queue.empty()
+
+
+async def test_web_origin_turn_omits_the_rich_final(store: MessageStore) -> None:
+    """The client tapped into a web thread gets the coarse tick but not a
+    dispatcher `final` — the WebAdapter already streamed the rich final, so a
+    second one would double-count the focused thread."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(_WebAdapter())
+    queue = hub.listen("web:main")
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="hi")
+    )
+    frames = _drain(queue)
+    assert not any(f["type"] == "final" for f in frames)
+    assert frames == [{
+        "type": "tick", "thread": "web:main",
+        "channel": "web", "preview": "hello back",
+    }]

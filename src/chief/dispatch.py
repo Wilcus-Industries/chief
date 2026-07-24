@@ -7,11 +7,12 @@ go on the event bus and run a turn.
 ``system`` senders (monitor/cron wakes) run a turn but are never published —
 that would let monitors trigger themselves.
 
-Every non-web turn emits one coarse ``tick`` to the observer hub so the
-cockpit can watch a thread it isn't tapped into; web turns stream their own
-``delta``/``final`` through the web adapter. When a client *is* tapped into a
-non-web thread, the dispatcher also streams that turn's inbound/delta/tool-
-tick/final frames to its subscriber (checked at emit time).
+Every completed turn emits one coarse ``tick`` to the observer hub so the
+cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
+snippet); web turns also stream their own ``delta``/``final`` through the web
+adapter, so the dispatcher skips only the rich ``final`` for them. A client
+*tapped into* a non-web thread also gets that turn's inbound/delta/tool-tick/
+final frames (checked at emit time).
 """
 
 import logging
@@ -188,10 +189,11 @@ class Dispatcher:
             self._hub.to_watchers(thread_key, frame)
 
     def _turn_end(self, message: Message, reply: str) -> None:
-        # Web-origin turns stream their own delta/final; every other channel
-        # gets one coarse tick, plus a rich `final` if a client is tapped in.
-        if self._hub is None or message.channel == WEB_CHANNEL:
+        # Every completed turn emits the coarse tick; only non-web threads also
+        # get the tapped rich `final` (web turns stream theirs via WebAdapter).
+        if self._hub is None:
             return
         tk = message.thread_key
-        self._tapped(tk, {"type": "final", "thread": tk, "text": reply})
+        if message.channel != WEB_CHANNEL:
+            self._tapped(tk, {"type": "final", "thread": tk, "text": reply})
         self._hub.tick(tk, message.channel, reply[:PREVIEW_CHARS])
