@@ -87,6 +87,15 @@ body{
 .toolload:hover{background:var(--bg2);}
 .toolbody{flex:1 0 100%; white-space:pre-wrap; word-break:break-word;
   color:var(--fg); margin-top:.2rem;}
+.msg.approval{border:1px solid var(--yellow); border-radius:3px;
+  padding:.6rem .8rem; background:var(--bg1);}
+.msg.approval .who{color:var(--yellow);}
+.approval-btns{display:flex; gap:.5rem; margin-top:.5rem;}
+.approval-btns button{font:inherit; font-size:12px; padding:.25rem .7rem;
+  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+.approval-btns button:hover{background:var(--bg2);}
+.approval-btns button:disabled{opacity:.5; cursor:default;}
 .empty{color:var(--faint); padding:1.3rem;}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}

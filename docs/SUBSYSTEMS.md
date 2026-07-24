@@ -25,7 +25,9 @@ engine. All content is filled client-side by `script.py`. The only server-side
 substitution is `{error}` on the login page. CSS and JS live as Python string
 constants served as separate assets so the HTML stays cacheable.
 
-Routes, all declared in one `Starlette(routes=[...])` block in `app.py`:
+Routes, assembled in one `Starlette(routes=[...])` block in `app.py` — `/approve`
+and `/events` are built by `web/live.py` and spliced in (#267, keeps `app.py`
+under the file-length cap):
 
 | Route | Purpose |
 |---|---|
@@ -37,6 +39,7 @@ Routes, all declared in one `Starlette(routes=[...])` block in `app.py`:
 | `GET /history` | transcript for one thread — tool calls collapsed to name + call id |
 | `GET /history/tool` | one tool call's args + result, fetched lazily |
 | `GET /commands` | `/command` palette |
+| `POST /approve` | answer a pending approval card — `{thread, answer}`, 200/409 |
 | `GET /events` | SSE stream |
 | `GET /monitors` | plaintext monitor list |
 | `GET /app.css`, `GET /app.js` | static assets, unauthenticated |
@@ -66,31 +69,44 @@ the `session` tool, `/prune`, and the web console.
 ### Live stream
 
 The fan-out is `ObserverHub` (`hub.py`), a core seam decoupled from origin
-channels and the monitor bus: `listen()` registers a per-client queue, `drop()`
-unregisters, `broadcast()` pushes to all. `App.stop()` calls `hub.close()`, which
-pushes a `closed` sentinel that terminates the SSE generator; a `finally` always
-drops the queue on disconnect. `/events` subscribes to the hub, not the adapter.
+channels and the monitor bus: `listen(thread)` registers a per-client queue
+(`None` = coarse-only), `drop()` unregisters, `broadcast()` pushes a frame to
+every client, `to_watchers(thread, frame)` pushes only to clients watching that
+exact thread. `App.stop()` calls `hub.close()`, which pushes a `closed`
+sentinel that terminates the SSE generator; a `finally` always drops the queue
+on disconnect. `/events?thread=` subscribes to the hub, not the adapter.
 
 Two frame shapes reach the browser:
 
-- A **web-origin** turn streams `delta`/`final` frames — `WebAdapter` (the origin
-  channel for `web:` threads) calls `hub.broadcast` from its `send`/`send_delta`.
-- **Every other channel's** completed turn (cli, iMessage, and monitor/cron
-  system wakes) emits one coarse `tick` frame — `{type, thread, channel,
-  preview}` — from `Dispatcher._tick`, so the cockpit can watch a thread it isn't
-  tapped into without mirroring its whole transcript.
+- A **web-origin** turn streams `delta`/`final` frames — `WebAdapter` (the
+  origin channel for `web:` threads) calls `hub.to_watchers` from its
+  `send`/`send_delta`, reaching only the client tapped into that thread.
+- A client **tapped into** any other thread also gets that turn's
+  `inbound`/`delta`/`tool`/`final` frames via `Dispatcher.tapped()`, which
+  checks `hub.is_watched()` before calling `to_watchers` — cheap for a thread
+  nobody is watching. Out-of-turn cards (see Approvals surface below) reach a
+  tapped thread the same way. **Every** completed turn, on every channel, also
+  emits one coarse `hub.tick()` frame (`{type, thread, channel, preview}`) so
+  the cockpit can track a thread it isn't tapped into (sidebar reorder/unread/
+  snippet) without mirroring its whole transcript.
 
-**Every browser sees every frame** and filters client-side on `thread`. A `tick`
-bumps the thread to the top of the sidebar, marks it unread, and shows the reply
-preview as a snippet; a `delta`/`final` for an unknown thread triggers a session
-reload. (The old EventBus→`WebAdapter` per-send mirror is gone — that coupling is
-what issue #262 removed.)
+A `tick` bumps the thread to the top of the sidebar, marks it unread, and shows
+the reply preview as a snippet; a `delta`/`final` for an unknown thread
+triggers a session reload.
 
 ### Approvals surface
 
-There is **no** dedicated approvals route or widget. Cards ride the ordinary text
-channel — `ApprovalBroker.ask` calls `send(question)`, which reaches the browser
-as a normal `final` frame, and the owner answers by typing into `/send`.
+Cards mirror to the dashboard (#267). `gate.approval_asker`'s `ask` closure
+sends the question on the origin channel *and* calls `dispatcher.tapped()` with
+an `approval` frame, so a client tapped into that thread renders it as a card
+with yes/always/no buttons — not as ordinary chat text. A button `POST`s
+`/approve` (`{thread, answer}`), which calls `ApprovalBroker.resolve` directly:
+the identical broker a typed origin-channel reply resolves, so first answer
+wins from either surface and the loser gets a no-op (409). Once answered, `ask`
+emits an `approval_resolved` frame so the dashboard clears the card. A client
+that taps into a thread *after* the card was raised still sees it — `/events`
+replays `ApprovalBroker.pending_question(thread)` as an `approval` frame on
+connect, so a blocked, watched thread never stalls silently.
 
 ### Serving
 

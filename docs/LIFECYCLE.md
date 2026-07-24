@@ -215,7 +215,9 @@ follow the same rule — return error strings, don't raise.
 
 Approval cards ride the session's own channel: the `ask` closure resolves
 `dispatcher.adapter(ctx.channel).send`, so the card appears where the
-conversation is.
+conversation is — and also mirrors to any dashboard client tapped into that
+thread via `dispatcher.tapped()`, answerable there through the same broker
+(`POST /approve`; see [SECURITY.md](./SECURITY.md#approvals--approvalspy), #267).
 
 ## 7. Reply out
 

@@ -162,7 +162,8 @@ def build_mcp(
 
 
 def build_adapters(
-    config: Config, core: Core, store: MessageStore, commands: CommandSet
+    config: Config, core: Core, store: MessageStore, commands: CommandSet,
+    approvals: ApprovalBroker,
 ) -> Adapters:
     """Register the socket, darwin-gated iMessage, and web adapters; build the
     optional password-gated web server."""
@@ -180,8 +181,7 @@ def build_adapters(
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
             restart=core.restart,
-            # Consume approval answers at the poll stage, ahead of the
-            # per-thread FIFO worker a gated turn would otherwise deadlock.
+            # Consume approvals at poll stage, ahead of the thread FIFO worker.
             resolve_approval=dispatcher.resolve_approval,
         )
         dispatcher.register(imessage_adapter)
@@ -194,6 +194,6 @@ def build_adapters(
         web_app = build_web_app(
             Auth(config.web_password, load_or_create_secret()), web_adapter,
             core.hub, dispatcher.handle, core.monitors, store,
-            commands.palette, core.manager)
+            commands.palette, core.manager, approvals)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

@@ -47,7 +47,7 @@ class ApprovalBroker:
 
     def __init__(self, timeout: float = APPROVAL_TIMEOUT_SECONDS) -> None:
         self._timeout = timeout
-        self._pending: dict[str, asyncio.Future[Approval]] = {}
+        self._pending: dict[str, tuple[str, asyncio.Future[Approval]]] = {}
 
     def resolve(self, thread_key: str, text: str) -> bool:
         """Try to consume an inbound message as an approval answer.
@@ -55,12 +55,20 @@ class ApprovalBroker:
         Returns True when the message answered a pending card (and so must
         not start a turn). The answer's verdict (deny/once/always) is passed
         to the waiting card; anything that isn't a clear yes/always denies.
+        First answer wins — a race between two callers (e.g. the origin
+        channel and the dashboard) resolves once; the loser sees ``False``.
         """
-        future = self._pending.get(thread_key)
-        if future is None or future.done():
+        entry = self._pending.get(thread_key)
+        if entry is None or entry[1].done():
             return False
-        future.set_result(parse_answer(text))
+        entry[1].set_result(parse_answer(text))
         return True
+
+    def pending_question(self, thread_key: str) -> str | None:
+        """The card text still waiting on ``thread_key``, if any — lets a late
+        subscriber (dashboard reconnect) render the card instead of nothing."""
+        entry = self._pending.get(thread_key)
+        return entry[0] if entry is not None else None
 
     async def ask(
         self, thread_key: str, question: str, send: SendText
@@ -74,7 +82,7 @@ class ApprovalBroker:
         future: asyncio.Future[Approval] = (
             asyncio.get_running_loop().create_future()
         )
-        self._pending[thread_key] = future
+        self._pending[thread_key] = (question, future)
         try:
             await send(question)
             return await asyncio.wait_for(future, self._timeout)

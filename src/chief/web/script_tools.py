@@ -1,11 +1,43 @@
-"""JS for the transcript's tool-call rows and the live SSE stream client:
-tool rows are collapsed by default (args + result fetched lazily off a click),
-and the stream subscribes to the focused thread, renders its rich frames, and
+"""JS for the transcript's tool-call rows, approval cards, and the live SSE
+stream client: tool rows are collapsed by default (args + result fetched
+lazily off a click); an approval card renders yes/always/no buttons that POST
+/approve, answering the same broker the origin channel's reply would (#267);
+the stream subscribes to the focused thread, renders its rich frames, and
 re-syncs from history on a final frame or an SSE reconnect. Split out of
 script.py to keep that file under the length cap (#261, #263). All JS is
 concatenated into one global scope, so cross-file references resolve fine."""
 
 TOOL_SCRIPT = """
+/* approval card: mirrors a gray-zone tool call's card to this dashboard —
+   answering here resolves the same broker an origin-channel reply would */
+function addApproval(thread, question){
+  const empty = log.querySelector(".empty"); if (empty) empty.remove();
+  const d = document.createElement("div"); d.className = "msg approval";
+  d.dataset.thread = thread;
+  const btns = document.createElement("div"); btns.className = "approval-btns";
+  [["yes", "approve"], ["always", "always allow"], ["no", "deny"]].forEach(
+    ([answer, label]) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = label;
+      b.onclick = async () => {
+        [...btns.children].forEach((x) => x.disabled = true);
+        await fetch("/approve", {method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({thread, answer})});
+      };
+      btns.appendChild(b);
+    }
+  );
+  d.append(span("who", "approval"), span(null, question), btns);
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+function resolveApproval(thread){
+  const card = log.querySelector(`.approval[data-thread="${CSS.escape(thread)}"]`);
+  if (card) card.remove();
+}
+
 /* collapsed tool-call row: name only, args + result fetched on demand */
 function addTool(callId, name){
   const empty = log.querySelector(".empty"); if (empty) empty.remove();
@@ -76,6 +108,8 @@ function onFrame(e){
   if (f.thread !== state.current) return;   /* rich frame racing a buffer switch */
   if (f.type === "inbound") addMsg("owner", f.text);
   else if (f.type === "tool") addTool(f.call_id, f.name);
+  else if (f.type === "approval") addApproval(f.thread, f.question);
+  else if (f.type === "approval_resolved") resolveApproval(f.thread);
   else if (f.type === "delta"){
     if (!live) live = addMsg("chief", ""); live.textContent += f.text;
   } else if (f.type === "final"){

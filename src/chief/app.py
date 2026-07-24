@@ -177,7 +177,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     )
     core.dispatcher.set_commands(commands)
     mcp_manager, mcp_configs = build_mcp(config, core.registry)
-    adapters = build_adapters(config, core, store, commands)
+    adapters = build_adapters(config, core, store, commands, gate.approvals)
 
     return App(
         config=config,

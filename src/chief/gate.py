@@ -66,17 +66,26 @@ Announce = Callable[[ToolContext, str], Awaitable[None]]
 
 
 def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskApproval:
-    """The card path: ask on the calling thread's own surface.
+    """The card path: ask on the calling thread's own surface, and mirror the
+    same card to any dashboard client tapped into that thread (#267).
 
     Shared by the gate's own gray-zone cards and by tools that raise their own
     card (``schedule``'s command creation), so both reach the owner the same way.
     """
 
     async def ask(ctx: ToolContext, question: str) -> Approval:
+        tk = ctx.thread_key
         send = dispatcher.adapter(ctx.channel).send
-        return await approvals.ask(
-            ctx.thread_key, question, lambda q: send(ctx.thread_key, q)
+
+        async def send_and_card(q: str) -> None:
+            dispatcher.tapped(tk, {"type": "approval", "thread": tk, "question": q})
+            await send(tk, q)
+
+        answer = await approvals.ask(tk, question, send_and_card)
+        dispatcher.tapped(
+            tk, {"type": "approval_resolved", "thread": tk, "verdict": answer.value}
         )
+        return answer
 
     return ask
 
@@ -168,10 +177,7 @@ class GatedTools:
             logger.exception("failed to announce tool call %s", call.name)
 
     async def _ask_card(self, call: ToolCall) -> Decision:
-        question = (
-            f"approve tool call {call.name}({call.arguments})? "
-            "yes / always / no"
-        )
+        question = f"approve tool call {call.name}({call.arguments})? yes / always / no"
         answer = await self._ask(self._context, question)
         if answer is Approval.ALWAYS:
             self._on_always(call.name)

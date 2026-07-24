@@ -73,13 +73,23 @@ Passing one does nothing.
 
 ## Approvals — `approvals.py`
 
-**Cards ride the session's own channel**, not a web widget. The `ask` closure
-resolves `dispatcher.adapter(ctx.channel).send`, so the card appears wherever the
-conversation is happening, and the owner answers by replying normally.
+**Cards ride the session's own channel, and mirror to the dashboard (#267).**
+`gate.approval_asker`'s `ask` closure resolves `dispatcher.adapter(ctx.channel).send`
+so the card appears wherever the conversation is happening, *and* calls the
+dispatcher's `tapped()` to push an `approval` frame to any dashboard client
+watching that thread — the same tapped-in path a turn's own frames take. The
+owner answers by replying normally on the origin channel, or from the
+dashboard's card buttons (`POST /approve`), which calls `ApprovalBroker.resolve`
+directly — the identical broker a text reply resolves, so first answer wins
+regardless of which surface it came from; the loser's call is a no-op (`resolve`
+returns `False`, the route reports 409). A client that taps into a thread after
+the card was raised still sees it: `GET /events?thread=` replays
+`ApprovalBroker.pending_question` as an immediate `approval` frame, and the
+`ask` closure emits `approval_resolved` once answered so the dashboard clears it.
 
-**Storage: none — purely in-memory**, keyed by thread. A pending card does not
-survive a restart, and since self-edit can `execv`, an in-flight card is silently
-lost.
+**Storage: none — purely in-memory**, keyed by thread (now storing the question
+text alongside the future, for that replay). A pending card does not survive a
+restart, and since self-edit can `execv`, an in-flight card is silently lost.
 
 Fail-closed, four ways:
 

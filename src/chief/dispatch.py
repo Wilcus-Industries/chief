@@ -2,17 +2,17 @@
 
 Inbound order: approval answers are consumed first (a turn blocked on an
 approval card would deadlock behind the session lock otherwise), strangers
-are logged and published to the bus but never run a turn, owner messages
-go on the event bus and run a turn.
-``system`` senders (monitor/cron wakes) run a turn but are never published —
-that would let monitors trigger themselves.
+are logged and published to the bus but never run a turn, owner messages go
+on the event bus and run a turn. ``system`` senders (monitor/cron wakes) run
+a turn but are never published — that would let monitors trigger themselves.
 
 Every completed turn emits one coarse ``tick`` to the observer hub so the
 cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
 snippet); web turns also stream their own ``delta``/``final`` through the web
 adapter, so the dispatcher skips only the rich ``final`` for them. A client
 *tapped into* a non-web thread also gets that turn's inbound/delta/tool-tick/
-final frames (checked at emit time).
+final frames — and, via the public ``tapped()``, an out-of-turn approval
+card the gate's ``approval_asker`` raises (#267).
 """
 
 import logging
@@ -140,20 +140,20 @@ class Dispatcher:
         )
         tk = message.thread_key
         # Web turns stream their own inbound/delta (adapter + JS); for every
-        # other channel _tapped re-checks the live subscription at emit time.
+        # other channel tapped() re-checks the live subscription at emit time.
         non_web = message.channel != WEB_CHANNEL
         if non_web:
-            self._tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
+            self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
         async def on_delta(text: str) -> None:
             await adapter.send_delta(tk, text)
             if non_web:
-                self._tapped(tk, {"type": "delta", "thread": tk, "text": text})
+                self.tapped(tk, {"type": "delta", "thread": tk, "text": text})
 
         async def on_tool(call: ToolCall) -> None:
             # Web turns get tool ticks too — the WebAdapter never emits them.
-            self._tapped(tk, {"type": "tool", "thread": tk,
-                              "call_id": call.id, "name": call.name})
+            self.tapped(tk, {"type": "tool", "thread": tk,
+                             "call_id": call.id, "name": call.name})
 
         try:
             result = await session.run_turn(
@@ -183,7 +183,7 @@ class Dispatcher:
         await adapter.send(message.thread_key, text)
         self._turn_end(message, text)
 
-    def _tapped(self, thread_key: str, frame: dict[str, object]) -> None:
+    def tapped(self, thread_key: str, frame: dict[str, object]) -> None:
         """Deliver a rich frame only if a client is tapped into the thread."""
         if self._hub is not None and self._hub.is_watched(thread_key):
             self._hub.to_watchers(thread_key, frame)
@@ -195,5 +195,5 @@ class Dispatcher:
             return
         tk = message.thread_key
         if message.channel != WEB_CHANNEL:
-            self._tapped(tk, {"type": "final", "thread": tk, "text": reply})
+            self.tapped(tk, {"type": "final", "thread": tk, "text": reply})
         self._hub.tick(tk, message.channel, reply[:PREVIEW_CHARS])

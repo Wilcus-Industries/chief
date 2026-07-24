@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
+from chief.approvals import Approval, ApprovalBroker
 from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.hub import ObserverHub
@@ -45,6 +46,7 @@ WebParts = tuple[
     MessageStore,
     SessionManager,
     ObserverHub,
+    ApprovalBroker,
 ]
 
 
@@ -69,13 +71,15 @@ def web(engine: AsyncEngine) -> WebParts:
         system_prompt="s",
         max_concurrent=4,
     )
+    approvals = ApprovalBroker()
     app = build_web_app(
-        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager
+        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
+        approvals,
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
     )
-    return client, adapter, monitors, store, manager, hub
+    return client, adapter, monitors, store, manager, hub, approvals
 
 
 async def login(client: httpx.AsyncClient) -> None:
@@ -138,7 +142,7 @@ async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
 async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
     """A non-web thread keeps its real key and its origin channel (resolved from
     the store), so the turn's reply exits on that channel — not a web buffer."""
-    client, _adapter, _monitors, store, _, _ = web
+    client, _adapter, _monitors, store, _, _, _ = web
     await store.ensure_session("+15551234567", "imessage")
     await login(client)
     response = await client.post(
@@ -155,7 +159,7 @@ async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
 async def test_send_refuses_a_group_thread(web: WebParts) -> None:
     """Groups have no core send path (imsg only); the cockpit keeps them view-
     only, and the route refuses a send rather than run an undeliverable turn."""
-    client, _adapter, _monitors, store, _, _ = web
+    client, _adapter, _monitors, store, _, _, _ = web
     group = "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c"
     await store.ensure_session(group, "imessage")
     await login(client)
@@ -203,7 +207,7 @@ async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> Non
     receives a hub tick as a real SSE `data:` frame — the leg the socket-side
     acceptance test can't exercise. (ASGITransport buffers the body, so the
     feeder closes the stream after the tick to let the response complete.)"""
-    client, _, _, _, _, hub = web
+    client, _, _, _, _, hub, _ = web
     await login(client)
 
     async def feed() -> None:
@@ -237,7 +241,7 @@ async def test_events_thread_param_subscribes_to_that_thread(
     this client. A param-name mismatch between the JS and the route would leave
     the listener on the coarse (None) subscription — the rich frame would never
     arrive and this assertion would fail (not hang: the hub close ends it)."""
-    client, _, _, _, _, hub = web
+    client, _, _, _, _, hub, _ = web
     await login(client)
 
     async def feed() -> None:
@@ -263,8 +267,98 @@ async def test_events_thread_param_subscribes_to_that_thread(
     ]
 
 
+async def _noop_send(_: str) -> None:
+    return None
+
+
+async def test_approve_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    response = await client.post("/approve", json={"thread": "cli:t", "answer": "yes"})
+    assert response.status_code == 401
+
+
+async def test_approve_resolves_the_broker_like_an_origin_channel_answer(
+    web: WebParts,
+) -> None:
+    """Answering from the dashboard unblocks the same pending card an
+    origin-channel typed reply would — the identical broker, the identical
+    Approval verdict (#267 AC1/AC2's central mechanism)."""
+    client, _, _, _, _, _, approvals = web
+    await login(client)
+
+    card = asyncio.create_task(
+        approvals.ask("cli:t", "approve rm_rf? yes/no", _noop_send)
+    )
+    await asyncio.sleep(0.01)
+    response = await client.post(
+        "/approve", json={"thread": "cli:t", "answer": "yes"}
+    )
+    assert response.status_code == 200
+    assert await card is Approval.ONCE
+
+
+async def test_approve_racing_answers_only_one_resolves(web: WebParts) -> None:
+    """Two answers race for the same card; exactly one resolves — the other is
+    a no-op, never a second resolution (#267 AC3)."""
+    client, _, _, _, _, _, approvals = web
+    await login(client)
+
+    card = asyncio.create_task(approvals.ask("cli:t", "ok?", _noop_send))
+    await asyncio.sleep(0.01)
+    first = await client.post("/approve", json={"thread": "cli:t", "answer": "yes"})
+    second = await client.post("/approve", json={"thread": "cli:t", "answer": "no"})
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert await card is Approval.ONCE  # the winning (first) answer stands
+
+
+async def test_approve_with_no_pending_card_is_a_409(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/approve", json={"thread": "cli:t", "answer": "yes"}
+    )
+    assert response.status_code == 409
+
+
+async def test_events_replays_a_pending_card_to_a_late_joiner(
+    web: WebParts,
+) -> None:
+    """A blocked, watched thread shows the pending card instead of stalling
+    silently — even for a client that connects after the card was raised
+    (#267 AC4)."""
+    client, _, _, _, _, hub, approvals = web
+    await login(client)
+    card = asyncio.create_task(
+        approvals.ask("cli:home", "approve rm_rf?", _noop_send)
+    )
+    await asyncio.sleep(0.01)
+
+    async def feed() -> None:
+        while not hub._watchers:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events?thread=cli:home") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "approval", "thread": "cli:home", "question": "approve rm_rf?"},
+    ]
+    approvals.resolve("cli:home", "no")
+    assert await card is Approval.DENY
+
+
 async def test_monitor_list_route(web: WebParts) -> None:
-    client, _, monitors, _store, _, _ = web
+    client, _, monitors, _store, _, _, _ = web
     await login(client)
     assert (await client.get("/monitors")).text == "none"
     await monitors.create(
@@ -283,7 +377,7 @@ async def test_sessions_requires_auth(web: WebParts) -> None:
 
 
 async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append("web:main", [{"role": "user", "content": "hi"}])
@@ -297,7 +391,7 @@ async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
 
 
 async def test_history_renders_owner_and_chief_rows(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -330,7 +424,7 @@ async def test_history_without_thread_is_empty(web: WebParts) -> None:
 async def test_history_includes_collapsed_tool_rows(web: WebParts) -> None:
     """A tool call shows as a name + call-id row, interleaved in order — no
     args or result in the list payload (#261)."""
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -368,7 +462,7 @@ async def test_history_tool_requires_auth(web: WebParts) -> None:
 
 
 async def test_history_tool_returns_args_and_result(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -405,7 +499,7 @@ async def test_history_tool_pending_when_result_not_yet_committed(
 ) -> None:
     """The call landed but its result hasn't — a real mid-turn snapshot, not
     a fake status (#261's central mechanism: real stored wire messages)."""
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -433,7 +527,7 @@ async def test_history_tool_pending_while_call_id_unwritten_and_thread_busy(
 ) -> None:
     """The call id isn't in the store at all yet — the turn hasn't produced
     it — but the thread is mid-turn, so this is pending, not an error."""
-    client, _, _, store, manager, _ = web
+    client, _, _, store, manager, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     session = await manager.get_or_create("web:main", "web")
@@ -445,7 +539,7 @@ async def test_history_tool_pending_while_call_id_unwritten_and_thread_busy(
 
 
 async def test_history_tool_compacted_when_call_id_is_gone(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     response = await client.get("/history/tool?thread=web:main&call_id=gone")
@@ -465,7 +559,7 @@ async def test_delete_requires_auth(web: WebParts) -> None:
 
 
 async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -478,7 +572,7 @@ async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
 
 
 async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
-    client, _, _, store, manager, _ = web
+    client, _, _, store, manager, _, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -491,7 +585,7 @@ async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
 
 
 async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None:
-    client, _, _, store, _, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.ensure_session("imessage:+1", "imessage")
@@ -514,3 +608,5 @@ async def test_assets_are_served(web: WebParts) -> None:
     js = await client.get("/app.js")
     assert "javascript" in js.headers["content-type"]
     assert "EventSource" in js.text
+    assert "/approve" in js.text
+    assert "addApproval" in js.text

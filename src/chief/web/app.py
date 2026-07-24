@@ -1,9 +1,8 @@
 """The web UI's ASGI app: login, chat, sessions, SSE stream, monitor list."""
 
 import asyncio
-import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -13,18 +12,19 @@ from starlette.responses import (
     PlainTextResponse,
     RedirectResponse,
     Response,
-    StreamingResponse,
 )
 from starlette.routing import Route
 
 from chief.adapters.base import Message
 from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
+from chief.approvals import ApprovalBroker
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.web.adapter import WebAdapter
 from chief.web.auth import COOKIE_NAME, Auth
+from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.script import SCRIPT
 from chief.web.styles import STYLES
@@ -44,12 +44,16 @@ def build_web_app(
     store: MessageStore,
     palette: Callable[[], list[str]],
     manager: SessionManager,
+    approvals: ApprovalBroker,
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
     ``palette`` yields the current ``/command`` names for input completion;
     ``store`` backs the session list and per-thread transcript history;
-    ``manager`` deletes buffers (row + live session) for the sidebar × control.
+    ``manager`` deletes buffers (row + live session) for the sidebar × control;
+    ``approvals`` is the same broker the gate's cards run on — ``/approve``
+    resolves it directly, so a dashboard answer and an origin-channel answer
+    race for the identical pending future (#267).
     """
 
     def unauthorized() -> Response:
@@ -142,23 +146,6 @@ def build_web_app(
             return unauthorized()
         return JSONResponse(palette())
 
-    async def events(request: Request) -> Response:
-        if not auth.is_authed(request):
-            return unauthorized()
-        queue = hub.listen(request.query_params.get("thread") or None)
-
-        async def stream() -> AsyncIterator[str]:
-            try:
-                while True:
-                    frame = await queue.get()
-                    if frame.get("type") == "closed":
-                        return
-                    yield f"data: {json.dumps(frame)}\n\n"
-            finally:
-                hub.drop(queue)
-
-        return StreamingResponse(stream(), media_type="text/event-stream")
-
     async def monitor_list(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
@@ -185,7 +172,7 @@ def build_web_app(
             Route("/history", history),
             Route("/history/tool", history_tool),
             Route("/commands", commands),
-            Route("/events", events),
+            *build_live_routes(hub, approvals, auth.is_authed, unauthorized),
             Route("/monitors", monitor_list),
             Route("/app.css", app_css),
             Route("/app.js", app_js),

@@ -1,19 +1,28 @@
 """The gate: list decisions, read-only auto-allow, cards, always-allow, audit."""
 
+import asyncio
 import json
 from pathlib import Path
 
-from chief.approvals import Approval
+from chief.adapters.base import Adapter
+from chief.agent.manager import SessionManager
+from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
+from chief.dispatch import Dispatcher
 from chief.gate import (
     Decision,
     GatedTools,
     GatePolicy,
+    approval_asker,
     load_approved,
     save_approved,
 )
+from chief.hub import ObserverHub
+from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import Tool, ToolContext, ToolRegistry
+
+from .fakes import FakeProvider
 
 CONTEXT = ToolContext(thread_key="cli:t", channel="cli")
 
@@ -243,6 +252,98 @@ async def test_announce_failure_does_not_break_the_call(tmp_path: Path) -> None:
         announce=announce,
     )
     assert await gated.dispatch(ToolCall(id="1", name="echo", arguments={})) == "ran:"
+
+
+class _RecordingAdapter(Adapter):
+    name = "cli"
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sent.append((thread_key, text))
+
+
+def _dispatcher(
+    hub: ObserverHub, approvals: ApprovalBroker, store: MessageStore
+) -> Dispatcher:
+    manager = SessionManager(
+        provider=FakeProvider([]),
+        tools_factory=lambda thread, channel: ToolRegistry(),
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    return Dispatcher(manager, hub=hub, approvals=approvals)
+
+
+async def test_approval_asker_cards_a_tapped_thread(store: MessageStore) -> None:
+    """The card mirrors to the dashboard: a client tapped into the calling
+    thread gets an ``approval`` frame carrying the question — the real hub,
+    the real broker, the same path a gray-zone tool call takes (#267)."""
+    hub = ObserverHub()
+    approvals = ApprovalBroker()
+    dispatcher = _dispatcher(hub, approvals, store)
+    dispatcher.register(_RecordingAdapter())
+    queue = hub.listen("cli:t")
+    ask = approval_asker(dispatcher, approvals)
+
+    task = asyncio.ensure_future(ask(CONTEXT, "approve tool call gray({})? yes"))
+    await asyncio.sleep(0.01)
+    assert queue.get_nowait() == {
+        "type": "approval", "thread": "cli:t",
+        "question": "approve tool call gray({})? yes",
+    }
+    assert approvals.resolve("cli:t", "yes") is True
+    assert await task is Approval.ONCE
+    assert queue.get_nowait() == {
+        "type": "approval_resolved", "thread": "cli:t", "verdict": "once",
+    }
+
+
+async def test_approval_asker_answer_from_the_broker_unblocks_the_card(
+    store: MessageStore,
+) -> None:
+    """Answering via ``ApprovalBroker.resolve`` — the same call the dashboard's
+    ``/approve`` route makes — resolves the pending ``ask`` exactly as an
+    origin-channel typed reply would."""
+    hub = ObserverHub()
+    approvals = ApprovalBroker()
+    dispatcher = _dispatcher(hub, approvals, store)
+    dispatcher.register(_RecordingAdapter())
+    ask = approval_asker(dispatcher, approvals)
+
+    task = asyncio.ensure_future(ask(CONTEXT, "approve tool call gray({})? yes"))
+    await asyncio.sleep(0.01)
+    assert approvals.resolve("cli:t", "always") is True
+    assert await task is Approval.ALWAYS
+    # A second answer to the same, now-resolved card is a no-op — never a
+    # second resolution (#267 AC3).
+    assert approvals.resolve("cli:t", "yes") is False
+
+
+async def test_approval_asker_untapped_thread_gets_no_frames(
+    store: MessageStore,
+) -> None:
+    hub = ObserverHub()
+    approvals = ApprovalBroker()
+    dispatcher = _dispatcher(hub, approvals, store)
+    dispatcher.register(_RecordingAdapter())
+    queue = hub.listen()  # watches no thread
+    ask = approval_asker(dispatcher, approvals)
+
+    task = asyncio.ensure_future(ask(CONTEXT, "ok?"))
+    await asyncio.sleep(0.01)
+    assert approvals.resolve("cli:t", "yes") is True
+    assert await task is Approval.ONCE
+    assert queue.empty()
 
 
 def test_approved_store_round_trips(tmp_path: Path) -> None:
