@@ -21,6 +21,12 @@ OnDelta = Callable[[str], Awaitable[None]]
 # the session from the post_tool hooks; see chief.hooks.posttool.
 PostTool = Callable[[ToolCall, str], Awaitable[str]]
 
+# Fires right after a message (assistant turn or tool result) is appended to
+# ``messages``, so a caller can persist it immediately instead of waiting for
+# the whole turn to finish — the transcript view's "pending" tool-call state
+# depends on this landing in the store as it happens (#261).
+OnCommit = Callable[[dict[str, Any]], Awaitable[None]]
+
 # Backstop against a model that never stops calling tools; generous because
 # real multi-step work legitimately chains many calls.
 MAX_ITERATIONS = 25
@@ -53,6 +59,7 @@ async def run_turn(
     tools: ToolDispatcher,
     on_delta: OnDelta,
     post_tool: PostTool | None = None,
+    on_commit: OnCommit | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
@@ -61,7 +68,10 @@ async def run_turn(
     for _ in range(max_iterations):
         completion = await _stream_once(provider, model, messages, tools, on_delta)
         usage = usage + completion.usage
-        messages.append(_assistant_message(completion))
+        assistant_message = _assistant_message(completion)
+        messages.append(assistant_message)
+        if on_commit is not None:
+            await on_commit(assistant_message)
         if not completion.tool_calls:
             return TurnResult(text=completion.text, usage=usage)
         for call in completion.tool_calls:
@@ -78,9 +88,10 @@ async def run_turn(
                 result = await tools.dispatch(call)
                 if post_tool is not None:
                     result = await post_tool(call, result)
-            messages.append(
-                {"role": "tool", "tool_call_id": call.id, "content": result}
-            )
+            tool_message = {"role": "tool", "tool_call_id": call.id, "content": result}
+            messages.append(tool_message)
+            if on_commit is not None:
+                await on_commit(tool_message)
     return TurnResult(
         text="error: turn exceeded the tool-call iteration limit", usage=usage
     )

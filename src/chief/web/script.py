@@ -1,5 +1,7 @@
 """The web UI client, served at /app.js. Buffers, SSE, readline completion."""
 
+from chief.web.script_tools import TOOL_SCRIPT
+
 SCRIPT = """
 const el = (id) => document.getElementById(id);
 const log = el("log"), input = el("input"), pop = el("complete");
@@ -68,7 +70,8 @@ async function switchTo(tk){
     const d = span("empty", "no messages yet \\u2014 type below to start.");
     log.appendChild(d);
   }
-  rows.forEach((r) => addMsg(r.role, r.text));
+  rows.forEach((r) =>
+    r.role === "tool" ? addTool(r.call_id, r.name) : addMsg(r.role, r.text));
   if (!input.disabled) input.focus();
 }
 
@@ -186,4 +189,4 @@ async function monitors(){
   state.commands = await getJSON("/commands") || [];
   await loadSessions(); connect(); monitors(); setInterval(monitors, 10000);
 })();
-"""
+""" + TOOL_SCRIPT

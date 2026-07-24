@@ -121,10 +121,17 @@ class Session:
             model = self._downgrade_model
         await self._maybe_compact()
         system = await self._assemble_system(user_text, sender)
+        # The user turn is persisted up front — before the model even starts —
+        # so it's never lost to a mid-turn crash; the assistant/tool messages
+        # the loop produces persist as they land (`_live_append`), not batched
+        # at the end, so a thread viewed mid-turn shows real progress instead
+        # of nothing (#261's pending tool-call state depends on this).
+        user_message = {"role": "user", "content": user_text}
+        await self._store.append(self.thread_key, [user_message])
         transcript = [
             {"role": "system", "content": system},
             *self._messages,
-            {"role": "user", "content": user_text},
+            user_message,
         ]
         baseline = len(transcript)
         result = await run_turn(
@@ -136,9 +143,10 @@ class Session:
             post_tool=tool_screener(
                 self._hooks, self._hooks_timeout_seconds, logger
             ),
+            on_commit=self._live_append,
         )
-        new_messages = [{"role": "user", "content": user_text}, *transcript[baseline:]]
-        await self._commit(new_messages)
+        new_messages = [user_message, *transcript[baseline:]]
+        self._messages.extend(new_messages)
         if self._hooks is not None:
             await run_post_turn(
                 self._hooks.post_turn(), result, new_messages,
@@ -218,3 +226,10 @@ class Session:
     async def _commit(self, new_messages: list[dict[str, Any]]) -> None:
         self._messages.extend(new_messages)
         await self._store.append(self.thread_key, new_messages)
+
+    async def _live_append(self, message: dict[str, Any]) -> None:
+        """Persist one turn message (assistant call or tool result) the
+        instant the loop produces it. ``self._messages`` is extended once, in
+        ``_one_turn``, after the whole turn finishes — this only writes the
+        store early, so a concurrent reader sees real progress mid-turn."""
+        await self._store.append(self.thread_key, [message])

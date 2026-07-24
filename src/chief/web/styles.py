@@ -76,6 +76,14 @@ body{
 .msg.owner .who::before{content:"owner\\2009>\\2009";}
 .msg.chief .who::before{content:"chief\\2009>\\2009";}
 .msg.peer .who::after{content:"\\2009>\\2009";}
+.msg.tool{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
+  color:var(--dim); font-size:12px;}
+.msg.tool .who{display:inline; margin:0; text-transform:none; color:var(--blue);}
+.toolload{font:inherit; font-size:11px; padding:.1rem .5rem; background:transparent;
+  color:var(--aqua); border:1px solid var(--bg3); border-radius:2px; cursor:pointer;}
+.toolload:hover{background:var(--bg2);}
+.toolbody{flex:1 0 100%; white-space:pre-wrap; word-break:break-word;
+  color:var(--fg); margin-top:.2rem;}
 .empty{color:var(--faint); padding:1.3rem;}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
