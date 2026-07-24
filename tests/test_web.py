@@ -400,6 +400,39 @@ async def test_history_tool_returns_args_and_result(web: WebParts) -> None:
     }
 
 
+async def test_history_ignores_a_coarse_stream_policy(web: WebParts) -> None:
+    """AC5: a thread whose row carries an off/coarse policy still returns its
+    tool rows from /history and a loadable result from /history/tool — the live
+    stream policy never gates the persisted transcript."""
+    client, _, _, store, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.set_stream_policy(
+        "web:main", {"deltas": False, "tools": False, "results": "off"}
+    )
+    await store.append(
+        "web:main",
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "file contents"},
+        ],
+    )
+    rows = (await client.get("/history?thread=web:main")).json()
+    assert {"role": "tool", "call_id": "c1", "name": "read_file"} in rows
+    loaded = (await client.get("/history/tool?thread=web:main&call_id=c1")).json()
+    assert loaded["result"] == "file contents"
+
+
 async def test_history_tool_pending_when_result_not_yet_committed(
     web: WebParts,
 ) -> None:

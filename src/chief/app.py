@@ -121,6 +121,7 @@ async def _build_agent_core(
     dispatcher = Dispatcher(
         manager, bus=bus, hub=hub, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
+        channel_defaults=config.stream_channel_defaults,
     )
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
     cron = CronService(

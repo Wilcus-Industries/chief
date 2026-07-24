@@ -14,6 +14,7 @@ from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
 from chief.mcpclient.manager import ServerConfig
+from chief.policy import RICH, StreamPolicy
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
@@ -228,7 +229,9 @@ async def test_focused_nonweb_turn_streams_over_real_dispatch(
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(call,))], text_turn("read the manifest")]
     )
-    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    # cli defaults coarse; opt it into RICH to keep this slice's rich-stream intent.
+    config = make_config(tmp_path, sock_path, stream_channel_defaults={"cli": RICH})
+    app, streams = await boot(config, provider)
     queue = app.hub.listen("cli:home")
     try:
         await app.dispatcher.handle(
@@ -257,7 +260,8 @@ async def test_two_focused_clients_get_independent_streams(
     # AC4: two clients focused on different threads each receive their own rich
     # stream; the other sees only the broadcast coarse tick, never its deltas.
     provider = FakeProvider([text_turn("aye"), text_turn("bee")])
-    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    config = make_config(tmp_path, sock_path, stream_channel_defaults={"cli": RICH})
+    app, streams = await boot(config, provider)
     q_a = app.hub.listen("cli:a")
     q_b = app.hub.listen("cli:b")
     try:
@@ -279,6 +283,34 @@ async def test_two_focused_clients_get_independent_streams(
     assert {"inbound", "delta", "final", "tick"} <= {f["type"] for f in b_second}
     assert [f["type"] for f in a_second] == ["tick"]
     assert a_second[0]["thread"] == "cli:b"
+
+
+async def test_persisted_row_policy_drives_real_hub_output(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # A session-row stream_policy (deltas off, tools on) drives the real
+    # dispatcher → session → loop → hub end to end: the tapped observer sees the
+    # tool tick but no delta, proving the persisted override gates live output.
+    call = ToolCall(id="c1", name="read_file", arguments={"path": "x"})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        await app.store.ensure_session("cli:home", "cli")
+        await app.store.set_stream_policy(
+            "cli:home", StreamPolicy(deltas=False, tools=True, results="lazy").to_dict()
+        )
+        queue = app.hub.listen("cli:home")
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:home", text="ping")
+        )
+        frames = _drain_hub(queue)
+    finally:
+        await shutdown(app, streams)
+    types = [f["type"] for f in frames]
+    assert "tool" in types
+    assert "delta" not in types
 
 
 async def test_switch_model_is_gated_and_persists_the_override(

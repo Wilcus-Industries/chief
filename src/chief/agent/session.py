@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from chief.agent.compaction import Compactor
-from chief.agent.loop import OnDelta, OnTool, TurnResult, run_turn
+from chief.agent.loop import OnDelta, OnTool, OnToolResult, TurnResult, run_turn
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
@@ -92,6 +92,7 @@ class Session:
         on_delta: OnDelta,
         sender: str = "owner",
         on_tool: OnTool | None = None,
+        on_tool_result: OnToolResult | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
@@ -111,7 +112,7 @@ class Session:
                 await self._gate.enter_turn()
                 try:
                     return await self._one_turn(
-                        user_text, on_delta, sender, on_tool
+                        user_text, on_delta, sender, on_tool, on_tool_result
                     )
                 finally:
                     self._gate.leave_turn()
@@ -122,6 +123,7 @@ class Session:
         on_delta: OnDelta,
         sender: str,
         on_tool: OnTool | None = None,
+        on_tool_result: OnToolResult | None = None,
     ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
@@ -156,6 +158,7 @@ class Session:
                 ),
                 on_commit=self._live_append,
                 on_tool=on_tool,
+                on_tool_result=on_tool_result,
             )
         except BaseException:
             # A provider/network raise mid-turn must not orphan the turn: the

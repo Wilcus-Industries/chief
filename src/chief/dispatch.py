@@ -1,18 +1,21 @@
 """Dispatcher: routes an inbound Message through its session and back out.
 
+styleguide: file-length — one cohesive turn-routing flow (approval/stranger/
+command routing plus the turn's own observer-streaming callbacks); the pure
+policy frame logic already lives in chief.policy. Splitting scatters one turn.
+
 Inbound order: approval answers are consumed first (a turn blocked on an
 approval card would deadlock behind the session lock otherwise), strangers
-are logged and published to the bus but never run a turn, owner messages
-go on the event bus and run a turn.
-``system`` senders (monitor/cron wakes) run a turn but are never published —
-that would let monitors trigger themselves.
+are logged and published to the bus but never run a turn, owner messages go on
+the event bus and run a turn. ``system`` senders (monitor/cron wakes) run a
+turn but are never published — that would let monitors trigger themselves.
 
-Every completed turn emits one coarse ``tick`` to the observer hub so the
-cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
-snippet); web turns also stream their own ``delta``/``final`` through the web
-adapter, so the dispatcher skips only the rich ``final`` for them. A client
-*tapped into* a non-web thread also gets that turn's inbound/delta/tool-tick/
-final frames (checked at emit time).
+Every completed turn emits one coarse ``tick`` to the observer hub; web turns
+stream their own ``delta``/``final`` via the adapter, so the dispatcher skips
+their rich ``final``. A client *tapped into* a non-web thread also gets that
+turn's inbound/final and — as the thread's :class:`~chief.policy.StreamPolicy`
+allows (resolved once per turn from the row override or channel default) — its
+delta / tool-tick / inline tool-result frames.
 """
 
 import logging
@@ -23,6 +26,7 @@ from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
+from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
 from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
@@ -54,6 +58,7 @@ class Dispatcher:
         approvals: ApprovalBroker | None = None,
         strangers: StrangerLog | None = None,
         restart: RestartBoundary | None = None,
+        channel_defaults: dict[str, StreamPolicy] | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
@@ -61,6 +66,7 @@ class Dispatcher:
         self._approvals = approvals
         self._strangers = strangers
         self._restart = restart
+        self._channel_defaults = channel_defaults or {}
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
 
@@ -139,6 +145,8 @@ class Dispatcher:
             message.thread_key, message.channel
         )
         tk = message.thread_key
+        override = await self._manager.stream_policy(tk)
+        policy = resolve(message.channel, override, self._channel_defaults)
         # Web turns stream their own inbound/delta (adapter + JS); for every
         # other channel _tapped re-checks the live subscription at emit time.
         non_web = message.channel != WEB_CHANNEL
@@ -147,17 +155,22 @@ class Dispatcher:
 
         async def on_delta(text: str) -> None:
             await adapter.send_delta(tk, text)
-            if non_web:
-                self._tapped(tk, {"type": "delta", "thread": tk, "text": text})
+            if non_web and (frame := delta_frame(policy, tk, text)):
+                self._tapped(tk, frame)
 
         async def on_tool(call: ToolCall) -> None:
             # Web turns get tool ticks too — the WebAdapter never emits them.
-            self._tapped(tk, {"type": "tool", "thread": tk,
-                              "call_id": call.id, "name": call.name})
+            if frame := tool_frame(policy, tk, name=call.name, call_id=call.id):
+                self._tapped(tk, frame)
+
+        async def on_tool_result(call: ToolCall, result: str) -> None:
+            if frame := result_frame(policy, tk, call_id=call.id, result=result):
+                self._tapped(tk, frame)
 
         try:
             result = await session.run_turn(
-                message.text, on_delta, sender=message.sender, on_tool=on_tool
+                message.text, on_delta, sender=message.sender,
+                on_tool=on_tool, on_tool_result=on_tool_result,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

@@ -14,11 +14,25 @@ class MessageStore:
     def __init__(self, session_factory: SessionFactory) -> None:
         self._factory = session_factory
 
-    async def ensure_session(self, thread_key: str, channel: str) -> None:
-        """Create the session row if this thread has never been seen."""
+    async def ensure_session(
+        self,
+        thread_key: str,
+        channel: str,
+        stream_policy: dict[str, Any] | None = None,
+    ) -> None:
+        """Create the session row if this thread has never been seen.
+
+        ``stream_policy`` seeds the per-thread override at creation only — an
+        existing row keeps whatever policy it already has."""
         async with self._factory() as db:
             if await db.get(SessionRow, thread_key) is None:
-                db.add(SessionRow(thread_key=thread_key, channel=channel))
+                db.add(
+                    SessionRow(
+                        thread_key=thread_key,
+                        channel=channel,
+                        stream_policy=stream_policy,
+                    )
+                )
                 await db.commit()
 
     async def has_sessions(self) -> bool:
@@ -97,6 +111,22 @@ class MessageStore:
             row = await db.get(SessionRow, thread_key)
             if row is not None:
                 row.model_override = model
+                await db.commit()
+
+    async def stream_policy(self, thread_key: str) -> dict[str, Any] | None:
+        """The thread's persisted stream-policy override, if any."""
+        async with self._factory() as db:
+            row = await db.get(SessionRow, thread_key)
+            return row.stream_policy if row else None
+
+    async def set_stream_policy(
+        self, thread_key: str, policy: dict[str, Any] | None
+    ) -> None:
+        """Persist (or clear) the thread's stream-policy override."""
+        async with self._factory() as db:
+            row = await db.get(SessionRow, thread_key)
+            if row is not None:
+                row.stream_policy = policy
                 await db.commit()
 
     async def append(self, thread_key: str, messages: list[dict[str, Any]]) -> None:
