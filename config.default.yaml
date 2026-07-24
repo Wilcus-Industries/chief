@@ -99,6 +99,20 @@ imessage:
   owner_handles: []
   poll_seconds: 2
 
+# Per-channel live stream policy. Every turn always emits its coarse activity
+# tick (and, for non-web threads, the rich inbound/final); this only governs
+# the EXTRA live detail a tapped-in observer sees — token deltas, per-call tool
+# ticks, and how a tool result loads (lazy = on click via /history, inline =
+# streamed live, off = not at all + the tool tick drops its call_id). It is the
+# LIVE stream only — /history always renders the full transcript regardless.
+# A session row's own override (the agent's `session` create tool) beats this.
+# Channels not listed default coarse (tick-only): the imessage/web observer
+# surfaces ship rich. send_guard is carried for a later reply-from-web slice.
+stream:
+  channel_defaults:
+    imessage: {deltas: true, tools: true, results: lazy, send_guard: true}
+    web: {deltas: true, tools: true, results: lazy, send_guard: true}
+
 # Context compaction: when a thread's transcript nears the model's context
 # window, the old messages are folded into one summary note and the tail kept.
 # Threshold = ratio * window. The window tracks the thread's CURRENT model,

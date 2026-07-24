@@ -14,6 +14,7 @@ from chief.dispatch import Dispatcher
 from chief.hub import ObserverHub
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import RICH, StreamPolicy
 from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
@@ -281,7 +282,9 @@ async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
         system_prompt="s",
         max_concurrent=4,
     )
-    dispatcher = Dispatcher(manager, hub=hub)
+    # cli defaults coarse now; opt this thread's channel into RICH so the rich
+    # frames still flow (the #262/#263 behavior, under the new policy gate).
+    dispatcher = Dispatcher(manager, hub=hub, channel_defaults={"cli": RICH})
     adapter = RecordingAdapter()
     dispatcher.register(adapter)
     queue = hub.listen("cli:t")
@@ -301,6 +304,80 @@ async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
         "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
     }
     assert adapter.sent == [("cli:t", "done")]  # origin channel still delivered
+
+
+def _tool_manager(store: MessageStore) -> SessionManager:
+    registry = _read_file_registry()
+    return SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+
+
+async def _run_tapped(
+    store: MessageStore, policy: StreamPolicy
+) -> list[dict[str, Any]]:
+    """Run one tool+text turn on a tapped ``cli:t`` under ``policy`` for cli."""
+    hub = ObserverHub()
+    dispatcher = Dispatcher(
+        _tool_manager(store), hub=hub, channel_defaults={"cli": policy}
+    )
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("hi"))
+    return _drain(queue)
+
+
+async def test_deltas_off_keeps_tool_tick_and_final_but_no_delta(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="lazy"))
+    types = [f["type"] for f in frames]
+    assert "delta" not in types
+    assert {"type": "tool", "thread": "cli:t", "call_id": "c1",
+            "name": "read_file"} in frames
+    assert any(f["type"] == "final" for f in frames)
+
+
+async def test_tools_off_drops_the_tool_frame(store: MessageStore) -> None:
+    frames = await _run_tapped(store, StreamPolicy(deltas=True))
+    types = [f["type"] for f in frames]
+    assert "tool" not in types
+    assert "delta" in types and "final" in types
+
+
+async def test_results_inline_emits_a_result_frame_with_the_body(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="inline"))
+    tool_idx = next(i for i, f in enumerate(frames) if f["type"] == "tool")
+    result = next(f for f in frames if f["type"] == "result")
+    assert result == {"type": "result", "thread": "cli:t",
+                      "call_id": "c1", "result": "file contents"}
+    # The result lands after its tool tick, as the call fires.
+    assert frames.index(result) > tool_idx
+
+
+async def test_results_off_drops_the_call_id_from_the_tool_frame(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="off"))
+    tool = next(f for f in frames if f["type"] == "tool")
+    assert tool == {"type": "tool", "thread": "cli:t", "name": "read_file"}
+    assert "call_id" not in tool
+
+
+async def test_coarse_default_taps_only_inbound_final_tick(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy())  # all off
+    assert [f["type"] for f in frames] == ["inbound", "final", "tick"]
 
 
 async def test_unwatched_thread_emits_only_the_coarse_tick(

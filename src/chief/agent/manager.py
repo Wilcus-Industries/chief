@@ -89,9 +89,8 @@ class SessionManager:
 
     def peek(self, thread_key: str) -> Session | None:
         """The cached live session for a thread, or ``None`` — never creates
-        one. Lets a read-only caller (the web history-tool route) check
-        ``.busy`` without paying to spin up a session for a thread it isn't
-        otherwise touching."""
+        one. Lets a read-only caller (the web history-tool route) check ``.busy``
+        without paying to spin up a session it isn't otherwise touching."""
         return self._sessions.get(thread_key)
 
     async def _repair_interrupted(
@@ -127,10 +126,22 @@ class SessionManager:
         await self._store.append(thread_key, repairs)
         return [*history, *repairs]
 
-    async def create(self, thread_key: str, channel: str) -> None:
-        """Register a thread (so a monitor/schedule can wake it) without a live
-        session."""
-        await self._store.ensure_session(thread_key, channel)
+    async def create(
+        self,
+        thread_key: str,
+        channel: str,
+        stream_policy: dict[str, Any] | None = None,
+    ) -> bool:
+        """Register a thread without a live session (a monitor/schedule can wake
+        it); ``stream_policy`` seeds the override at creation, or updates an
+        existing thread's. ``True`` only when a new row was made."""
+        created = await self._store.ensure_session(thread_key, channel, stream_policy)
+        if not created and stream_policy is not None:
+            await self._store.set_stream_policy(thread_key, stream_policy)
+        return created
+
+    async def stream_policy(self, thread_key: str) -> dict[str, Any] | None:
+        return await self._store.stream_policy(thread_key)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         """Every known thread — the agent's own `session` list tool."""
@@ -148,10 +159,9 @@ class SessionManager:
         await self._store.set_model_override(thread_key, model)
 
     async def compact(self, thread_key: str) -> str:
-        """Force-compact one thread's transcript now (the ``/compact`` command
-        and nightly autocompact). Operates on the live session so the in-memory
-        history is folded too — a store-only compaction would be clobbered by
-        the cached session's next commit. Refuses to create an unknown thread."""
+        """Force-compact one thread now (``/compact`` + nightly autocompact) on
+        the live session so in-memory history folds too (a store-only compaction
+        is clobbered by the session's next commit). Refuses an unknown thread."""
         channel = await self._store.channel(thread_key)
         if channel is None:
             return f"no such thread: {thread_key}"
@@ -159,34 +169,24 @@ class SessionManager:
         return await session.compact()
 
     async def clear(self, thread_key: str) -> bool:
-        """Wipe a thread's transcript (keep the row) and drop its cached session.
-
-        Returns ``False`` untouched when the thread is mid-turn — see
-        :meth:`_wipe`. Dropping the cache is the point: the DB wipe alone is
-        cosmetic while a loaded ``Session`` still holds the old history.
-        """
+        """Wipe a thread's transcript (keep the row) and drop its cached session
+        — dropping the cache is the point, a DB wipe alone is cosmetic while a
+        loaded ``Session`` still holds the old history. Mid-turn: see :meth:`_wipe`."""
         return await self._wipe(thread_key, self._store.clear)
 
     async def delete(self, thread_key: str) -> bool:
-        """Delete a thread entirely and drop its cached live session.
-
-        Returns ``False`` untouched when the thread is mid-turn — see
-        :meth:`_wipe`.
-        """
+        """Delete a thread entirely and drop its cached live session (mid-turn
+        handling: see :meth:`_wipe`)."""
         return await self._wipe(thread_key, self._store.delete_session)
 
     async def _wipe(
         self, thread_key: str, op: Callable[[str], Awaitable[None]]
     ) -> bool:
-        """Run a store wipe under the session lock, atomically.
-
-        Refuses (returns ``False``, no store write) when a cached session is
-        mid-turn: its in-flight tail would commit orphan rows over the wipe.
-        Otherwise the lock is held across the wipe so no turn can start in the
-        store-write window — closing the delete/clear TOCTOU that a plain
-        ``is_busy`` pre-check leaves open. This is the single guard for every
-        caller (the ``session`` tool, ``/prune``, and the web cockpit).
-        """
+        """Run a store wipe under the session lock — the single guard for every
+        caller (``session`` tool, ``/prune``, web cockpit). Refuses (``False``,
+        no write) when a cached session is mid-turn: its in-flight tail would
+        commit orphan rows over the wipe. Holding the lock across the wipe shuts
+        the delete/clear TOCTOU a plain ``is_busy`` pre-check leaves open."""
         session = self._sessions.get(thread_key)
         if session is None:
             await op(thread_key)

@@ -66,6 +66,69 @@ async def test_create_defaults_channel_to_context(
     assert await store.channel("cli:new") == "cli"
 
 
+async def test_create_with_policy_persists_a_normalized_override(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """AC4: a `policy` arg on create stores the full normalized policy dict."""
+    registry, _ = make_registry(store)
+    await registry.dispatch(
+        call(
+            "create",
+            thread_key="cli:new",
+            policy={"deltas": True, "tools": True, "results": "inline"},
+        ),
+        context=CTX,
+    )
+    assert await store.stream_policy("cli:new") == {
+        "deltas": True, "tools": True, "results": "inline", "send_guard": False
+    }
+
+
+async def test_create_on_existing_thread_reports_unchanged(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """Re-creating a known thread without a policy is honest about the no-op."""
+    await store.ensure_session("cli:new", "cli")
+    registry, _ = make_registry(store)
+    result = await registry.dispatch(
+        call("create", thread_key="cli:new"), context=CTX
+    )
+    assert "already exists" in result
+    assert "registered" not in result
+
+
+async def test_create_with_policy_on_existing_thread_updates_override(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """A policy on an already-existing thread is applied, not silently dropped."""
+    await store.ensure_session("cli:new", "cli")
+    registry, _ = make_registry(store)
+    result = await registry.dispatch(
+        call(
+            "create",
+            thread_key="cli:new",
+            policy={"deltas": True, "tools": True, "results": "inline"},
+        ),
+        context=CTX,
+    )
+    assert "already exists" in result
+    assert await store.stream_policy("cli:new") == {
+        "deltas": True, "tools": True, "results": "inline", "send_guard": False
+    }
+
+
+async def test_create_with_a_bad_policy_errors_and_creates_no_override(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    registry, _ = make_registry(store)
+    result = await registry.dispatch(
+        call("create", thread_key="cli:new", policy={"results": "nope"}),
+        context=CTX,
+    )
+    assert result.startswith("error: invalid stream policy")
+    assert await store.channel("cli:new") is None  # no row created
+
+
 async def test_delete_removes_a_thread(
     engine: AsyncEngine, store: MessageStore
 ) -> None:

@@ -70,6 +70,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     hooks = raw.get("hooks") or {}
     compaction = raw.get("compaction") or {}
     update = raw.get("update") or {}
+    stream = raw.get("stream") or {}
     return Config(
         models=models,
         temperature=temperature,
@@ -117,6 +118,9 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         compaction_windows=coerce.windows(compaction.get("windows") or {}),
         update_autonomy=coerce.autonomy(update.get("autonomy", "clean-only")),
         update_schedule=str(update.get("schedule") or ""),
+        stream_channel_defaults=coerce.stream_channel_defaults(
+            stream.get("channel_defaults")
+        ),
     )
 
 

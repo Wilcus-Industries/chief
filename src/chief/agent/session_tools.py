@@ -1,6 +1,7 @@
 """Native tool for the agent to manage its own sessions (threads)."""
 
 from chief.agent.manager import SessionManager
+from chief.policy import RESULT_MODES, StreamPolicy
 from chief.provider.base import ToolSpec
 from chief.tools import Tool, ToolContext, ToolRegistry
 
@@ -11,7 +12,11 @@ _SPEC = ToolSpec(
         "action=list takes nothing and reports every thread. "
         "action=create needs `thread_key` (plus optional `channel`, defaulting "
         "to this thread's channel); it pre-registers the thread row so it shows "
-        "up in list and the web cockpit, without starting a live session. "
+        "up in list and the web cockpit, without starting a live session. An "
+        "optional `policy` object seeds the thread's live stream policy "
+        "(deltas/tools booleans, results one of lazy|inline|off, send_guard); "
+        "on a thread that already exists a `policy` updates its override "
+        "(without one, create just reports the thread already exists). "
         "action=delete needs `thread_key` and removes the thread entirely. "
         "action=clear needs `thread_key` and wipes its transcript, keeping the "
         "row. delete/clear refuse your own thread and any thread mid-turn."
@@ -27,6 +32,16 @@ _SPEC = ToolSpec(
             "channel": {
                 "type": "string",
                 "description": "channel for create; defaults to this thread's",
+            },
+            "policy": {
+                "type": "object",
+                "description": "create-only: seed the thread's stream policy",
+                "properties": {
+                    "deltas": {"type": "boolean"},
+                    "tools": {"type": "boolean"},
+                    "results": {"type": "string", "enum": list(RESULT_MODES)},
+                    "send_guard": {"type": "boolean"},
+                },
             },
         },
         "required": ["action"],
@@ -52,10 +67,25 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
         )
 
     async def _create(
-        context: ToolContext, thread_key: str, channel: str | None
+        context: ToolContext,
+        thread_key: str,
+        channel: str | None,
+        policy: dict[str, object] | None,
     ) -> str:
-        await manager.create(thread_key, channel or context.channel)
-        return f"session '{thread_key}' registered"
+        stream_policy = None
+        if policy is not None:
+            try:
+                stream_policy = StreamPolicy.from_dict(policy).to_dict()
+            except ValueError as exc:
+                return f"error: invalid stream policy: {exc}"
+        created = await manager.create(
+            thread_key, channel or context.channel, stream_policy=stream_policy
+        )
+        if created:
+            return f"session '{thread_key}' registered"
+        if stream_policy is not None:
+            return f"session '{thread_key}' already exists — stream policy updated"
+        return f"session '{thread_key}' already exists"
 
     async def _delete(context: ToolContext, thread_key: str) -> str:
         if thread_key == context.thread_key:
@@ -84,6 +114,7 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
         context: ToolContext | None = None,
         thread_key: str | None = None,
         channel: str | None = None,
+        policy: dict[str, object] | None = None,
     ) -> str:
         if context is None:
             return "error: session needs a session context"
@@ -94,7 +125,7 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
         if not thread_key:
             return f"error: {action} needs thread_key"
         if action == "create":
-            return await _create(context, thread_key, channel)
+            return await _create(context, thread_key, channel, policy)
         if action == "delete":
             return await _delete(context, thread_key)
         return await _clear(context, thread_key)

@@ -80,6 +80,7 @@ template line.
 | `compaction.keep_recent` | `compaction_keep_recent` | `int` | `20` | — |
 | `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
 | `compaction.windows.<model>` | `compaction_windows` | `dict[str,int]` | `{}` | — |
+| `stream.channel_defaults.<channel>` | `stream_channel_defaults` | `dict[str,StreamPolicy]` | `{imessage,web: rich}` | — |
 
 `Config.default_model` is a derived property: `self.models["default"]`.
 
@@ -102,6 +103,14 @@ Notes on specific keys:
   `default_window`. Set a `windows` entry for any model on a non-OpenRouter
   backend (a local proxy). `/compact` (and `chief compact <thread>`) forces a
   compaction now regardless of the threshold.
+- **`stream.channel_defaults` seeds the per-thread live stream policy** — each
+  channel maps to `{deltas, tools, results: lazy|inline|off, send_guard}`,
+  fields unset default off. `imessage` and `web` ship rich (the observer
+  surfaces); unlisted channels resolve coarse (tick-only). A session row's own
+  `stream_policy` override (the agent's `session` create tool) beats the channel
+  default (`chief.policy.resolve`). It governs the **live stream only** — a bad
+  `results` mode is refused at boot; `/history` always renders the full
+  transcript regardless of policy.
 
 ### The owner_handles coercion trap
 

@@ -28,6 +28,11 @@ class SessionRow(_Stamped, Base):
     thread_key: Mapped[str] = mapped_column(String, primary_key=True)
     channel: Mapped[str] = mapped_column(String)
     model_override: Mapped[str | None] = mapped_column(String, default=None)
+    # Per-thread stream policy (StreamPolicy.to_dict); None = fall back to the
+    # channel default. Nullable so _reconcile_columns adds it to legacy DBs.
+    stream_policy: Mapped[dict[str, object] | None] = mapped_column(
+        JSON, default=None
+    )
 
 
 class MessageRow(_Stamped, Base):

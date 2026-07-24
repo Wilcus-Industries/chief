@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from chief.policy import DEFAULT_CHANNEL_DEFAULTS, StreamPolicy
+
 
 class ConfigError(ValueError):
     """A config.yaml value is the wrong shape and can't be coerced.
@@ -107,6 +109,12 @@ class Config:
     # only, clean-only = apply clean updates and ask on a collision, full =
     # resolve collisions unattended and report afterwards. The owner asking
     # chief directly is always allowed, whatever this says.
+    # Per-channel default stream policy (rich for the imessage/web observer
+    # surfaces, coarse elsewhere). A session row's own override beats this; see
+    # chief.policy.resolve. Real default is built in load.py (the dataclass trap).
+    stream_channel_defaults: dict[str, StreamPolicy] = field(
+        default_factory=lambda: dict(DEFAULT_CHANNEL_DEFAULTS)
+    )
     update_autonomy: str = "clean-only"
     # Cron spec for chief's own update schedule ("" = none). Config is the
     # source of truth — chief creates the schedule from this and re-creates it

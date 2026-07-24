@@ -22,6 +22,11 @@ OnDelta = Callable[[str], Awaitable[None]]
 # persists) — this one is purely for live streaming.
 OnTool = Callable[[ToolCall], Awaitable[None]]
 
+# Fires after a tool result lands (post-screen), so an observer can stream the
+# result body live (inline mode). Distinct from on_tool, which fires before the
+# call runs and so has no result yet.
+OnToolResult = Callable[[ToolCall, str], Awaitable[None]]
+
 # Screens one tool result before it is appended for the model. Supplied by
 # the session from the post_tool hooks; see chief.hooks.posttool.
 PostTool = Callable[[ToolCall, str], Awaitable[str]]
@@ -66,6 +71,7 @@ async def run_turn(
     post_tool: PostTool | None = None,
     on_commit: OnCommit | None = None,
     on_tool: OnTool | None = None,
+    on_tool_result: OnToolResult | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
@@ -100,6 +106,8 @@ async def run_turn(
             messages.append(tool_message)
             if on_commit is not None:
                 await on_commit(tool_message)
+            if on_tool_result is not None:
+                await on_tool_result(call, result)
     return TurnResult(
         text="error: turn exceeded the tool-call iteration limit", usage=usage
     )
