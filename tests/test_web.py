@@ -1,6 +1,7 @@
 """Web UI: auth, chat send, SSE frames, monitor list."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -194,6 +195,37 @@ async def test_events_requires_auth(web: WebParts) -> None:
     client, *_ = web
     response = await client.get("/events")
     assert response.status_code == 401
+
+
+async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> None:
+    """The central mechanism end to end: an authed browser holding GET /events
+    receives a hub tick as a real SSE `data:` frame — the leg the socket-side
+    acceptance test can't exercise. (ASGITransport buffers the body, so the
+    feeder closes the stream after the tick to let the response complete.)"""
+    client, _, _, _, _, hub = web
+    await login(client)
+
+    async def feed() -> None:
+        while not hub._queues:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.tick("cli:home", "cli", "hi back")
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "tick", "thread": "cli:home",
+         "channel": "cli", "preview": "hi back"},
+    ]
 
 
 async def test_monitor_list_route(web: WebParts) -> None:
