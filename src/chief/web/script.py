@@ -1,10 +1,15 @@
-"""The web UI client, served at /app.js. Buffers, SSE, readline completion."""
+"""The web UI client, served at /app.js. Buffers, send, readline completion;
+the SSE stream client and tool rows live in script_tools.py (concatenated)."""
+
+from chief.web.script_policy import POLICY_SCRIPT
+from chief.web.script_tools import TOOL_SCRIPT
 
 SCRIPT = """
 const el = (id) => document.getElementById(id);
 const log = el("log"), input = el("input"), pop = el("complete");
 const state = {current: null, sessions: [], commands: [], matches: [], sel: -1};
 const unread = new Set();
+const snippets = {};  /* thread -> last reply preview, shown in the sidebar */
 let live = null;
 
 const bare = (tk) => tk.startsWith("web:") ? tk.slice(4) : null;
@@ -30,13 +35,13 @@ function renderBuffers(){
       (unread.has(s.thread) ? "unread" : "");
     li.append(span("idx", i), span("name", label(s.thread)));
     if (s.channel !== "web") li.append(span("badge", s.channel));
+    if (snippets[s.thread]) li.append(span("snippet", snippets[s.thread]));
     if (s.channel === "web" && s.thread !== "web:main"){
       const x = span("kill", "\\u00d7"); x.title = "delete buffer";
       x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
       li.append(x);
     }
-    li.onclick = () => switchTo(s.thread);
-    list.appendChild(li);
+    li.onclick = () => switchTo(s.thread); list.appendChild(li);
   });
 }
 
@@ -44,8 +49,7 @@ async function delBuf(tk){
   await fetch("/delete", {method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify({thread: tk})});
-  unread.delete(tk);
-  if (state.current === tk) await switchTo("web:main");
+  unread.delete(tk); if (state.current === tk) await switchTo("web:main");
   await loadSessions();
 }
 
@@ -60,15 +64,8 @@ function setStatus(tk){
 }
 
 async function switchTo(tk){
-  state.current = tk; live = null; unread.delete(tk);
-  setStatus(tk); renderBuffers();
-  const rows = await getJSON("/history?thread=" + encodeURIComponent(tk)) || [];
-  log.replaceChildren();
-  if (!rows.length){
-    const d = span("empty", "no messages yet \\u2014 type below to start.");
-    log.appendChild(d);
-  }
-  rows.forEach((r) => addMsg(r.role, r.text));
+  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
+  await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
 }
 
@@ -79,27 +76,6 @@ function addMsg(role, text, who){
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
   log.scrollTop = log.scrollHeight; return body;
-}
-
-/* ---- live stream ---- */
-function connect(){
-  const es = new EventSource("/events");
-  const conn = el("conn"), lbl = el("conn-label");
-  es.onopen = () => { conn.className = "seg live"; lbl.textContent = "live"; };
-  es.onerror = () => { conn.className = "seg down"; lbl.textContent = "offline"; };
-  es.onmessage = (e) => {
-    const f = JSON.parse(e.data);
-    if (!state.sessions.some((s) => s.thread === f.thread)){ loadSessions(); return; }
-    if (f.thread !== state.current){ unread.add(f.thread); renderBuffers(); return; }
-    if (f.type === "delta"){
-      if (!live) live = addMsg("chief", ""); live.textContent += f.text;
-    } else if (f.type === "final"){
-      if (live){ live.textContent = f.text; live = null; } else addMsg("chief", f.text);
-    } else if (f.type === "peer"){
-      live = null; addMsg("peer", f.text, f.sender);  // the other party
-    }
-    log.scrollTop = log.scrollHeight;
-  };
 }
 
 async function loadSessions(){
@@ -118,6 +94,10 @@ el("f").onsubmit = async (e) => {
   e.preventDefault();
   if (acceptCompletion()) return;
   const text = input.value.trim(); if (!text || input.disabled) return;
+  const s = state.sessions.find((x) => x.thread === state.current);
+  if (s && s.send_guard &&
+      !confirm(`This reply goes to ${label(state.current)} on ${s.channel} — `
+        + `not you. Send it?`)) return;
   addMsg("owner", text); input.value = ""; hidePop();
   await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
     body: JSON.stringify({thread: state.current, text})});
@@ -184,6 +164,6 @@ async function monitors(){
 /* ---- boot ---- */
 (async () => {
   state.commands = await getJSON("/commands") || [];
-  await loadSessions(); connect(); monitors(); setInterval(monitors, 10000);
+  await loadSessions(); monitors(); setInterval(monitors, 10000);
 })();
-"""
+""" + POLICY_SCRIPT + TOOL_SCRIPT

@@ -7,12 +7,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
+from chief.adapters.base import Adapter, Message
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
 from chief.mcpclient.manager import ServerConfig
+from chief.policy import RICH, StreamPolicy
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
@@ -178,49 +181,137 @@ def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
     assert "bad" in caplog.text
 
 
-async def test_web_mirror_is_wired_by_app_start(
+async def test_nonweb_turn_ticks_through_real_dispatch(
     tmp_path: Path, sock_path: Path
 ) -> None:
-    # Regression: App.start() must call web_adapter.start() so the mirror
-    # subscribes to the bus. Without it the cockpit never sees traffic on any
-    # non-web channel — the whole "drive any thread from the web" slice is dead
-    # in the real daemon even though hand-started-adapter unit tests pass.
-    app, streams = await boot(make_config(tmp_path, sock_path), FakeProvider([]))
-    queue = app.web_adapter.listen()
+    # Central mechanism, end to end: a completed turn on a non-web channel runs
+    # through the real dispatcher → session → hub and lands one coarse tick on a
+    # browser observer — the whole "watch any thread from the web" slice, with a
+    # system-sender wake standing in for a monitor/cron turn.
+    app, streams = await boot(
+        make_config(tmp_path, sock_path), FakeProvider([text_turn("hi back")])
+    )
+    queue = app.hub.listen()
     try:
-        await app.bus.publish(
-            Event(
-                type="message.inbound",
-                channel="imessage",
-                payload={
-                    "thread_key": "imessage:+15551112222",
-                    "sender": "+15551112222",
-                    "text": "hey",
-                },
+        await app.dispatcher.handle(
+            Message(
+                channel="cli", sender="system",
+                thread_key="cli:home", text="ping",
             )
         )
-        await app.bus.publish(
-            Event(
-                type="message.outbound",
-                channel="imessage",
-                payload={"thread_key": "imessage:+15551112222", "text": "hi back"},
-            )
-        )
-        peer = await asyncio.wait_for(queue.get(), timeout=5)
-        final = await asyncio.wait_for(queue.get(), timeout=5)
-        assert peer == {
-            "type": "peer",
-            "thread": "imessage:+15551112222",
-            "text": "hey",
-            "sender": "+15551112222",
-        }
-        assert final == {
-            "type": "final",
-            "thread": "imessage:+15551112222",
-            "text": "hi back",
+        tick = await asyncio.wait_for(queue.get(), timeout=5)
+        assert tick == {
+            "type": "tick", "thread": "cli:home",
+            "channel": "cli", "preview": "hi back",
         }
     finally:
         await shutdown(app, streams)
+
+
+def _drain_hub(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
+    frames = []
+    while not queue.empty():
+        frames.append(queue.get_nowait())
+    return frames
+
+
+async def test_focused_nonweb_turn_streams_over_real_dispatch(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Central mechanism end to end: a client tapped into a non-web thread gets
+    # that turn's inbound text, a name-only tool tick as the call fires, live
+    # deltas, and the coarse tick — real dispatcher → session → loop → hub →
+    # subscribed queue, with a system-sender wake standing in for a monitor.
+    call = ToolCall(
+        id="c1",
+        name="read_file",
+        arguments={"path": "packages/build-imessage/manifest.yaml"},
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("read the manifest")]
+    )
+    # cli defaults coarse; opt it into RICH to keep this slice's rich-stream intent.
+    config = make_config(tmp_path, sock_path, stream_channel_defaults={"cli": RICH})
+    app, streams = await boot(config, provider)
+    queue = app.hub.listen("cli:home")
+    try:
+        await app.dispatcher.handle(
+            Message(
+                channel="cli", sender="system", thread_key="cli:home", text="ping"
+            )
+        )
+        frames = _drain_hub(queue)
+    finally:
+        await shutdown(app, streams)
+    by_type = {f["type"]: f for f in frames}
+    assert by_type["inbound"] == {
+        "type": "inbound", "thread": "cli:home", "text": "ping"
+    }
+    # Name only — no args/result on the wire (they load via lazy fetch, AC6).
+    assert by_type["tool"] == {
+        "type": "tool", "thread": "cli:home", "call_id": "c1", "name": "read_file"
+    }
+    assert [f for f in frames if f["type"] == "delta"], "expected live deltas"
+    assert by_type["tick"]["thread"] == "cli:home"
+
+
+async def test_two_focused_clients_get_independent_streams(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # AC4: two clients focused on different threads each receive their own rich
+    # stream; the other sees only the broadcast coarse tick, never its deltas.
+    provider = FakeProvider([text_turn("aye"), text_turn("bee")])
+    config = make_config(tmp_path, sock_path, stream_channel_defaults={"cli": RICH})
+    app, streams = await boot(config, provider)
+    q_a = app.hub.listen("cli:a")
+    q_b = app.hub.listen("cli:b")
+    try:
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:a", text="pa")
+        )
+        a_first, b_first = _drain_hub(q_a), _drain_hub(q_b)
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:b", text="pb")
+        )
+        a_second, b_second = _drain_hub(q_a), _drain_hub(q_b)
+    finally:
+        await shutdown(app, streams)
+    # The cli:a turn: q_a streams its rich frames, q_b gets only the coarse tick.
+    assert {"inbound", "delta", "final", "tick"} <= {f["type"] for f in a_first}
+    assert [f["type"] for f in b_first] == ["tick"]
+    assert b_first[0]["thread"] == "cli:a"
+    # The cli:b turn: mirror image.
+    assert {"inbound", "delta", "final", "tick"} <= {f["type"] for f in b_second}
+    assert [f["type"] for f in a_second] == ["tick"]
+    assert a_second[0]["thread"] == "cli:b"
+
+
+async def test_persisted_row_policy_drives_real_hub_output(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # A session-row stream_policy (deltas off, tools on) drives the real
+    # dispatcher → session → loop → hub end to end: the tapped observer sees the
+    # tool tick but no delta, proving the persisted override gates live output.
+    call = ToolCall(id="c1", name="read_file", arguments={"path": "x"})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        await app.store.ensure_session("cli:home", "cli")
+        await app.store.set_stream_policy(
+            "cli:home", StreamPolicy(deltas=False, tools=True, results="lazy").to_dict()
+        )
+        queue = app.hub.listen("cli:home")
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:home", text="ping")
+        )
+        frames = _drain_hub(queue)
+    finally:
+        await shutdown(app, streams)
+    types = [f["type"] for f in frames]
+    assert "tool" in types
+    assert "delta" not in types
 
 
 async def test_switch_model_is_gated_and_persists_the_override(
@@ -524,6 +615,60 @@ async def test_prompt_schedule_creation_raises_no_card(
         assert len(await app.cron_service.list_enabled()) == 1
     finally:
         await shutdown(app, streams)
+
+
+class _CapturingAdapter(Adapter):
+    """A registered origin adapter that captures its outbound sends — the
+    fake device transport at the edge (#277). Everything upstream of ``send``
+    (the web route, the dispatcher, the session turn) is the real wiring."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.sent: list[tuple[str, str]] = []
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sent.append((thread_key, text))
+
+
+async def test_web_send_drives_the_real_cross_channel_dispatch_path(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # #277: an authed POST /send for a non-web 1:1 thread runs through the REAL
+    # dispatcher → session turn → the thread's registered origin adapter, and
+    # the outbound reply mirrors to the web hub. Only the model (FakeProvider)
+    # and the device transport (the capturing adapter's send) are faked.
+    config = make_config(tmp_path, sock_path, web_password="hunter2")
+    app, streams = await boot(config, FakeProvider([text_turn("on my way")]))
+    device = _CapturingAdapter("imessage")
+    app.dispatcher.register(device)
+    assert app.web_server is not None
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app.web_server.app),
+        base_url="http://web",
+    )
+    hub = app.hub.listen()  # coarse subscriber sees the outbound mirror tick
+    try:
+        await app.store.ensure_session("+15551234567", "imessage")
+        resp = await client.post("/login", data={"password": "hunter2"})
+        client.cookies.update(resp.cookies)
+        resp = await client.post(
+            "/send", json={"thread": "+15551234567", "text": "you around?"}
+        )
+        assert resp.status_code == 202
+        tick = await asyncio.wait_for(hub.get(), timeout=5)
+    finally:
+        await client.aclose()
+        await shutdown(app, streams)
+    # The reply exited the thread's real origin adapter, keyed on its real key.
+    assert device.sent == [("+15551234567", "on my way")]
+    # …and mirrored to the hub as the coarse tick the cockpit watches.
+    assert tick == {
+        "type": "tick", "thread": "+15551234567",
+        "channel": "imessage", "preview": "on my way",
+    }
 
 
 async def test_scheduled_command_gets_the_owner_send_guard(

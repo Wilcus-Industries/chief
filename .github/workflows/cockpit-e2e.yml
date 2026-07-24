@@ -1,0 +1,33 @@
+# Opt-in browser e2e for the live cockpit (#268). Manually dispatched — it
+# launches a real Chromium and is not part of the merge gate (the default
+# `uv run pytest` excludes the `browser` marker via pyproject addopts).
+#
+# Central mechanism, never simulated: a real daemon on localhost with only the
+# LLM stubbed (the scripted FakeProvider), driving the shipped /app.js in
+# Chromium — dispatcher → session → observer hub → SSE → client render, plus
+# the stream-policy toggle and the reply-from-web send guard.
+name: Cockpit E2E (opt-in)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  browser:
+    name: Live cockpit in real Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Install the Chromium browser binary
+        run: uv run playwright install --with-deps chromium
+
+      - name: Browser e2e
+        run: uv run pytest -m browser

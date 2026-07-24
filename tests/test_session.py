@@ -1,15 +1,34 @@
 """Sessions: serial turn queue, persistence, restart resume, concurrency cap."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
+
+import pytest
 
 from chief.agent.manager import SessionManager
 from chief.persistence.store import MessageStore
-from chief.provider.base import ToolSpec
+from chief.provider.base import ProviderEvent, ToolSpec
 from chief.selfedit.recovery import RestartController
 from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn, tool_turn
+
+
+class _RaisingProvider:
+    """Raises mid-stream, after recording the call — simulates a provider or
+    network failure once the turn is already underway (#261's atomic-
+    persistence finding)."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, Any]]] = []
+
+    async def stream(
+        self, *, model: str, messages: list[dict[str, Any]], tools: list[ToolSpec]
+    ) -> AsyncIterator[ProviderEvent]:
+        self.calls.append([dict(m) for m in messages])
+        raise RuntimeError("provider connection dropped")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
 
 
 async def noop_delta(text: str) -> None:
@@ -122,6 +141,165 @@ async def test_semaphore_caps_concurrent_turns_across_threads(
     assert len(provider.calls) == 2
 
 
+async def test_tool_call_message_persists_before_its_result(
+    store: MessageStore,
+) -> None:
+    """Each turn message lands in the store as it's produced, not batched at
+    the end — so a concurrent reader (the web history-tool route, #261) sees
+    the assistant's tool_calls message committed while the tool is still
+    running, with only that call's result missing."""
+    gate = asyncio.Event()
+
+    async def slow_tool() -> str:
+        await gate.wait()
+        return "the slow result"
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(ToolSpec(name="slow", description="", parameters={}), slow_tool)
+    )
+    provider = FakeProvider([tool_turn("slow", {}), text_turn("done")])
+    manager = SessionManager(
+        provider=provider,
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="test-model",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    session = await manager.get_or_create("cli:t", "cli")
+    task = asyncio.create_task(session.run_turn("go slow", noop_delta))
+    await asyncio.sleep(0.05)  # let the loop commit the call and start dispatch
+
+    mid_turn = await store.load("cli:t")
+    assert mid_turn[-1]["role"] == "assistant"
+    assert mid_turn[-1]["tool_calls"][0]["function"]["name"] == "slow"
+    assert not any(m["role"] == "tool" for m in mid_turn)
+
+    gate.set()
+    await task
+    finished = await store.load("cli:t")
+    assert any(
+        m["role"] == "tool" and m["content"] == "the slow result" for m in finished
+    )
+
+
+async def test_resume_repairs_a_dangling_tool_call_from_a_crash(
+    store: MessageStore,
+) -> None:
+    """A process death between committing the assistant's tool_calls message
+    and its result would otherwise leave that call's result missing forever:
+    the transcript view would report it pending indefinitely, and the
+    provider requires every tool_call answered before the next turn. On
+    resume the manager closes it out with an error result instead."""
+    await store.ensure_session("cli:t", "cli")
+    await store.append(
+        "cli:t",
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "slow", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    )
+    manager = make_manager(FakeProvider([]), store)
+    session = await manager.get_or_create("cli:t", "cli")
+
+    repaired = {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "error: interrupted before this tool call finished "
+        "(process restarted)",
+    }
+    assert session._messages[-1] == repaired
+    assert (await store.load("cli:t"))[-1] == repaired  # persisted, not just in memory
+
+
+async def test_resume_repairs_a_parallel_call_crashed_mid_results(
+    store: MessageStore,
+) -> None:
+    """A parallel tool_calls message can crash after only some of its results
+    land, leaving the tail on a tool-role message rather than the assistant
+    one. Repair must still find the dangling call by scanning for the last
+    assistant tool_calls message, not by checking history[-1]'s role (#261)."""
+    await store.ensure_session("cli:t", "cli")
+    await store.append(
+        "cli:t",
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "slow", "arguments": "{}"},
+                    },
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {"name": "slow", "arguments": "{}"},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "done"},
+        ],
+    )
+    manager = make_manager(FakeProvider([]), store)
+    session = await manager.get_or_create("cli:t", "cli")
+
+    repaired = {
+        "role": "tool",
+        "tool_call_id": "c2",
+        "content": "error: interrupted before this tool call finished "
+        "(process restarted)",
+    }
+    assert session._messages[-1] == repaired
+    assert (await store.load("cli:t"))[-1] == repaired  # persisted, not just in memory
+    # c1's real result must survive untouched.
+    assert any(m == {"role": "tool", "tool_call_id": "c1", "content": "done"}
+               for m in session._messages)
+
+
+async def test_a_provider_crash_keeps_memory_in_sync_with_the_store(
+    store: MessageStore,
+) -> None:
+    """The user message is persisted up front; if the provider then raises,
+    in-memory history must still learn about it (and anything `_live_append`
+    already committed) instead of silently orphaning the turn (#261)."""
+    provider = _RaisingProvider()
+    manager = make_manager(provider, store)  # type: ignore[arg-type]
+    session = await manager.get_or_create("cli:t", "cli")
+
+    with pytest.raises(RuntimeError):
+        await session.run_turn("hello", noop_delta)
+
+    expected = [{"role": "user", "content": "hello"}]
+    assert session._messages == expected
+    assert await store.load("cli:t") == expected
+
+
+async def test_resume_leaves_a_complete_transcript_untouched(
+    store: MessageStore,
+) -> None:
+    provider = FakeProvider([text_turn("hi there")])
+    manager = make_manager(provider, store)
+    session = await manager.get_or_create("cli:t", "cli")
+    await session.run_turn("hello", noop_delta)
+
+    resumed = await make_manager(FakeProvider([]), store).get_or_create("cli:t", "cli")
+    assert resumed._messages == await store.load("cli:t")
+
+
 async def test_run_turn_commits_but_does_not_fire_restart(
     store: MessageStore,
 ) -> None:
@@ -163,14 +341,18 @@ async def test_run_turn_commits_but_does_not_fire_restart(
     session = await manager.get_or_create("cli:t", "cli")
     await session.run_turn("install imessage", noop_delta)
 
-    # Committed, but the restart is only requested — not fired here.
-    assert events == ["commit"]
+    # Committed (now incrementally as each message lands — see #261's
+    # mid-turn persistence — so several "commit"s, not one), but the restart
+    # is only requested, never fired here.
+    assert events and "restart" not in events
     saved = await store.load("cli:t")
     assert saved[0] == {"role": "user", "content": "install imessage"}
     assert saved[-1] == {"role": "assistant", "content": "done, back soon"}
-    # The pending restart fires once the boundary owner calls it.
+    # The pending restart fires once the boundary owner calls it — strictly
+    # after every commit above, never interleaved with them.
     await controller.fire_if_requested()
-    assert events == ["commit", "restart"]
+    assert events[-1] == "restart"
+    assert events.count("restart") == 1
 
 
 async def test_get_or_create_returns_the_same_session(store: MessageStore) -> None:

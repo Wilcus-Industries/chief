@@ -100,9 +100,10 @@ async def test_owner_events_are_skipped_strangers_still_fire(
 async def test_outbound_events_never_fire_a_monitor(
     engine: AsyncEngine,
 ) -> None:
-    """Chief's own replies are published as ``message.outbound`` for the web
-    mirror. Their payload has no sender, so a ``^(?!owner$)``-style predicate
-    would match — the service must skip every non-inbound event."""
+    """A non-inbound event (e.g. a legacy ``message.outbound``) has no sender,
+    so a ``^(?!owner$)``-style predicate would match — the service must skip
+    every non-inbound event. Core no longer emits outbound; this guard stays as
+    defense-in-depth against any future non-inbound publisher."""
     bus = EventBus()
     service, wake = make_service(engine, bus)
     await service.create(

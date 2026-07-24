@@ -1,6 +1,7 @@
 """Web UI: auth, chat send, SSE frames, monitor list."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -9,11 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
-from chief.bus import Event, EventBus
+from chief.approvals import Approval, ApprovalBroker
+from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
+from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import COARSE, DEFAULT_CHANNEL_DEFAULTS, RICH
 from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
@@ -37,14 +41,21 @@ def _palette() -> list[str]:
 
 
 WebParts = tuple[
-    httpx.AsyncClient, WebAdapter, MonitorService, MessageStore, SessionManager
+    httpx.AsyncClient,
+    WebAdapter,
+    MonitorService,
+    MessageStore,
+    SessionManager,
+    ObserverHub,
+    ApprovalBroker,
 ]
 
 
 @pytest.fixture
 def web(engine: AsyncEngine) -> WebParts:
     HANDLED.clear()
-    adapter = WebAdapter()
+    hub = ObserverHub()
+    adapter = WebAdapter(hub)
     factory = make_session_factory(engine)
     monitors = MonitorService(
         factory,
@@ -61,13 +72,15 @@ def web(engine: AsyncEngine) -> WebParts:
         system_prompt="s",
         max_concurrent=4,
     )
+    approvals = ApprovalBroker()
     app = build_web_app(
-        Auth("hunter2"), adapter, handle, monitors, store, _palette, manager
+        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
+        approvals, DEFAULT_CHANNEL_DEFAULTS, ("+15550009999",),
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
     )
-    return client, adapter, monitors, store, manager
+    return client, adapter, monitors, store, manager, hub, approvals
 
 
 async def login(client: httpx.AsyncClient) -> None:
@@ -130,7 +143,7 @@ async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
 async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
     """A non-web thread keeps its real key and its origin channel (resolved from
     the store), so the turn's reply exits on that channel — not a web buffer."""
-    client, _adapter, _monitors, store, _ = web
+    client, _adapter, _monitors, store, _, _, _ = web
     await store.ensure_session("+15551234567", "imessage")
     await login(client)
     response = await client.post(
@@ -147,7 +160,7 @@ async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
 async def test_send_refuses_a_group_thread(web: WebParts) -> None:
     """Groups have no core send path (imsg only); the cockpit keeps them view-
     only, and the route refuses a send rather than run an undeliverable turn."""
-    client, _adapter, _monitors, store, _ = web
+    client, _adapter, _monitors, store, _, _, _ = web
     group = "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c"
     await store.ensure_session(group, "imessage")
     await login(client)
@@ -157,73 +170,52 @@ async def test_send_refuses_a_group_thread(web: WebParts) -> None:
     assert HANDLED == []
 
 
+async def test_sessions_marks_only_a_non_owner_audience_guarded(
+    web: WebParts,
+) -> None:
+    """send_guard is True only for a deliverable non-owner thread (external 1:1
+    iMessage). The owner self-DM, a cli thread, and web buffers are owner-only."""
+    client, _adapter, _monitors, store, _, _, _ = web
+    await store.ensure_session("+15551234567", "imessage")  # external peer
+    await store.ensure_session("+15550009999", "imessage")  # owner self-DM
+    await store.ensure_session("cli:t", "cli")
+    await store.ensure_session("web:main", "web")
+    await login(client)
+    rows = (await client.get("/sessions")).json()
+    guard = {r["thread"]: r["send_guard"] for r in rows}
+    assert guard == {
+        "+15551234567": True,
+        "+15550009999": False,
+        "cli:t": False,
+        "web:main": False,
+    }
+
+
 async def test_adapter_broadcasts_frames_to_listeners() -> None:
-    adapter = WebAdapter()
-    queue = adapter.listen()
+    """A web-origin turn streams its delta/final to the browser via the hub —
+    to the client watching that thread, not every connected one."""
+    hub = ObserverHub()
+    adapter = WebAdapter(hub)
+    queue = hub.listen("web:main")
     await adapter.send_delta("web:main", "he")
     await adapter.send("web:main", "hello")
     delta = queue.get_nowait()
     final = queue.get_nowait()
     assert delta == {"type": "delta", "thread": "web:main", "text": "he"}
     assert final == {"type": "final", "thread": "web:main", "text": "hello"}
-    adapter.drop(queue)
+    hub.drop(queue)
     await adapter.send("web:main", "gone")
     assert queue.empty()
 
 
-async def test_mirror_relays_peer_inbound_and_outbound() -> None:
-    """With a bus, the adapter mirrors another channel's traffic: a non-owner
-    inbound becomes a peer frame, chief's reply a final frame."""
-    bus = EventBus()
-    adapter = WebAdapter(bus)
-    await adapter.start()
-    queue = adapter.listen()
-    await bus.publish(
-        Event(
-            type="message.inbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "sender": "+1", "text": "hi there"},
-        )
-    )
-    await bus.publish(
-        Event(
-            type="message.outbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "text": "hello back"},
-        )
-    )
+async def test_hub_tick_broadcasts_to_listeners() -> None:
+    """A coarse tick reaches every hub listener (the non-web observation path)."""
+    hub = ObserverHub()
+    queue = hub.listen()
+    hub.tick("cli:t", "cli", "hey")
     assert queue.get_nowait() == {
-        "type": "peer", "thread": "+1", "text": "hi there", "sender": "+1"
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hey"
     }
-    assert queue.get_nowait() == {
-        "type": "final", "thread": "+1", "text": "hello back"
-    }
-    await adapter.stop()
-
-
-async def test_mirror_skips_owner_inbound_and_web_channel() -> None:
-    """Owner inbound is shown optimistically by the browser (skip, no dup); web
-    threads use the direct send path, so their bus events never re-mirror."""
-    bus = EventBus()
-    adapter = WebAdapter(bus)
-    await adapter.start()
-    queue = adapter.listen()
-    await bus.publish(
-        Event(
-            type="message.inbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "sender": "owner", "text": "drive"},
-        )
-    )
-    await bus.publish(
-        Event(
-            type="message.outbound",
-            channel="web",
-            payload={"thread_key": "web:main", "text": "reply"},
-        )
-    )
-    assert queue.empty()
-    await adapter.stop()
 
 
 async def test_events_requires_auth(web: WebParts) -> None:
@@ -232,8 +224,163 @@ async def test_events_requires_auth(web: WebParts) -> None:
     assert response.status_code == 401
 
 
+async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> None:
+    """The central mechanism end to end: an authed browser holding GET /events
+    receives a hub tick as a real SSE `data:` frame — the leg the socket-side
+    acceptance test can't exercise. (ASGITransport buffers the body, so the
+    feeder closes the stream after the tick to let the response complete.)"""
+    client, _, _, _, _, hub, _ = web
+    await login(client)
+
+    async def feed() -> None:
+        while not hub._watchers:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.tick("cli:home", "cli", "hi back")
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "tick", "thread": "cli:home",
+         "channel": "cli", "preview": "hi back"},
+    ]
+
+
+async def test_events_thread_param_subscribes_to_that_thread(
+    web: WebParts,
+) -> None:
+    """The client-facing join: GET /events?thread= must feed the param straight
+    into hub.listen(thread) so a rich to_watchers frame for that thread reaches
+    this client. A param-name mismatch between the JS and the route would leave
+    the listener on the coarse (None) subscription — the rich frame would never
+    arrive and this assertion would fail (not hang: the hub close ends it)."""
+    client, _, _, _, _, hub, _ = web
+    await login(client)
+
+    async def feed() -> None:
+        while not hub._watchers:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.to_watchers("cli:home", {"type": "final", "thread": "cli:home",
+                                     "text": "done"})
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events?thread=cli:home") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "final", "thread": "cli:home", "text": "done"},
+    ]
+
+
+async def _noop_send(_: str) -> None:
+    return None
+
+
+async def test_approve_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    response = await client.post("/approve", json={"thread": "cli:t", "answer": "yes"})
+    assert response.status_code == 401
+
+
+async def test_approve_resolves_the_broker_like_an_origin_channel_answer(
+    web: WebParts,
+) -> None:
+    """Answering from the dashboard unblocks the same pending card an
+    origin-channel typed reply would — the identical broker, the identical
+    Approval verdict (#267 AC1/AC2's central mechanism)."""
+    client, _, _, _, _, _, approvals = web
+    await login(client)
+
+    card = asyncio.create_task(
+        approvals.ask("cli:t", "approve rm_rf? yes/no", _noop_send)
+    )
+    await asyncio.sleep(0.01)
+    response = await client.post(
+        "/approve", json={"thread": "cli:t", "answer": "yes"}
+    )
+    assert response.status_code == 200
+    assert await card is Approval.ONCE
+
+
+async def test_approve_racing_answers_only_one_resolves(web: WebParts) -> None:
+    """Two answers race for the same card; exactly one resolves — the other is
+    a no-op, never a second resolution (#267 AC3)."""
+    client, _, _, _, _, _, approvals = web
+    await login(client)
+
+    card = asyncio.create_task(approvals.ask("cli:t", "ok?", _noop_send))
+    await asyncio.sleep(0.01)
+    first = await client.post("/approve", json={"thread": "cli:t", "answer": "yes"})
+    second = await client.post("/approve", json={"thread": "cli:t", "answer": "no"})
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert await card is Approval.ONCE  # the winning (first) answer stands
+
+
+async def test_approve_with_no_pending_card_is_a_409(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/approve", json={"thread": "cli:t", "answer": "yes"}
+    )
+    assert response.status_code == 409
+
+
+async def test_events_replays_a_pending_card_to_a_late_joiner(
+    web: WebParts,
+) -> None:
+    """A blocked, watched thread shows the pending card instead of stalling
+    silently — even for a client that connects after the card was raised
+    (#267 AC4)."""
+    client, _, _, _, _, hub, approvals = web
+    await login(client)
+    card = asyncio.create_task(
+        approvals.ask("cli:home", "approve rm_rf?", _noop_send)
+    )
+    await asyncio.sleep(0.01)
+
+    async def feed() -> None:
+        while not hub._watchers:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events?thread=cli:home") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "approval", "thread": "cli:home", "question": "approve rm_rf?"},
+    ]
+    approvals.resolve("cli:home", "no")
+    assert await card is Approval.DENY
+
+
 async def test_monitor_list_route(web: WebParts) -> None:
-    client, _, monitors, _store, _ = web
+    client, _, monitors, _store, _, _, _ = web
     await login(client)
     assert (await client.get("/monitors")).text == "none"
     await monitors.create(
@@ -252,7 +399,7 @@ async def test_sessions_requires_auth(web: WebParts) -> None:
 
 
 async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append("web:main", [{"role": "user", "content": "hi"}])
@@ -266,7 +413,7 @@ async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
 
 
 async def test_history_renders_owner_and_chief_rows(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -296,6 +443,164 @@ async def test_history_without_thread_is_empty(web: WebParts) -> None:
     assert (await client.get("/history")).json() == []
 
 
+async def test_history_includes_collapsed_tool_rows(web: WebParts) -> None:
+    """A tool call shows as a name + call-id row, interleaved in order — no
+    args or result in the list payload (#261)."""
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.append(
+        "web:main",
+        [
+            {"role": "user", "content": "read that file"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 5_000_000},
+            {"role": "assistant", "content": "done"},
+        ],
+    )
+    response = await client.get("/history?thread=web:main")
+    assert len(response.content) < 10_000  # the huge tool result never leaks in
+    assert response.json() == [
+        {"role": "owner", "text": "read that file"},
+        {"role": "tool", "call_id": "c1", "name": "read_file"},
+        {"role": "chief", "text": "done"},
+    ]
+
+
+async def test_history_tool_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    response = await client.get("/history/tool?thread=web:main&call_id=c1")
+    assert response.status_code == 401
+
+
+async def test_history_tool_returns_args_and_result(web: WebParts) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.append(
+        "web:main",
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "/tmp/x"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "file contents"},
+        ],
+    )
+    response = await client.get("/history/tool?thread=web:main&call_id=c1")
+    assert response.json() == {
+        "status": "ok",
+        "name": "read_file",
+        "args": {"path": "/tmp/x"},
+        "result": "file contents",
+    }
+
+
+async def test_history_ignores_a_coarse_stream_policy(web: WebParts) -> None:
+    """AC5: a thread whose row carries an off/coarse policy still returns its
+    tool rows from /history and a loadable result from /history/tool — the live
+    stream policy never gates the persisted transcript."""
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.set_stream_policy(
+        "web:main", {"deltas": False, "tools": False, "results": "off"}
+    )
+    await store.append(
+        "web:main",
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "file contents"},
+        ],
+    )
+    rows = (await client.get("/history?thread=web:main")).json()
+    assert {"role": "tool", "call_id": "c1", "name": "read_file"} in rows
+    loaded = (await client.get("/history/tool?thread=web:main&call_id=c1")).json()
+    assert loaded["result"] == "file contents"
+
+
+async def test_history_tool_pending_when_result_not_yet_committed(
+    web: WebParts,
+) -> None:
+    """The call landed but its result hasn't — a real mid-turn snapshot, not
+    a fake status (#261's central mechanism: real stored wire messages)."""
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await store.append(
+        "web:main",
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "shell", "arguments": "{}"},
+                    }
+                ],
+            }
+        ],
+    )
+    response = await client.get("/history/tool?thread=web:main&call_id=c1")
+    assert response.json() == {"status": "pending"}
+
+
+async def test_history_tool_pending_while_call_id_unwritten_and_thread_busy(
+    web: WebParts,
+) -> None:
+    """The call id isn't in the store at all yet — the turn hasn't produced
+    it — but the thread is mid-turn, so this is pending, not an error."""
+    client, _, _, store, manager, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    session = await manager.get_or_create("web:main", "web")
+    async with session.lock:  # a turn holds this for its whole duration
+        response = await client.get(
+            "/history/tool?thread=web:main&call_id=never-committed"
+        )
+    assert response.json() == {"status": "pending"}
+
+
+async def test_history_tool_compacted_when_call_id_is_gone(web: WebParts) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    response = await client.get("/history/tool?thread=web:main&call_id=gone")
+    assert response.json() == {"status": "compacted"}
+
+
 async def test_commands_route_returns_palette(web: WebParts) -> None:
     client, *_ = web
     await login(client)
@@ -309,7 +614,7 @@ async def test_delete_requires_auth(web: WebParts) -> None:
 
 
 async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -322,7 +627,7 @@ async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
 
 
 async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
-    client, _, _, store, manager = web
+    client, _, _, store, manager, _, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -335,7 +640,7 @@ async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
 
 
 async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.ensure_session("imessage:+1", "imessage")
@@ -350,6 +655,96 @@ async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None
     assert {"web:main", "imessage:+1"} <= threads
 
 
+async def test_policy_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    assert (await client.get("/policy?thread=web:main")).status_code == 401
+    assert (await client.post("/policy", json={"thread": "x"})).status_code == 401
+
+
+async def test_policy_resolves_the_channel_default_absent_an_override(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["channel"] == "web"
+    assert data["override"] is None
+    assert data["default"] == RICH.to_dict()
+    assert data["resolved"] == RICH.to_dict()
+
+
+async def test_policy_post_sets_an_override_that_get_reflects(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    response = await client.post(
+        "/policy", json={"thread": "web:main", "policy": COARSE.to_dict()}
+    )
+    assert response.status_code == 200
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["override"] == COARSE.to_dict()
+    assert data["resolved"] == COARSE.to_dict()
+    assert data["default"] == RICH.to_dict()  # provenance: default unchanged
+
+
+async def test_policy_post_null_clears_the_override_back_to_default(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web", stream_policy=COARSE.to_dict())
+
+    response = await client.post(
+        "/policy", json={"thread": "web:main", "policy": None}
+    )
+    assert response.status_code == 200
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["override"] is None
+    assert data["resolved"] == RICH.to_dict()
+
+
+async def test_policy_post_rejects_an_unknown_results_mode(web: WebParts) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    response = await client.post(
+        "/policy",
+        json={"thread": "web:main", "policy": {"results": "nope"}},
+    )
+    assert response.status_code == 400
+    assert await store.stream_policy("web:main") is None  # untouched
+
+
+async def test_policy_override_survives_a_fresh_manager_lookup(
+    web: WebParts,
+) -> None:
+    """AC2: the manager the dispatcher reads per-turn sees the same value —
+    the write is the one and only override row, no cache to go stale."""
+    client, _, _, store, manager, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await client.post(
+        "/policy", json={"thread": "web:main", "policy": COARSE.to_dict()}
+    )
+    assert await manager.stream_policy("web:main") == COARSE.to_dict()
+
+
+async def test_policy_panel_and_route_wired_into_the_page(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    assert 'id="policy"' in (await client.get("/")).text
+    js = (await client.get("/app.js")).text
+    assert "/policy" in js and "loadPolicy" in js and "savePolicy" in js
+
+
 async def test_assets_are_served(web: WebParts) -> None:
     client, *_ = web
     css = await client.get("/app.css")
@@ -358,3 +753,5 @@ async def test_assets_are_served(web: WebParts) -> None:
     js = await client.get("/app.js")
     assert "javascript" in js.headers["content-type"]
     assert "EventSource" in js.text
+    assert "/approve" in js.text
+    assert "addApproval" in js.text

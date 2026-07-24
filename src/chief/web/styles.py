@@ -41,8 +41,9 @@ body{
   text-transform:uppercase; color:var(--faint);}
 #buflist{list-style:none; margin:0; padding:0; overflow-y:auto; flex:1;}
 #buflist li{
-  display:flex; align-items:baseline; gap:.55rem; padding:.32rem .9rem;
-  cursor:pointer; color:var(--dim); border-left:2px solid transparent;
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:.55rem;
+  padding:.32rem .9rem; cursor:pointer; color:var(--dim);
+  border-left:2px solid transparent;
 }
 #buflist li:hover{background:var(--bg2); color:var(--fg);}
 #buflist li.active{background:var(--bg0); color:var(--fg);
@@ -54,6 +55,8 @@ body{
   letter-spacing:.08em;}
 #buflist li.unread .name::after{content:" \\25CF"; color:var(--aqua);
   font-size:10px;}
+#buflist .snippet{flex-basis:100%; color:var(--faint); font-size:11px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 #buflist .kill{color:var(--faint); font-size:13px; line-height:1;
   padding:0 .15rem; border-radius:2px; opacity:0;}
 #buflist li:hover .kill{opacity:.7;}
@@ -64,6 +67,23 @@ body{
   border-radius:2px; cursor:pointer;
 }
 #newbuf:hover{background:var(--bg2); border-style:solid;}
+/* stream-policy panel */
+#policy{display:flex; align-items:center; gap:.9rem; flex-wrap:wrap;
+  padding:.4rem 1.3rem; font-size:12px; color:var(--dim);
+  background:var(--bg1); border-bottom:1px solid var(--bg2);}
+#policy label{display:flex; align-items:center; gap:.3rem; cursor:pointer;}
+.plabel{color:var(--faint); text-transform:uppercase; letter-spacing:.08em;
+  font-size:11px;}
+.psrc{padding:.05rem .4rem; border-radius:2px; text-transform:none;
+  letter-spacing:0;}
+.psrc.default{color:var(--faint); border:1px solid var(--bg3);}
+.psrc.override{color:var(--bg0); background:var(--orange);}
+#policy select{font:inherit; background:var(--bg2); color:var(--fg);
+  border:1px solid var(--bg3); border-radius:2px;}
+#pol-reset{font:inherit; font-size:11px; padding:.15rem .5rem;
+  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+#pol-reset:hover{background:var(--bg2);}
 /* transcript pane */
 #pane{flex:1; display:flex; flex-direction:column; min-height:0; position:relative;}
 #log{flex:1; overflow-y:auto; padding:1.1rem 1.3rem;}
@@ -76,6 +96,23 @@ body{
 .msg.owner .who::before{content:"owner\\2009>\\2009";}
 .msg.chief .who::before{content:"chief\\2009>\\2009";}
 .msg.peer .who::after{content:"\\2009>\\2009";}
+.msg.tool{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
+  color:var(--dim); font-size:12px;}
+.msg.tool .who{display:inline; margin:0; text-transform:none; color:var(--blue);}
+.toolload{font:inherit; font-size:11px; padding:.1rem .5rem; background:transparent;
+  color:var(--aqua); border:1px solid var(--bg3); border-radius:2px; cursor:pointer;}
+.toolload:hover{background:var(--bg2);}
+.toolbody{flex:1 0 100%; white-space:pre-wrap; word-break:break-word;
+  color:var(--fg); margin-top:.2rem;}
+.msg.approval{border:1px solid var(--yellow); border-radius:3px;
+  padding:.6rem .8rem; background:var(--bg1);}
+.msg.approval .who{color:var(--yellow);}
+.approval-btns{display:flex; gap:.5rem; margin-top:.5rem;}
+.approval-btns button{font:inherit; font-size:12px; padding:.25rem .7rem;
+  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+.approval-btns button:hover{background:var(--bg2);}
+.approval-btns button:disabled{opacity:.5; cursor:default;}
 .empty{color:var(--faint); padding:1.3rem;}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}

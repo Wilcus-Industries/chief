@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -10,8 +11,10 @@ from chief.agent.manager import SessionManager
 from chief.approvals import Approval, ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
+from chief.hub import ObserverHub
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import RICH, StreamPolicy
 from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
@@ -227,23 +230,239 @@ async def test_owner_message_is_published_system_wake_is_not(
     assert len(provider.calls) == 2  # both still ran turns
 
 
-async def test_outbound_reply_is_published_for_the_web_mirror(
+async def test_completed_turn_emits_one_tick(store: MessageStore) -> None:
+    """A completed non-web turn puts exactly one coarse ``tick`` on every hub
+    listener — and nothing else — while the reply still exits its own channel."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen()
+    await dispatcher.handle(owner_message("hi"))
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hello back"
+    }
+    assert queue.empty()  # no delta/final/peer frames for an un-tapped thread
+    assert adapter.sent == [("cli:t", "hello back")]  # origin channel unaffected
+
+
+def _read_file_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def read_file(**_: object) -> str:
+        return "file contents"
+
+    registry.register(
+        Tool(ToolSpec(name="read_file", description="", parameters={}), read_file)
+    )
+    return registry
+
+
+def _drain(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
+    frames = []
+    while not queue.empty():
+        frames.append(queue.get_nowait())
+    return frames
+
+
+async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
+    """A client tapped into a non-web thread receives that turn's inbound text,
+    the name-only tool tick as the call fires, the reply deltas, and the final
+    — while the reply still exits on its own channel."""
+    hub = ObserverHub()
+    registry = _read_file_registry()
+    manager = SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    # cli defaults coarse now; opt this thread's channel into RICH so the rich
+    # frames still flow (the #262/#263 behavior, under the new policy gate).
+    dispatcher = Dispatcher(manager, hub=hub, channel_defaults={"cli": RICH})
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen("cli:t")
+
+    await dispatcher.handle(owner_message("hi"))
+
+    frames = _drain(queue)
+    assert frames[0] == {"type": "inbound", "thread": "cli:t", "text": "hi"}
+    # Name only — no args/result (they load via the lazy /history/tool fetch).
+    assert frames[1] == {
+        "type": "tool", "thread": "cli:t", "call_id": "c1", "name": "read_file"
+    }
+    deltas = [f for f in frames if f["type"] == "delta"]
+    assert "".join(f["text"] for f in deltas) == "done"
+    assert frames[-2] == {"type": "final", "thread": "cli:t", "text": "done"}
+    assert frames[-1] == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
+    }
+    assert adapter.sent == [("cli:t", "done")]  # origin channel still delivered
+
+
+def _tool_manager(store: MessageStore) -> SessionManager:
+    registry = _read_file_registry()
+    return SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+
+
+async def _run_tapped(
+    store: MessageStore, policy: StreamPolicy
+) -> list[dict[str, Any]]:
+    """Run one tool+text turn on a tapped ``cli:t`` under ``policy`` for cli."""
+    hub = ObserverHub()
+    dispatcher = Dispatcher(
+        _tool_manager(store), hub=hub, channel_defaults={"cli": policy}
+    )
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("hi"))
+    return _drain(queue)
+
+
+async def test_deltas_off_keeps_tool_tick_and_final_but_no_delta(
     store: MessageStore,
 ) -> None:
-    """Every reply is published as ``message.outbound`` so the web cockpit can
-    mirror a turn that went out on another channel (iMessage)."""
-    bus = EventBus()
-    seen: list[Event] = []
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="lazy"))
+    types = [f["type"] for f in frames]
+    assert "delta" not in types
+    assert {"type": "tool", "thread": "cli:t", "call_id": "c1",
+            "name": "read_file"} in frames
+    assert any(f["type"] == "final" for f in frames)
 
-    async def collector(event: Event) -> None:
-        seen.append(event)
 
-    bus.subscribe(collector)
-    provider = FakeProvider([text_turn("hello back")])
-    dispatcher = Dispatcher(make_manager(provider, store), bus=bus)
+async def test_tools_off_drops_the_tool_frame(store: MessageStore) -> None:
+    frames = await _run_tapped(store, StreamPolicy(deltas=True))
+    types = [f["type"] for f in frames]
+    assert "tool" not in types
+    assert "delta" in types and "final" in types
+
+
+async def test_results_inline_emits_a_result_frame_with_the_body(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="inline"))
+    tool_idx = next(i for i, f in enumerate(frames) if f["type"] == "tool")
+    result = next(f for f in frames if f["type"] == "result")
+    assert result == {"type": "result", "thread": "cli:t",
+                      "call_id": "c1", "result": "file contents"}
+    # The result lands after its tool tick, as the call fires.
+    assert frames.index(result) > tool_idx
+
+
+async def test_results_off_drops_the_call_id_from_the_tool_frame(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy(tools=True, results="off"))
+    tool = next(f for f in frames if f["type"] == "tool")
+    assert tool == {"type": "tool", "thread": "cli:t", "name": "read_file"}
+    assert "call_id" not in tool
+
+
+async def test_coarse_default_taps_only_inbound_final_tick(
+    store: MessageStore,
+) -> None:
+    frames = await _run_tapped(store, StreamPolicy())  # all off
+    assert [f["type"] for f in frames] == ["inbound", "final", "tick"]
+
+
+async def test_unwatched_thread_emits_only_the_coarse_tick(
+    store: MessageStore,
+) -> None:
+    """No subscriber tapped into the thread: the turn puts only the single
+    coarse tick on the wire — no inbound/tool/delta/final frames (AC2)."""
+    hub = ObserverHub()
+    registry = _read_file_registry()
+    manager = SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    dispatcher = Dispatcher(manager, hub=hub)
     dispatcher.register(RecordingAdapter())
+    queue = hub.listen()  # watches no thread
+
     await dispatcher.handle(owner_message("hi"))
-    outbound = [e for e in seen if e.type == "message.outbound"]
-    assert len(outbound) == 1
-    assert outbound[0].channel == "cli"
-    assert outbound[0].payload == {"thread_key": "cli:t", "text": "hello back"}
+
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
+    }
+    assert queue.empty()
+
+
+async def test_system_wake_ticks_like_owner(store: MessageStore) -> None:
+    """A system-sender (monitor/cron) turn ticks identically to an owner turn."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen()
+    await dispatcher.handle(owner_message("hi", sender="system"))
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hello back"
+    }
+    assert queue.empty()
+
+
+class _WebAdapter(RecordingAdapter):
+    name = "web"
+
+
+async def test_web_origin_turn_still_emits_the_coarse_tick(
+    store: MessageStore,
+) -> None:
+    """A web-origin turn streams its own rich final through the adapter, but
+    still emits the one coarse tick so other tabs get the unread/reorder/
+    snippet (an un-focused or abandoned web buffer would go dark otherwise)."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(_WebAdapter())
+    queue = hub.listen()
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="hi")
+    )
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "web:main",
+        "channel": "web", "preview": "hello back",
+    }
+    assert queue.empty()
+
+
+async def test_web_origin_turn_omits_the_rich_final(store: MessageStore) -> None:
+    """The client tapped into a web thread gets the coarse tick but not a
+    dispatcher `final` — the WebAdapter already streamed the rich final, so a
+    second one would double-count the focused thread."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(_WebAdapter())
+    queue = hub.listen("web:main")
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="hi")
+    )
+    frames = _drain(queue)
+    assert not any(f["type"] == "final" for f in frames)
+    assert frames == [{
+        "type": "tick", "thread": "web:main",
+        "channel": "web", "preview": "hello back",
+    }]

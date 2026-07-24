@@ -56,6 +56,19 @@ async def test_unrelated_thread_is_not_consumed() -> None:
     assert await task is Approval.ONCE
 
 
+async def test_pending_question_lets_a_late_joiner_see_the_card() -> None:
+    """A dashboard client tapping in after the card was raised must still be
+    able to render it — not stall silently (#267 AC4)."""
+    broker = ApprovalBroker()
+    assert broker.pending_question("cli:t") is None
+    task = asyncio.create_task(broker.ask("cli:t", "ok?", send))
+    await asyncio.sleep(0.01)
+    assert broker.pending_question("cli:t") == "ok?"
+    assert broker.resolve("cli:t", "yes") is True
+    assert await task is Approval.ONCE
+    assert broker.pending_question("cli:t") is None  # cleared once answered
+
+
 async def test_second_card_on_same_thread_denies_immediately() -> None:
     broker = ApprovalBroker(timeout=0.5)
     task = asyncio.create_task(broker.ask("cli:t", "first?", send))

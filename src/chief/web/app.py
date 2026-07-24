@@ -1,9 +1,8 @@
 """The web UI's ASGI app: login, chat, sessions, SSE stream, monitor list."""
 
 import asyncio
-import json
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -13,21 +12,25 @@ from starlette.responses import (
     PlainTextResponse,
     RedirectResponse,
     Response,
-    StreamingResponse,
 )
 from starlette.routing import Route
 
 from chief.adapters.base import Message
 from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
+from chief.approvals import ApprovalBroker
+from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
+from chief.policy import StreamPolicy, guard_audience
 from chief.web.adapter import WebAdapter
 from chief.web.auth import COOKIE_NAME, Auth
+from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
+from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
 from chief.web.styles import STYLES
-from chief.web.view import render_transcript
+from chief.web.view import render_transcript, tool_call_response
 
 # An iMessage group's thread_key is an opaque 32-char hex chat id; a 1:1 key is
 # a phone/email handle. Groups have no core send path (see the send route).
@@ -37,17 +40,26 @@ _GROUP_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 def build_web_app(
     auth: Auth,
     adapter: WebAdapter,
+    hub: ObserverHub,
     handle: HandleMessage,
     monitors: MonitorService,
     store: MessageStore,
     palette: Callable[[], list[str]],
     manager: SessionManager,
+    approvals: ApprovalBroker,
+    channel_defaults: dict[str, StreamPolicy],
+    owner_handles: tuple[str, ...],
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
     ``palette`` yields the current ``/command`` names for input completion;
     ``store`` backs the session list and per-thread transcript history;
-    ``manager`` deletes buffers (row + live session) for the sidebar × control.
+    ``manager`` deletes buffers (row + live session) for the sidebar × control;
+    ``approvals`` is the same broker the gate's cards run on — ``/approve``
+    resolves it directly, so a dashboard answer and an origin-channel answer
+    race for the identical pending future (#267); ``channel_defaults`` is the
+    same map ``Dispatcher`` resolves against, so ``/policy`` reports the exact
+    provenance (override vs channel default) a turn will stream under (#265).
     """
 
     def unauthorized() -> Response:
@@ -100,7 +112,16 @@ def build_web_app(
     async def sessions(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
-        return JSONResponse(await store.list_sessions())
+        rows = await store.list_sessions()
+        for row in rows:
+            # ponytail: one stream_policy query per row; fine at LAN single-owner
+            # scale (a handful of threads). Fold into list_sessions if it grows.
+            override = await manager.stream_policy(str(row["thread"]))
+            row["send_guard"] = guard_audience(
+                str(row["channel"]), str(row["thread"]),
+                override, channel_defaults, owner_handles,
+            )
+        return JSONResponse(rows)
 
     async def history(request: Request) -> Response:
         if not auth.is_authed(request):
@@ -109,6 +130,20 @@ def build_web_app(
         if not thread:
             return JSONResponse([])
         return JSONResponse(render_transcript(await store.load(thread)))
+
+    async def history_tool(request: Request) -> Response:
+        """One tool call's args + result, fetched lazily off a row's click —
+        never in the ``history`` payload above."""
+        if not auth.is_authed(request):
+            return unauthorized()
+        thread = request.query_params.get("thread", "")
+        call_id = request.query_params.get("call_id", "")
+        if not thread or not call_id:
+            return JSONResponse({"status": "compacted"})
+        session = manager.peek(thread)
+        busy = session is not None and session.busy
+        messages = await store.load(thread)
+        return JSONResponse(tool_call_response(messages, call_id, busy))
 
     async def delete(request: Request) -> Response:
         if not auth.is_authed(request):
@@ -125,23 +160,6 @@ def build_web_app(
         if not auth.is_authed(request):
             return unauthorized()
         return JSONResponse(palette())
-
-    async def events(request: Request) -> Response:
-        if not auth.is_authed(request):
-            return unauthorized()
-        queue = adapter.listen()
-
-        async def stream() -> AsyncIterator[str]:
-            try:
-                while True:
-                    frame = await queue.get()
-                    if frame.get("type") == "closed":
-                        return
-                    yield f"data: {json.dumps(frame)}\n\n"
-            finally:
-                adapter.drop(queue)
-
-        return StreamingResponse(stream(), media_type="text/event-stream")
 
     async def monitor_list(request: Request) -> Response:
         if not auth.is_authed(request):
@@ -167,8 +185,12 @@ def build_web_app(
             Route("/sessions", sessions),
             Route("/delete", delete, methods=["POST"]),
             Route("/history", history),
+            Route("/history/tool", history_tool),
             Route("/commands", commands),
-            Route("/events", events),
+            *build_live_routes(hub, approvals, auth.is_authed, unauthorized),
+            *build_policy_routes(
+                store, channel_defaults, auth.is_authed, unauthorized
+            ),
             Route("/monitors", monitor_list),
             Route("/app.css", app_css),
             Route("/app.js", app_js),

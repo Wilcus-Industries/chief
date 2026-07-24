@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from chief.config.schema import AliasSpec, BackendSpec, ConfigError
+from chief.policy import DEFAULT_CHANNEL_DEFAULTS, StreamPolicy
 
 AUTONOMY_VALUES = ("off", "clean-only", "full")
 
@@ -97,6 +98,26 @@ def aliases(raw: dict[str, Any]) -> dict[str, AliasSpec]:
 def windows(raw: dict[str, Any]) -> dict[str, int]:
     """Coerce the ``compaction.windows`` override map to ``model-name -> tokens``."""
     return {str(name): int(tokens) for name, tokens in raw.items()}
+
+
+def stream_channel_defaults(raw: Any) -> dict[str, StreamPolicy]:
+    """Coerce ``stream.channel_defaults`` to ``channel -> StreamPolicy``.
+
+    Empty/missing keeps the shipped defaults (imessage + web rich). Each spec
+    fills unlisted fields from the policy defaults (off). A bad ``results`` mode
+    is refused at boot — named — rather than silently killing live results.
+    """
+    if not raw:
+        return dict(DEFAULT_CHANNEL_DEFAULTS)
+    out: dict[str, StreamPolicy] = {}
+    for channel, spec in raw.items():
+        try:
+            out[str(channel)] = StreamPolicy.from_dict(dict(spec or {}))
+        except ValueError as exc:
+            raise ConfigError(
+                f"stream.channel_defaults.{channel}: {exc}"
+            ) from exc
+    return out
 
 
 def ratio(raw: Any) -> float:

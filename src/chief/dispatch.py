@@ -1,11 +1,24 @@
 """Dispatcher: routes an inbound Message through its session and back out.
 
+styleguide: file-length — one cohesive turn-routing flow (approval/stranger/
+command routing plus the turn's own observer-streaming callbacks); the pure
+policy frame logic already lives in chief.policy. Splitting scatters one turn.
+
 Inbound order: approval answers are consumed first (a turn blocked on an
 approval card would deadlock behind the session lock otherwise), strangers
-are logged and published to the bus but never run a turn, owner messages
-go on the event bus and run a turn.
-``system`` senders (monitor/cron wakes) run a turn but are never published —
-that would let monitors trigger themselves.
+are logged and published to the bus but never run a turn, owner messages go on
+the event bus and run a turn. ``system`` senders (monitor/cron wakes) run a
+turn but are never published — that would let monitors trigger themselves.
+
+Every completed turn emits one coarse ``tick`` to the observer hub so the
+cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
+snippet); web turns also stream their own ``delta``/``final`` through the web
+adapter, so the dispatcher skips only the rich ``final`` for them. A client
+*tapped into* a non-web thread also gets that turn's inbound/final and — as the
+thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
+the row override or channel default) — its delta / tool-tick / inline
+tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
+approval card the gate's ``approval_asker`` raises (#267).
 """
 
 import logging
@@ -15,7 +28,9 @@ from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
-from chief.provider.base import ProviderError
+from chief.hub import ObserverHub
+from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
+from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
 
@@ -30,6 +45,8 @@ logger = logging.getLogger(__name__)
 
 OWNER = "owner"
 SYSTEM = "system"
+WEB_CHANNEL = "web"
+PREVIEW_CHARS = 120
 
 
 class Dispatcher:
@@ -40,15 +57,19 @@ class Dispatcher:
         manager: SessionManager,
         *,
         bus: EventBus | None = None,
+        hub: ObserverHub | None = None,
         approvals: ApprovalBroker | None = None,
         strangers: StrangerLog | None = None,
         restart: RestartBoundary | None = None,
+        channel_defaults: dict[str, StreamPolicy] | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
+        self._hub = hub
         self._approvals = approvals
         self._strangers = strangers
         self._restart = restart
+        self._channel_defaults = channel_defaults or {}
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
 
@@ -126,43 +147,69 @@ class Dispatcher:
         session = await self._manager.get_or_create(
             message.thread_key, message.channel
         )
+        tk = message.thread_key
+        override = await self._manager.stream_policy(tk)
+        policy = resolve(message.channel, override, self._channel_defaults)
+        # Web turns stream their own inbound/delta (adapter + JS); for every
+        # other channel tapped() re-checks the live subscription at emit time.
+        non_web = message.channel != WEB_CHANNEL
+        if non_web:
+            self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
         async def on_delta(text: str) -> None:
-            await adapter.send_delta(message.thread_key, text)
+            await adapter.send_delta(tk, text)
+            if non_web and (frame := delta_frame(policy, tk, text)):
+                self.tapped(tk, frame)
 
-        async def send_out(text: str) -> None:
-            # Deliver on the origin channel, then publish the same text as an
-            # outbound event so the web cockpit can mirror a reply that went to
-            # another channel (iMessage) and never touched its own adapter.
-            await adapter.send(message.thread_key, text)
-            await self._publish_outbound(message, text)
+        async def on_tool(call: ToolCall) -> None:
+            # Web turns get tool ticks too — the WebAdapter never emits them.
+            if frame := tool_frame(policy, tk, name=call.name, call_id=call.id):
+                self.tapped(tk, frame)
+
+        async def on_tool_result(call: ToolCall, result: str) -> None:
+            if frame := result_frame(policy, tk, call_id=call.id, result=result):
+                self.tapped(tk, frame)
 
         try:
             result = await session.run_turn(
-                message.text, on_delta, sender=message.sender
+                message.text, on_delta, sender=message.sender,
+                on_tool=on_tool, on_tool_result=on_tool_result,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
-            logger.exception("turn failed for thread %s", message.thread_key)
-            await send_out(f"error: {exc}")
+            logger.exception("turn failed for thread %s", tk)
+            await self._reply(adapter, message, f"error: {exc}")
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
-            logger.exception("turn failed for thread %s", message.thread_key)
-            await send_out("error: something went wrong running that turn")
-            return
-        await send_out(result.text)
-        if result.notice:
-            await send_out(result.notice)
-
-    async def _publish_outbound(self, message: Message, text: str) -> None:
-        if self._bus is None:
-            return
-        await self._bus.publish(
-            Event(
-                type="message.outbound",
-                channel=message.channel,
-                payload={"thread_key": message.thread_key, "text": text},
+            logger.exception("turn failed for thread %s", tk)
+            await self._reply(
+                adapter, message, "error: something went wrong running that turn"
             )
-        )
+            return
+        await adapter.send(tk, result.text)
+        if result.notice:
+            await adapter.send(tk, result.notice)
+        self._turn_end(message, result.text)
+
+    async def _reply(
+        self, adapter: Adapter, message: Message, text: str
+    ) -> None:
+        await adapter.send(message.thread_key, text)
+        self._turn_end(message, text)
+
+    def tapped(self, thread_key: str, frame: dict[str, object]) -> None:
+        """Deliver a rich frame only if a client is tapped into the thread."""
+        if self._hub is not None and self._hub.is_watched(thread_key):
+            self._hub.to_watchers(thread_key, frame)
+
+    def _turn_end(self, message: Message, reply: str) -> None:
+        # Every completed turn emits the coarse tick; only non-web threads also
+        # get the tapped rich `final` (web turns stream theirs via WebAdapter).
+        if self._hub is None:
+            return
+        tk = message.thread_key
+        if message.channel != WEB_CHANNEL:
+            self.tapped(tk, {"type": "final", "thread": tk, "text": reply})
+        self._hub.tick(tk, message.channel, reply[:PREVIEW_CHARS])

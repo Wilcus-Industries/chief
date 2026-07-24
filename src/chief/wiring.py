@@ -24,6 +24,7 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
 from chief.gate import GatePolicy, load_approved, save_approved
+from chief.hub import ObserverHub
 from chief.mcpclient.manager import (
     McpManager,
     ServerConfig,
@@ -64,6 +65,7 @@ class Core:
 
     budget: Budget
     bus: EventBus
+    hub: ObserverHub
     registry: ToolRegistry
     restart: RestartController
     manager: SessionManager
@@ -160,7 +162,8 @@ def build_mcp(
 
 
 def build_adapters(
-    config: Config, core: Core, store: MessageStore, commands: CommandSet
+    config: Config, core: Core, store: MessageStore, commands: CommandSet,
+    approvals: ApprovalBroker,
 ) -> Adapters:
     """Register the socket, darwin-gated iMessage, and web adapters; build the
     optional password-gated web server."""
@@ -178,22 +181,19 @@ def build_adapters(
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
             restart=core.restart,
-            # Consume approval answers at the poll stage, ahead of the
-            # per-thread FIFO worker a gated turn would otherwise deadlock.
+            # Consume approvals at poll stage, ahead of the thread FIFO worker.
             resolve_approval=dispatcher.resolve_approval,
         )
         dispatcher.register(imessage_adapter)
 
-    # The bus lets the web adapter mirror other channels' traffic (iMessage) to
-    # the cockpit; web threads still use its direct send path.
-    web_adapter = WebAdapter(core.bus)
+    # Web-origin turns stream to the hub; other channels reach it as ticks.
+    web_adapter = WebAdapter(core.hub)
     dispatcher.register(web_adapter)
     web_server: WebServer | None = None
     if config.web_password:
         web_app = build_web_app(
-            Auth(config.web_password, load_or_create_secret()),
-            web_adapter, dispatcher.handle, core.monitors, store,
-            commands.palette, core.manager,
-        )
+            Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
+            dispatcher.handle, core.monitors, store, commands.palette, core.manager,
+            approvals, config.stream_channel_defaults, config.imessage_owner_handles)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)
