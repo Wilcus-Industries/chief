@@ -10,6 +10,9 @@ class WebServer:
     """Serves the ASGI app inside the daemon's event loop."""
 
     def __init__(self, app: Starlette, host: str, port: int) -> None:
+        # Kept so an integration test can drive the production-wired ASGI app
+        # in-process (httpx ASGITransport) without a real socket (#277).
+        self.app = app
         self._server = uvicorn.Server(
             uvicorn.Config(app, host=host, port=port, log_level="warning")
         )

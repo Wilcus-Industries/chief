@@ -7,9 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
-from chief.adapters.base import Message
+from chief.adapters.base import Adapter, Message
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
@@ -614,6 +615,60 @@ async def test_prompt_schedule_creation_raises_no_card(
         assert len(await app.cron_service.list_enabled()) == 1
     finally:
         await shutdown(app, streams)
+
+
+class _CapturingAdapter(Adapter):
+    """A registered origin adapter that captures its outbound sends — the
+    fake device transport at the edge (#277). Everything upstream of ``send``
+    (the web route, the dispatcher, the session turn) is the real wiring."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.sent: list[tuple[str, str]] = []
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sent.append((thread_key, text))
+
+
+async def test_web_send_drives_the_real_cross_channel_dispatch_path(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # #277: an authed POST /send for a non-web 1:1 thread runs through the REAL
+    # dispatcher → session turn → the thread's registered origin adapter, and
+    # the outbound reply mirrors to the web hub. Only the model (FakeProvider)
+    # and the device transport (the capturing adapter's send) are faked.
+    config = make_config(tmp_path, sock_path, web_password="hunter2")
+    app, streams = await boot(config, FakeProvider([text_turn("on my way")]))
+    device = _CapturingAdapter("imessage")
+    app.dispatcher.register(device)
+    assert app.web_server is not None
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app.web_server.app),
+        base_url="http://web",
+    )
+    hub = app.hub.listen()  # coarse subscriber sees the outbound mirror tick
+    try:
+        await app.store.ensure_session("+15551234567", "imessage")
+        resp = await client.post("/login", data={"password": "hunter2"})
+        client.cookies.update(resp.cookies)
+        resp = await client.post(
+            "/send", json={"thread": "+15551234567", "text": "you around?"}
+        )
+        assert resp.status_code == 202
+        tick = await asyncio.wait_for(hub.get(), timeout=5)
+    finally:
+        await client.aclose()
+        await shutdown(app, streams)
+    # The reply exited the thread's real origin adapter, keyed on its real key.
+    assert device.sent == [("+15551234567", "on my way")]
+    # …and mirrored to the hub as the coarse tick the cockpit watches.
+    assert tick == {
+        "type": "tick", "thread": "+15551234567",
+        "channel": "imessage", "preview": "on my way",
+    }
 
 
 async def test_scheduled_command_gets_the_owner_send_guard(

@@ -39,6 +39,9 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.4",
+    # The browser e2e capstone (#268) drives the shipped JS in real Chromium;
+    # opt-in (the `browser` marker), so the default suite never launches it.
+    "playwright>=1.40",
     # The obsidian-memory package's code ships as an editable subpackage so its
     # judge is importable in-process, its `chief-memory` CLI runs, and its real
     # model2vec + chromadb path is exercised by the test suite (#207).
@@ -93,3 +96,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # Guardrail: every real test is sub-second; a hung test fails fast.
 timeout = 30
+# The browser e2e (#268) is opt-in: excluded by default, run with `-m browser`
+# in its own CI job (a real Chromium launch is slow and needs a browser binary).
+addopts = "-m 'not browser'"
+markers = [
+    "browser: end-to-end test that drives a real browser (opt-in; needs playwright + `playwright install chromium`)",
+]
