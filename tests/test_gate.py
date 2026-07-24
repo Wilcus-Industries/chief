@@ -329,6 +329,53 @@ async def test_approval_asker_answer_from_the_broker_unblocks_the_card(
     assert approvals.resolve("cli:t", "yes") is False
 
 
+async def test_approval_asker_cli_thread_also_sends_plain_text(
+    store: MessageStore,
+) -> None:
+    """A non-web origin has no card UI of its own — the question must still
+    reach the owner as a plain message on that channel."""
+    hub = ObserverHub()
+    approvals = ApprovalBroker()
+    dispatcher = _dispatcher(hub, approvals, store)
+    adapter = _RecordingAdapter()
+    dispatcher.register(adapter)
+    ask = approval_asker(dispatcher, approvals)
+
+    task = asyncio.ensure_future(ask(CONTEXT, "approve tool call gray({})? yes"))
+    await asyncio.sleep(0.01)
+    assert adapter.sent == [("cli:t", "approve tool call gray({})? yes")]
+    assert approvals.resolve("cli:t", "yes") is True
+    assert await task is Approval.ONCE
+
+
+async def test_approval_asker_web_thread_skips_the_duplicate_final(
+    store: MessageStore,
+) -> None:
+    """A web-origin card already renders via the tapped ``approval`` frame;
+    also sending the question through ``WebAdapter.send`` would emit a
+    redundant SSE ``final`` frame that makes the dashboard's ``reloadHistory``
+    wipe the just-rendered card out from under the owner (#267)."""
+    hub = ObserverHub()
+    approvals = ApprovalBroker()
+    dispatcher = _dispatcher(hub, approvals, store)
+    web_adapter = _RecordingAdapter()
+    web_adapter.name = "web"
+    dispatcher.register(web_adapter)
+    web_context = ToolContext(thread_key="web:t", channel="web")
+    queue = hub.listen("web:t")
+    ask = approval_asker(dispatcher, approvals)
+
+    task = asyncio.ensure_future(ask(web_context, "approve tool call gray({})? yes"))
+    await asyncio.sleep(0.01)
+    assert queue.get_nowait() == {
+        "type": "approval", "thread": "web:t",
+        "question": "approve tool call gray({})? yes",
+    }
+    assert web_adapter.sent == []
+    assert approvals.resolve("web:t", "yes") is True
+    assert await task is Approval.ONCE
+
+
 async def test_approval_asker_untapped_thread_gets_no_frames(
     store: MessageStore,
 ) -> None:

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
-from chief.dispatch import Dispatcher
+from chief.dispatch import WEB_CHANNEL, Dispatcher
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import ToolContext, ToolDispatcher
 
@@ -79,7 +79,8 @@ def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskAppr
 
         async def send_and_card(q: str) -> None:
             dispatcher.tapped(tk, {"type": "approval", "thread": tk, "question": q})
-            await send(tk, q)
+            if ctx.channel != WEB_CHANNEL:  # web's card above is enough (#267)
+                await send(tk, q)
 
         answer = await approvals.ask(tk, question, send_and_card)
         dispatcher.tapped(
