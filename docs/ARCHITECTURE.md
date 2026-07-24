@@ -20,7 +20,7 @@ itself, so line numbers rot; grep the symbol.
 | [SUBSYSTEMS.md](./SUBSYSTEMS.md) | web UI, monitors, classifiers, subagents |
 | [CONFIG.md](./CONFIG.md) | every config key, on-disk layout, the package registry |
 | [EXTENDING.md](./EXTENDING.md) | recipes: tools, commands, packages, skills, hooks, MCP |
-| [OPERATIONS.md](./OPERATIONS.md) | install, the service, `chief update`, `chief-pkg` |
+| [OPERATIONS.md](./OPERATIONS.md) | install, the service, releases + `chief update`, `chief-pkg` |
 | [TESTING.md](./TESTING.md) | done-check, fixtures, the provider fake, meta-tests |
 
 Working rules live in [`CLAUDE.md`](../CLAUDE.md); code conventions in
@@ -72,7 +72,9 @@ through the adapter named on the `Message` that started it.
   `Session._one_turn` fires hooks — subagents never do.**
 - **Skills** — one directory per skill under `skills/`, each a `SKILL.md`.
   Loader/validator: `src/chief/skills.py`. The prompt carries only one-liners;
-  `load_skill` pulls a full body.
+  `load_skill` pulls a full body. `skills/` is **untracked instance data** —
+  chief edits its own copies. Tracked sources are `core-skills/` (core's own,
+  seeded on boot when missing) and `packages/*/skills/`.
 - **Native tools** — registry and dispatch in `src/chief/tools/registry.py`
   (re-exported from `src/chief/tools/`). The default set is assembled by
   `register_native_tools` in `src/chief/tools/native.py` and wired at boot in
@@ -88,6 +90,12 @@ through the adapter named on the `Message` that started it.
   Install/uninstall are **document-driven** — follow the package's `INSTALL.md`
   with your file tools, record installs via `chief.registry_apply`, then
   `restart`.
+- **Updating yourself** — `src/chief/install/`: `releases.py` (version + tag
+  resolution), `basepin.py` (the `refs/chief/base` pin and the advance-on-healthy
+  record), `layer.py` (the three-way `merge-tree` application), `update.py`
+  (the `chief update` command), `release.py` (`chief release`), `migrate.py`
+  (the one-time crossover run at boot). Judgment lives in the `self-update`
+  skill, not in a tool; the restart seatbelt is reused unchanged.
 - **Boot wiring** — `src/chief/app.py` (`build_app`, the table of contents) with
   infrastructure phases in `src/chief/wiring.py`. The entrypoint
   (`src/chief/entrypoint.py`) takes a single-instance `flock` before `build_app`

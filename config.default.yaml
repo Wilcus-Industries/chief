@@ -113,3 +113,19 @@ compaction:
   default_window: 60000
   windows: {}
   #   opus: 200000
+
+# Keeping yourself current. Chief applies a new core release *onto* its own
+# self-edits as an ordinary turn (the `self-update` skill), then restarts under
+# the usual done-check seatbelt — so an update is never a checkout and never
+# discards what chief has changed about itself.
+#   autonomy: what a SCHEDULED update may do with nobody present.
+#     off        — manual only; a schedule fires and does nothing but say so.
+#     clean-only — apply clean updates; ask the owner on a collision (default).
+#     full       — resolve collisions unattended and report afterwards.
+#     Asking chief directly always works, whatever this is set to.
+#   schedule: cron spec (UTC) for chief's own update check; "" = none. This key
+#     is the source of truth — chief re-creates the schedule from it — so turn
+#     scheduled updates off by clearing it, not only by deleting the schedule.
+update:
+  autonomy: clean-only
+  schedule: ""

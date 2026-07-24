@@ -1,4 +1,4 @@
-"""Is core behind ``origin/main``? A cached verdict chief can mention.
+"""Is a newer core release out? A cached verdict chief can act on.
 
 The check never runs inside a turn. ``session_start`` reads a cached answer
 off disk — zero network, zero latency — and schedules a refresh in the
@@ -6,8 +6,10 @@ background when that answer has gone stale, so the *next* session sees fresh
 news. A ``git fetch`` in the turn path would put the network between the owner
 and a reply, and an unbounded git call already wedged the whole daemon once.
 
-Informational only: nothing here updates anything. ``chief update`` stays a
-deliberate, owner-typed command.
+It speaks in **releases**, not in commits behind a branch: a self-editing
+install is permanently ahead of and behind any branch at once, so a commit
+count never meant anything. What a box has is a pinned release plus its own
+layer, and the only question is whether a newer release exists.
 """
 
 import asyncio
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chief.hooks.context import TurnContext
+from chief.install import basepin, releases
 
 logger = logging.getLogger(__name__)
 
@@ -38,50 +41,57 @@ _refreshing = False
 
 @dataclass(frozen=True)
 class UpdateStatus:
-    """How far core's checkout trails ``origin/main``."""
+    """The release this box is pinned at, and the newest one published."""
 
-    behind: int
-    target: str
+    current: str
+    latest: str
     checked_at: float
 
     @property
     def stale(self) -> bool:
         return (time.time() - self.checked_at) > STALE_AFTER_SECONDS
 
+    @property
+    def behind(self) -> bool:
+        return bool(self.latest) and self.latest != self.current
+
 
 def refresh(
     repo_dir: Path, *, status_path: Path = STATUS_PATH
 ) -> UpdateStatus | None:
-    """Fetch and recount, writing the cache. ``None`` if git could not answer.
-
-    Counts ``HEAD..origin/main`` — commits upstream has that we do not. The
-    other direction is expected and uninteresting: a self-editing install is
-    permanently ahead as well.
-    """
+    """Fetch tags and re-resolve, writing the cache. ``None`` if git can't answer."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    git = ["git", "-C", str(repo_dir)]
     try:
-        fetched = _git([*git, "fetch", "--quiet", "origin"], env)
-        if fetched.returncode != 0:
-            logger.warning("update check fetch failed: %s", fetched.stderr.strip())
-            return None
-        counted = _git([*git, "rev-list", "--count", "HEAD..origin/main"], env)
-        target = _git([*git, "rev-parse", "--short", "origin/main"], env)
+        fetched = _git(
+            ["git", "-C", str(repo_dir), "fetch", "--quiet", "--tags", "origin"], env
+        )
     except subprocess.TimeoutExpired:
         logger.warning("update check timed out after %ss", FETCH_TIMEOUT_SECONDS)
         return None
-    if counted.returncode != 0:
-        logger.warning("update check count failed: %s", counted.stderr.strip())
+    if fetched.returncode != 0:
+        logger.warning("update check fetch failed: %s", fetched.stderr.strip())
         return None
-    try:
-        behind = int(counted.stdout.strip())
-    except ValueError:
+    latest = releases.newest_release(repo_dir)
+    if latest is None:
         return None
     status = UpdateStatus(
-        behind=behind, target=target.stdout.strip(), checked_at=time.time()
+        current=_pinned_tag(repo_dir),
+        latest=latest.tag,
+        checked_at=time.time(),
     )
     _write(status, status_path)
     return status
+
+
+def _pinned_tag(repo_dir: Path) -> str:
+    """The tag of the pinned base, or ``""`` when it is not a release commit."""
+    base = basepin.read_base(repo_dir)
+    if base is None:
+        return ""
+    for release in releases.all_releases(repo_dir):
+        if release.commit == base:
+            return release.tag
+    return ""
 
 
 def _git(argv: list[str], env: dict[str, str]) -> "subprocess.CompletedProcess[str]":
@@ -100,8 +110,8 @@ def _write(status: UpdateStatus, status_path: Path) -> None:
         status_path.write_text(
             json.dumps(
                 {
-                    "behind": status.behind,
-                    "target": status.target,
+                    "current": status.current,
+                    "latest": status.latest,
                     "checked_at": status.checked_at,
                 }
             )
@@ -115,8 +125,8 @@ def read_status(status_path: Path = STATUS_PATH) -> UpdateStatus | None:
     try:
         raw = json.loads(status_path.read_text())
         return UpdateStatus(
-            behind=int(raw["behind"]),
-            target=str(raw["target"]),
+            current=str(raw["current"]),
+            latest=str(raw["latest"]),
             checked_at=float(raw["checked_at"]),
         )
     except (OSError, ValueError, KeyError, TypeError):
@@ -125,20 +135,21 @@ def read_status(status_path: Path = STATUS_PATH) -> UpdateStatus | None:
 
 def notice(status: UpdateStatus | None) -> str | None:
     """The line chief sees, or ``None`` when there is nothing worth saying."""
-    if status is None or status.behind <= 0:
+    if status is None or not status.behind:
         return None
-    commits = "commit" if status.behind == 1 else "commits"
+    running = f"on {status.current}" if status.current else "on an unrecorded base"
     return (
-        f"A core update is available: {status.behind} {commits} behind "
-        f"origin/main ({status.target}). Mention it if it is relevant — the "
-        f"owner runs `chief update` themselves; you never update yourself."
+        f"A new core release is out: {status.latest} (you are {running}). "
+        "You update yourself — load the `self-update` skill and follow it. "
+        "Mention it if it is relevant; otherwise wait for the schedule or for "
+        "the owner to ask."
     )
 
 
 def session_start_notice(
     repo_dir: Path, *, status_path: Path = STATUS_PATH
 ) -> Callable[[TurnContext], Awaitable[str | None]]:
-    """Build the ``session_start`` hook that reports a pending core update.
+    """Build the ``session_start`` hook that reports a pending core release.
 
     Reads only. When the cached verdict has aged out it kicks off a refresh in
     the background and still returns the old answer immediately, so a session

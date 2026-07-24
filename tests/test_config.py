@@ -298,3 +298,39 @@ def test_merge_config_refuses_a_duplicated_base(tmp_path: Path) -> None:
     path.write_text("block: {a: 1}\nblock: {a: 2}\n")
     with pytest.raises(ConfigError, match="duplicate key"):
         merge_config({"other": True}, path)
+
+
+def test_update_autonomy_defaults_to_asking_before_resolving(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "none.yaml")
+    assert config.update_autonomy == "clean-only"
+    assert config.update_schedule == ""
+
+
+def test_update_autonomy_accepts_the_three_values(tmp_path: Path) -> None:
+    for value in ("off", "clean-only", "full"):
+        path = tmp_path / f"{value}.yaml"
+        path.write_text(
+            f"update:\n  autonomy: '{value}'\n  schedule: '0 9 * * *'\n"
+        )
+        config = load_config(path)
+        assert config.update_autonomy == value
+        assert config.update_schedule == "0 9 * * *"
+
+
+def test_bare_off_survives_yamls_boolean_reading(tmp_path: Path) -> None:
+    """YAML 1.1 turns a bare `off` into False — which is what was meant."""
+    path = tmp_path / "config.yaml"
+    path.write_text("update:\n  autonomy: off\n")
+    assert load_config(path).update_autonomy == "off"
+    path.write_text("update:\n  autonomy: on\n")
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+def test_a_typo_in_update_autonomy_is_refused_not_coerced(tmp_path: Path) -> None:
+    """Neither "silently off" nor "silently on" is an acceptable reading of a
+    typo in the key that governs unattended conflict resolution."""
+    path = tmp_path / "config.yaml"
+    path.write_text("update:\n  autonomy: yes-please\n")
+    with pytest.raises(ConfigError):
+        load_config(path)

@@ -14,14 +14,19 @@ this. Only add a rule here when it differs from, or isn't covered by, the global
 Core runs natively on this machine — no containers, no migrations (the schema is
 created at boot). Fresh-machine setup is the one-liner (`bootstrap.sh` →
 `install.sh`, README.md); from a clone, `./install.sh` does prereqs, scaffold,
-deps, the first-run wizard (web password, OpenRouter key, monthly budget cap),
-the `chief` launcher, and the autostart service (`--no-service` / `--no-launch` /
-`--non-interactive` for automation; re-runs are idempotent). Run in the foreground
-with `chief run` or `uv run python -m chief.entrypoint`; lifecycle via
-`chief start|stop|status|update|uninstall` — `update` merges `origin/main`
-(never a checkout: self-edit means every install carries local commits),
-re-syncs installed skill copies, restarts, and rolls back if the daemon comes
-back unhealthy. Attach the plain-REPL socket client with `uv run chief-cli`
+deps, the first-run wizard (web password, OpenRouter key, monthly budget cap,
+auto-update schedule), the `chief` launcher, and the autostart service
+(`--no-service` / `--no-launch` / `--non-interactive` for automation; re-runs are
+idempotent). Run in the foreground with `chief run` or
+`uv run python -m chief.entrypoint`; lifecycle via
+`chief start|stop|status|update|uninstall`. Upstream cuts tagged releases with
+`chief release [major|minor|patch]`; a box **applies** the newest release onto its
+own self-edits (never a checkout — self-edit means every install carries local
+commits) and leaves the result uncommitted, then chief resolves any collision and
+calls the ordinary `restart` seatbelt to commit and reboot. Judgment lives in the
+`self-update` skill; `docs/OPERATIONS.md` has the mechanics. Installed `skills/`
+are untracked instance data seeded from tracked `core-skills/`. Attach the
+plain-REPL socket client with `uv run chief-cli`
 (`--socket` overrides `socket_path`); it is only a client, so quitting it leaves
 the daemon running. The web UI serves in-process at `http://127.0.0.1:8130`
 (`web_*` config keys) — owner-password chat + approvals + monitors, server-

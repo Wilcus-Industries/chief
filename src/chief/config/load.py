@@ -11,7 +11,8 @@ from typing import Any
 
 import yaml
 
-from chief.config.schema import AliasSpec, BackendSpec, Config, ConfigError
+from chief.config import coerce
+from chief.config.schema import Config, ConfigError
 
 
 class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml is untyped
@@ -68,6 +69,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     shell = raw.get("shell") or {}
     hooks = raw.get("hooks") or {}
     compaction = raw.get("compaction") or {}
+    update = raw.get("update") or {}
     return Config(
         models=models,
         temperature=temperature,
@@ -75,13 +77,13 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         socket_path=Path(_env_or(raw, "socket_path", "data/chief.sock")),
         max_concurrent_sessions=int(_env_or(raw, "max_concurrent_sessions", 4)),
         openrouter_api_key=os.environ.get(
-            "OPENROUTER_API_KEY", _read_secret(Path("secrets/openrouter_api_key"))
+            "OPENROUTER_API_KEY", coerce.read_secret(Path("secrets/openrouter_api_key"))
         ),
         provider_base_url=str(
             _env_or(raw, "provider_base_url", "https://openrouter.ai/api/v1")
         ),
-        provider_backends=_parse_backends(raw.get("provider_backends") or {}),
-        provider_aliases=_parse_aliases(raw.get("provider_aliases") or {}),
+        provider_backends=coerce.backends(raw.get("provider_backends") or {}),
+        provider_aliases=coerce.aliases(raw.get("provider_aliases") or {}),
         gate_never=tuple(gate.get("never") or ()),
         gate_approved=tuple(gate.get("approved") or ()),
         gate_announce=bool(gate.get("announce", True)),
@@ -91,7 +93,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         web_host=str(_env_or(raw, "web_host", "127.0.0.1")),
         web_port=int(_env_or(raw, "web_port", 8130)),
         web_password=os.environ.get(
-            "CHIEF_WEB_PASSWORD", _read_secret(Path("secrets/web_password"))
+            "CHIEF_WEB_PASSWORD", coerce.read_secret(Path("secrets/web_password"))
         ),
         skills_dir=Path(_env_or(raw, "skills_dir", "skills")),
         agents_dir=Path(_env_or(raw, "agents_dir", "agents")),
@@ -104,86 +106,19 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         hooks_timeout_seconds=float(hooks.get("timeout_seconds", 10.0)),
         hooks_disabled=tuple(hooks.get("disabled") or ()),
         imessage_enabled=bool(imessage.get("enabled", False)),
-        imessage_owner_handles=_as_handles(imessage.get("owner_handles")),
+        imessage_owner_handles=coerce.as_handles(imessage.get("owner_handles")),
         imessage_db_path=Path(
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
         imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
-        compaction_ratio=_parse_ratio(compaction.get("ratio", 0.95)),
+        compaction_ratio=coerce.ratio(compaction.get("ratio", 0.95)),
         compaction_keep_recent=int(compaction.get("keep_recent", 20)),
         compaction_default_window=int(compaction.get("default_window", 60_000)),
-        compaction_windows=_parse_windows(compaction.get("windows") or {}),
-    )
-
-
-def _as_handles(value: Any) -> tuple[str, ...]:
-    """Coerce ``imessage.owner_handles`` into a tuple of strings.
-
-    A single quoted string becomes a one-element tuple; a list/tuple becomes
-    per-element strings; missing/empty becomes ``()``. A **bare numeric scalar**
-    (``owner_handles: +15551234567`` → YAML parses it as the int
-    ``15551234567``, silently dropping the ``+``) is rejected with a clear
-    ``ConfigError``: coercing it would scope to the wrong chat and fail
-    silently, and raising turns the mini boot-loop (``tuple(int)`` TypeError
-    deep in boot) into an actionable error. A mapping is likewise rejected.
-    """
-    if value is None or value == "":
-        return ()
-    if isinstance(value, str):
-        return (value,)
-    if isinstance(value, list | tuple):
-        return tuple(str(v) for v in value)
-    raise ConfigError(
-        "imessage.owner_handles must be a quoted handle or a list of quoted "
-        f"handles (e.g. [\"+15551234567\"]), got {type(value).__name__} "
-        f"{value!r} — quote it so YAML keeps the leading '+'."
+        compaction_windows=coerce.windows(compaction.get("windows") or {}),
+        update_autonomy=coerce.autonomy(update.get("autonomy", "clean-only")),
+        update_schedule=str(update.get("schedule") or ""),
     )
 
 
 def _env_or(raw: dict[str, Any], key: str, default: Any) -> Any:
     return os.environ.get(f"CHIEF_{key.upper()}", raw.get(key, default))
-
-
-def _read_secret(path: Path) -> str:
-    return path.read_text().strip() if path.exists() else ""
-
-
-def _parse_backends(raw: dict[str, Any]) -> dict[str, BackendSpec]:
-    return {
-        name: BackendSpec(base_url=str(spec["base_url"]), api_key=_backend_key(spec))
-        for name, spec in raw.items()
-    }
-
-
-def _backend_key(spec: dict[str, Any]) -> str:
-    """Resolve a backend key: ``api_key_env`` var first, then a secret file."""
-    env = spec.get("api_key_env")
-    if env and os.environ.get(env):
-        return os.environ[env]
-    if secret := spec.get("api_key_secret"):
-        return _read_secret(Path("secrets") / str(secret))
-    return ""
-
-
-def _parse_aliases(raw: dict[str, Any]) -> dict[str, AliasSpec]:
-    return {
-        name: AliasSpec(backend=str(spec["backend"]), model=str(spec["model"]))
-        for name, spec in raw.items()
-    }
-
-
-def _parse_windows(raw: dict[str, Any]) -> dict[str, int]:
-    """Coerce the ``compaction.windows`` override map to ``model-name -> tokens``."""
-    return {str(name): int(tokens) for name, tokens in raw.items()}
-
-
-def _parse_ratio(raw: Any) -> float:
-    """Coerce ``compaction.ratio`` and clamp it to ``(0, 1]``.
-
-    ``0`` (or negative) would fire compaction every turn; ``>1`` would silently
-    disable threshold compaction — both foot-guns, so reject at boot instead.
-    """
-    ratio = float(raw)
-    if not 0 < ratio <= 1:
-        raise ConfigError(f"compaction.ratio must be in (0, 1], got {ratio}")
-    return ratio

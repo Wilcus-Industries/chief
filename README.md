@@ -71,7 +71,7 @@ From a clone, `./install.sh` does the same without the prerequisite step.
 
 ```
 chief status     # service + web UI state
-chief update     # merge the latest origin/main, restart, roll back if unhealthy
+chief update     # apply the newest release onto this box's own edits
 chief stop       # stop the daemon (chief start brings it back)
 chief run        # run in the foreground instead of the service
 chief wizard     # re-run the first-run wizard

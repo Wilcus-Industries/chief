@@ -22,6 +22,7 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
+from chief.cron.updates import ensure_update_schedule
 from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools, approval_asker
@@ -165,6 +166,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         model_aliases=model_aliases,
         ask=approval_asker(core.dispatcher, gate.approvals),
     )
+    await ensure_update_schedule(core.cron, config)
     commands = CommandSet(
         core.manager, core.monitors, core.cron, store, skills=skills,
         model_aliases=model_aliases,

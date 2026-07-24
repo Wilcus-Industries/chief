@@ -9,9 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.approvals import Approval
+from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
 from chief.cron.tools import register_cron_tools
+from chief.cron.updates import (
+    UPDATE_DESCRIPTION,
+    ensure_update_schedule,
+    primary_target,
+)
 from chief.persistence.db import make_session_factory
 from chief.persistence.models import ScheduleRow
 from chief.persistence.store import MessageStore
@@ -637,3 +643,76 @@ async def test_create_rejects_both_prompt_and_command(engine: AsyncEngine) -> No
     )
     assert result.startswith("error: create needs")
     assert await service.list_enabled() == []
+
+
+# --- chief's own update schedule --------------------------------------------
+
+
+def _update_config(**overrides: object) -> Config:
+    base = {"update_schedule": "0 9 * * *", "update_autonomy": "clean-only"}
+    return Config(**{**base, **overrides})  # type: ignore[arg-type]
+
+
+async def test_update_schedule_is_seeded_from_config(engine: AsyncEngine) -> None:
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    assert await ensure_update_schedule(service, _update_config()) is not None
+    rows = await service.list_enabled()
+    assert [row.description for row in rows] == [UPDATE_DESCRIPTION]
+    # A PROMPT row, not a command one: quiet hours and the safe-boundary
+    # restart only come for free when chief is woken as a turn.
+    assert rows[0].command is None
+    assert "self-update" in rows[0].prompt
+    assert rows[0].spec == "0 9 * * *"
+
+
+async def test_update_prompt_does_not_freeze_the_autonomy_level(
+    engine: AsyncEngine,
+) -> None:
+    """The row outlives config changes, so it must not state a level itself.
+
+    A row seeded while autonomy was ``full`` is never rewritten; baking the
+    level in would have it keep granting unattended conflict resolution long
+    after the owner dialled it back. It points at config instead.
+    """
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    await ensure_update_schedule(service, _update_config(update_autonomy="full"))
+    prompt = (await service.list_enabled())[0].prompt
+    assert "full" not in prompt
+    assert "update.autonomy" in prompt
+
+
+async def test_update_schedule_is_not_duplicated_on_reboot(
+    engine: AsyncEngine,
+) -> None:
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    await ensure_update_schedule(service, _update_config())
+    assert await ensure_update_schedule(service, _update_config()) is None
+    assert len(await service.list_enabled()) == 1
+
+
+async def test_no_update_schedule_without_config(engine: AsyncEngine) -> None:
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    unscheduled = _update_config(update_schedule="")
+    assert await ensure_update_schedule(service, unscheduled) is None
+    manual_only = _update_config(update_autonomy="off")
+    assert await ensure_update_schedule(service, manual_only) is None
+    assert await service.list_enabled() == []
+
+
+async def test_a_bad_update_spec_is_refused_not_persisted(
+    engine: AsyncEngine,
+) -> None:
+    """A typo must not wedge the schedule loop, and must not stop the boot."""
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    assert (
+        await ensure_update_schedule(service, _update_config(update_schedule="nope"))
+        is None
+    )
+    assert await service.list_enabled() == []
+
+
+def test_update_wakes_the_owners_primary_channel() -> None:
+    assert primary_target(_update_config()) == ("web", "web:main")
+    assert primary_target(
+        _update_config(imessage_enabled=True, imessage_owner_handles=("+1555",))
+    ) == ("imessage", "+1555")
