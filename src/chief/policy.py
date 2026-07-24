@@ -96,12 +96,18 @@ def guard_audience(
     the resolved policy's send_guard is on — the dashboard shows a confirm before
     dispatch. Internal surfaces (web/cli) and the owner's own self-DM (thread_key
     is an owner handle) are always owner-only, so never guarded regardless of the
-    channel default (both imessage and web default RICH with send_guard on)."""
+    channel default (both imessage and web default RICH with send_guard on).
+
+    Fails closed for an unknown external channel: a package-added channel
+    (signal/whatsapp) with no ``channel_defaults`` entry and no override guards
+    by default, so a new channel is never silently sendable from the dashboard."""
     if channel in INTERNAL_CHANNELS:
         return False
     norm = {h.strip().lstrip("+").lower() for h in owner_handles if h.strip()}
     if thread.strip().lstrip("+").lower() in norm:
         return False
+    if override is None and channel not in channel_defaults:
+        return True
     return resolve(channel, override, channel_defaults).send_guard
 
 

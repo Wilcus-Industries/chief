@@ -43,6 +43,17 @@ def test_guard_audience_override_can_clear_the_guard() -> None:
     assert _guard("imessage", "+15551234567", off) is False
 
 
+def test_guard_audience_unknown_external_channel_fails_closed() -> None:
+    # A package-added channel (signal/whatsapp) with no channel_defaults entry
+    # and no override must guard by default — never silently sendable.
+    assert _guard("signal", "+15551234567", None) is True
+
+
+def test_guard_audience_unknown_external_channel_override_still_wins() -> None:
+    off: dict[str, object] = {"send_guard": False}
+    assert _guard("signal", "+15551234567", off) is False
+
+
 def test_from_dict_fills_missing_from_field_defaults() -> None:
     p = StreamPolicy.from_dict({"deltas": True})
     assert p == StreamPolicy(deltas=True, tools=False, results="off", send_guard=False)
