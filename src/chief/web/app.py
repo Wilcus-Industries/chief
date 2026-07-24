@@ -22,10 +22,12 @@ from chief.approvals import ApprovalBroker
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
+from chief.policy import StreamPolicy
 from chief.web.adapter import WebAdapter
 from chief.web.auth import COOKIE_NAME, Auth
 from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
+from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript, tool_call_response
@@ -45,6 +47,7 @@ def build_web_app(
     palette: Callable[[], list[str]],
     manager: SessionManager,
     approvals: ApprovalBroker,
+    channel_defaults: dict[str, StreamPolicy],
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
@@ -53,7 +56,9 @@ def build_web_app(
     ``manager`` deletes buffers (row + live session) for the sidebar × control;
     ``approvals`` is the same broker the gate's cards run on — ``/approve``
     resolves it directly, so a dashboard answer and an origin-channel answer
-    race for the identical pending future (#267).
+    race for the identical pending future (#267); ``channel_defaults`` is the
+    same map ``Dispatcher`` resolves against, so ``/policy`` reports the exact
+    provenance (override vs channel default) a turn will stream under (#265).
     """
 
     def unauthorized() -> Response:
@@ -173,6 +178,9 @@ def build_web_app(
             Route("/history/tool", history_tool),
             Route("/commands", commands),
             *build_live_routes(hub, approvals, auth.is_authed, unauthorized),
+            *build_policy_routes(
+                store, channel_defaults, auth.is_authed, unauthorized
+            ),
             Route("/monitors", monitor_list),
             Route("/app.css", app_css),
             Route("/app.js", app_js),

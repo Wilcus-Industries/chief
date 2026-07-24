@@ -43,6 +43,20 @@ CHAT_PAGE = """<!doctype html>
     <button id="newbuf">+ new</button>
   </nav>
   <section id="pane">
+    <div id="policy">
+      <span class="plabel">stream policy <span id="pol-src" class="psrc"></span></span>
+      <label><input type="checkbox" id="pol-deltas"> deltas</label>
+      <label><input type="checkbox" id="pol-tools"> tools</label>
+      <label>results
+        <select id="pol-results">
+          <option value="off">off</option>
+          <option value="lazy">lazy</option>
+          <option value="inline">inline</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="pol-guard"> send guard</label>
+      <button id="pol-reset" type="button" hidden>reset to default</button>
+    </div>
     <div id="log"></div>
     <div id="readonly" hidden>group thread &mdash; view only; send with imsg.</div>
     <form id="f" autocomplete="off">

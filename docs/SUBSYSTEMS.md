@@ -26,8 +26,8 @@ substitution is `{error}` on the login page. CSS and JS live as Python string
 constants served as separate assets so the HTML stays cacheable.
 
 Routes, assembled in one `Starlette(routes=[...])` block in `app.py` — `/approve`
-and `/events` are built by `web/live.py` and spliced in (#267, keeps `app.py`
-under the file-length cap):
+and `/events` are built by `web/live.py`, `/policy` by `web/policy_routes.py`,
+both spliced in (#267, #265, keeps `app.py` under the file-length cap):
 
 | Route | Purpose |
 |---|---|
@@ -41,6 +41,8 @@ under the file-length cap):
 | `GET /commands` | `/command` palette |
 | `POST /approve` | answer a pending approval card — `{thread, answer}`, 200/409 |
 | `GET /events` | SSE stream |
+| `GET /policy` | a thread's resolved stream policy + provenance (override vs channel default) |
+| `POST /policy` | set (or, with `policy: null`, clear) the thread's override |
 | `GET /monitors` | plaintext monitor list |
 | `GET /app.css`, `GET /app.js` | static assets, unauthenticated |
 

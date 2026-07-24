@@ -67,6 +67,23 @@ body{
   border-radius:2px; cursor:pointer;
 }
 #newbuf:hover{background:var(--bg2); border-style:solid;}
+/* stream-policy panel */
+#policy{display:flex; align-items:center; gap:.9rem; flex-wrap:wrap;
+  padding:.4rem 1.3rem; font-size:12px; color:var(--dim);
+  background:var(--bg1); border-bottom:1px solid var(--bg2);}
+#policy label{display:flex; align-items:center; gap:.3rem; cursor:pointer;}
+.plabel{color:var(--faint); text-transform:uppercase; letter-spacing:.08em;
+  font-size:11px;}
+.psrc{padding:.05rem .4rem; border-radius:2px; text-transform:none;
+  letter-spacing:0;}
+.psrc.default{color:var(--faint); border:1px solid var(--bg3);}
+.psrc.override{color:var(--bg0); background:var(--orange);}
+#policy select{font:inherit; background:var(--bg2); color:var(--fg);
+  border:1px solid var(--bg3); border-radius:2px;}
+#pol-reset{font:inherit; font-size:11px; padding:.15rem .5rem;
+  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+#pol-reset:hover{background:var(--bg2);}
 /* transcript pane */
 #pane{flex:1; display:flex; flex-direction:column; min-height:0; position:relative;}
 #log{flex:1; overflow-y:auto; padding:1.1rem 1.3rem;}

@@ -17,6 +17,7 @@ from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import COARSE, RICH
 from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
@@ -74,7 +75,7 @@ def web(engine: AsyncEngine) -> WebParts:
     approvals = ApprovalBroker()
     app = build_web_app(
         Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
-        approvals,
+        approvals, {"web": RICH, "imessage": RICH},
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
@@ -631,6 +632,96 @@ async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None
 
     threads = {s["thread"] for s in await store.list_sessions()}
     assert {"web:main", "imessage:+1"} <= threads
+
+
+async def test_policy_requires_auth(web: WebParts) -> None:
+    client, *_ = web
+    assert (await client.get("/policy?thread=web:main")).status_code == 401
+    assert (await client.post("/policy", json={"thread": "x"})).status_code == 401
+
+
+async def test_policy_resolves_the_channel_default_absent_an_override(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["channel"] == "web"
+    assert data["override"] is None
+    assert data["default"] == RICH.to_dict()
+    assert data["resolved"] == RICH.to_dict()
+
+
+async def test_policy_post_sets_an_override_that_get_reflects(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    response = await client.post(
+        "/policy", json={"thread": "web:main", "policy": COARSE.to_dict()}
+    )
+    assert response.status_code == 200
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["override"] == COARSE.to_dict()
+    assert data["resolved"] == COARSE.to_dict()
+    assert data["default"] == RICH.to_dict()  # provenance: default unchanged
+
+
+async def test_policy_post_null_clears_the_override_back_to_default(
+    web: WebParts,
+) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web", stream_policy=COARSE.to_dict())
+
+    response = await client.post(
+        "/policy", json={"thread": "web:main", "policy": None}
+    )
+    assert response.status_code == 200
+
+    data = (await client.get("/policy?thread=web:main")).json()
+    assert data["override"] is None
+    assert data["resolved"] == RICH.to_dict()
+
+
+async def test_policy_post_rejects_an_unknown_results_mode(web: WebParts) -> None:
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+
+    response = await client.post(
+        "/policy",
+        json={"thread": "web:main", "policy": {"results": "nope"}},
+    )
+    assert response.status_code == 400
+    assert await store.stream_policy("web:main") is None  # untouched
+
+
+async def test_policy_override_survives_a_fresh_manager_lookup(
+    web: WebParts,
+) -> None:
+    """AC2: the manager the dispatcher reads per-turn sees the same value —
+    the write is the one and only override row, no cache to go stale."""
+    client, _, _, store, manager, _, _ = web
+    await login(client)
+    await store.ensure_session("web:main", "web")
+    await client.post(
+        "/policy", json={"thread": "web:main", "policy": COARSE.to_dict()}
+    )
+    assert await manager.stream_policy("web:main") == COARSE.to_dict()
+
+
+async def test_policy_panel_and_route_wired_into_the_page(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    assert 'id="policy"' in (await client.get("/")).text
+    js = (await client.get("/app.js")).text
+    assert "/policy" in js and "loadPolicy" in js and "savePolicy" in js
 
 
 async def test_assets_are_served(web: WebParts) -> None:

@@ -1,6 +1,7 @@
 """The web UI client, served at /app.js. Buffers, send, readline completion;
 the SSE stream client and tool rows live in script_tools.py (concatenated)."""
 
+from chief.web.script_policy import POLICY_SCRIPT
 from chief.web.script_tools import TOOL_SCRIPT
 
 SCRIPT = """
@@ -64,7 +65,7 @@ function setStatus(tk){
 
 async function switchTo(tk){
   state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
-  await reloadHistory(tk); subscribe(tk);
+  await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
 }
 
@@ -161,4 +162,4 @@ async function monitors(){
   state.commands = await getJSON("/commands") || [];
   await loadSessions(); monitors(); setInterval(monitors, 10000);
 })();
-""" + TOOL_SCRIPT
+""" + POLICY_SCRIPT + TOOL_SCRIPT
