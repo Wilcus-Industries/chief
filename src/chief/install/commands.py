@@ -20,7 +20,7 @@ from chief.install.lifecycle import (
 )
 from chief.install.release import cut_release
 from chief.install.service import ServiceManager
-from chief.install.update import update
+from chief.install.update import abort_update, update
 from chief.install.updatecheck import refresh
 from chief.install.wizard import WizardIO, run_wizard
 from chief.socket_client import send_once
@@ -86,6 +86,8 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         print(f"web:     {url} ({'responding' if up else 'not responding'})")
         return 0
     if command == "update":
+        if args.abort:
+            return abort_update(repo_dir=args.repo)
         return update(repo_dir=args.repo)
     if command == "release":
         return cut_release(repo_dir=args.repo, part=args.part)

@@ -39,6 +39,36 @@ def update(*, repo_dir: Path, say: Callable[[str], None] = print) -> int:
         return 1
 
 
+def abort_update(*, repo_dir: Path, say: Callable[[str], None] = print) -> int:
+    """Give up on an applied-but-unresolved update, cleanly.
+
+    Undoing the apply is not enough on its own: the pending record must be
+    cleared in the same breath. If only the tree were reverted (what
+    ``revert_edits`` does), the record would linger with HEAD still on the
+    pre-update commit, and the next unrelated self-edit's healthy boot would
+    read that HEAD movement as the update landing — pinning a release whose
+    changes are no longer in the tree. So the box's give-up path calls this,
+    not the generic revert.
+
+    A no-op when nothing is pending, so it can never discard real work: only an
+    update in flight is undone, and only back onto the commit it was applied on.
+    """
+    try:
+        if basepin.read_pending(repo_dir) is None:
+            say("nothing to abort: no update is in flight.")
+            return 0
+        # Inverse of the apply: reset index + working tree to HEAD (the
+        # pre-update commit), which drops the merged tree — added files and
+        # all — while leaving untracked instance data untouched.
+        layer.checkout_tree(repo_dir, "HEAD")
+        basepin.clear_pending(repo_dir)
+        say("aborted: the update was undone; still on the pinned release.")
+        return 0
+    except layer.GitError as exc:
+        say(f"error: {exc}")
+        return 1
+
+
 def _update(*, repo_dir: Path, say: Callable[[str], None]) -> int:
     failure = layer.fetch(repo_dir)
     if failure is not None:

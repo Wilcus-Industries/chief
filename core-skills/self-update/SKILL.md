@@ -45,10 +45,18 @@ rollback). There is no separate update machinery to learn.
    it asks. On green it commits everything as that one change and reboots.
 
 5. **On red**, fix forward against the check output and restart again — same as
-   any self-edit. After three reds in a row, stop: `revert_edits` puts the box
-   back exactly on the version it was already running, which is the correct
-   give-up. Then tell the owner what collided and why you could not land it.
-   Never leave the box sitting on a half-merged tree.
+   any self-edit. After three reds in a row, stop and give up cleanly:
+
+   ```
+   chief update --abort
+   ```
+
+   That undoes the applied update *and* forgets it — use it, not `revert_edits`.
+   Reverting the tree alone would leave the update recorded as pending, and your
+   next unrelated restart would then be misread as this update landing. Abort
+   puts the box back exactly on the version it was already running. Then tell
+   the owner what collided and why you could not land it. Never leave the box
+   sitting on a half-merged tree.
 
 The base pin only advances once you come back up healthy, so a rollback or a
 give-up leaves you recorded as still on the old release — the next update
@@ -60,7 +68,10 @@ retries from the same place. You do not manage the pin yourself.
 
 - **`off`** — only when the owner asks. A schedule firing does nothing but say so.
 - **`clean-only`** (default) — apply and restart a clean update on your own.
-  On a collision, do **not** resolve it: tell the owner what conflicted and ask.
+  On a collision, do **not** resolve it: `chief update --abort` to put the tree
+  back clean on the old version, then tell the owner what conflicted and ask.
+  (Leaving the half-merged tree sitting there would wedge your next self-edit on
+  the stray conflict markers.)
 - **`full`** — resolve collisions yourself too, then report what you did
   afterwards, naming each file you merged and how you decided.
 

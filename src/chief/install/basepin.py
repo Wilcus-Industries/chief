@@ -8,9 +8,17 @@ still there to merge against long after upstream has forgotten it.
 
 The pin advances **only after an update comes back healthy**. ``update`` writes
 a pending record naming the release and the pre-update HEAD; the next healthy
-boot advances the pin if — and only if — a commit actually landed. A rollback,
-a red done-check, or an abandoned update all leave HEAD where it was, so the
-same check discards the record without moving the pin.
+boot advances the pin if HEAD has moved off that recorded commit — the seatbelt
+committing the merge is the only thing that moves it on the boot that follows an
+apply. A rollback or a red done-check leaves HEAD put, so the same check
+discards the record without moving the pin.
+
+That HEAD-moved test is proof *only while the record is fresh* — i.e. consumed
+by the boot the update's own restart triggers. An update abandoned without a
+reboot (``revert_edits`` reverts the tree but does not move HEAD or restart)
+must therefore clear the record itself, or a later unrelated commit's healthy
+boot would read that movement as this update landing. ``update --abort`` does
+exactly that; see :func:`clear_pending`.
 """
 
 import json
@@ -68,6 +76,16 @@ def record_pending(
     path.write_text(
         json.dumps({"commit": commit, "version": version, "head": head})
     )
+
+
+def clear_pending(repo_dir: Path) -> None:
+    """Forget a pending update. Idempotent — missing is fine.
+
+    Called when an update is abandoned before it lands: the record must not
+    outlive the applied tree, or a later unrelated commit would let
+    :func:`resolve_pending` read HEAD movement as proof the update landed.
+    """
+    (repo_dir / PENDING_NAME).unlink(missing_ok=True)
 
 
 def read_pending(repo_dir: Path) -> Pending | None:

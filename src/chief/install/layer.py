@@ -18,11 +18,17 @@ strategy flag is the bug this replaces: ``-X theirs`` discarded self-edits
 silently.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
 #: Exit code for "applied, but some files collided and need resolving".
 CONFLICTS_EXIT = 2
+
+#: Never let a git call block on an interactive credential prompt — an
+#: auth-required fetch must fail fast, not hang until the timeout. Mirrors the
+#: hardening in :mod:`.updatecheck`.
+_NO_PROMPT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 #: Local git work is fast; a fetch is not, so it carries its own bound.
 GIT_TIMEOUT_SECONDS = 60.0
@@ -99,7 +105,11 @@ def checkout_tree(repo_dir: Path, tree: str) -> None:
 
     That is what stages the update as ordinary uncommitted changes on the
     pre-update commit. Paths no release tracks — installed skills, config,
-    secrets, ``data/`` — are untouched, because they are in no tree at all.
+    secrets, ``data/`` — are untouched, because they are in no tree at all. The
+    one exception is a release that starts tracking a path an install already
+    holds as an untracked file: ``--reset`` would overwrite it. That cannot hit
+    the gitignored instance dirs (a release will not track into them), but a
+    new top-level tracked file colliding with local scratch would be clobbered.
     """
     git(repo_dir, "read-tree", "-u", "--reset", tree)
 
@@ -131,6 +141,7 @@ def _run(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_NO_PROMPT_ENV,
         )
     except subprocess.TimeoutExpired:
         return 1, "", f"git {args[0]} timed out after {timeout:.0f}s"

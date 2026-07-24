@@ -59,35 +59,60 @@ def _untrack_skills(repo_dir: Path) -> bool:
     The working-tree copies are kept (``--cached``). Committing immediately
     matters: a staged deletion left lying around would otherwise be swept into
     whatever the next self-edit commits, under someone else's rationale.
+
+    Atomic by contract: if the commit fails (a pre-commit hook, a missing git
+    identity), the staged ``rm`` and the .gitignore edit are rolled back before
+    the error propagates. Otherwise the tree would stay dirty, and the boot
+    guard would skip the *whole* migration on every future boot — the base pin
+    would never be recorded and the box could never update.
     """
     tracked = bool(layer.git(repo_dir, "ls-files", SKILLS_DIR).strip())
-    ignored = _ensure_ignored(repo_dir)
-    if not tracked and not ignored:
+    original_ignore = _ensure_ignored(repo_dir)
+    if not tracked and original_ignore is None:
         return False
-    if tracked:
-        layer.git(repo_dir, "rm", "-r", "--cached", "-q", SKILLS_DIR)
-    if ignored:
-        layer.git(repo_dir, "add", ".gitignore")
-    layer.git(
-        repo_dir,
-        "commit",
-        "-q",
-        "-m",
-        "chore: untrack installed skills (update migration)",
-    )
+    try:
+        if tracked:
+            layer.git(repo_dir, "rm", "-r", "--cached", "-q", SKILLS_DIR)
+        if original_ignore is not None:
+            layer.git(repo_dir, "add", ".gitignore")
+        layer.git(
+            repo_dir,
+            "commit",
+            "-q",
+            "-m",
+            "chore: untrack installed skills (update migration)",
+        )
+    except layer.GitError:
+        _restore(repo_dir, original_ignore)
+        raise
     logger.info("installed skills are now untracked instance data")
     return True
 
 
-def _ensure_ignored(repo_dir: Path) -> bool:
-    """Add ``/skills/`` to .gitignore if absent; True when the file changed."""
+def _restore(repo_dir: Path, original_ignore: str | None) -> None:
+    """Undo a failed untrack: unstage everything and put .gitignore back.
+
+    The migration only runs against a clean tree, so resetting the index to
+    HEAD and rewriting the one file we touched returns it to exactly that.
+    """
+    layer.git(repo_dir, "reset", "-q")
+    if original_ignore is not None:
+        (repo_dir / ".gitignore").write_text(original_ignore)
+
+
+def _ensure_ignored(repo_dir: Path) -> str | None:
+    """Add ``/skills/`` to .gitignore if absent.
+
+    Returns the file's *original* text when it was changed (so a failed commit
+    can restore it), or ``None`` when the entry was already there.
+    """
     path = repo_dir / ".gitignore"
     text = path.read_text() if path.exists() else ""
     if IGNORE_ENTRY in text.splitlines():
-        return False
+        return None
     prefix = text if text.endswith("\n") or not text else text + "\n"
     path.write_text(f"{prefix}\n{_IGNORE_COMMENT}{IGNORE_ENTRY}\n")
-    return True
+    return text
 
 
 def _seed_core_skills(repo_dir: Path) -> bool:

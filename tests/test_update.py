@@ -17,7 +17,7 @@ import pytest
 from chief.install import basepin, layer, migrate, releases, updatecheck
 from chief.install.commands import main
 from chief.install.release import cut_release
-from chief.install.update import update
+from chief.install.update import abort_update, update
 
 
 def git(repo: Path, *args: str) -> str:
@@ -301,6 +301,59 @@ def test_a_red_check_leaves_the_box_on_the_old_version(
     assert basepin.read_base(box) == pinned
 
 
+def test_abort_reverts_the_apply_and_forgets_the_pending_record(
+    box: Path, upstream: Path
+) -> None:
+    """Giving up on an update must undo it *and* clear the pending record.
+
+    Reverting the tree alone (``revert_edits``) leaves the record on disk with
+    HEAD unmoved; a later unrelated commit then reboots and ``resolve_pending``
+    reads that HEAD movement as proof the update landed — pinning a release
+    whose changes were thrown away. The abort closes that by clearing the
+    record while HEAD is still on the pre-update commit.
+    """
+    pinned = basepin.read_base(box)
+    _self_edit(box, box / "src/chief/local.py", "chief wrote this\n")
+    _release(upstream, "0.4.0", upstream / "README.md", "four\n")
+    assert update(repo_dir=box, say=lambda _: None) == 0
+    assert basepin.read_pending(box) is not None
+
+    said: list[str] = []
+    assert abort_update(repo_dir=box, say=said.append) == 0
+    # The apply is undone: upstream's change is gone, the self-edit stays, and
+    # the tree is clean on the old version.
+    assert (box / "README.md").read_text() == "chief\n"
+    assert (box / "src/chief/local.py").read_text() == "chief wrote this\n"
+    assert not git(box, "status", "--porcelain", "--untracked-files=no").strip()
+    assert basepin.read_pending(box) is None
+
+    # The mispin the record enabled can no longer happen: an unrelated self-edit
+    # commits and a healthy boot resolves nothing, leaving the pin put.
+    _self_edit(box, box / "src/chief/other.py", "unrelated later edit\n")
+    assert basepin.resolve_pending(box) is None
+    assert basepin.read_base(box) == pinned
+
+
+def test_abort_without_a_pending_update_changes_nothing(box: Path) -> None:
+    """No update in flight: abort must not touch a clean, legitimate tree."""
+    _self_edit(box, box / "src/chief/local.py", "chief wrote this\n")
+    before = git(box, "rev-parse", "HEAD").strip()
+    said: list[str] = []
+    assert abort_update(repo_dir=box, say=said.append) == 0
+    assert git(box, "rev-parse", "HEAD").strip() == before
+    assert (box / "src/chief/local.py").read_text() == "chief wrote this\n"
+    assert any("nothing" in line.lower() for line in said)
+
+
+def test_abort_command_reverts_and_clears(box: Path, upstream: Path) -> None:
+    """The `--abort` flag is the shell-invocable half the skill calls."""
+    _release(upstream, "0.4.0", upstream / "README.md", "four\n")
+    assert update(repo_dir=box, say=lambda _: None) == 0
+    assert main(["update", "--repo", str(box), "--abort"]) == 0
+    assert (box / "README.md").read_text() == "chief\n"
+    assert basepin.read_pending(box) is None
+
+
 def test_a_resolved_collision_commits_once_and_advances(
     box: Path, upstream: Path
 ) -> None:
@@ -424,6 +477,27 @@ def test_migration_untracks_installed_skills_without_losing_content(
     assert (box / "skills/screening/SKILL.md").read_text() == "chief's own edit\n"
     assert not git(box, "status", "--porcelain", "--untracked-files=no").strip()
     assert "/skills/" in (box / ".gitignore").read_text()
+
+
+def test_a_failed_untrack_commit_leaves_a_clean_tree(box: Path) -> None:
+    """If the crossover commit fails, nothing may be left staged.
+
+    A leftover staged ``rm`` + .gitignore edit would keep the tree dirty, and
+    the boot guard would then skip the whole migration forever — the base pin
+    would never be recorded. A blocking pre-commit hook forces the failure.
+    """
+    _write(box / "skills/screening/SKILL.md", "chief's own edit\n")
+    _commit(box, "instance state: an installed skill")
+    original_ignore = (box / ".gitignore").read_text()
+    hook = box / ".git/hooks/pre-commit"
+    _write(hook, "#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    migrate.migrate_instance(box)  # fail-soft: logs and skips
+
+    assert not git(box, "status", "--porcelain", "--untracked-files=no").strip()
+    assert "skills/screening/SKILL.md" in git(box, "ls-files", "skills")
+    assert (box / ".gitignore").read_text() == original_ignore
 
 
 def test_migration_seeds_core_skills_that_are_missing(box: Path) -> None:

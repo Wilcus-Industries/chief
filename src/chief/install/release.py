@@ -6,6 +6,7 @@ done-check: every box in the fleet applies its own self-edits onto whatever
 this publishes, so shipping a broken tree costs a rollback everywhere at once.
 """
 
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -19,6 +20,9 @@ Publish = Callable[[str, str], None]
 
 #: A full done-check run is minutes, not seconds.
 CHECK_TIMEOUT_SECONDS = 1800.0
+
+#: A push that needs auth must fail fast, not hang on a credential prompt.
+_NO_PROMPT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
 def cut_release(
@@ -108,14 +112,17 @@ def _first_failing(
     checks: Sequence[Sequence[str]], repo_dir: Path
 ) -> str | None:
     for cmd in checks:
-        result = subprocess.run(
-            list(cmd),
-            cwd=repo_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=CHECK_TIMEOUT_SECONDS,
-        )
+        try:
+            result = subprocess.run(
+                list(cmd),
+                cwd=repo_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return f"$ {' '.join(cmd)}\ntimed out after {CHECK_TIMEOUT_SECONDS:.0f}s"
         if result.returncode != 0:
             return f"$ {' '.join(cmd)}\n{result.stdout[-4000:]}"
     return None
@@ -130,12 +137,16 @@ def _tag_exists(repo_dir: Path, tag: str) -> bool:
 
 
 def _git(repo_dir: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo_dir), *args],
-        capture_output=True,
-        text=True,
-        timeout=120.0,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_dir), *args],
+            capture_output=True,
+            text=True,
+            timeout=120.0,
+            env=_NO_PROMPT_ENV,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git {' '.join(args)} timed out") from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}"

@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         "update", help="apply the newest release onto this box's own edits"
     )
     update_cmd.add_argument("--repo", type=Path, default=Path.cwd())
+    update_cmd.add_argument(
+        "--abort",
+        action="store_true",
+        help="give up on an applied update: undo it and forget it",
+    )
     check = sub.add_parser("check-updates", help="is a newer core release out?")
     check.add_argument("--repo", type=Path, default=Path.cwd())
     release_cmd = sub.add_parser("release", help="cut a release (upstream only)")

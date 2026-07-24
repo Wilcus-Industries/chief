@@ -120,13 +120,17 @@ upstream's structure.
 Chief takes it from there via the **`self-update` skill**: resolve any conflict
 markers, then `restart` — full done-check, one `update to vX.Y.Z` commit, reboot,
 and the existing boot-failure rollback. Three consecutive red checks trip the
-existing circuit breaker; the correct give-up is `revert_edits`, which puts the
-box back exactly on the version it was already running.
+existing circuit breaker; the correct give-up is **`chief update --abort`**,
+which undoes the applied update and forgets the pending record, putting the box
+back exactly on the version it was already running.
 
 **The base pin advances only after a healthy boot**, and only if HEAD actually
-moved — proof the update was committed. A rollback, a red check, or an abandoned
-update all leave HEAD where it was, so the pending record is discarded and the
-pin does not move. The next update retries from the same place.
+moved — proof the update was committed. A rollback or a red check leaves HEAD
+where it was, so the pending record is discarded and the pin does not move. The
+give-up must use `--abort`, not a bare `revert_edits`: the latter reverts the
+tree but leaves the pending record and HEAD unmoved, and a *later* unrelated
+commit's healthy boot would then be misread as this update landing. The next
+update retries from the same place.
 
 ### Local layer = tree diff, not a commit range
 
