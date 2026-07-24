@@ -8,6 +8,8 @@ model2vec) happen lazily inside the methods that touch them.
 """
 
 import hashlib
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -41,11 +43,15 @@ class VaultIndex:
         index_home: Path,
         settings: MemorySettings,
         model: Any | None = None,
+        now: Callable[[], float] | None = None,
     ) -> None:
         self._vault = Path(vault)
         self._index_home = Path(index_home)
         self._settings = settings
         self._model = model
+        # Clock behind the refresh throttle; injectable so tests drive it
+        # without sleeping.
+        self._now = now or time.time
         self._client: Any | None = None
         self._collection: Any | None = None
         # The daemon hook and the CLI share this store across processes; the
@@ -71,37 +77,68 @@ class VaultIndex:
     def search(self, query: str, k: int) -> list[SearchHit]:
         """Return the ``k`` chunks most similar to ``query``, closest first.
 
-        Self-heals a missing/emptied index by building it, then does a cheap
-        mtime staleness check on the hit notes and re-embeds any that drifted
-        out of band before returning — so recall never serves stale or empty
-        results silently. A missing vault surfaces loudly from :meth:`build`."""
+        Self-heals a missing/emptied index by building it, then runs the cheap
+        mtime-gated sweep (:meth:`refresh`) so new, edited, and deleted notes are
+        reconciled before the query — recall never needs a manual reindex, and
+        never serves stale or empty results silently. The sweep is skippable via
+        ``auto_refresh`` and rate-limited by ``refresh_min_interval_s``. A
+        missing vault surfaces loudly from :meth:`build`."""
         with self._lock:
-            collection = self._ensure()
+            self._ensure()
+            self._maybe_sweep()
+            collection = self._open()
             if collection.count() == 0:
                 return []
-            hits = self._query(query, k)
-            stale = heal.drifted(
-                collection, self._vault, [h.note_path for h in hits]
-            )
-            if stale:
-                for rel in stale:
-                    self._reindex_note(rel)
-                hits = self._query(query, k)
-            return hits
+            return self._query(query, k)
 
     def refresh(self) -> int:
-        """Re-embed only the notes whose content changed and drop deleted ones;
-        returns how many notes were touched. Cheap enough for a cron sweep."""
+        """Re-embed only the notes whose mtime advanced and bytes changed, index
+        new notes, and drop deleted ones; returns how many notes were touched.
+        The manual counterpart to the in-search sweep — always runs, ignoring
+        ``auto_refresh``/throttle. Cheap: an untouched note costs one ``stat``."""
         with self._lock:
-            collection = self._ensure()
-            to_reindex, to_delete = heal.diff(
-                self._vault, self._settings, heal.indexed_hashes(collection)
-            )
-            for rel in to_delete:
-                collection.delete(where={"note_path": rel})
-            for rel in to_reindex:
-                self._reindex_note(rel)
-            return len(to_reindex) + len(to_delete)
+            return self._sweep_now()
+
+    def _maybe_sweep(self) -> None:
+        """Run the sweep on the search read-path, honoring the config policy:
+        ``auto_refresh`` off skips it; a positive ``refresh_min_interval_s``
+        skips it when the last sweep is within the window. Assumes the store
+        lock is held (search holds it)."""
+        if not self._settings.auto_refresh or self._throttled():
+            return
+        self._sweep_now()
+        # Only the automatic path stamps: the throttle window tracks the last
+        # in-search sweep. A manual `refresh`/`reindex` deliberately does not
+        # reset it — at worst one redundant (idempotent) sweep follows.
+        self._stamp_path().write_text(repr(self._now()))
+
+    def _sweep_now(self) -> int:
+        """The mtime-gated reconcile itself; assumes the store lock is held."""
+        collection = self._ensure()
+        to_reindex, to_delete = heal.sweep_plan(
+            self._vault, self._settings, heal.indexed_meta(collection)
+        )
+        for rel in to_delete:
+            collection.delete(where={"note_path": rel})
+        for rel in to_reindex:
+            self._reindex_note(rel)
+        return len(to_reindex) + len(to_delete)
+
+    def _throttled(self) -> bool:
+        interval = self._settings.refresh_min_interval_s
+        if interval <= 0:
+            return False
+        stamp = self._stamp_path()
+        try:
+            last = float(stamp.read_text())
+        except (OSError, ValueError):
+            return False  # no/garbled stamp — sweep and (re)write it
+        return (self._now() - last) < interval
+
+    def _stamp_path(self) -> Path:
+        # Per-vault (keyed on the collection name), so one vault's sweep never
+        # throttles another sharing the same index home.
+        return self._index_home / f"{self._collection_name()}.sweep"
 
     def _query(self, query: str, k: int) -> list[SearchHit]:
         collection = self._open()
@@ -132,8 +169,14 @@ class VaultIndex:
         collection = self._open()
         collection.delete(where={"note_path": rel})
         path = self._vault / rel
-        if path.exists():
-            self._index_note(rel, path.read_text())
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            # Vanished between the sweep and here, or non-UTF-8: leave it
+            # dropped rather than aborting the whole search; a later sweep
+            # retries it. One bad note must never take down recall.
+            return
+        self._index_note(rel, text)
 
     def _index_note(self, rel: str, text: str) -> int:
         chunks = chunk_note(rel, text)

@@ -70,6 +70,23 @@ def test_reindex_picks_up_an_out_of_band_change(
     assert "tomatoes.md :: Blight" in out
 
 
+def test_refresh_runs_an_incremental_sweep(
+    vault: Path, tmp_path: Path, warm_cache: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(_args(vault, tmp_path, "reindex"))
+    capsys.readouterr()
+    (vault / "tomatoes.md").write_text(
+        "# Blight\n\nEarly blight fungus spots the lower tomato leaves in "
+        "humid weather.\n"
+    )
+    assert cli.main(_args(vault, tmp_path, "refresh")) == 0
+    out = capsys.readouterr().out
+    assert "refreshed 1 note" in out
+
+    cli.main(_args(vault, tmp_path, "search", "fungal disease spotting the leaves"))
+    assert "tomatoes.md :: Blight" in capsys.readouterr().out
+
+
 def test_unknown_subcommand_exits_nonzero() -> None:
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["bogus"])

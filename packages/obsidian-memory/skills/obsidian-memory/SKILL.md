@@ -23,11 +23,16 @@ strings (they read the index, never the model):
 - `uv run chief-memory related "<query>"` — semantic hits **widened by
   wikilinks**, so a linked note a pure search would miss still surfaces.
 - `uv run chief-memory links "<note>"` — a note's 1-hop wikilink neighbourhood.
-- `uv run chief-memory reindex` — rebuild after bulk external edits (the index
-  self-heals single out-of-band edits at query time, so this is rarely needed).
+- `uv run chief-memory refresh` — force the incremental sweep now (new/changed/
+  deleted notes). Rarely needed: every `search` already sweeps first, so notes
+  you save show up on the next recall on their own — no command required.
+- `uv run chief-memory reindex` — full rebuild; recovery only (a corrupted index,
+  an embed-model change, or an edit that never bumped the file's mtime). Not part
+  of normal use.
 
-The verbs are exactly `search`, `related`, `links`, `reindex` — **there is no
-`recall` subcommand** (a bare `chief-memory recall` errors). So to recall who
+The verbs are exactly `search`, `related`, `links`, `refresh`, `reindex` —
+**there is no `recall` subcommand** (a bare `chief-memory recall` errors). So to
+recall who
 the owner is, the action is: `shell` tool → `uv run chief-memory search "owner"`.
 Never a tool named after this package, and never import its Python modules —
 only the CLI above.
