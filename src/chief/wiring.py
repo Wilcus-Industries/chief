@@ -24,6 +24,7 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
 from chief.gate import GatePolicy, load_approved, save_approved
+from chief.hub import ObserverHub
 from chief.mcpclient.manager import (
     McpManager,
     ServerConfig,
@@ -64,6 +65,7 @@ class Core:
 
     budget: Budget
     bus: EventBus
+    hub: ObserverHub
     registry: ToolRegistry
     restart: RestartController
     manager: SessionManager
@@ -184,16 +186,14 @@ def build_adapters(
         )
         dispatcher.register(imessage_adapter)
 
-    # The bus lets the web adapter mirror other channels' traffic (iMessage) to
-    # the cockpit; web threads still use its direct send path.
-    web_adapter = WebAdapter(core.bus)
+    # Web-origin turns stream to the hub; other channels reach it as ticks.
+    web_adapter = WebAdapter(core.hub)
     dispatcher.register(web_adapter)
     web_server: WebServer | None = None
     if config.web_password:
         web_app = build_web_app(
-            Auth(config.web_password, load_or_create_secret()),
-            web_adapter, dispatcher.handle, core.monitors, store,
-            commands.palette, core.manager,
-        )
+            Auth(config.web_password, load_or_create_secret()), web_adapter,
+            core.hub, dispatcher.handle, core.monitors, store,
+            commands.palette, core.manager)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

@@ -11,6 +11,7 @@ from chief.bus import EventBus
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
+from chief.hub import ObserverHub
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
@@ -33,6 +34,7 @@ class App:
     monitor_service: MonitorService
     cron_service: CronService
     bus: EventBus
+    hub: ObserverHub
     web_adapter: WebAdapter
     web_server: WebServer | None
     mcp_manager: McpManager
@@ -62,6 +64,7 @@ class App:
         await self.cron_service.stop()
         if self.imessage_adapter is not None:
             await self.imessage_adapter.stop()
+        self.hub.close()
         await self.web_adapter.stop()
         await self.socket_adapter.stop()
         await self.shell_service.aclose()

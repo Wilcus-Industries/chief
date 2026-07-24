@@ -64,14 +64,26 @@ the `session` tool, `/prune`, and the web console.
 
 ### Live stream
 
-`WebAdapter` is a fan-out broadcaster: `listen()` registers a per-client queue,
-`drop()` unregisters, `_broadcast()` pushes to all. `stop()` pushes a `closed`
-sentinel that terminates the SSE generator; a `finally` always drops the queue on
-disconnect.
+The fan-out is `ObserverHub` (`hub.py`), a core seam decoupled from origin
+channels and the monitor bus: `listen()` registers a per-client queue, `drop()`
+unregisters, `broadcast()` pushes to all. `App.stop()` calls `hub.close()`, which
+pushes a `closed` sentinel that terminates the SSE generator; a `finally` always
+drops the queue on disconnect. `/events` subscribes to the hub, not the adapter.
 
-**Every browser sees every thread's frames** and filters client-side on the
-`thread` field. A frame for an unknown thread triggers a session reload; a frame
-for a non-current thread marks it unread.
+Two frame shapes reach the browser:
+
+- A **web-origin** turn streams `delta`/`final` frames — `WebAdapter` (the origin
+  channel for `web:` threads) calls `hub.broadcast` from its `send`/`send_delta`.
+- **Every other channel's** completed turn (cli, iMessage, and monitor/cron
+  system wakes) emits one coarse `tick` frame — `{type, thread, channel,
+  preview}` — from `Dispatcher._tick`, so the cockpit can watch a thread it isn't
+  tapped into without mirroring its whole transcript.
+
+**Every browser sees every frame** and filters client-side on `thread`. A `tick`
+bumps the thread to the top of the sidebar, marks it unread, and shows the reply
+preview as a snippet; a `delta`/`final` for an unknown thread triggers a session
+reload. (The old EventBus→`WebAdapter` per-send mirror is gone — that coupling is
+what issue #262 removed.)
 
 ### Approvals surface
 

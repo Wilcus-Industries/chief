@@ -1,6 +1,7 @@
 """Web UI: auth, chat send, SSE frames, monitor list."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -9,8 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
-from chief.bus import Event, EventBus
+from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
+from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
@@ -37,14 +39,20 @@ def _palette() -> list[str]:
 
 
 WebParts = tuple[
-    httpx.AsyncClient, WebAdapter, MonitorService, MessageStore, SessionManager
+    httpx.AsyncClient,
+    WebAdapter,
+    MonitorService,
+    MessageStore,
+    SessionManager,
+    ObserverHub,
 ]
 
 
 @pytest.fixture
 def web(engine: AsyncEngine) -> WebParts:
     HANDLED.clear()
-    adapter = WebAdapter()
+    hub = ObserverHub()
+    adapter = WebAdapter(hub)
     factory = make_session_factory(engine)
     monitors = MonitorService(
         factory,
@@ -62,12 +70,12 @@ def web(engine: AsyncEngine) -> WebParts:
         max_concurrent=4,
     )
     app = build_web_app(
-        Auth("hunter2"), adapter, handle, monitors, store, _palette, manager
+        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
     )
-    return client, adapter, monitors, store, manager
+    return client, adapter, monitors, store, manager, hub
 
 
 async def login(client: httpx.AsyncClient) -> None:
@@ -130,7 +138,7 @@ async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
 async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
     """A non-web thread keeps its real key and its origin channel (resolved from
     the store), so the turn's reply exits on that channel — not a web buffer."""
-    client, _adapter, _monitors, store, _ = web
+    client, _adapter, _monitors, store, _, _ = web
     await store.ensure_session("+15551234567", "imessage")
     await login(client)
     response = await client.post(
@@ -147,7 +155,7 @@ async def test_send_routes_to_the_threads_real_channel(web: WebParts) -> None:
 async def test_send_refuses_a_group_thread(web: WebParts) -> None:
     """Groups have no core send path (imsg only); the cockpit keeps them view-
     only, and the route refuses a send rather than run an undeliverable turn."""
-    client, _adapter, _monitors, store, _ = web
+    client, _adapter, _monitors, store, _, _ = web
     group = "3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c"
     await store.ensure_session(group, "imessage")
     await login(client)
@@ -158,72 +166,29 @@ async def test_send_refuses_a_group_thread(web: WebParts) -> None:
 
 
 async def test_adapter_broadcasts_frames_to_listeners() -> None:
-    adapter = WebAdapter()
-    queue = adapter.listen()
+    """A web-origin turn streams its delta/final to the browser via the hub."""
+    hub = ObserverHub()
+    adapter = WebAdapter(hub)
+    queue = hub.listen()
     await adapter.send_delta("web:main", "he")
     await adapter.send("web:main", "hello")
     delta = queue.get_nowait()
     final = queue.get_nowait()
     assert delta == {"type": "delta", "thread": "web:main", "text": "he"}
     assert final == {"type": "final", "thread": "web:main", "text": "hello"}
-    adapter.drop(queue)
+    hub.drop(queue)
     await adapter.send("web:main", "gone")
     assert queue.empty()
 
 
-async def test_mirror_relays_peer_inbound_and_outbound() -> None:
-    """With a bus, the adapter mirrors another channel's traffic: a non-owner
-    inbound becomes a peer frame, chief's reply a final frame."""
-    bus = EventBus()
-    adapter = WebAdapter(bus)
-    await adapter.start()
-    queue = adapter.listen()
-    await bus.publish(
-        Event(
-            type="message.inbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "sender": "+1", "text": "hi there"},
-        )
-    )
-    await bus.publish(
-        Event(
-            type="message.outbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "text": "hello back"},
-        )
-    )
+async def test_hub_tick_broadcasts_to_listeners() -> None:
+    """A coarse tick reaches every hub listener (the non-web observation path)."""
+    hub = ObserverHub()
+    queue = hub.listen()
+    hub.tick("cli:t", "cli", "hey")
     assert queue.get_nowait() == {
-        "type": "peer", "thread": "+1", "text": "hi there", "sender": "+1"
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hey"
     }
-    assert queue.get_nowait() == {
-        "type": "final", "thread": "+1", "text": "hello back"
-    }
-    await adapter.stop()
-
-
-async def test_mirror_skips_owner_inbound_and_web_channel() -> None:
-    """Owner inbound is shown optimistically by the browser (skip, no dup); web
-    threads use the direct send path, so their bus events never re-mirror."""
-    bus = EventBus()
-    adapter = WebAdapter(bus)
-    await adapter.start()
-    queue = adapter.listen()
-    await bus.publish(
-        Event(
-            type="message.inbound",
-            channel="imessage",
-            payload={"thread_key": "+1", "sender": "owner", "text": "drive"},
-        )
-    )
-    await bus.publish(
-        Event(
-            type="message.outbound",
-            channel="web",
-            payload={"thread_key": "web:main", "text": "reply"},
-        )
-    )
-    assert queue.empty()
-    await adapter.stop()
 
 
 async def test_events_requires_auth(web: WebParts) -> None:
@@ -232,8 +197,39 @@ async def test_events_requires_auth(web: WebParts) -> None:
     assert response.status_code == 401
 
 
+async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> None:
+    """The central mechanism end to end: an authed browser holding GET /events
+    receives a hub tick as a real SSE `data:` frame — the leg the socket-side
+    acceptance test can't exercise. (ASGITransport buffers the body, so the
+    feeder closes the stream after the tick to let the response complete.)"""
+    client, _, _, _, _, hub = web
+    await login(client)
+
+    async def feed() -> None:
+        while not hub._queues:  # wait until the route registers its listener
+            await asyncio.sleep(0)
+        hub.tick("cli:home", "cli", "hi back")
+        hub.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        async with client.stream("GET", "/events") as response:
+            assert response.status_code == 200
+            frames = [
+                json.loads(line.removeprefix("data: "))
+                async for line in response.aiter_lines()
+                if line.startswith("data: ")
+            ]
+    finally:
+        await feeder
+    assert frames == [
+        {"type": "tick", "thread": "cli:home",
+         "channel": "cli", "preview": "hi back"},
+    ]
+
+
 async def test_monitor_list_route(web: WebParts) -> None:
-    client, _, monitors, _store, _ = web
+    client, _, monitors, _store, _, _ = web
     await login(client)
     assert (await client.get("/monitors")).text == "none"
     await monitors.create(
@@ -252,7 +248,7 @@ async def test_sessions_requires_auth(web: WebParts) -> None:
 
 
 async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append("web:main", [{"role": "user", "content": "hi"}])
@@ -266,7 +262,7 @@ async def test_sessions_lists_threads_with_metadata(web: WebParts) -> None:
 
 
 async def test_history_renders_owner_and_chief_rows(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -309,7 +305,7 @@ async def test_delete_requires_auth(web: WebParts) -> None:
 
 
 async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -322,7 +318,7 @@ async def test_delete_removes_a_scratch_buffer(web: WebParts) -> None:
 
 
 async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
-    client, _, _, store, manager = web
+    client, _, _, store, manager, _ = web
     await login(client)
     await store.ensure_session("web:scratch", "web")
     await store.append("web:scratch", [{"role": "user", "content": "hi"}])
@@ -335,7 +331,7 @@ async def test_delete_refuses_a_busy_buffer_with_409(web: WebParts) -> None:
 
 
 async def test_delete_refuses_primary_and_non_web_threads(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.ensure_session("imessage:+1", "imessage")

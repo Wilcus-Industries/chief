@@ -27,6 +27,7 @@ from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools, approval_asker
 from chief.hooks.boot import build_hooks
+from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
@@ -72,6 +73,7 @@ async def _build_agent_core(
     splitting them would break the closure cycle."""
     budget = Budget(factory, config.budget_cap_usd, config.budget_warn_ratio)
     bus = EventBus()
+    hub = ObserverHub()
     registry = ToolRegistry()
     hooks, classifier = build_hooks(config, provider, budget)
 
@@ -117,7 +119,7 @@ async def _build_agent_core(
         hooks_timeout_seconds=config.hooks_timeout_seconds,
     )
     dispatcher = Dispatcher(
-        manager, bus=bus, approvals=gate.approvals,
+        manager, bus=bus, hub=hub, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
     )
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
@@ -125,7 +127,9 @@ async def _build_agent_core(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
         run_command=guarded_runner(shell_service, shell_guards),
     )
-    return Core(budget, bus, registry, restart, manager, dispatcher, monitors, cron)
+    return Core(
+        budget, bus, hub, registry, restart, manager, dispatcher, monitors, cron
+    )
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -184,6 +188,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         monitor_service=core.monitors,
         cron_service=core.cron,
         bus=core.bus,
+        hub=core.hub,
         web_adapter=adapters.web_adapter,
         web_server=adapters.web_server,
         mcp_manager=mcp_manager,

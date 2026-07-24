@@ -6,6 +6,11 @@ are logged and published to the bus but never run a turn, owner messages
 go on the event bus and run a turn.
 ``system`` senders (monitor/cron wakes) run a turn but are never published —
 that would let monitors trigger themselves.
+
+Every completed turn on a non-web channel emits one coarse ``tick`` to the
+observer hub so the cockpit can watch activity on a thread it isn't tapped
+into; web-origin turns stream their own ``delta``/``final`` through the web
+adapter instead.
 """
 
 import logging
@@ -15,6 +20,7 @@ from chief.adapters.base import Adapter, Message
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
+from chief.hub import ObserverHub
 from chief.provider.base import ProviderError
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
@@ -30,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 OWNER = "owner"
 SYSTEM = "system"
+WEB_CHANNEL = "web"
+PREVIEW_CHARS = 120
 
 
 class Dispatcher:
@@ -40,12 +48,14 @@ class Dispatcher:
         manager: SessionManager,
         *,
         bus: EventBus | None = None,
+        hub: ObserverHub | None = None,
         approvals: ApprovalBroker | None = None,
         strangers: StrangerLog | None = None,
         restart: RestartBoundary | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
+        self._hub = hub
         self._approvals = approvals
         self._strangers = strangers
         self._restart = restart
@@ -130,13 +140,6 @@ class Dispatcher:
         async def on_delta(text: str) -> None:
             await adapter.send_delta(message.thread_key, text)
 
-        async def send_out(text: str) -> None:
-            # Deliver on the origin channel, then publish the same text as an
-            # outbound event so the web cockpit can mirror a reply that went to
-            # another channel (iMessage) and never touched its own adapter.
-            await adapter.send(message.thread_key, text)
-            await self._publish_outbound(message, text)
-
         try:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender
@@ -145,24 +148,29 @@ class Dispatcher:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
             logger.exception("turn failed for thread %s", message.thread_key)
-            await send_out(f"error: {exc}")
+            await self._reply(adapter, message, f"error: {exc}")
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
             logger.exception("turn failed for thread %s", message.thread_key)
-            await send_out("error: something went wrong running that turn")
-            return
-        await send_out(result.text)
-        if result.notice:
-            await send_out(result.notice)
-
-    async def _publish_outbound(self, message: Message, text: str) -> None:
-        if self._bus is None:
-            return
-        await self._bus.publish(
-            Event(
-                type="message.outbound",
-                channel=message.channel,
-                payload={"thread_key": message.thread_key, "text": text},
+            await self._reply(
+                adapter, message, "error: something went wrong running that turn"
             )
-        )
+            return
+        await adapter.send(message.thread_key, result.text)
+        if result.notice:
+            await adapter.send(message.thread_key, result.notice)
+        self._tick(message, result.text)
+
+    async def _reply(
+        self, adapter: Adapter, message: Message, text: str
+    ) -> None:
+        await adapter.send(message.thread_key, text)
+        self._tick(message, text)
+
+    def _tick(self, message: Message, reply: str) -> None:
+        # Web-origin turns already stream delta/final through their adapter;
+        # every other channel gets one coarse observation tick instead.
+        if self._hub is None or message.channel == WEB_CHANNEL:
+            return
+        self._hub.tick(message.thread_key, message.channel, reply[:PREVIEW_CHARS])

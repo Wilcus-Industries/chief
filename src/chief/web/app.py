@@ -20,6 +20,7 @@ from starlette.routing import Route
 from chief.adapters.base import Message
 from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
+from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.web.adapter import WebAdapter
@@ -37,6 +38,7 @@ _GROUP_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 def build_web_app(
     auth: Auth,
     adapter: WebAdapter,
+    hub: ObserverHub,
     handle: HandleMessage,
     monitors: MonitorService,
     store: MessageStore,
@@ -129,7 +131,7 @@ def build_web_app(
     async def events(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
-        queue = adapter.listen()
+        queue = hub.listen()
 
         async def stream() -> AsyncIterator[str]:
             try:
@@ -139,7 +141,7 @@ def build_web_app(
                         return
                     yield f"data: {json.dumps(frame)}\n\n"
             finally:
-                adapter.drop(queue)
+                hub.drop(queue)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
