@@ -134,17 +134,27 @@ class Session:
             user_message,
         ]
         baseline = len(transcript)
-        result = await run_turn(
-            provider=self._provider,
-            model=model,
-            messages=transcript,
-            tools=self._tools,
-            on_delta=on_delta,
-            post_tool=tool_screener(
-                self._hooks, self._hooks_timeout_seconds, logger
-            ),
-            on_commit=self._live_append,
-        )
+        try:
+            result = await run_turn(
+                provider=self._provider,
+                model=model,
+                messages=transcript,
+                tools=self._tools,
+                on_delta=on_delta,
+                post_tool=tool_screener(
+                    self._hooks, self._hooks_timeout_seconds, logger
+                ),
+                on_commit=self._live_append,
+            )
+        except BaseException:
+            # A provider/network raise mid-turn must not orphan the turn: the
+            # store already has the user message and whatever `_live_append`
+            # committed (`transcript` is mutated in place by `run_turn`), so
+            # in-memory history has to catch up to the same point before the
+            # exception propagates — otherwise the next turn diverges from
+            # what's on disk.
+            self._messages.extend([user_message, *transcript[baseline:]])
+            raise
         new_messages = [user_message, *transcript[baseline:]]
         self._messages.extend(new_messages)
         if self._hooks is not None:

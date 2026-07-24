@@ -126,10 +126,12 @@ places — iMessage's per-thread FIFO worker, `Session._lock` per thread, and
 `SessionManager.get_or_create` resumes the transcript from the store, so history
 survives restarts. Tools come from `tools_factory(thread_key, channel)`,
 producing a per-session `GatedTools`. Before handing the history back it runs
-`_repair_interrupted`: if the last message is an assistant tool_calls turn a
-crash left with no matching tool-role result, it appends a synthetic error
-result for each so the transcript stays valid (the provider requires every
-tool_call answered) instead of reporting that call `pending` forever — see
+`_repair_interrupted`: it finds the *last* assistant message carrying
+`tool_calls` (by role, not by tail position — a crash mid-way through a
+parallel call leaves the tail on a tool-role message instead) and appends a
+synthetic error result for each of its call ids missing a matching tool-role
+result, so the transcript stays valid (the provider requires every tool_call
+answered) instead of reporting that call `pending` forever — see
 `SUBSYSTEMS.md`'s web UI section for the transcript-view side of this.
 
 `Session.run_turn` nests locks in an order that matters:
@@ -160,7 +162,11 @@ one busy thread can't starve every concurrency slot.
    transcript (`SUBSYSTEMS.md`) real: a thread read mid-turn sees the call
    committed before its result.
 5. Slices new messages off the baseline, extends in-memory history (already on
-   disk from step 4).
+   disk from step 4). If `run_turn` raises instead — a provider/network
+   failure mid-turn — the same slice-and-extend still runs, in an `except`,
+   before the exception propagates: whatever `_live_append` already
+   committed stays in sync between the store and `self._messages` rather than
+   orphaning the turn on disk with the in-memory copy never learning of it.
 6. Runs `post_turn` hooks, then `settle_budget` (which may attach `result.notice`).
 
 **The system prompt is never persisted.** It is assembled fresh each turn, so

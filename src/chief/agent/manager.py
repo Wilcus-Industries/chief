@@ -97,20 +97,20 @@ class SessionManager:
     async def _repair_interrupted(
         self, thread_key: str, history: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Close out a tool call a crash left dangling mid-dispatch.
-
-        Each turn message now persists as it's produced (`Session._live_append`),
-        so a process death between committing an assistant tool_calls message
-        and its result leaves that call's result missing forever — the transcript
-        view would report it pending indefinitely, and replaying it into a fresh
-        provider call would violate the tool_call/tool_result pairing the wire
-        format requires. Only ever runs at session creation, so it can't mistake
-        a genuinely in-flight call (no live session exists yet here) for one a
-        crash orphaned.
+        """Close out tool calls a crash left dangling mid-dispatch — the last
+        assistant tool_calls message (found by role, not tail position: a
+        parallel call can crash after only some results land, tailing on a
+        tool-role message) gets an error result filled in for every call id
+        still missing one. Only runs at session creation, so it can't mistake
+        a live in-flight call for one `Session._live_append` left orphaned.
         """
-        if not history or history[-1].get("role") != "assistant":
+        last_call = None
+        for m in history:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                last_call = m
+        if last_call is None:
             return history
-        calls = history[-1].get("tool_calls") or []
+        calls = last_call.get("tool_calls") or []
         seen = {m.get("tool_call_id") for m in history if m.get("role") == "tool"}
         missing = [call for call in calls if call.get("id") not in seen]
         if not missing:
