@@ -85,8 +85,10 @@ and config (steps 7–8), then build the first index and verify (steps 9–10).
    step entirely if no such package exists.
 10. **Build and verify.** `restart` to bring the config, deps, and hook live.
    Then build the first index and confirm recall:
-   - `uv run chief-memory reindex --vault "<abs vault path>"` — reports the
-     chunk count. (The first run downloads the embedding model.)
+   - `uv run chief-memory reindex --vault "<abs vault path>"` — seeds the index
+     and reports the chunk count. (The first run downloads the embedding model.)
+     A one-time step: from here on every `search` sweeps first, so new, edited,
+     and deleted notes are picked up automatically — `reindex` is recovery-only.
    - `uv run chief-memory search "<something in a note>" --vault "<path>"` —
      confirm the right note path comes back.
    - `uv run chief-memory related "<topic>" --vault "<path>"` and

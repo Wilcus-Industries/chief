@@ -1,4 +1,4 @@
-"""The ``chief-memory`` command line: search and reindex an Obsidian vault.
+"""The ``chief-memory`` command line: search, refresh, and reindex a vault.
 
 Settings resolve from the daemon's ``obsidian_memory`` config block — the same
 source the ambient hook reads via ``HookContext.config`` — so the CLI and the
@@ -52,6 +52,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     reindex.set_defaults(run=_reindex)
 
+    refresh = sub.add_parser(
+        "refresh",
+        parents=[common],
+        help="incremental sweep: index new/changed, drop deleted notes",
+    )
+    refresh.set_defaults(run=_refresh)
+
     links = sub.add_parser("links", parents=[common], help="wikilink neighbours")
     links.add_argument("note")
     links.add_argument("--hops", type=int, default=1)
@@ -101,6 +108,16 @@ def _reindex(args: argparse.Namespace) -> int:
         vault=_vault(settings), index_home=_index_home(args), settings=settings
     ).build()
     print(f"reindexed {count} chunks from {_vault(settings)}")
+    return 0
+
+
+def _refresh(args: argparse.Namespace) -> int:
+    settings = _settings(args)
+    touched = VaultIndex(
+        vault=_vault(settings), index_home=_index_home(args), settings=settings
+    ).refresh()
+    noun = "note" if touched == 1 else "notes"
+    print(f"refreshed {touched} {noun} in {_vault(settings)}")
     return 0
 
 

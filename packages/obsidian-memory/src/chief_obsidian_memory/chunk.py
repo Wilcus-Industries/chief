@@ -54,14 +54,21 @@ def _compose(heading: str, body: str) -> str:
     return heading or body
 
 
+def iter_note_paths(vault: Path, settings: MemorySettings) -> Iterator[str]:
+    """Yield the vault-relative posix path of each in-scope ``.md`` note, without
+    reading any file — the cheap walk the mtime-gated sweep stats over."""
+    for path in sorted(vault.rglob("*.md")):
+        rel = path.relative_to(vault).as_posix()
+        if in_scope(rel, settings):
+            yield rel
+
+
 def iter_notes(vault: Path, settings: MemorySettings) -> Iterator[tuple[str, str]]:
     """Yield ``(vault-relative posix path, text)`` for each in-scope ``.md``
     note. ``include`` (if set) whitelists path prefixes; ``exclude`` drops
     them — so ``.obsidian/``, ``templates/`` and ``attachments/`` never index."""
-    for path in sorted(vault.rglob("*.md")):
-        rel = path.relative_to(vault).as_posix()
-        if in_scope(rel, settings):
-            yield rel, path.read_text()
+    for rel in iter_note_paths(vault, settings):
+        yield rel, (vault / rel).read_text()
 
 
 def in_scope(rel: str, settings: MemorySettings) -> bool:

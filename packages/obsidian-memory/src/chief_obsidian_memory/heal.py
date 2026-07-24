@@ -1,16 +1,20 @@
 """Freshness helpers: diff the vault against the index to re-embed only changes.
 
 Kept out of ``index.py`` so that module stays focused on embedding and querying.
-Re-embedding is decided by content hash — a touch that leaves the bytes
-unchanged never re-embeds — while mtime is the cheap query-time drift signal
-(a ``stat``, not a read) used to catch an out-of-band edit at search time.
+The sweep is *mtime-gated*: a note's on-disk mtime (a ``stat``, not a read) picks
+which notes are candidates, and only those get read and content-hashed — so a
+touch that leaves the bytes unchanged never re-embeds, and an untouched note
+costs a single ``stat``. The one thing this trades away: a content change that
+does not advance mtime (a git checkout, a timestamp-preserving sync) is missed
+until a full ``reindex`` — the documented, accepted corner.
 """
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from chief_obsidian_memory.chunk import iter_notes
+from chief_obsidian_memory.chunk import iter_note_paths
 from chief_obsidian_memory.config import MemorySettings
 
 
@@ -18,40 +22,61 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def indexed_hashes(collection: Any) -> dict[str, str]:
-    """note_path -> stored content hash, one entry per indexed note."""
+@dataclass(frozen=True)
+class IndexedNote:
+    """What the index remembers about a note: the mtime it was embedded at (the
+    cheap staleness signal) and the hash of its bytes (the authoritative one)."""
+
+    mtime: float
+    content_hash: str
+
+
+def indexed_meta(collection: Any) -> dict[str, IndexedNote]:
+    """note_path -> its indexed mtime + content hash, one entry per note.
+
+    A note has one metadata row per chunk, all carrying the same mtime and
+    hash; collapsing on note_path leaves one record each."""
     got = collection.get(include=["metadatas"])
-    return {m["note_path"]: m["content_hash"] for m in got["metadatas"] or []}
+    return {
+        m["note_path"]: IndexedNote(mtime=m["mtime"], content_hash=m["content_hash"])
+        for m in got["metadatas"] or []
+    }
 
 
-def diff(
-    vault: Path, settings: MemorySettings, indexed: dict[str, str]
+def sweep_plan(
+    vault: Path, settings: MemorySettings, indexed: dict[str, IndexedNote]
 ) -> tuple[list[str], list[str]]:
-    """Diff disk against the index.
+    """Diff disk against the index, mtime-gated.
 
-    Returns ``(to_reindex, to_delete)``: notes whose content changed or that are
-    newly in scope, and indexed notes no longer present on disk or in scope."""
+    Returns ``(to_reindex, to_delete)``: notes that are new, or whose mtime
+    advanced past the index *and* whose bytes actually changed; and indexed
+    notes no longer present on disk or in scope. Unchanged notes cost one
+    ``stat`` and no read.
+
+    Robust to a note that vanishes between the walk and the ``stat`` (an
+    external sync or an editor delete — the store lock only serializes chief's
+    own processes) or that won't decode: it is skipped, never raised, so one
+    bad file can't abort the sweep and, with it, the whole search."""
     on_disk: set[str] = set()
     to_reindex: list[str] = []
-    for rel, text in iter_notes(vault, settings):
+    for rel in iter_note_paths(vault, settings):
+        path = vault / rel
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue  # gone since the walk: left out of on_disk, so it drops
         on_disk.add(rel)
-        if indexed.get(rel) != content_hash(text):
+        record = indexed.get(rel)
+        if record is None:
+            to_reindex.append(rel)  # never indexed
+            continue
+        if mtime <= record.mtime:
+            continue  # mtime unmoved: assume bytes unchanged (accepted corner)
+        try:
+            changed = content_hash(path.read_text()) != record.content_hash
+        except (OSError, UnicodeDecodeError):
+            continue  # unreadable right now: keep the existing index entry
+        if changed:
             to_reindex.append(rel)
     to_delete = [rel for rel in indexed if rel not in on_disk]
     return to_reindex, to_delete
-
-
-def drifted(collection: Any, vault: Path, hit_paths: list[str]) -> list[str]:
-    """Of ``hit_paths``, the notes whose on-disk mtime is newer than indexed (or
-    that vanished) — the cheap query-time staleness check over just the hits."""
-    unique = list(dict.fromkeys(hit_paths))
-    got = collection.get(
-        where={"note_path": {"$in": unique}}, include=["metadatas"]
-    )
-    indexed_mtime = {m["note_path"]: m["mtime"] for m in got["metadatas"] or []}
-    stale: list[str] = []
-    for rel in unique:
-        path = vault / rel
-        if not path.exists() or path.stat().st_mtime > indexed_mtime.get(rel, 0.0):
-            stale.append(rel)
-    return stale

@@ -47,6 +47,14 @@ class MemorySettings:
     is single-vault end-to-end). ``writable_paths`` — where the agent
     may save notes (capability follows config; empty means read-only).
 
+    ``auto_refresh`` — whether every ``search`` first runs the cheap mtime-gated
+    sweep that keeps the index current (new/changed/deleted notes), so recall
+    never needs a manual reindex; set ``false`` to fall back to manual-reindex
+    mode. ``refresh_min_interval_s`` — throttle for that sweep: it is skipped
+    when one ran within this many seconds (a per-vault stamp under the index
+    home). Defaults to 60s so a burst of searches over a large vault does not
+    re-scan on every one; set ``0`` to sweep on literally every search.
+
     The gate's model is not configured here: it is the ``model:`` field of the
     ``memory-relevance`` classifier definition, which the install seeds to a
     fast OpenRouter model (``openai/gpt-4.1-nano``) rather than the daemon's
@@ -63,6 +71,8 @@ class MemorySettings:
     exclude: tuple[str, ...] = _DEFAULT_EXCLUDE
     vault_paths: tuple[str, ...] = ()
     writable_paths: tuple[str, ...] = ()
+    auto_refresh: bool = True
+    refresh_min_interval_s: float = 60.0
 
     @classmethod
     def from_config(cls, mapping: Mapping[str, Any] | None) -> "MemorySettings":

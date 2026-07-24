@@ -38,6 +38,22 @@ def test_recall_defaults_are_tuned_small() -> None:
     assert settings.top_k == 2
 
 
+def test_auto_refresh_defaults_on_with_a_60s_throttle() -> None:
+    # The in-search sweep is on by default; the 60s throttle keeps a burst of
+    # searches over a large vault from re-scanning on every one.
+    settings = MemorySettings()
+    assert settings.auto_refresh is True
+    assert settings.refresh_min_interval_s == 60
+
+
+def test_auto_refresh_and_interval_parse_from_config() -> None:
+    settings = MemorySettings.from_config(
+        {"auto_refresh": False, "refresh_min_interval_s": 30}
+    )
+    assert settings.auto_refresh is False
+    assert settings.refresh_min_interval_s == 30
+
+
 def test_iter_notes_excludes_obsidian_templates_attachments(vault: Path) -> None:
     settings = MemorySettings()
     paths = {rel for rel, _ in iter_notes(vault, settings)}
