@@ -10,6 +10,7 @@ from chief.agent.manager import SessionManager
 from chief.approvals import Approval, ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
+from chief.hub import ObserverHub
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
@@ -227,23 +228,50 @@ async def test_owner_message_is_published_system_wake_is_not(
     assert len(provider.calls) == 2  # both still ran turns
 
 
-async def test_outbound_reply_is_published_for_the_web_mirror(
-    store: MessageStore,
-) -> None:
-    """Every reply is published as ``message.outbound`` so the web cockpit can
-    mirror a turn that went out on another channel (iMessage)."""
-    bus = EventBus()
-    seen: list[Event] = []
-
-    async def collector(event: Event) -> None:
-        seen.append(event)
-
-    bus.subscribe(collector)
+async def test_completed_turn_emits_one_tick(store: MessageStore) -> None:
+    """A completed non-web turn puts exactly one coarse ``tick`` on every hub
+    listener — and nothing else — while the reply still exits its own channel."""
+    hub = ObserverHub()
     provider = FakeProvider([text_turn("hello back")])
-    dispatcher = Dispatcher(make_manager(provider, store), bus=bus)
-    dispatcher.register(RecordingAdapter())
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen()
     await dispatcher.handle(owner_message("hi"))
-    outbound = [e for e in seen if e.type == "message.outbound"]
-    assert len(outbound) == 1
-    assert outbound[0].channel == "cli"
-    assert outbound[0].payload == {"thread_key": "cli:t", "text": "hello back"}
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hello back"
+    }
+    assert queue.empty()  # no delta/final/peer frames for an un-tapped thread
+    assert adapter.sent == [("cli:t", "hello back")]  # origin channel unaffected
+
+
+async def test_system_wake_ticks_like_owner(store: MessageStore) -> None:
+    """A system-sender (monitor/cron) turn ticks identically to an owner turn."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen()
+    await dispatcher.handle(owner_message("hi", sender="system"))
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "hello back"
+    }
+    assert queue.empty()
+
+
+class _WebAdapter(RecordingAdapter):
+    name = "web"
+
+
+async def test_web_origin_turn_does_not_tick(store: MessageStore) -> None:
+    """A web-origin turn streams its own delta/final; the dispatcher must not
+    also tick it, or the browser would double-count its own thread."""
+    hub = ObserverHub()
+    provider = FakeProvider([text_turn("hello back")])
+    dispatcher = Dispatcher(make_manager(provider, store), hub=hub)
+    dispatcher.register(_WebAdapter())
+    queue = hub.listen()
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="hi")
+    )
+    assert queue.empty()

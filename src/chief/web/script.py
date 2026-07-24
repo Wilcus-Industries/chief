@@ -5,6 +5,7 @@ const el = (id) => document.getElementById(id);
 const log = el("log"), input = el("input"), pop = el("complete");
 const state = {current: null, sessions: [], commands: [], matches: [], sel: -1};
 const unread = new Set();
+const snippets = {};  /* thread -> last reply preview, shown in the sidebar */
 let live = null;
 
 const bare = (tk) => tk.startsWith("web:") ? tk.slice(4) : null;
@@ -30,6 +31,7 @@ function renderBuffers(){
       (unread.has(s.thread) ? "unread" : "");
     li.append(span("idx", i), span("name", label(s.thread)));
     if (s.channel !== "web") li.append(span("badge", s.channel));
+    if (snippets[s.thread]) li.append(span("snippet", snippets[s.thread]));
     if (s.channel === "web" && s.thread !== "web:main"){
       const x = span("kill", "\\u00d7"); x.title = "delete buffer";
       x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
@@ -82,6 +84,14 @@ function addMsg(role, text, who){
 }
 
 /* ---- live stream ---- */
+function bumpThread(thread, preview){
+  if (preview != null) snippets[thread] = preview;
+  const i = state.sessions.findIndex((s) => s.thread === thread);
+  if (i < 0){ loadSessions(); return; }            /* unknown thread: refetch */
+  state.sessions.unshift(state.sessions.splice(i, 1)[0]);  /* newest-first */
+  if (thread !== state.current) unread.add(thread);
+  renderBuffers();
+}
 function connect(){
   const es = new EventSource("/events");
   const conn = el("conn"), lbl = el("conn-label");
@@ -89,16 +99,16 @@ function connect(){
   es.onerror = () => { conn.className = "seg down"; lbl.textContent = "offline"; };
   es.onmessage = (e) => {
     const f = JSON.parse(e.data);
+    if (f.type === "tick"){ bumpThread(f.thread, f.preview); return; }
     if (!state.sessions.some((s) => s.thread === f.thread)){ loadSessions(); return; }
-    if (f.thread !== state.current){ unread.add(f.thread); renderBuffers(); return; }
-    if (f.type === "delta"){
-      if (!live) live = addMsg("chief", ""); live.textContent += f.text;
-    } else if (f.type === "final"){
-      if (live){ live.textContent = f.text; live = null; } else addMsg("chief", f.text);
-    } else if (f.type === "peer"){
-      live = null; addMsg("peer", f.text, f.sender);  // the other party
+    if (f.thread === state.current){  /* stream a web-origin turn we're viewing */
+      if (f.type === "delta"){
+        if (!live) live = addMsg("chief", ""); live.textContent += f.text;
+      } else if (live){ live.textContent = f.text; live = null; }
+      else addMsg("chief", f.text);
+      log.scrollTop = log.scrollHeight;
     }
-    log.scrollTop = log.scrollHeight;
+    if (f.type === "final") bumpThread(f.thread, f.text);
   };
 }
 

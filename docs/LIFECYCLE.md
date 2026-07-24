@@ -72,9 +72,13 @@ daemon running.
 ### Web — `WebAdapter` (`web/adapter.py`) + `build_web_app` (`web/app.py`)
 
 `POST /send` authenticates, builds a `Message(channel="web", sender="owner")`,
-fires a task, returns 202 immediately. Outbound is **broadcast to every open SSE
-client**, not addressed per-connection — every browser sees every thread's
-frames and filters client-side on the `thread` field.
+fires a task, returns 202 immediately. A web-origin turn's outbound is
+**broadcast to every open SSE client** through the `ObserverHub` (`hub.py`), not
+addressed per-connection — every browser sees every frame and filters
+client-side on the `thread` field. A completed turn on **any other** channel
+emits one coarse `tick` frame to the same hub (`Dispatcher._tick`), so the
+cockpit can watch a thread it isn't tapped into. The `WebAdapter` is now only the
+`web:` origin channel; the old EventBus mirror it used to run is gone.
 
 ### System wakes
 

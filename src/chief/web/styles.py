@@ -41,8 +41,9 @@ body{
   text-transform:uppercase; color:var(--faint);}
 #buflist{list-style:none; margin:0; padding:0; overflow-y:auto; flex:1;}
 #buflist li{
-  display:flex; align-items:baseline; gap:.55rem; padding:.32rem .9rem;
-  cursor:pointer; color:var(--dim); border-left:2px solid transparent;
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:.55rem;
+  padding:.32rem .9rem; cursor:pointer; color:var(--dim);
+  border-left:2px solid transparent;
 }
 #buflist li:hover{background:var(--bg2); color:var(--fg);}
 #buflist li.active{background:var(--bg0); color:var(--fg);
@@ -54,6 +55,8 @@ body{
   letter-spacing:.08em;}
 #buflist li.unread .name::after{content:" \\25CF"; color:var(--aqua);
   font-size:10px;}
+#buflist .snippet{flex-basis:100%; color:var(--faint); font-size:11px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 #buflist .kill{color:var(--faint); font-size:13px; line-height:1;
   padding:0 .15rem; border-radius:2px; opacity:0;}
 #buflist li:hover .kill{opacity:.7;}

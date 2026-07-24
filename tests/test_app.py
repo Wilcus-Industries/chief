@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from chief.adapters.base import Message
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
@@ -178,46 +179,28 @@ def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
     assert "bad" in caplog.text
 
 
-async def test_web_mirror_is_wired_by_app_start(
+async def test_nonweb_turn_ticks_through_real_dispatch(
     tmp_path: Path, sock_path: Path
 ) -> None:
-    # Regression: App.start() must call web_adapter.start() so the mirror
-    # subscribes to the bus. Without it the cockpit never sees traffic on any
-    # non-web channel — the whole "drive any thread from the web" slice is dead
-    # in the real daemon even though hand-started-adapter unit tests pass.
-    app, streams = await boot(make_config(tmp_path, sock_path), FakeProvider([]))
-    queue = app.web_adapter.listen()
+    # Central mechanism, end to end: a completed turn on a non-web channel runs
+    # through the real dispatcher → session → hub and lands one coarse tick on a
+    # browser observer — the whole "watch any thread from the web" slice, with a
+    # system-sender wake standing in for a monitor/cron turn.
+    app, streams = await boot(
+        make_config(tmp_path, sock_path), FakeProvider([text_turn("hi back")])
+    )
+    queue = app.hub.listen()
     try:
-        await app.bus.publish(
-            Event(
-                type="message.inbound",
-                channel="imessage",
-                payload={
-                    "thread_key": "imessage:+15551112222",
-                    "sender": "+15551112222",
-                    "text": "hey",
-                },
+        await app.dispatcher.handle(
+            Message(
+                channel="cli", sender="system",
+                thread_key="cli:home", text="ping",
             )
         )
-        await app.bus.publish(
-            Event(
-                type="message.outbound",
-                channel="imessage",
-                payload={"thread_key": "imessage:+15551112222", "text": "hi back"},
-            )
-        )
-        peer = await asyncio.wait_for(queue.get(), timeout=5)
-        final = await asyncio.wait_for(queue.get(), timeout=5)
-        assert peer == {
-            "type": "peer",
-            "thread": "imessage:+15551112222",
-            "text": "hey",
-            "sender": "+15551112222",
-        }
-        assert final == {
-            "type": "final",
-            "thread": "imessage:+15551112222",
-            "text": "hi back",
+        tick = await asyncio.wait_for(queue.get(), timeout=5)
+        assert tick == {
+            "type": "tick", "thread": "cli:home",
+            "channel": "cli", "preview": "hi back",
         }
     finally:
         await shutdown(app, streams)
