@@ -39,8 +39,7 @@ function renderBuffers(){
       x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
       li.append(x);
     }
-    li.onclick = () => switchTo(s.thread);
-    list.appendChild(li);
+    li.onclick = () => switchTo(s.thread); list.appendChild(li);
   });
 }
 
@@ -48,8 +47,7 @@ async function delBuf(tk){
   await fetch("/delete", {method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify({thread: tk})});
-  unread.delete(tk);
-  if (state.current === tk) await switchTo("web:main");
+  unread.delete(tk); if (state.current === tk) await switchTo("web:main");
   await loadSessions();
 }
 
@@ -64,8 +62,7 @@ function setStatus(tk){
 }
 
 async function switchTo(tk){
-  state.current = tk; live = null; unread.delete(tk);
-  setStatus(tk); renderBuffers();
+  state.current = tk; live = null; unread.delete(tk); setStatus(tk); renderBuffers();
   const rows = await getJSON("/history?thread=" + encodeURIComponent(tk)) || [];
   log.replaceChildren();
   if (!rows.length){

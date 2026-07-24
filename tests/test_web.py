@@ -295,7 +295,7 @@ async def test_history_without_thread_is_empty(web: WebParts) -> None:
 async def test_history_includes_collapsed_tool_rows(web: WebParts) -> None:
     """A tool call shows as a name + call-id row, interleaved in order — no
     args or result in the list payload (#261)."""
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -333,7 +333,7 @@ async def test_history_tool_requires_auth(web: WebParts) -> None:
 
 
 async def test_history_tool_returns_args_and_result(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -370,7 +370,7 @@ async def test_history_tool_pending_when_result_not_yet_committed(
 ) -> None:
     """The call landed but its result hasn't — a real mid-turn snapshot, not
     a fake status (#261's central mechanism: real stored wire messages)."""
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     await store.append(
@@ -398,7 +398,7 @@ async def test_history_tool_pending_while_call_id_unwritten_and_thread_busy(
 ) -> None:
     """The call id isn't in the store at all yet — the turn hasn't produced
     it — but the thread is mid-turn, so this is pending, not an error."""
-    client, _, _, store, manager = web
+    client, _, _, store, manager, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     session = await manager.get_or_create("web:main", "web")
@@ -410,7 +410,7 @@ async def test_history_tool_pending_while_call_id_unwritten_and_thread_busy(
 
 
 async def test_history_tool_compacted_when_call_id_is_gone(web: WebParts) -> None:
-    client, _, _, store, _ = web
+    client, _, _, store, _, _ = web
     await login(client)
     await store.ensure_session("web:main", "web")
     response = await client.get("/history/tool?thread=web:main&call_id=gone")
