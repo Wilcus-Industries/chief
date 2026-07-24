@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 #: How the row is recognised across boots. Changing it orphans existing rows.
 UPDATE_DESCRIPTION = "core update check"
 
+#: Says no autonomy level itself. The row is written once and never rewritten,
+#: so a level named here would go on granting whatever it granted at seeding
+#: time long after the owner dialled `update.autonomy` back.
 _PROMPT = (
     "Time to check whether a newer core release is out. Load the "
-    "`self-update` skill and follow it exactly. Your unattended autonomy for "
-    "this run is `{autonomy}` — this schedule woke you, so no one is "
-    "necessarily reading this thread."
+    "`self-update` skill and follow it exactly. Read `update.autonomy` from "
+    "config.yaml for what you may do unattended on this run — this schedule "
+    "woke you, so no one is necessarily reading this thread."
 )
 
 
@@ -60,7 +63,7 @@ async def ensure_update_schedule(
         spec=config.update_schedule,
         wake_channel=channel,
         wake_thread=thread,
-        prompt=_PROMPT.format(autonomy=config.update_autonomy),
+        prompt=_PROMPT,
     )
     logger.info(
         "update schedule #%s created (%s, waking %s)",

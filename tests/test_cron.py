@@ -662,8 +662,23 @@ async def test_update_schedule_is_seeded_from_config(engine: AsyncEngine) -> Non
     # restart only come for free when chief is woken as a turn.
     assert rows[0].command is None
     assert "self-update" in rows[0].prompt
-    assert "clean-only" in rows[0].prompt
     assert rows[0].spec == "0 9 * * *"
+
+
+async def test_update_prompt_does_not_freeze_the_autonomy_level(
+    engine: AsyncEngine,
+) -> None:
+    """The row outlives config changes, so it must not state a level itself.
+
+    A row seeded while autonomy was ``full`` is never rewritten; baking the
+    level in would have it keep granting unattended conflict resolution long
+    after the owner dialled it back. It points at config instead.
+    """
+    service = CronService(make_session_factory(engine), WakeSink(), quiet=None)
+    await ensure_update_schedule(service, _update_config(update_autonomy="full"))
+    prompt = (await service.list_enabled())[0].prompt
+    assert "full" not in prompt
+    assert "update.autonomy" in prompt
 
 
 async def test_update_schedule_is_not_duplicated_on_reboot(
