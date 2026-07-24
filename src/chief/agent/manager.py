@@ -131,10 +131,14 @@ class SessionManager:
         thread_key: str,
         channel: str,
         stream_policy: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Register a thread without a live session (a monitor/schedule can wake
-        it); ``stream_policy`` seeds a per-thread override at creation."""
-        await self._store.ensure_session(thread_key, channel, stream_policy)
+        it); ``stream_policy`` seeds the override at creation, or updates an
+        existing thread's. ``True`` only when a new row was made."""
+        created = await self._store.ensure_session(thread_key, channel, stream_policy)
+        if not created and stream_policy is not None:
+            await self._store.set_stream_policy(thread_key, stream_policy)
+        return created
 
     async def stream_policy(self, thread_key: str) -> dict[str, Any] | None:
         return await self._store.stream_policy(thread_key)
@@ -178,15 +182,11 @@ class SessionManager:
     async def _wipe(
         self, thread_key: str, op: Callable[[str], Awaitable[None]]
     ) -> bool:
-        """Run a store wipe under the session lock, atomically.
-
-        Refuses (returns ``False``, no store write) when a cached session is
-        mid-turn: its in-flight tail would commit orphan rows over the wipe.
-        Otherwise the lock is held across the wipe so no turn can start in the
-        store-write window — closing the delete/clear TOCTOU that a plain
-        ``is_busy`` pre-check leaves open. This is the single guard for every
-        caller (the ``session`` tool, ``/prune``, and the web cockpit).
-        """
+        """Run a store wipe under the session lock — the single guard for every
+        caller (``session`` tool, ``/prune``, web cockpit). Refuses (``False``,
+        no write) when a cached session is mid-turn: its in-flight tail would
+        commit orphan rows over the wipe. Holding the lock across the wipe shuts
+        the delete/clear TOCTOU a plain ``is_busy`` pre-check leaves open."""
         session = self._sessions.get(thread_key)
         if session is None:
             await op(thread_key)

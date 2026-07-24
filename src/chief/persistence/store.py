@@ -19,11 +19,13 @@ class MessageStore:
         thread_key: str,
         channel: str,
         stream_policy: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Create the session row if this thread has never been seen.
 
         ``stream_policy`` seeds the per-thread override at creation only — an
-        existing row keeps whatever policy it already has."""
+        existing row keeps whatever policy it already has. Returns ``True`` when
+        a new row was created, ``False`` when the thread already existed (so a
+        caller can tell the agent its policy was not applied)."""
         async with self._factory() as db:
             if await db.get(SessionRow, thread_key) is None:
                 db.add(
@@ -34,6 +36,8 @@ class MessageStore:
                     )
                 )
                 await db.commit()
+                return True
+            return False
 
     async def has_sessions(self) -> bool:
         """Whether any thread has ever existed (false = fresh install)."""

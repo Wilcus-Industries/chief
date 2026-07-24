@@ -14,7 +14,9 @@ _SPEC = ToolSpec(
         "to this thread's channel); it pre-registers the thread row so it shows "
         "up in list and the web cockpit, without starting a live session. An "
         "optional `policy` object seeds the thread's live stream policy "
-        "(deltas/tools booleans, results one of lazy|inline|off, send_guard). "
+        "(deltas/tools booleans, results one of lazy|inline|off, send_guard); "
+        "on a thread that already exists a `policy` updates its override "
+        "(without one, create just reports the thread already exists). "
         "action=delete needs `thread_key` and removes the thread entirely. "
         "action=clear needs `thread_key` and wipes its transcript, keeping the "
         "row. delete/clear refuse your own thread and any thread mid-turn."
@@ -76,10 +78,14 @@ def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> N
                 stream_policy = StreamPolicy.from_dict(policy).to_dict()
             except ValueError as exc:
                 return f"error: invalid stream policy: {exc}"
-        await manager.create(
+        created = await manager.create(
             thread_key, channel or context.channel, stream_policy=stream_policy
         )
-        return f"session '{thread_key}' registered"
+        if created:
+            return f"session '{thread_key}' registered"
+        if stream_policy is not None:
+            return f"session '{thread_key}' already exists — stream policy updated"
+        return f"session '{thread_key}' already exists"
 
     async def _delete(context: ToolContext, thread_key: str) -> str:
         if thread_key == context.thread_key:
