@@ -2,8 +2,9 @@
 # Deterministic install for build-imessage: install the imsg CLI, copy the
 # skills verbatim, and set the standard config keys. The customizable +
 # interactive parts (which setup mode, Full Disk Access, the Automation
-# prompt, the notify-tier monitor) are NOT here — the agent does them from
-# INSTALL.md.
+# prompt, and any owner-requested per-chat monitor) are NOT here — the agent
+# does them from INSTALL.md. No monitor is created at install: chief texts
+# only the owner by default.
 #
 # Parameters (env):
 #   IMESSAGE_HANDLES  comma-separated owner handle(s), e.g. "+15551234567"
