@@ -28,7 +28,7 @@ from chief.web.auth import COOKIE_NAME, Auth
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.script import SCRIPT
 from chief.web.styles import STYLES
-from chief.web.view import render_transcript
+from chief.web.view import render_transcript, tool_call_response
 
 # An iMessage group's thread_key is an opaque 32-char hex chat id; a 1:1 key is
 # a phone/email handle. Groups have no core send path (see the send route).
@@ -112,6 +112,20 @@ def build_web_app(
             return JSONResponse([])
         return JSONResponse(render_transcript(await store.load(thread)))
 
+    async def history_tool(request: Request) -> Response:
+        """One tool call's args + result, fetched lazily off a row's click —
+        never in the ``history`` payload above."""
+        if not auth.is_authed(request):
+            return unauthorized()
+        thread = request.query_params.get("thread", "")
+        call_id = request.query_params.get("call_id", "")
+        if not thread or not call_id:
+            return JSONResponse({"status": "compacted"})
+        session = manager.peek(thread)
+        busy = session is not None and session.busy
+        messages = await store.load(thread)
+        return JSONResponse(tool_call_response(messages, call_id, busy))
+
     async def delete(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
@@ -169,6 +183,7 @@ def build_web_app(
             Route("/sessions", sessions),
             Route("/delete", delete, methods=["POST"]),
             Route("/history", history),
+            Route("/history/tool", history_tool),
             Route("/commands", commands),
             Route("/events", events),
             Route("/monitors", monitor_list),

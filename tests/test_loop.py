@@ -82,6 +82,38 @@ async def test_tool_call_turn_dispatches_and_loops() -> None:
     assert provider.calls[1][-1] == tool_message
 
 
+async def test_on_commit_fires_for_the_assistant_call_before_its_result() -> None:
+    """The tool-call transcript view's "pending" state depends on the
+    assistant's tool_calls message landing before the matching tool result —
+    ``on_commit`` is the seam that lets a caller persist each as it happens."""
+    call = ToolCall(id="c1", name="echo", arguments={"text": "hi"})
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(call,), usage=Usage(cost=0.01))],
+            [TextDelta("done"), Completion(text="done", usage=Usage(cost=0.02))],
+        ]
+    )
+    committed: list[dict[str, Any]] = []
+
+    async def on_commit(message: dict[str, Any]) -> None:
+        committed.append(message)
+
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "echo hi"}]
+    await run_turn(
+        provider=provider,
+        model="test-model",
+        messages=messages,
+        tools=echo_registry(),
+        on_delta=DeltaSink(),
+        on_commit=on_commit,
+    )
+    # Same order the real messages list gets them: the tool_calls turn first,
+    # then its result — never the reverse, or "pending" couldn't be real.
+    assert [m["role"] for m in committed] == ["assistant", "tool", "assistant"]
+    assert committed[0]["tool_calls"][0]["id"] == "c1"
+    assert committed[1] == {"role": "tool", "tool_call_id": "c1", "content": "echo: hi"}
+
+
 async def test_identical_repeat_calls_are_refused_after_limit() -> None:
     # Perseveration breaker (audit H2): the 4th identical call is refused with
     # a course-correcting error instead of running — prod once repeated one

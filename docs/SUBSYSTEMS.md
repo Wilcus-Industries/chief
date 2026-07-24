@@ -34,7 +34,8 @@ Routes, all declared in one `Starlette(routes=[...])` block in `app.py`:
 | `POST /send` | 202 accepted, fire-and-forget |
 | `GET /sessions` | JSON buffer list |
 | `POST /delete` | buffer deletion |
-| `GET /history` | transcript for one thread |
+| `GET /history` | transcript for one thread — tool calls collapsed to name + call id |
+| `GET /history/tool` | one tool call's args + result, fetched lazily |
 | `GET /commands` | `/command` palette |
 | `GET /events` | SSE stream |
 | `GET /monitors` | plaintext monitor list |
@@ -97,9 +98,16 @@ as a normal `final` frame, and the owner answers by typing into `/send`.
 daemon's own event loop** — no separate process. Lifecycle is owned by the
 daemon. Both server fields are `| None` because the web UI is optional.
 
-`view.py` maps stored wire messages to `{role, text}`, relabeling `user`→`owner`
-and `assistant`→`chief`, dropping system prompts and empty turns, and keeping only
-`text` blocks so tool machinery never renders.
+`view.py` maps stored wire messages to display rows: a text row (`{role: owner|
+chief, text}`, relabeling `user`→`owner`/`assistant`→`chief`) and, for each tool
+call an assistant message made, its own collapsed row (`{role: tool, call_id,
+name}`) — no args or result, so the row list's size tracks message count, not
+tool-output size. System prompts and empty turns drop out. `find_tool_call` looks
+up one call's args + result on demand for `GET /history/tool`; a result that
+hasn't landed yet (call committed, its tool-role message not — mid-turn, or a
+crash `SessionManager` hasn't repaired yet) reports `pending`, and a call id
+absent from the transcript altogether reports `pending` while the thread is
+mid-turn or `compacted` once it isn't (folded away by compaction).
 
 ## Monitors — `src/chief/monitors/`
 

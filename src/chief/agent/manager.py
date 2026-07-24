@@ -61,7 +61,9 @@ class SessionManager:
             if session := self._sessions.get(thread_key):
                 return session
             await self._store.ensure_session(thread_key, channel)
-            history = await self._store.load(thread_key)
+            history = await self._repair_interrupted(
+                thread_key, await self._store.load(thread_key)
+            )
             override = await self._store.model_override(thread_key)
             origin = await self._store.channel(thread_key)
             session = Session(
@@ -84,6 +86,46 @@ class SessionManager:
             )
             self._sessions[thread_key] = session
             return session
+
+    def peek(self, thread_key: str) -> Session | None:
+        """The cached live session for a thread, or ``None`` — never creates
+        one. Lets a read-only caller (the web history-tool route) check
+        ``.busy`` without paying to spin up a session for a thread it isn't
+        otherwise touching."""
+        return self._sessions.get(thread_key)
+
+    async def _repair_interrupted(
+        self, thread_key: str, history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Close out tool calls a crash left dangling mid-dispatch — the last
+        assistant tool_calls message (found by role, not tail position: a
+        parallel call can crash after only some results land, tailing on a
+        tool-role message) gets an error result filled in for every call id
+        still missing one. Only runs at session creation, so it can't mistake
+        a live in-flight call for one `Session._live_append` left orphaned.
+        """
+        last_call = None
+        for m in history:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                last_call = m
+        if last_call is None:
+            return history
+        calls = last_call.get("tool_calls") or []
+        seen = {m.get("tool_call_id") for m in history if m.get("role") == "tool"}
+        missing = [call for call in calls if call.get("id") not in seen]
+        if not missing:
+            return history
+        repairs = [
+            {
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "content": "error: interrupted before this tool call finished "
+                "(process restarted)",
+            }
+            for call in missing
+        ]
+        await self._store.append(thread_key, repairs)
+        return [*history, *repairs]
 
     async def create(self, thread_key: str, channel: str) -> None:
         """Register a thread (so a monitor/schedule can wake it) without a live
