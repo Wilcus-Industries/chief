@@ -7,10 +7,11 @@ go on the event bus and run a turn.
 ``system`` senders (monitor/cron wakes) run a turn but are never published —
 that would let monitors trigger themselves.
 
-Every completed turn on a non-web channel emits one coarse ``tick`` to the
-observer hub so the cockpit can watch activity on a thread it isn't tapped
-into; web-origin turns stream their own ``delta``/``final`` through the web
-adapter instead.
+Every non-web turn emits one coarse ``tick`` to the observer hub so the
+cockpit can watch a thread it isn't tapped into; web turns stream their own
+``delta``/``final`` through the web adapter. When a client *is* tapped into a
+non-web thread, the dispatcher also streams that turn's inbound/delta/tool-
+tick/final frames to its subscriber (checked at emit time).
 """
 
 import logging
@@ -21,7 +22,7 @@ from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
-from chief.provider.base import ProviderError
+from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
 
@@ -136,41 +137,61 @@ class Dispatcher:
         session = await self._manager.get_or_create(
             message.thread_key, message.channel
         )
+        tk = message.thread_key
+        # Web turns stream their own inbound/delta (adapter + JS); for every
+        # other channel _tapped re-checks the live subscription at emit time.
+        non_web = message.channel != WEB_CHANNEL
+        if non_web:
+            self._tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
         async def on_delta(text: str) -> None:
-            await adapter.send_delta(message.thread_key, text)
+            await adapter.send_delta(tk, text)
+            if non_web:
+                self._tapped(tk, {"type": "delta", "thread": tk, "text": text})
+
+        async def on_tool(call: ToolCall) -> None:
+            # Web turns get tool ticks too — the WebAdapter never emits them.
+            self._tapped(tk, {"type": "tool", "thread": tk,
+                              "call_id": call.id, "name": call.name})
 
         try:
             result = await session.run_turn(
-                message.text, on_delta, sender=message.sender
+                message.text, on_delta, sender=message.sender, on_tool=on_tool
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
-            logger.exception("turn failed for thread %s", message.thread_key)
+            logger.exception("turn failed for thread %s", tk)
             await self._reply(adapter, message, f"error: {exc}")
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
-            logger.exception("turn failed for thread %s", message.thread_key)
+            logger.exception("turn failed for thread %s", tk)
             await self._reply(
                 adapter, message, "error: something went wrong running that turn"
             )
             return
-        await adapter.send(message.thread_key, result.text)
+        await adapter.send(tk, result.text)
         if result.notice:
-            await adapter.send(message.thread_key, result.notice)
-        self._tick(message, result.text)
+            await adapter.send(tk, result.notice)
+        self._turn_end(message, result.text)
 
     async def _reply(
         self, adapter: Adapter, message: Message, text: str
     ) -> None:
         await adapter.send(message.thread_key, text)
-        self._tick(message, text)
+        self._turn_end(message, text)
 
-    def _tick(self, message: Message, reply: str) -> None:
-        # Web-origin turns already stream delta/final through their adapter;
-        # every other channel gets one coarse observation tick instead.
+    def _tapped(self, thread_key: str, frame: dict[str, object]) -> None:
+        """Deliver a rich frame only if a client is tapped into the thread."""
+        if self._hub is not None and self._hub.is_watched(thread_key):
+            self._hub.to_watchers(thread_key, frame)
+
+    def _turn_end(self, message: Message, reply: str) -> None:
+        # Web-origin turns stream their own delta/final; every other channel
+        # gets one coarse tick, plus a rich `final` if a client is tapped in.
         if self._hub is None or message.channel == WEB_CHANNEL:
             return
-        self._hub.tick(message.thread_key, message.channel, reply[:PREVIEW_CHARS])
+        tk = message.thread_key
+        self._tapped(tk, {"type": "final", "thread": tk, "text": reply})
+        self._hub.tick(tk, message.channel, reply[:PREVIEW_CHARS])

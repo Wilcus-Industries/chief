@@ -1,4 +1,5 @@
-"""The web UI client, served at /app.js. Buffers, SSE, readline completion."""
+"""The web UI client, served at /app.js. Buffers, send, readline completion;
+the SSE stream client and tool rows live in script_tools.py (concatenated)."""
 
 from chief.web.script_tools import TOOL_SCRIPT
 
@@ -62,15 +63,8 @@ function setStatus(tk){
 }
 
 async function switchTo(tk){
-  state.current = tk; live = null; unread.delete(tk); setStatus(tk); renderBuffers();
-  const rows = await getJSON("/history?thread=" + encodeURIComponent(tk)) || [];
-  log.replaceChildren();
-  if (!rows.length){
-    const d = span("empty", "no messages yet \\u2014 type below to start.");
-    log.appendChild(d);
-  }
-  rows.forEach((r) =>
-    r.role === "tool" ? addTool(r.call_id, r.name) : addMsg(r.role, r.text));
+  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
+  await reloadHistory(tk); subscribe(tk);
   if (!input.disabled) input.focus();
 }
 
@@ -81,35 +75,6 @@ function addMsg(role, text, who){
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
   log.scrollTop = log.scrollHeight; return body;
-}
-
-/* ---- live stream ---- */
-function bumpThread(thread, preview){
-  if (preview != null) snippets[thread] = preview;
-  const i = state.sessions.findIndex((s) => s.thread === thread);
-  if (i < 0){ loadSessions(); return; }            /* unknown thread: refetch */
-  state.sessions.unshift(state.sessions.splice(i, 1)[0]);  /* newest-first */
-  if (thread !== state.current) unread.add(thread);
-  renderBuffers();
-}
-function connect(){
-  const es = new EventSource("/events");
-  const conn = el("conn"), lbl = el("conn-label");
-  es.onopen = () => { conn.className = "seg live"; lbl.textContent = "live"; };
-  es.onerror = () => { conn.className = "seg down"; lbl.textContent = "offline"; };
-  es.onmessage = (e) => {
-    const f = JSON.parse(e.data);
-    if (f.type === "tick"){ bumpThread(f.thread, f.preview); return; }
-    if (!state.sessions.some((s) => s.thread === f.thread)){ loadSessions(); return; }
-    if (f.thread === state.current){  /* stream a web-origin turn we're viewing */
-      if (f.type === "delta"){
-        if (!live) live = addMsg("chief", ""); live.textContent += f.text;
-      } else if (live){ live.textContent = f.text; live = null; }
-      else addMsg("chief", f.text);
-      log.scrollTop = log.scrollHeight;
-    }
-    if (f.type === "final") bumpThread(f.thread, f.text);
-  };
 }
 
 async function loadSessions(){
@@ -194,6 +159,6 @@ async function monitors(){
 /* ---- boot ---- */
 (async () => {
   state.commands = await getJSON("/commands") || [];
-  await loadSessions(); connect(); monitors(); setInterval(monitors, 10000);
+  await loadSessions(); monitors(); setInterval(monitors, 10000);
 })();
 """ + TOOL_SCRIPT

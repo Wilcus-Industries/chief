@@ -145,7 +145,7 @@ def build_web_app(
     async def events(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
-        queue = hub.listen()
+        queue = hub.listen(request.query_params.get("thread") or None)
 
         async def stream() -> AsyncIterator[str]:
             try:

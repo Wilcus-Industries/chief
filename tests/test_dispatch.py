@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -243,6 +244,92 @@ async def test_completed_turn_emits_one_tick(store: MessageStore) -> None:
     }
     assert queue.empty()  # no delta/final/peer frames for an un-tapped thread
     assert adapter.sent == [("cli:t", "hello back")]  # origin channel unaffected
+
+
+def _read_file_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def read_file(**_: object) -> str:
+        return "file contents"
+
+    registry.register(
+        Tool(ToolSpec(name="read_file", description="", parameters={}), read_file)
+    )
+    return registry
+
+
+def _drain(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
+    frames = []
+    while not queue.empty():
+        frames.append(queue.get_nowait())
+    return frames
+
+
+async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
+    """A client tapped into a non-web thread receives that turn's inbound text,
+    the name-only tool tick as the call fires, the reply deltas, and the final
+    — while the reply still exits on its own channel."""
+    hub = ObserverHub()
+    registry = _read_file_registry()
+    manager = SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    dispatcher = Dispatcher(manager, hub=hub)
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen("cli:t")
+
+    await dispatcher.handle(owner_message("hi"))
+
+    frames = _drain(queue)
+    assert frames[0] == {"type": "inbound", "thread": "cli:t", "text": "hi"}
+    # Name only — no args/result (they load via the lazy /history/tool fetch).
+    assert frames[1] == {
+        "type": "tool", "thread": "cli:t", "call_id": "c1", "name": "read_file"
+    }
+    deltas = [f for f in frames if f["type"] == "delta"]
+    assert "".join(f["text"] for f in deltas) == "done"
+    assert frames[-2] == {"type": "final", "thread": "cli:t", "text": "done"}
+    assert frames[-1] == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
+    }
+    assert adapter.sent == [("cli:t", "done")]  # origin channel still delivered
+
+
+async def test_unwatched_thread_emits_only_the_coarse_tick(
+    store: MessageStore,
+) -> None:
+    """No subscriber tapped into the thread: the turn puts only the single
+    coarse tick on the wire — no inbound/tool/delta/final frames (AC2)."""
+    hub = ObserverHub()
+    registry = _read_file_registry()
+    manager = SessionManager(
+        provider=FakeProvider(
+            [tool_turn("read_file", {}, call_id="c1"), text_turn("done")]
+        ),
+        tools_factory=lambda thread, channel: registry,
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=4,
+    )
+    dispatcher = Dispatcher(manager, hub=hub)
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen()  # watches no thread
+
+    await dispatcher.handle(owner_message("hi"))
+
+    assert queue.get_nowait() == {
+        "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
+    }
+    assert queue.empty()
 
 
 async def test_system_wake_ticks_like_owner(store: MessageStore) -> None:

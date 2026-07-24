@@ -17,6 +17,11 @@ from chief.tools import ToolDispatcher
 
 OnDelta = Callable[[str], Awaitable[None]]
 
+# Fires as each requested tool call fires, so an observer can emit a name-only
+# tool tick to a watching client (#263). Independent of on_commit (which
+# persists) — this one is purely for live streaming.
+OnTool = Callable[[ToolCall], Awaitable[None]]
+
 # Screens one tool result before it is appended for the model. Supplied by
 # the session from the post_tool hooks; see chief.hooks.posttool.
 PostTool = Callable[[ToolCall, str], Awaitable[str]]
@@ -60,6 +65,7 @@ async def run_turn(
     on_delta: OnDelta,
     post_tool: PostTool | None = None,
     on_commit: OnCommit | None = None,
+    on_tool: OnTool | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
@@ -75,6 +81,8 @@ async def run_turn(
         if not completion.tool_calls:
             return TurnResult(text=completion.text, usage=usage)
         for call in completion.tool_calls:
+            if on_tool is not None:
+                await on_tool(call)
             key = (call.name, json.dumps(call.arguments, sort_keys=True))
             seen_calls[key] = seen_calls.get(key, 0) + 1
             if seen_calls[key] > REPEAT_LIMIT:

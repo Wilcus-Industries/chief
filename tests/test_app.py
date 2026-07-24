@@ -206,6 +206,81 @@ async def test_nonweb_turn_ticks_through_real_dispatch(
         await shutdown(app, streams)
 
 
+def _drain_hub(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
+    frames = []
+    while not queue.empty():
+        frames.append(queue.get_nowait())
+    return frames
+
+
+async def test_focused_nonweb_turn_streams_over_real_dispatch(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Central mechanism end to end: a client tapped into a non-web thread gets
+    # that turn's inbound text, a name-only tool tick as the call fires, live
+    # deltas, and the coarse tick — real dispatcher → session → loop → hub →
+    # subscribed queue, with a system-sender wake standing in for a monitor.
+    call = ToolCall(
+        id="c1",
+        name="read_file",
+        arguments={"path": "packages/build-imessage/manifest.yaml"},
+    )
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("read the manifest")]
+    )
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    queue = app.hub.listen("cli:home")
+    try:
+        await app.dispatcher.handle(
+            Message(
+                channel="cli", sender="system", thread_key="cli:home", text="ping"
+            )
+        )
+        frames = _drain_hub(queue)
+    finally:
+        await shutdown(app, streams)
+    by_type = {f["type"]: f for f in frames}
+    assert by_type["inbound"] == {
+        "type": "inbound", "thread": "cli:home", "text": "ping"
+    }
+    # Name only — no args/result on the wire (they load via lazy fetch, AC6).
+    assert by_type["tool"] == {
+        "type": "tool", "thread": "cli:home", "call_id": "c1", "name": "read_file"
+    }
+    assert [f for f in frames if f["type"] == "delta"], "expected live deltas"
+    assert by_type["tick"]["thread"] == "cli:home"
+
+
+async def test_two_focused_clients_get_independent_streams(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # AC4: two clients focused on different threads each receive their own rich
+    # stream; the other sees only the broadcast coarse tick, never its deltas.
+    provider = FakeProvider([text_turn("aye"), text_turn("bee")])
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    q_a = app.hub.listen("cli:a")
+    q_b = app.hub.listen("cli:b")
+    try:
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:a", text="pa")
+        )
+        a_first, b_first = _drain_hub(q_a), _drain_hub(q_b)
+        await app.dispatcher.handle(
+            Message(channel="cli", sender="system", thread_key="cli:b", text="pb")
+        )
+        a_second, b_second = _drain_hub(q_a), _drain_hub(q_b)
+    finally:
+        await shutdown(app, streams)
+    # The cli:a turn: q_a streams its rich frames, q_b gets only the coarse tick.
+    assert {"inbound", "delta", "final", "tick"} <= {f["type"] for f in a_first}
+    assert [f["type"] for f in b_first] == ["tick"]
+    assert b_first[0]["thread"] == "cli:a"
+    # The cli:b turn: mirror image.
+    assert {"inbound", "delta", "final", "tick"} <= {f["type"] for f in b_second}
+    assert [f["type"] for f in a_second] == ["tick"]
+    assert a_second[0]["thread"] == "cli:b"
+
+
 async def test_switch_model_is_gated_and_persists_the_override(
     tmp_path: Path, sock_path: Path
 ) -> None:

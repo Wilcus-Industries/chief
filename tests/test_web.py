@@ -166,10 +166,11 @@ async def test_send_refuses_a_group_thread(web: WebParts) -> None:
 
 
 async def test_adapter_broadcasts_frames_to_listeners() -> None:
-    """A web-origin turn streams its delta/final to the browser via the hub."""
+    """A web-origin turn streams its delta/final to the browser via the hub —
+    to the client watching that thread, not every connected one."""
     hub = ObserverHub()
     adapter = WebAdapter(hub)
-    queue = hub.listen()
+    queue = hub.listen("web:main")
     await adapter.send_delta("web:main", "he")
     await adapter.send("web:main", "hello")
     delta = queue.get_nowait()
@@ -206,7 +207,7 @@ async def test_events_streams_a_tick_to_a_connected_client(web: WebParts) -> Non
     await login(client)
 
     async def feed() -> None:
-        while not hub._queues:  # wait until the route registers its listener
+        while not hub._watchers:  # wait until the route registers its listener
             await asyncio.sleep(0)
         hub.tick("cli:home", "cli", "hi back")
         hub.close()

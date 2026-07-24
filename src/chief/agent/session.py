@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from chief.agent.compaction import Compactor
-from chief.agent.loop import OnDelta, TurnResult, run_turn
+from chief.agent.loop import OnDelta, OnTool, TurnResult, run_turn
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
@@ -87,7 +87,11 @@ class Session:
         return self._lock
 
     async def run_turn(
-        self, user_text: str, on_delta: OnDelta, sender: str = "owner"
+        self,
+        user_text: str,
+        on_delta: OnDelta,
+        sender: str = "owner",
+        on_tool: OnTool | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
@@ -106,12 +110,18 @@ class Session:
                 # durable too, never here where the reply is still un-sent.
                 await self._gate.enter_turn()
                 try:
-                    return await self._one_turn(user_text, on_delta, sender)
+                    return await self._one_turn(
+                        user_text, on_delta, sender, on_tool
+                    )
                 finally:
                     self._gate.leave_turn()
 
     async def _one_turn(
-        self, user_text: str, on_delta: OnDelta, sender: str
+        self,
+        user_text: str,
+        on_delta: OnDelta,
+        sender: str,
+        on_tool: OnTool | None = None,
     ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
@@ -145,6 +155,7 @@ class Session:
                     self._hooks, self._hooks_timeout_seconds, logger
                 ),
                 on_commit=self._live_append,
+                on_tool=on_tool,
             )
         except BaseException:
             # A provider/network raise mid-turn must not orphan the turn: the
