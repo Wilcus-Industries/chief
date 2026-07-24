@@ -192,8 +192,8 @@ def build_adapters(
     web_server: WebServer | None = None
     if config.web_password:
         web_app = build_web_app(
-            Auth(config.web_password, load_or_create_secret()), web_adapter,
-            core.hub, dispatcher.handle, core.monitors, store,
-            commands.palette, core.manager, approvals)
+            Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
+            dispatcher.handle, core.monitors, store, commands.palette, core.manager,
+            approvals, config.stream_channel_defaults, config.imessage_owner_handles)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

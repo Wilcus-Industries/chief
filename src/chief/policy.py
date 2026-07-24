@@ -9,9 +9,9 @@ its ``call_id`` so no load button binds to it). History always renders full,
 independent of this — the policy governs the live stream only.
 
 Resolution order: a session row's stored override wins; else the channel's
-configured default; else :data:`COARSE`. ``send_guard`` is carried and
-persisted here but not enforced this slice (a later reply-from-web slice reads
-it).
+configured default; else :data:`COARSE`. :func:`guard_audience` reads
+``send_guard`` to gate the dashboard's reply-from-web confirm — the one
+enforcement point for that field.
 """
 
 from dataclasses import dataclass, fields
@@ -80,6 +80,29 @@ def resolve(
     if override is not None:
         return StreamPolicy.from_dict(override)
     return channel_defaults.get(channel, COARSE)
+
+
+INTERNAL_CHANNELS = ("web", "cli")
+
+
+def guard_audience(
+    channel: str,
+    thread: str,
+    override: dict[str, object] | None,
+    channel_defaults: dict[str, StreamPolicy],
+    owner_handles: tuple[str, ...],
+) -> bool:
+    """True when a reply-from-web to this thread reaches a NON-owner audience and
+    the resolved policy's send_guard is on — the dashboard shows a confirm before
+    dispatch. Internal surfaces (web/cli) and the owner's own self-DM (thread_key
+    is an owner handle) are always owner-only, so never guarded regardless of the
+    channel default (both imessage and web default RICH with send_guard on)."""
+    if channel in INTERNAL_CHANNELS:
+        return False
+    norm = {h.strip().lstrip("+").lower() for h in owner_handles if h.strip()}
+    if thread.strip().lstrip("+").lower() in norm:
+        return False
+    return resolve(channel, override, channel_defaults).send_guard
 
 
 # Frame builders — a policy decides *which* live frames a turn emits. Each

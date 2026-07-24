@@ -17,6 +17,7 @@ from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import DEFAULT_CHANNEL_DEFAULTS
 from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
@@ -74,7 +75,7 @@ def web(engine: AsyncEngine) -> WebParts:
     approvals = ApprovalBroker()
     app = build_web_app(
         Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
-        approvals,
+        approvals, DEFAULT_CHANNEL_DEFAULTS, ("+15550009999",),
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://web"
@@ -167,6 +168,27 @@ async def test_send_refuses_a_group_thread(web: WebParts) -> None:
     assert response.status_code == 400
     await asyncio.sleep(0)
     assert HANDLED == []
+
+
+async def test_sessions_marks_only_a_non_owner_audience_guarded(
+    web: WebParts,
+) -> None:
+    """send_guard is True only for a deliverable non-owner thread (external 1:1
+    iMessage). The owner self-DM, a cli thread, and web buffers are owner-only."""
+    client, _adapter, _monitors, store, _, _, _ = web
+    await store.ensure_session("+15551234567", "imessage")  # external peer
+    await store.ensure_session("+15550009999", "imessage")  # owner self-DM
+    await store.ensure_session("cli:t", "cli")
+    await store.ensure_session("web:main", "web")
+    await login(client)
+    rows = (await client.get("/sessions")).json()
+    guard = {r["thread"]: r["send_guard"] for r in rows}
+    assert guard == {
+        "+15551234567": True,
+        "+15550009999": False,
+        "cli:t": False,
+        "web:main": False,
+    }
 
 
 async def test_adapter_broadcasts_frames_to_listeners() -> None:

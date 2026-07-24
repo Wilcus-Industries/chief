@@ -22,6 +22,7 @@ from chief.approvals import ApprovalBroker
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
+from chief.policy import StreamPolicy, guard_audience
 from chief.web.adapter import WebAdapter
 from chief.web.auth import COOKIE_NAME, Auth
 from chief.web.live import build_live_routes
@@ -45,6 +46,8 @@ def build_web_app(
     palette: Callable[[], list[str]],
     manager: SessionManager,
     approvals: ApprovalBroker,
+    channel_defaults: dict[str, StreamPolicy],
+    owner_handles: tuple[str, ...],
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
@@ -106,7 +109,16 @@ def build_web_app(
     async def sessions(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
-        return JSONResponse(await store.list_sessions())
+        rows = await store.list_sessions()
+        for row in rows:
+            # ponytail: one stream_policy query per row; fine at LAN single-owner
+            # scale (a handful of threads). Fold into list_sessions if it grows.
+            override = await manager.stream_policy(str(row["thread"]))
+            row["send_guard"] = guard_audience(
+                str(row["channel"]), str(row["thread"]),
+                override, channel_defaults, owner_handles,
+            )
+        return JSONResponse(rows)
 
     async def history(request: Request) -> Response:
         if not auth.is_authed(request):

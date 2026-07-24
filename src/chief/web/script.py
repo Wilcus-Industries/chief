@@ -93,6 +93,10 @@ el("f").onsubmit = async (e) => {
   e.preventDefault();
   if (acceptCompletion()) return;
   const text = input.value.trim(); if (!text || input.disabled) return;
+  const s = state.sessions.find((x) => x.thread === state.current);
+  if (s && s.send_guard &&
+      !confirm(`This reply goes to ${label(state.current)} on ${s.channel} — `
+        + `not you. Send it?`)) return;
   addMsg("owner", text); input.value = ""; hidePop();
   await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
     body: JSON.stringify({thread: state.current, text})});

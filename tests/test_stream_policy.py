@@ -11,8 +11,36 @@ from chief.policy import (
     COARSE,
     RICH,
     StreamPolicy,
+    guard_audience,
     resolve,
 )
+
+_DEFAULTS = {"imessage": RICH, "web": RICH}
+_OWNER = ("+15550009999",)
+
+
+def _guard(channel: str, thread: str, override: dict[str, object] | None) -> bool:
+    return guard_audience(channel, thread, override, _DEFAULTS, _OWNER)
+
+
+def test_guard_audience_internal_channels_are_never_guarded() -> None:
+    assert _guard("web", "web:main", None) is False
+    assert _guard("cli", "cli:t", None) is False
+
+
+def test_guard_audience_self_dm_is_never_guarded() -> None:
+    # thread_key is the owner handle, +/case variant still matches.
+    assert _guard("imessage", "+15550009999", None) is False
+    assert _guard("imessage", "15550009999", None) is False
+
+
+def test_guard_audience_external_imessage_with_rich_default_is_guarded() -> None:
+    assert _guard("imessage", "+15551234567", None) is True
+
+
+def test_guard_audience_override_can_clear_the_guard() -> None:
+    off: dict[str, object] = {"send_guard": False}
+    assert _guard("imessage", "+15551234567", off) is False
 
 
 def test_from_dict_fills_missing_from_field_defaults() -> None:
