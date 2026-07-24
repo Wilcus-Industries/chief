@@ -6,6 +6,8 @@ import signal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chief.install.basepin import resolve_pending
+from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
@@ -46,6 +48,11 @@ async def amain() -> None:
         from chief.app import build_app
         from chief.config import load_config
 
+        # Before anything is served: the one-time crossover onto the
+        # release-based update system (untrack installed skills, seed core's
+        # own, record the base pin). Idempotent, and a no-op once done.
+        for step in migrate_instance(repo_root):
+            logger.info("update migration: %s", step)
         config = load_config()
         # One daemon per data dir: a stray second instance would double-poll
         # chat.db and answer every iMessage twice. Held for the whole process.
@@ -64,6 +71,11 @@ async def amain() -> None:
             restart_daemon()
         raise
     clear_marker(repo_root)
+    # The box is up on the new code, so an update that landed is now proven.
+    # Only here does the base pin advance; a rollback or an abandoned update
+    # leaves HEAD where it was and the pin unmoved.
+    if (version := resolve_pending(repo_root)) is not None:
+        logger.info("now running %s", version)
     await report_restart(app, repo_root)
     logger.info("chief up — socket at %s", config.socket_path)
 

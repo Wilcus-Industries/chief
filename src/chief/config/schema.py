@@ -103,6 +103,16 @@ class Config:
     compaction_keep_recent: int = 20
     compaction_default_window: int = 60_000
     compaction_windows: dict[str, int] = field(default_factory=dict)
+    # What a *scheduled* self-update may do with nobody present: off = manual
+    # only, clean-only = apply clean updates and ask on a collision, full =
+    # resolve collisions unattended and report afterwards. The owner asking
+    # chief directly is always allowed, whatever this says.
+    update_autonomy: str = "clean-only"
+    # Cron spec for chief's own update schedule ("" = none). Config is the
+    # source of truth — chief creates the schedule from this and re-creates it
+    # when it is missing — so switching scheduled updates off means clearing
+    # this key, not only deleting the schedule.
+    update_schedule: str = ""
 
     @property
     def default_model(self) -> str:

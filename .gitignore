@@ -28,3 +28,6 @@ dist/
 
 # Install-local config (seeded from config.default.yaml by the wizard).
 /config.yaml
+
+# Installed skill copies — instance data chief edits about itself.
+/skills/

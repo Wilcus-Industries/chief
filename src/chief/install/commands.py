@@ -1,4 +1,7 @@
-"""The ``python -m chief.install`` CLI: parser + dispatch over lifecycle ops."""
+"""The ``python -m chief.install`` CLI: dispatch over the lifecycle ops.
+
+The argument parser — the CLI's public surface — lives in :mod:`.cli`.
+"""
 
 import argparse
 import asyncio
@@ -9,14 +12,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from chief.config import load_config
+from chief.install.cli import build_parser
 from chief.install.lifecycle import (
-    DEFAULT_LAUNCHER,
     uninstall,
     wait_for_health,
     web_url,
 )
+from chief.install.release import cut_release
 from chief.install.service import ServiceManager
-from chief.install.units import default_runner
 from chief.install.update import update
 from chief.install.updatecheck import refresh
 from chief.install.wizard import WizardIO, run_wizard
@@ -41,50 +44,6 @@ def ensure_config(
         return False
     config_path.write_text(template.read_text())
     return True
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m chief.install",
-        description="chief install + lifecycle commands",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-    wizard = sub.add_parser("wizard", help="run the first-run wizard")
-    wizard.add_argument("--non-interactive", action="store_true")
-    service_install = sub.add_parser(
-        "service-install", help="install + start the autostart service"
-    )
-    service_install.add_argument("--repo", type=Path, default=Path.cwd())
-    service_install.add_argument("--launcher", type=Path, default=DEFAULT_LAUNCHER)
-    sub.add_parser("service-uninstall", help="remove the autostart service")
-    sub.add_parser("start", help="start the daemon via the service")
-    sub.add_parser("stop", help="stop the daemon via the service")
-    status = sub.add_parser("status", help="service + web UI state")
-    status.add_argument("--port", type=int, default=None)
-    update_cmd = sub.add_parser("update", help="merge origin/main and restart")
-    update_cmd.add_argument("--repo", type=Path, default=Path.cwd())
-    check = sub.add_parser("check-updates", help="is core behind origin/main?")
-    check.add_argument("--repo", type=Path, default=Path.cwd())
-    uninstall_cmd = sub.add_parser("uninstall", help="remove service + launcher")
-    uninstall_cmd.add_argument("--repo", type=Path, default=Path.cwd())
-    uninstall_cmd.add_argument("--launcher", type=Path, default=DEFAULT_LAUNCHER)
-    uninstall_cmd.add_argument("--purge-data", action="store_true")
-    uninstall_cmd.add_argument("--yes", action="store_true")
-    health = sub.add_parser("await-health", help="wait until the web UI answers")
-    health.add_argument("--timeout", type=float, default=120.0)
-    health.add_argument("--port", type=int, default=None)
-    open_cmd = sub.add_parser("open-browser", help="open the web UI")
-    open_cmd.add_argument("--port", type=int, default=None)
-    compact_cmd = sub.add_parser(
-        "compact", help="force-compact a thread's history via the running daemon"
-    )
-    compact_cmd.add_argument(
-        "thread", help="thread_key to compact (e.g. the iMessage self-chat handle)"
-    )
-    compact_cmd.add_argument(
-        "--socket", default=None, help="daemon socket path (default: from config)"
-    )
-    return parser
 
 
 def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
@@ -127,11 +86,9 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         print(f"web:     {url} ({'responding' if up else 'not responding'})")
         return 0
     if command == "update":
-        return update(
-            repo_dir=args.repo,
-            runner=default_runner,
-            service=ServiceManager.detect(),
-        )
+        return update(repo_dir=args.repo)
+    if command == "release":
+        return cut_release(repo_dir=args.repo, part=args.part)
     if command == "check-updates":
         # Synchronous on purpose: the daemon's hook reads the cache this writes,
         # but someone typing the command wants an answer, not yesterday's.
@@ -139,13 +96,13 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         if status is None:
             print("could not check: git did not answer (offline? auth?)")
             return 1
-        if status.behind <= 0:
-            print("up to date with origin/main.")
+        if not status.behind:
+            print(f"up to date ({status.latest}).")
             return 0
-        commits = "commit" if status.behind == 1 else "commits"
+        running = status.current or "an unrecorded base"
         print(
-            f"{status.behind} {commits} behind origin/main ({status.target}) "
-            f"— run `chief update`."
+            f"{status.latest} is out (this box is on {running}) "
+            "— run `chief update`."
         )
         return 0
     if command == "uninstall":
@@ -191,7 +148,7 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch one lifecycle command; returns the process exit code."""
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
         return _dispatch(args)
     except RuntimeError as exc:

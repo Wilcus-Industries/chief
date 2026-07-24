@@ -48,7 +48,9 @@ Re-run any time with `chief wizard`.
 
 ```
 chief status     # service + web UI state
-chief update     # merge origin/main, resync skills, restart, roll back if unhealthy
+chief update     # apply the newest release onto this box's own edits
+chief check-updates  # is a newer core release out? (changes nothing)
+chief release <part>  # cut a release — upstream repo only, never a box
 chief start      # / stop
 chief run        # foreground, instead of the service
 chief wizard     # re-run the first-run wizard
@@ -82,43 +84,90 @@ while the caller sees a clean return. Don't reintroduce it.
 `install` also boots out first before writing the plist, because bootstrapping an
 already-loaded label errors.
 
-## What `chief update` does
+## Releases, and what `chief update` does
 
-In order, with the failure behavior that matters:
+Upstream cuts **releases**: `chief release [major|minor|patch]` refuses a dirty
+tree or a red done-check, bumps the version in `pyproject.toml`, commits, tags
+`vX.Y.Z`, pushes branch and tag, and publishes a GitHub Release whose notes are
+the subject lines since the previous tag. Boxes consume releases; never run this
+on one.
 
-1. `git fetch --force origin` — non-zero returns 1.
-2. Record `before = HEAD`, `target = origin/main`.
-3. **Up-to-date test is `git merge-base --is-ancestor origin/main HEAD`, not
-   `before == target`** — a self-editing install commits to this same repo, so
-   HEAD is permanently ahead of origin/main and equality never holds.
-4. **Dirty guard** on tracked files only. Untracked files are expected (installed
-   skills live untracked on some installs), but a modified tracked file would be
-   silently clobbered by `-X theirs`, so a non-empty list prints and returns 1.
-5. `git merge -X theirs --no-edit origin/main`; failure aborts the merge and
-   returns 1 with the tree untouched. **It merges, never checks out a tag** — a
-   tag checkout would drop the install's local self-edit commits out of the
-   working tree.
-6. `uv sync`; failure rolls back.
-7. **Re-sync installed skills.** For each `packages/*/skills/*/SKILL.md`: skip
-   names whose `skills/<name>/` doesn't exist (an update must never enable a
-   capability the owner didn't install); skip byte-identical targets; otherwise
-   compare the target against `git show <before>:<path>`. Equal means safe to
-   copy; different means **drifted — left alone** and reported as "NOT overwritten
-   (locally edited)".
-8. If anything synced, commit it (`chore(skills): re-sync after update`) — because
-   `skills/` is tracked, so leaving copies modified would trip step 4's own dirty
-   guard on the next run.
-9. No service installed → print "restart chief yourself" and return 0.
-10. `service.restart()`, then health check.
-11. **Health is service-first, then web.** A stopped or not-installed service is
-    unhealthy immediately; otherwise wait up to 45s on the web URL. A web probe
-    alone is insufficient — right after a restart the *old* process can still be
-    serving while the new one never comes up.
-12. Unhealthy → `git reset --hard <before>`, `uv sync`, restart. Rollback always
-    returns 1, and a failed reset reports `ROLLBACK FAILED`.
+A box runs *a release plus everything it has since edited about itself*. So an
+update never checks anything out — it applies the box's **local layer onto** the
+release, keeping chief's edits as the side that wins and adapting them to
+upstream's structure.
 
-Health checks count **any status < 500** as healthy, so a login redirect is
-healthy.
+1. `git fetch --force --tags origin`; failure returns 1.
+2. Resolve the newest `vX.Y.Z` tag — **numerically**, so `v0.10.0` beats `v0.9.0`.
+3. Read the **base pin**, `refs/chief/base`: the release commit this box last
+   synced to. It is a *local* ref, which is what makes update survive an upstream
+   history rewrite and keeps the base commit alive against gc. No pin returns 1
+   with instructions rather than guessing.
+4. Pin equals the newest release → "already up to date", return 0.
+5. **Dirty guard** on tracked files only; untracked instance data (`skills/`,
+   `config.yaml`, `secrets/`, `data/`) never counts.
+6. `git merge-tree --write-tree --merge-base=<pin> HEAD <tag>` — a real
+   three-way merge with the pin supplied *explicitly*, so git is never asked for
+   a common ancestor and unrelated histories still merge.
+7. `git read-tree -u --reset <merged tree>` — index and working tree get the
+   result, **HEAD stays on the pre-update commit**. That is what leaves the
+   update as ordinary uncommitted changes, so the self-edit seatbelt applies
+   verbatim and needs no new knobs.
+8. Write `data/update_pending.json` (target commit, version, pre-update HEAD).
+9. Print `clean:` or `conflicts:` with the file list, and stop. Exit `0` clean,
+   `2` conflicted, `1` could not run.
+
+Chief takes it from there via the **`self-update` skill**: resolve any conflict
+markers, then `restart` — full done-check, one `update to vX.Y.Z` commit, reboot,
+and the existing boot-failure rollback. Three consecutive red checks trip the
+existing circuit breaker; the correct give-up is `revert_edits`, which puts the
+box back exactly on the version it was already running.
+
+**The base pin advances only after a healthy boot**, and only if HEAD actually
+moved — proof the update was committed. A rollback, a red check, or an abandoned
+update all leave HEAD where it was, so the pending record is discarded and the
+pin does not move. The next update retries from the same place.
+
+### Local layer = tree diff, not a commit range
+
+Deliberate, and load-bearing. An update commits as a *single squashed* commit, so
+HEAD's parent is the previous box commit rather than the release it came from.
+After one update, `rebase --onto` or any commit range can no longer tell the
+local layer from all of history. Tracking a pinned base and merging trees is
+behaviourally the rebase, mechanically not one. Don't "simplify" it back.
+
+### Installed skills are instance data
+
+`skills/` is untracked, like `config.yaml`, `secrets/`, and `data/`. Chief edits
+its own installed skills, and tracking them made every release collide with that
+— the old handling gave up and printed "reconcile by hand". Tracked *sources*
+live in `core-skills/` (core's own) and `packages/*/skills/` (packages'); boot
+seeds a core skill into `skills/` only when it is missing, never over an existing
+copy. A skill genuinely changed on both sides is now just another conflicted file
+for chief to reconcile.
+
+### Autonomy and the schedule
+
+`update.autonomy` — `off` (manual only), `clean-only` (default: apply clean
+updates, ask the owner on a collision), `full` (resolve unattended and report
+afterwards). It governs *scheduled* runs; the owner asking chief directly always
+works.
+
+`update.schedule` is a cron spec (UTC) the installer offers to set. Boot creates
+a matching **prompt** schedule — chief woken as a normal turn, so quiet hours and
+safe-boundary restarts come for free. Config is the source of truth: chief can
+retune or delete the schedule, but clearing the key is what stops it coming back.
+
+### Crossing over from the merge-based update (one time)
+
+An existing box takes one final old-style `chief update`, then the new code's
+boot migration runs, idempotently: untrack `skills/` (one
+`chore: untrack installed skills` commit, working-tree copies kept), seed any
+missing core skill from `core-skills/`, and record the base pin at the newest
+release contained in HEAD (falling back to the shared ancestor; if there is
+neither it logs loudly and pins nothing rather than inventing a base). If a
+self-edited core skill was clobbered by that final merge, its pre-migration copy
+is still in git history.
 
 Cloned packages update separately via `chief-pkg update`, which restarts nothing.
 

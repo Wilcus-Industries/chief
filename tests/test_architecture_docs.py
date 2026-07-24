@@ -23,7 +23,8 @@ def test_architecture_doc_exists() -> None:
 
 
 def test_self_edit_skill_points_to_architecture_doc() -> None:
-    skill = SkillLibrary(REPO_ROOT / "skills").get("self-edit")
+    # The tracked source copies; `skills/` is untracked instance data now.
+    skill = SkillLibrary(REPO_ROOT / "core-skills").get("self-edit")
     assert skill is not None
     assert "docs/ARCHITECTURE.md" in skill.body()
 
