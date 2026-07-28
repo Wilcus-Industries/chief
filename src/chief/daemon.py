@@ -43,6 +43,8 @@ class App:
     shell_service: ShellService
 
     async def start(self) -> None:
+        # Fail closed on monitors written before the scoping rule (#285).
+        await self.monitor_service.disable_unscoped()
         await self.socket_adapter.start()
         await self.web_adapter.start()
         if self.imessage_adapter is not None:

@@ -18,7 +18,11 @@ _SPEC = ToolSpec(
         "match a contact with field=`sender`), `instruction` (a "
         "yes/no judgment via the built-in wake-judge classifier), or "
         "`classifier` (a named categorical classifier, which requires "
-        "`fire_label` — the label that fires the monitor). Plus optional "
+        "`fire_label` — the label that fires the monitor). The `instruction` "
+        "and `classifier` forms send message text to a model, so each MUST be "
+        "scoped to one contact (`scope_sender`) or one thread/group chat "
+        "(`scope_thread`) — ask the owner whose messages it may read, never "
+        "guess. `pattern` is local regex and takes no scope. Plus optional "
         "`watch_channel` (defaults to this thread's channel) and "
         "`target_session` (an existing session's thread_key; which session the "
         "wake runs in, default this thread). "
@@ -54,6 +58,20 @@ _SPEC = ToolSpec(
                     "this thread. Must already exist (see the session tool)."
                 ),
             },
+            "scope_sender": {
+                "type": "string",
+                "description": (
+                    "the one sender an instruction/classifier monitor may "
+                    "read (handle, number, or email)"
+                ),
+            },
+            "scope_thread": {
+                "type": "string",
+                "description": (
+                    "the one thread_key an instruction/classifier monitor may "
+                    "read, e.g. a group chat id"
+                ),
+            },
             "monitor_id": {"type": "integer"},
         },
         "required": ["action"],
@@ -74,6 +92,8 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         watch_channel: str | None,
         field: str | None,
         target_session: str | None,
+        scope_sender: str | None,
+        scope_thread: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
@@ -81,7 +101,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return "error: create needs a description"
         predicate = build_predicate(
             pattern, instruction, classifier, fire_label, field,
-            service.classifier_def,
+            service.classifier_def, scope_sender, scope_thread,
         )
         if isinstance(predicate, str):
             return predicate  # a validation error
@@ -139,6 +159,8 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         monitor_id: Any = None,
         field: str | None = None,
         target_session: str | None = None,
+        scope_sender: str | None = None,
+        scope_thread: str | None = None,
     ) -> str:
         if action == "create":
             return await _create(
@@ -151,6 +173,8 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
                 watch_channel,
                 field,
                 target_session,
+                scope_sender,
+                scope_thread,
             )
         if action == "retarget":
             return await _retarget(context, monitor_id, target_session)

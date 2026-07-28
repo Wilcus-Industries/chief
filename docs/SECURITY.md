@@ -133,6 +133,43 @@ lets notify policy (e.g. a whitelist tier) be agent policy rather than hardcoded
 Group chats are never trusted. A group `sender` stays the raw handle and must
 never map to `owner`.
 
+## Monitor scope — the prompt-injection boundary (`monitors/`)
+
+A `classifier` predicate sends the event payload — the sender's words, verbatim
+— to a model, and that model's verdict decides whether chief wakes. The
+stranger's text and the wake instruction share one prompt. **That is a
+prompt-injection boundary, not a cost question.**
+
+So: **a classifier-form monitor must declare a scope; a pattern-form monitor
+must not.** A `code` predicate is local regex over one field — nothing leaves
+the machine, so scanning every message leaks nothing. The asymmetry is the
+point; don't "simplify" it into one uniform rule.
+
+- Scope is `{"sender": ...}` or `{"thread_key": ...}` inside the JSON
+  `predicate` — exactly one, exact match, compared case-insensitively.
+- `build_predicate` refuses an unscoped classifier form with an `error: ...`
+  string, and refuses a scope on the pattern form.
+- `MonitorService._on_event` checks `in_scope` **before** `_matches`. Keep that
+  order — after `_matches`, the model has already read the message.
+- A classifier row with no scope matches nothing (`in_scope` fails closed), and
+  `disable_unscoped()` — run from `App.start` — disables it at boot, logging
+  each by id and description at WARNING. Read the log after a deploy.
+
+**Scoping to a group trusts every current and future member of that group.** A
+group monitor has to scope on `thread_key`, because you cannot name who will
+speak: group messages carry the raw handle as `sender` and the chat id as
+`thread_key`. Everyone in that chat — including people the owner has never met,
+and anyone added later without their involvement — reaches the judge. This is a
+documented, accepted exception, not a bug. For 1:1 senders the rule closes the
+path completely: an unknown sender can never reach a classifier, because the
+owner cannot name a contact they do not know.
+
+`_fire` wraps the payload in `UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers,
+because the wake dispatches as `sender="system"` and so takes the owner path in
+`dispatch.handle` — a full turn, with external text as trusted-origin content.
+The marker does not make injection impossible; nothing does. It is the cheapest
+thing that helps, and it applies to every fire, not just groups.
+
 ## Audit — `audit.py`
 
 Append-only JSONL at `data/audit.jsonl`. `record(kind, **data)` prepends a UTC
@@ -263,6 +300,8 @@ reaches the shell; it returns exit code 126 and is logged. Reaching
    monitors trigger themselves in a loop.
 9. **An unattended shell path is guarded exactly like the owner-driven one**, and
    a control card never renders attacker-shaped text unescaped.
+10. **No unscoped classifier monitor ever reaches a model** — scope is checked
+    before the classifier, and an unscoped row is disabled at boot.
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,
