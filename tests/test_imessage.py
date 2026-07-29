@@ -680,11 +680,14 @@ async def test_an_unreadable_owner_store_costs_that_store_not_the_daemon(
     harness.owner_store = FakeStore(tmp_path / "owner.db")
     harness.owner_store.path.write_bytes(b"not a database at all")
     adapter = harness.adapter()
+    # start() then stop() before polling by hand: start() leaves the poll loop
+    # running, and its first tick would race an explicit poll_once() over the
+    # same rows (both fetch before either advances the cursor).
     await adapter.start()
+    await adapter.stop()
     harness.store.add_message(OWNER, "hi chief", chat=OWNER)
     await adapter.poll_once()
     await adapter.drain()
-    await adapter.stop()
     assert [m.text for m in harness.delivered] == ["hi chief"]
 
 
