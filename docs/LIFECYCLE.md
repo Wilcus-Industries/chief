@@ -58,6 +58,14 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    `restart.fire_if_requested()` *after* the turn — safe, because the cursor is
    already durable.
 
+Steps 3, 5 and 6 above describe `imessage.mode: self` — chief on the owner's
+Apple ID. Under `mode: dedicated` (chief's own Apple ID, own user session) the
+poll runs with an **empty** self-chat scope, so only `is_from_me = 0` rows
+qualify; the `BOT_PREFIX` skip and `RecentDedup` are both bypassed, and
+`send()` stamps no prefix. The scope is turned off, never repointed at the
+owner's handle: that chat is chief's real conversation with the owner, so
+scoping it would poll chief's own replies back as owner input.
+
 ### Socket / CLI — `SocketAdapter` (`adapters/socket.py`), name `cli`
 
 Unix socket at `config.socket_path`, newline-delimited JSON. In `{thread, text}`,

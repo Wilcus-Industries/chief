@@ -180,7 +180,7 @@ def build_adapters(
             cursor_path=config.db_path.parent / "imessage_cursor",
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
-            restart=core.restart,
+            restart=core.restart, dedicated=config.imessage_dedicated,
             # Consume approvals at poll stage, ahead of the thread FIFO worker.
             resolve_approval=dispatcher.resolve_approval,
         )

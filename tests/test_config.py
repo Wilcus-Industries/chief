@@ -327,6 +327,24 @@ def test_bare_off_survives_yamls_boolean_reading(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_imessage_mode_defaults_to_todays_self_dm_posture(tmp_path: Path) -> None:
+    """Existing installs must be untouched by the dedicated-account work."""
+    assert load_config(tmp_path / "none.yaml").imessage_mode == "self"
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  mode: dedicated\n")
+    assert load_config(path).imessage_mode == "dedicated"
+
+
+def test_a_typo_in_imessage_mode_is_refused_not_coerced(tmp_path: Path) -> None:
+    """Reading a typo as `self` would leave the echo machinery on for a chief
+    that has its own Apple ID — 🤖-stamped replies and a scope for a chat that
+    isn't its own."""
+    path = tmp_path / "config.yaml"
+    path.write_text("imessage:\n  mode: dedicted\n")
+    with pytest.raises(ConfigError, match="imessage.mode"):
+        load_config(path)
+
+
 def test_a_typo_in_update_autonomy_is_refused_not_coerced(tmp_path: Path) -> None:
     """Neither "silently off" nor "silently on" is an acceptable reading of a
     typo in the key that governs unattended conflict resolution."""

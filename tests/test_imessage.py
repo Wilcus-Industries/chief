@@ -119,6 +119,9 @@ class Harness:
         self.on_deliver: Callable[[Message], Awaitable[None]] | None = None
         # Optional poll-stage approval resolver (dispatcher.resolve_approval).
         self.resolve_approval: Callable[[Message], bool] | None = None
+        # imessage.mode = dedicated: chief on its own Apple ID, so the four
+        # self-DM compensations are off.
+        self.dedicated = False
 
     def adapter(self) -> IMessageAdapter:
         async def on_message(message: Message) -> None:
@@ -138,6 +141,7 @@ class Harness:
             run_jxa=run_jxa,
             restart=self.restart,
             resolve_approval=self.resolve_approval,
+            dedicated=self.dedicated,
         )
 
 
@@ -307,6 +311,74 @@ async def test_self_chat_scope_does_not_leak_other_conversations(
     assert [(m.sender, m.text) for m in harness.delivered] == [
         ("owner", "self note"),
     ]
+
+
+# --- dedicated mode: chief on its own Apple ID ----------------------------
+
+
+async def test_dedicated_mode_round_trip_reply_does_not_re_enter(
+    tmp_path: Path,
+) -> None:
+    """The central mechanism. On its own Apple ID chief's chat with the owner
+    is an ordinary conversation whose chat_identifier IS the owner's handle:
+    the owner's texts arrive is_from_me=0, chief's replies are is_from_me=1 in
+    that same chat. So the self-chat scope must be OFF, not repointed at the
+    owner — repointed, every reply below would poll straight back as owner
+    input and loop. Driven through the real query against a real store."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(OWNER, "hi chief", from_me=0, chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
+        ("owner", OWNER, "hi chief"),
+    ]
+
+    await adapter.send(OWNER, "hello back")
+    assert harness.jxa_calls[0][1] == (OWNER, "hello back")  # no BOT_PREFIX
+
+    # Chief's own reply as its store records it, then a second poll.
+    harness.store.add_message(OWNER, "hello back", from_me=1, chat=OWNER)
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["hi chief"]
+
+
+async def test_dedicated_mode_drops_the_self_dm_compensations(
+    tmp_path: Path,
+) -> None:
+    """Prefix filter and twin dedup are self-DM artefacts: in dedicated mode a
+    real owner message that happens to start with 🤖 must run a turn, and two
+    quick identical texts are two messages, not one row recorded twice."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(OWNER, BOT_PREFIX + "robot emoji", chat=OWNER)
+    harness.store.add_message(OWNER, "ok", chat=OWNER, date=100)
+    harness.store.add_message(OWNER, "ok", chat=OWNER, date=100)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == [
+        BOT_PREFIX + "robot emoji", "ok", "ok",
+    ]
+
+
+async def test_dedicated_mode_still_ignores_owner_sends_to_others(
+    tmp_path: Path,
+) -> None:
+    """Chief reads the owner's store too (monitors), so its own poll sees the
+    owner's outbound copies. Those are not messages to chief."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(
+        "+15554443333", "hey friend", from_me=1, chat="+15554443333"
+    )
+    harness.store.add_message("+15559998888", "yo from a stranger")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["yo from a stranger"]
 
 
 async def test_cursor_persists_across_restarts(tmp_path: Path) -> None:

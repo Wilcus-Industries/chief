@@ -76,6 +76,7 @@ template line.
 | `imessage.owner_handles` | `imessage_owner_handles` | `tuple` | `()` | — |
 | `imessage.db_path` | `imessage_db_path` | `Path` | `~/Library/Messages/chat.db` | — |
 | `imessage.poll_seconds` | `imessage_poll_seconds` | `float` | `2.0` | — |
+| `imessage.mode` | `imessage_mode` | `str` | `self` | — |
 | `compaction.ratio` | `compaction_ratio` | `float` | `0.95` | — |
 | `compaction.keep_recent` | `compaction_keep_recent` | `int` | `20` | — |
 | `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
@@ -93,6 +94,14 @@ Notes on specific keys:
   closed and no listener is built.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
+- **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,
+  today's install: the owner's own, chief texted through the self-chat) or
+  `dedicated` (chief's own Apple ID in its own user session). `dedicated` turns
+  off all four self-DM compensations at once: the self-chat query scope, the
+  🤖 prefix on replies and its inbound filter, the twin-row dedup, and the
+  out-of-band `imsg`/`osascript` send guard. A typo is refused at boot, not read
+  as `self`. `owner_handles` keeps its meaning in both modes — it is still who
+  chief answers as the owner.
 - **`quiet_hours` is `"HH:MM-HH:MM"`** and may span midnight; prompt-waking
   schedule fires inside the window defer to its end (command schedules run
   silently and are never deferred).

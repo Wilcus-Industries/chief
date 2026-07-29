@@ -146,7 +146,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         output_limit=config.shell_output_limit,
     )
     # Echo-loop seatbelt on BOTH shell paths: the tool and cron's runner.
-    shell_guards = (owner_send_guard(config.imessage_owner_handles),)
+    shell_guards = (owner_send_guard(config.echo_guarded_handles),)
     core = await _build_agent_core(
         config, provider, store, factory, gate, skills, shell_service, shell_guards
     )

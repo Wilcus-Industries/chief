@@ -112,6 +112,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
         imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
+        imessage_mode=coerce.imessage_mode(imessage.get("mode", "self")),
         compaction_ratio=coerce.ratio(compaction.get("ratio", 0.95)),
         compaction_keep_recent=int(compaction.get("keep_recent", 20)),
         compaction_default_window=int(compaction.get("default_window", 60_000)),

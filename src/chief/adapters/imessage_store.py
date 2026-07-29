@@ -126,11 +126,14 @@ PolledRow = tuple[int, str, str, int, str | None, int, int]
 
 
 def fetch_rows(
-    db_path: Path, owner_handles: frozenset[str], after: int
+    db_path: Path, scope_handles: frozenset[str], after: int
 ) -> list[PolledRow]:
     """Run :data:`POLL_QUERY` read-only and coerce the rows (sync; callers
-    thread it off the loop)."""
-    handles = tuple(owner_handles)
+    thread it off the loop).
+
+    ``scope_handles`` are the self-chat identifiers; empty (dedicated mode)
+    turns that scope off, leaving only real inbound rows."""
+    handles = tuple(scope_handles)
     scope = ",".join("?" for _ in handles) if handles else "NULL"
     query = POLL_QUERY.format(scope=scope)
     params: tuple[object, ...] = (*handles, after, POLL_BATCH_LIMIT)
