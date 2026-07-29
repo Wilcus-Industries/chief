@@ -293,6 +293,46 @@ skipped per schedule, so it cannot starve the schedules after it.
 reaches the shell; it returns exit code 126 and is logged. Reaching
 `ShellService.run` directly bypasses the seatbelts — always wrap it.
 
+## The account boundary — chief as its own system user (#286)
+
+By default the installer gives chief its **own system account**, and its own
+email-only Apple ID, so the owner texts it as an ordinary contact. Declining
+falls back to the single-user install, which stays supported — but the account
+is where several of the trust claims above actually get teeth.
+
+What the boundary buys:
+
+- **Chief's shell tool, self-edit and file access carry chief's authority, not
+  the owner's.** Before, "chief made a mistake" and "the owner's home directory
+  is gone" were the same event.
+- **The owner cannot read chief's credentials without escalating.** The tree is
+  owned by chief and shared with the group so the owner can still *edit the
+  code*; `secrets/` is carved back out (`chmod -R go-rwx`) and is chief-only.
+  The carve-out runs **after** the group sweep — reversed, it re-opens what it
+  just closed (`install/account.py`).
+- **The owner picks what chief may reach.** The wizard asks two questions —
+  directories to read, directories to write — defaulting to **none**, applied
+  as group permissions. The home directory root is never offered
+  (`grant_reason`).
+
+What it deliberately does **not** cover:
+
+- **Chief gets no privilege escalation. None, not deferred.** When it needs a
+  system package it tells the owner what to run. Granting package installation
+  would be root-equivalent, because package scripts run as root.
+- **Chief keeps read access to the owner's message store**
+  (`imessage.owner_db_path`). This is a considered trade, stated plainly rather
+  than hidden: the owner runs monitors on their own conversations, and that
+  access already exists today, so refusing it would forgo an improvement rather
+  than close a new hole. It is read-only, and it is the one dataset the new
+  boundary does not cover.
+
+The account never changes who is `owner`. Trust is still identity-derived from
+the adapter (§1): under `imessage.mode: dedicated` the owner is an ordinary
+correspondent whose handle is in `owner_handles`, and chief's own handles in
+`self_handles` are dropped from the owner's store so chief cannot mistake its
+own reply for input.
+
 ## The invariant list
 
 1. **Fail closed everywhere.** Unparsed approval → deny. Timed-out card → deny.
@@ -312,6 +352,11 @@ reaches the shell; it returns exit code 126 and is logged. Reaching
    a control card never renders attacker-shaped text unescaped.
 10. **No unscoped classifier monitor ever reaches a model** — scope is checked
     before the classifier, and an unscoped row is disabled at boot.
+11. **`secrets/` is chief-only, and the carve-out runs after the group sweep.**
+    Reversed, the sweep re-opens it.
+12. **Chief never escalates.** No sudo rule, no broker, no approval flow — it
+    reports what the owner should run.
+13. **A non-interactive install never creates a system account.**
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,

@@ -15,9 +15,17 @@ Core runs natively on this machine — no containers, no migrations (the schema 
 created at boot). Fresh-machine setup is the one-liner (`bootstrap.sh` →
 `install.sh`, README.md); from a clone, `./install.sh` does prereqs, scaffold,
 deps, the first-run wizard (web password, OpenRouter key, monthly budget cap,
-auto-update schedule), the `chief` launcher, and the autostart service
-(`--no-service` / `--no-launch` / `--non-interactive` for automation; re-runs are
-idempotent). Run in the foreground with `chief run` or
+auto-update schedule), the dedicated-account offer, the `chief` launcher, and
+the autostart service (`--no-service` / `--no-launch` / `--non-interactive` /
+`--single-user` for automation; re-runs are idempotent). By default chief gets
+its **own system user** and its own Apple ID (`imessage.mode: dedicated`, which
+switches off all four self-DM compensations); declining is first-class and gives
+today's single-user install. A dedicated install ends *without* starting the
+daemon — chief has no graphical session until its first login, and Messages only
+delivers into one. `docs/OPERATIONS.md` has the account plan, the session
+mechanism (auto-login vs the documented screen-share reconnect on an encrypted
+disk), the boot check, and the **migration checklist with its abort path**.
+Run in the foreground with `chief run` or
 `uv run python -m chief.entrypoint`; lifecycle via
 `chief start|stop|status|update|uninstall`. Upstream cuts tagged releases with
 `chief release [major|minor|patch]`; a box **applies** the newest release onto its

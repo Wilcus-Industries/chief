@@ -21,8 +21,9 @@ curl -fsSL https://raw.githubusercontent.com/Wilcus-Industries/chief/main/bootst
 4. `exec bash ./install.sh`.
 
 `install.sh` is idempotent and does prereq checks → `mkdir data secrets` →
-`uv sync` → wizard → launcher → service → launch. From a clone, run it directly to
-skip the bootstrap.
+`uv sync` → wizard → **dedicated account** → launcher → service → launch. From a
+clone, run it directly to skip the bootstrap. `--single-user` skips the account
+offer; `--non-interactive` never offers it at all.
 
 The launcher written to `~/.local/bin/chief` bakes in the repo dir and uv path,
 `cd`s to the repo, and dispatches: `run` execs the entrypoint directly, everything
@@ -44,6 +45,70 @@ Three idempotent steps, each reporting `set` / `kept` / `skipped`:
 
 Re-run any time with `chief wizard`.
 
+### The dedicated system account
+
+Default on, both platforms, **interactive only** — a scripted run refuses rather
+than adding a system user unattended. Runs *after* the wizard on purpose: the
+plan chowns the tree and locks down `secrets/`, and the wizard is what writes
+the files in there.
+
+Three cases, asked once: **create** the account (default, name overridable),
+install into an account that **already exists**, or **decline** and get exactly
+today's single-user install. Declining anywhere — the first question, or the
+confirmation before anything runs — lands on the same supported fallback.
+
+Everything it would run is printed first, then executed step by step, stopping
+at the first failure. `sudo` prompts on the **terminal**, not on stdin, which is
+what lets this work through `curl … | bash`. Passwords never appear in an argv;
+they go in on stdin. The whole plan is pure data in `install/account.py` +
+`install/account_steps.py` and is pinned byte-for-byte in `tests/test_install.py`.
+
+What the plan covers: the account (non-admin — chief must log in graphically,
+and an admin chief would be root-equivalent via its shell tool), a shared group
+with both users in it, the tree chowned to chief and group-writable with setgid
+inheritance, `secrets/` carved back out chief-only, chief's git identity
+(self-edit commits fail outright without one), `safe.directory` in the owner's
+git config (git refuses to work on a tree owned by another user), lingering on
+Linux, and the file grants the wizard asked about.
+
+Taking the account also sets `imessage.mode: dedicated` in `config.yaml`.
+
+Run it on its own with `chief account` (or `python -m chief.install account`).
+
+### The login session — why the install ends without starting the daemon
+
+Messages only delivers into a **real graphical session**, and there is no
+supported or unsupported-but-working way to manufacture one for a chosen user
+from a root context at boot. So the installer detects the machine's
+disk-encryption state (`fdesetup status`) and picks:
+
+- **Unencrypted** → the supported automatic-login path
+  (`sysadminctl -autologin set`). Chief owns the console; the owner switches to
+  their own account; unattended reboots survive. macOS refuses this when the
+  account's login password matches its Apple ID password, so the installer
+  checks and re-asks.
+- **Encrypted, or an unreadable state** → screen sharing is enabled and the
+  reconnect is a **documented human step**: after each reboot, unlock the disk
+  at the console as yourself, then connect Screen Sharing to `vnc://127.0.0.1`
+  and log in as chief. That login is what creates the session. An unreadable
+  state takes this branch on purpose — automatic login on an encrypted disk
+  silently does nothing.
+
+Because chief has no session yet at install time, a launchd agent cannot be
+bootstrapped into one. The installer therefore **writes the service definition
+into chief's home and exits without starting anything**, printing the remaining
+steps. The agent loads at chief's first login.
+
+### The boot check
+
+Automatic login is documented to break silently after an OS update, so the state
+is reported rather than inferred from chief going quiet. `read_posture()`
+(`install/posture.py`) probes the encryption setting, the automatic-login
+setting and whether a GUI domain exists for the uid, and names the failure
+modes. It surfaces in exactly two places, both required and neither a push
+channel: `chief status`, and the web statusbar (polling `/posture` every 10s,
+red when not `ok`).
+
 ## Commands
 
 ```
@@ -54,12 +119,20 @@ chief release <part>  # cut a release — upstream repo only, never a box
 chief start      # / stop
 chief run        # foreground, instead of the service
 chief wizard     # re-run the first-run wizard
+chief account    # give chief its own system user (interactive only)
 chief uninstall  # remove service + launcher; --purge-data removes data too
 ```
 
-`status` prints the service state, then probes the web URL with a 2s health wait.
+`status` prints the service state, probes the web URL with a 2s health wait, then
+the boot check: encryption, automatic login, session presence, and a one-line
+posture verdict.
+
 `uninstall` with `--purge-data` and no `--yes` prompts before deleting `data/`
-and `secrets/`; without `--purge-data` it explicitly says both were kept.
+and `secrets/`; without `--purge-data` it explicitly says both were kept. It then
+asks about the **system account** separately — `--remove-account` /
+`--keep-account` are the non-interactive answers, and keeping is the default,
+because chief's home holds its own message store and the dedicated Apple ID's
+whole conversation lives there.
 
 ## The service
 
@@ -204,3 +277,73 @@ present under `mcp_servers` in `config.yaml`. Exits 1 with a problem list.
 are bounded and fail-soft — 30s clone, 10s pull, `GIT_TERMINAL_PROMPT=0`. The
 reason: `chief-pkg` runs through the single dispatcher, so a hanging git command
 hangs the whole daemon. A stale clone is always the better failure.
+
+## Migrating a live box to the dedicated account
+
+A human runs this, once, on one machine. There is no `chief migrate` command and
+there should not be — every step below wants eyes on it. Write the abort path
+down **before** starting; it is the last section here.
+
+**Before you touch anything**
+
+1. Take a full backup of the tree (`data/`, `secrets/`, `config.yaml`, and the
+   git history — this box's lineage carries its own self-edit commits and is not
+   recoverable from upstream).
+2. Note the current service definition's path and contents, and where the tree
+   lives now. That pair is what the abort path restores.
+3. `chief status` and record it. This is the "known good" you are comparing to.
+4. Create chief's Apple ID (email-only) but do **not** sign in yet.
+5. Check the machine's disk-encryption state — it decides the session mechanism
+   and therefore whether reboots are unattended.
+
+**The migration**
+
+6. `chief stop`.
+7. Move the tree to its permanent home if it is not there already, and run
+   `chief account` from inside it (or re-run `install.sh`). Answer the two file
+   grant questions deliberately; the default is none and none is usually right.
+8. Confirm `secrets/` is chief-only and the tree is group-editable by you.
+9. Set `imessage.owner_handles` to your handle, `imessage.self_handles` to
+   chief's new one, and `imessage.owner_db_path` to your own `chat.db` if you
+   want your existing monitors to keep working. `imessage.mode` is already
+   `dedicated`.
+10. Log in as chief (console, or Screen Sharing to `vnc://127.0.0.1` on an
+    encrypted disk) and sign Messages into chief's Apple ID. One iMessage
+    account per user session — this is the step the whole design rests on.
+11. Make sure `uv` is on chief's PATH, then let the service load, or start it by
+    hand from chief's session.
+
+**The gate — the feature is not done until all six pass, by hand**
+
+12. The web UI is reachable at `http://127.0.0.1:8130/` from your own session
+    (loopback is machine-wide).
+13. A text from your phone to chief's **new** address arrives.
+14. Chief's reply comes back, and does **not** poll back in as input.
+15. A self-edit commit lands under chief's git identity.
+16. A scheduled task fires.
+17. All of the above still true after one full reboot — including whatever the
+    session mechanism requires of you.
+
+**Aborting, at any step**
+
+1. Stop the new service (`launchctl bootout` + `pkill -9 -f chief.entrypoint` on
+   macOS; plain `kickstart -k` orphans the python child).
+2. Restore the tree to its original location from the backup.
+3. Reinstall the previous service definition, exactly as recorded in step 2.
+4. Set `imessage.mode` back to `self` and clear `owner_db_path` /
+   `self_handles`.
+5. Start it and confirm the old posture works — a text to yourself gets a
+   prefixed reply, and `chief status` matches what you recorded in step 3.
+
+Signing chief's Apple ID out again is optional; the old self-chat thread is
+inert either way. Conversation history does not migrate — the dedicated
+conversation starts fresh, by design.
+
+### Two traps this box has already hit
+
+- **Never `checkout` on a box.** Self-edit means every install carries local
+  commits; merge only.
+- **macOS 26 `chat.db` has schema drift** — no `account` table, `chat.service`
+  is now `service_name`. `POLL_QUERY` touches neither, but anything you write by
+  hand against that store during migration should be checked against the real
+  schema, not the one you remember.

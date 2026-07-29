@@ -61,9 +61,18 @@ a web password and a monthly spend cap.
 
 The one-liner installs prerequisites (Homebrew on macOS, apt on Linux), clones
 Chief to `~/.local/share/chief` at the latest tagged release, runs the wizard,
-installs the `chief` command and an autostart service (launchd or systemd user
-unit, skip with `--no-service`), starts the daemon, and opens the web UI.
-Running it again updates an existing install instead of wiping it.
+offers Chief its **own system account**, installs the `chief` command and an
+autostart service (launchd or systemd user unit, skip with `--no-service`),
+starts the daemon, and opens the web UI. Running it again updates an existing
+install instead of wiping it.
+
+The account offer is interactive-only and easy to decline (`--single-user`, or
+just answer no) — declining gives you the single-user install, which stays
+first-class. Taking it means Chief runs as its own user with its own Apple ID,
+so you text it as an ordinary contact instead of texting yourself, and its
+mistakes stop at its own account. Chief then has no login session until you log
+in as it once, so the install ends by printing what is left to do rather than
+starting the daemon. See [docs/OPERATIONS.md](./docs/OPERATIONS.md).
 
 From a clone, `./install.sh` does the same without the prerequisite step.
 
@@ -75,6 +84,7 @@ chief update     # apply the newest release onto this box's own edits
 chief stop       # stop the daemon (chief start brings it back)
 chief run        # run in the foreground instead of the service
 chief wizard     # re-run the first-run wizard
+chief account    # give Chief its own system user (interactive only)
 chief uninstall  # remove service + launcher; --purge-data removes data too
 ```
 
@@ -108,8 +118,16 @@ Releases are git tags.
 
 ## Security and privacy
 
-Chief runs as you, holds your keys, and reads whatever you connect it to.
+Chief holds your keys and reads whatever you connect it to.
 
+- By default it runs as **its own system user**, not as you: its shell tool,
+  self-edit and file access carry its authority, not yours. You can still read
+  and edit its code (shared group); you cannot read its credentials without
+  escalating, and it gets no escalation at all. At install time you choose which
+  of your directories it may read and write — the default is none. If you
+  decline the account it runs as you, exactly as before.
+- One documented exception to that boundary: it keeps **read** access to your
+  message store, so monitors on your own conversations keep working.
 - Single-owner. Unknown senders are logged (metadata only) and never wake the
   agent or get a reply.
 - Secrets live in `secrets/` (one per file, `chmod 0600`) or env vars, never in

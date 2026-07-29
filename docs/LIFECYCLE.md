@@ -39,9 +39,9 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    jump to the max ROWID; history is never replayed.**
 2. `_poll_loop()` ticks every `poll_seconds` (default 2.0), swallowing per-tick
    errors so one bad row can't kill the poller.
-3. `poll_once()` → `fetch_rows()` runs `POLL_QUERY` (both in
-   `imessage_store.py`) against a **read-only** sqlite URI (`mode=ro`) in a
-   thread, `LIMIT POLL_BATCH_LIMIT`.
+3. `poll_once()` walks each configured store (`Store`, `imessage_cursor.py`)
+   and runs `POLL_QUERY` (`imessage_store.py`) against a **read-only** sqlite
+   URI (`mode=ro`) in a thread, `LIMIT POLL_BATCH_LIMIT`.
 4. Per row, **the cursor is saved BEFORE the turn runs**. This is the
    at-most-once invariant: a hard crash mid-turn drops that row rather than
    answering it twice. Graceful restarts drain instead (§6).
@@ -52,9 +52,9 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    `DEDUP_WINDOW_NS` (5s, in-memory).
 7. `resolve_approval()` is called **at poll stage, before enqueue** — see §5 for
    why that ordering is load-bearing.
-8. `_enqueue()` → a per-`thread_key` `asyncio.Queue` with a `_worker` task
-   spawned lazily. FIFO within a thread, parallel across threads.
-9. `_worker()` calls `dispatcher.handle(m, fire_restart=False)`, then
+8. `ThreadFifo.put()` (`imessage_fifo.py`) → a per-`thread_key` `asyncio.Queue`
+   with a worker task spawned lazily. FIFO within a thread, parallel across.
+9. That worker calls `dispatcher.handle(m, fire_restart=False)`, then
    `restart.fire_if_requested()` *after* the turn — safe, because the cursor is
    already durable.
 
@@ -65,6 +65,14 @@ qualify; the `BOT_PREFIX` skip and `RecentDedup` are both bypassed, and
 `send()` stamps no prefix. The scope is turned off, never repointed at the
 owner's handle: that chat is chief's real conversation with the owner, so
 scoping it would poll chief's own replies back as owner input.
+
+Dedicated mode also polls a **second** store when `imessage.owner_db_path` is
+set — the owner's own `chat.db`, so monitors the owner already relies on keep
+working. Each store keeps its own cursor (rowids are per-store). One row class
+is dropped from that store and only that store: rows whose sender is in
+`imessage.self_handles`. Those are **chief's own replies seen from the owner's
+side**, ordinary `is_from_me = 0` inbound rows with no prefix left to mark
+them — delivering them would rebuild the echo loop by another route.
 
 ### Socket / CLI — `SocketAdapter` (`adapters/socket.py`), name `cli`
 
