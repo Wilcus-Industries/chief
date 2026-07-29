@@ -103,6 +103,12 @@ imessage:
   owner_handles: []
   poll_seconds: 2
   mode: self
+  # Dedicated mode only: the owner's own chat.db, polled read-only alongside
+  # chief's so their existing monitors keep working, and chief's own handles,
+  # whose rows are dropped from that store (chief's replies land there as
+  # ordinary inbound rows and would otherwise poll back as input).
+  owner_db_path: ""
+  self_handles: []
 
 # Per-channel live stream policy. Every turn always emits its coarse activity
 # tick (and, for non-web threads, the rich inbound/final); this only governs

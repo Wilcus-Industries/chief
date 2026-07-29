@@ -5,8 +5,7 @@ concerns living here:
 
 * the SQL that selects candidate rows past the cursor, and the read-only
   sqlite executors that run it (:func:`fetch_rows`, :func:`head_rowid`);
-* the persisted rowid cursor (:class:`RowCursor`) the at-most-once contract
-  hangs on;
+* where chief is in each store — :mod:`.imessage_cursor`;
 * extracting a row's text — which on modern macOS is NOT always in
   ``message.text``. The owner's own sends (``is_from_me = 1``, i.e. every
   self-DM to chief) store their body only in ``message.attributedBody``, an
@@ -158,19 +157,3 @@ def head_rowid(db_path: Path) -> int:
         return int(conn.execute(HEAD_QUERY).fetchone()[0])
     finally:
         conn.close()
-
-
-class RowCursor:
-    """The persisted rowid cursor; saving at read is the at-most-once contract."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-
-    def load(self) -> int:
-        if self._path.exists():
-            return int(self._path.read_text().strip() or 0)
-        return 0
-
-    def save(self, value: int) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(str(value))

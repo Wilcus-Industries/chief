@@ -11,6 +11,7 @@ from chief.adapters.imessage_send import owner_send_guard
 from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
+CHIEF = "chief@example.com"  # chief's own Apple ID handle (dedicated mode)
 
 # A real streamtyped attributedBody blob from a macOS chat.db (is_from_me=1,
 # text column NULL). Decodes to "I’ll take the edi too" (curly apostrophe).
@@ -122,6 +123,9 @@ class Harness:
         # imessage.mode = dedicated: chief on its own Apple ID, so the four
         # self-DM compensations are off.
         self.dedicated = False
+        # The owner's own chat.db, polled alongside chief's in dedicated mode.
+        self.owner_store: FakeStore | None = None
+        self.self_handles: tuple[str, ...] = ()
 
     def adapter(self) -> IMessageAdapter:
         async def on_message(message: Message) -> None:
@@ -142,6 +146,10 @@ class Harness:
             restart=self.restart,
             resolve_approval=self.resolve_approval,
             dedicated=self.dedicated,
+            owner_db_path=(
+                None if self.owner_store is None else self.owner_store.path
+            ),
+            self_handles=self.self_handles,
         )
 
 
@@ -592,3 +600,76 @@ def test_owner_send_guard_email_handle_matches_case_insensitively() -> None:
     assert guard("imsg send --to owner@icloud.com --text hi") is not None
     assert guard("IMSG send --to OWNER@ICLOUD.COM --text hi") is not None
     assert guard("imsg send --to friend@icloud.com --text hi") is None
+
+
+# --- dual-store reach: chief's own store plus the owner's (#286)
+
+
+async def test_dedicated_mode_polls_both_stores(tmp_path: Path) -> None:
+    """Chief keeps reading the owner's store so their existing monitors keep
+    working — the documented reach of the new account boundary."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.store.add_message(OWNER, "hi chief", chat=OWNER)
+    harness.owner_store.add_message("+15559998888", "a friend texts the owner")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == [
+        "hi chief",
+        "a friend texts the owner",
+    ]
+
+
+async def test_chiefs_own_reply_in_the_owners_store_never_polls_back(
+    tmp_path: Path,
+) -> None:
+    """The trap in dual-store reach: chief's reply lands in the OWNER's store
+    as an ordinary is_from_me = 0 row from chief's handle. Polling it would
+    re-create the echo loop by another route, with no BOT_PREFIX left to catch
+    it — dedicated mode turned that off."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.self_handles = (CHIEF,)
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.add_message(CHIEF, "hello back", chat=CHIEF)
+    harness.owner_store.add_message("+15559998888", "a friend texts the owner")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["a friend texts the owner"]
+
+
+async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
+    """Rowids are per-store: one shared cursor would skip whichever store is
+    behind, silently dropping messages."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    for i in range(5):
+        harness.owner_store.add_message("+15559998888", f"owner-side {i}")
+    harness.store.add_message(OWNER, "to chief", chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert len(harness.delivered) == 6
+    # Across a restart both positions come back off disk. A shared cursor file
+    # would carry the owner store's much higher rowid into chief's store and
+    # swallow everything below it.
+    harness.store.add_message(OWNER, "second", chat=OWNER)
+    restarted = harness.adapter()
+    await restarted.start()
+    await restarted.poll_once()
+    await restarted.drain()
+    await restarted.stop()
+    assert [m.text for m in harness.delivered][-1:] == ["second"]
+
+
+async def test_one_store_when_no_owner_store_is_configured(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "hi", chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.start()
+    await adapter.stop()
+    assert not (tmp_path / "cursor.owner").exists()
