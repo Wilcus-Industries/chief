@@ -22,6 +22,15 @@ from chief.install.account import account_plan
 from chief.install.commands import ensure_config, main
 from chief.install.lifecycle import uninstall
 from chief.install.service import ServiceManager
+from chief.install.session import (
+    AUTO_LOGIN,
+    NO_SESSION,
+    SCREEN_SHARING,
+    SessionPlan,
+    disk_encrypted,
+    password_conflict,
+    session_plan,
+)
 from chief.install.units import default_path_env, launchd_plist, systemd_unit
 from chief.install.updatecheck import UpdateStatus
 from chief.install.wizard import WizardIO, run_wizard
@@ -545,3 +554,71 @@ def test_account_plan_rejects_bad_input() -> None:
         account_plan(platform="plan9", owner="owner", password="x")
     with pytest.raises(ValueError, match="needs a password"):
         account_plan(platform="linux", owner="owner")
+
+
+# --- login-session mechanism (#286)
+
+
+def test_filevault_state_decides_the_session_mechanism() -> None:
+    on = FakeRunner(stdout={"fdesetup": "FileVault is On.\n"})
+    off = FakeRunner(stdout={"fdesetup": "FileVault is Off.\n"})
+    assert disk_encrypted("darwin", on) is True
+    assert disk_encrypted("darwin", off) is False
+    assert disk_encrypted("linux", on) is None
+    assert not on.calls[1:]  # one probe, no retries
+
+
+def test_unreadable_filevault_state_is_treated_as_encrypted() -> None:
+    """Automatic login on an encrypted disk silently does nothing, so an
+    unknown answer must take the branch with the human step, not the one that
+    looks like it worked."""
+    broken = FakeRunner(fails={"fdesetup": "boom"})
+    assert disk_encrypted("darwin", broken) is None
+    plan = session_plan(
+        platform="darwin", encrypted=None, user="chief", password="pw"
+    )
+    assert plan.mechanism == SCREEN_SHARING
+    assert any("assuming encrypted" in line for line in plan.manual)
+
+
+def test_unencrypted_mac_gets_pinned_auto_login() -> None:
+    plan = session_plan(
+        platform="darwin", encrypted=False, user="chief", password="hunter2"
+    )
+    assert plan.mechanism == AUTO_LOGIN
+    assert [list(s.command()) for s in plan.steps] == [
+        ["sudo", "sysadminctl", "-autologin", "set", "-userName", "chief",
+         "-password", "-"],
+    ]
+    assert not any("hunter2" in a for s in plan.steps for a in s.command())
+    assert plan.steps[0].stdin == "hunter2\n"
+
+
+def test_encrypted_mac_gets_pinned_screen_sharing_and_a_human_step() -> None:
+    plan = session_plan(platform="darwin", encrypted=True, user="chief")
+    assert plan.mechanism == SCREEN_SHARING
+    assert [list(s.command()) for s in plan.steps] == [
+        ["sudo", "launchctl", "enable", "system/com.apple.screensharing"],
+        ["sudo", "launchctl", "load", "-w",
+         "/System/Library/LaunchDaemons/com.apple.screensharing.plist"],
+    ]
+    assert any("vnc://127.0.0.1" in line for line in plan.manual)
+    assert any("log in as chief" in line for line in plan.manual)
+
+
+def test_linux_needs_no_session_mechanism() -> None:
+    plan = session_plan(platform="linux", encrypted=None, user="chief")
+    assert plan == SessionPlan(NO_SESSION, (), ())
+
+
+def test_session_plan_rejects_bad_input() -> None:
+    with pytest.raises(ValueError, match="unsupported platform"):
+        session_plan(platform="plan9", encrypted=False, user="chief")
+    with pytest.raises(ValueError, match="needs chief's login password"):
+        session_plan(platform="darwin", encrypted=False, user="chief")
+
+
+def test_auto_login_refuses_a_password_matching_the_apple_id() -> None:
+    assert password_conflict("same", "same") is not None
+    assert password_conflict("login", "appleid") is None
+    assert password_conflict("", "") is None
