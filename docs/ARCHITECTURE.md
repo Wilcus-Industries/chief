@@ -90,6 +90,11 @@ through the adapter named on the `Message` that started it.
   Install/uninstall are **document-driven** — follow the package's `INSTALL.md`
   with your file tools, record installs via `chief.registry_apply`, then
   `restart`.
+- **Standing chief up as its own user** — `src/chief/install/`: `account.py` +
+  `account_steps.py` (the pure, pinned plan), `session.py` (disk encryption →
+  auto-login or the documented screen-share reconnect), `dedicated.py` +
+  `dedicated_ask.py` (ask, show, run), `posture.py` (the boot check, surfaced by
+  `chief status` and `web/status_routes.py`).
 - **Updating yourself** — `src/chief/install/`: `releases.py` (version + tag
   resolution), `basepin.py` (the `refs/chief/base` pin and the advance-on-healthy
   record), `layer.py` (the three-way `merge-tree` application), `update.py`

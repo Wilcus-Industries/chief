@@ -110,8 +110,7 @@ def build_provider(config: Config) -> Provider:
     for name, alias in config.provider_aliases.items():
         if alias.backend not in backends:
             raise ValueError(
-                f"provider alias '{name}' names unknown backend "
-                f"'{alias.backend}'"
+                f"provider alias '{name}' names unknown backend '{alias.backend}'"
             )
         aliases[name] = (alias.backend, alias.model)
     return RouterProvider(default=default, backends=backends, aliases=aliases)
@@ -176,11 +175,12 @@ def build_adapters(
         imessage_adapter = IMessageAdapter(
             # fire_restart=False: adapter fires it after its cursor is durable.
             lambda m: dispatcher.handle(m, fire_restart=False),
-            db_path=config.imessage_db_path,
+            db_path=config.imessage_db_path, self_handles=config.imessage_self_handles,
             cursor_path=config.db_path.parent / "imessage_cursor",
+            owner_db_path=config.imessage_owner_db_path,
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
-            restart=core.restart,
+            restart=core.restart, dedicated=config.imessage_dedicated,
             # Consume approvals at poll stage, ahead of the thread FIFO worker.
             resolve_approval=dispatcher.resolve_approval,
         )

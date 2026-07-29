@@ -71,6 +71,22 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     compaction = raw.get("compaction") or {}
     update = raw.get("update") or {}
     stream = raw.get("stream") or {}
+    imessage_mode = coerce.imessage_mode(imessage.get("mode", "self"))
+    self_handles = coerce.as_handles(imessage.get("self_handles"))
+    owner_db_path = (
+        Path(str(imessage["owner_db_path"]))
+        if imessage.get("owner_db_path")
+        else None
+    )
+    if imessage_mode == "dedicated" and owner_db_path and not self_handles:
+        # Fail closed like imessage.mode itself: without self_handles, chief's
+        # own replies come back out of the owner's store as ordinary inbound
+        # rows — BOT_PREFIX is already off in dedicated mode — and reach the bus.
+        raise ConfigError(
+            "imessage.owner_db_path is set but imessage.self_handles is empty "
+            "— chief would read its own replies back as input; set both or "
+            "neither (docs/CONFIG.md)"
+        )
     return Config(
         models=models,
         temperature=temperature,
@@ -112,6 +128,9 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
             imessage.get("db_path") or Path.home() / "Library/Messages/chat.db"
         ),
         imessage_poll_seconds=float(imessage.get("poll_seconds", 2.0)),
+        imessage_owner_db_path=owner_db_path,
+        imessage_self_handles=self_handles,
+        imessage_mode=imessage_mode,
         compaction_ratio=coerce.ratio(compaction.get("ratio", 0.95)),
         compaction_keep_recent=int(compaction.get("keep_recent", 20)),
         compaction_default_window=int(compaction.get("default_window", 60_000)),

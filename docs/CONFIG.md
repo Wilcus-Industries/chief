@@ -76,6 +76,9 @@ template line.
 | `imessage.owner_handles` | `imessage_owner_handles` | `tuple` | `()` | — |
 | `imessage.db_path` | `imessage_db_path` | `Path` | `~/Library/Messages/chat.db` | — |
 | `imessage.poll_seconds` | `imessage_poll_seconds` | `float` | `2.0` | — |
+| `imessage.mode` | `imessage_mode` | `str` | `self` | — |
+| `imessage.owner_db_path` | `imessage_owner_db_path` | `Path \| None` | `None` | — |
+| `imessage.self_handles` | `imessage_self_handles` | `tuple` | `()` | — |
 | `compaction.ratio` | `compaction_ratio` | `float` | `0.95` | — |
 | `compaction.keep_recent` | `compaction_keep_recent` | `int` | `20` | — |
 | `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
@@ -93,6 +96,26 @@ Notes on specific keys:
   closed and no listener is built.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
+- **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,
+  today's install: the owner's own, chief texted through the self-chat) or
+  `dedicated` (chief's own Apple ID in its own user session). `dedicated` turns
+  off all four self-DM compensations at once: the self-chat query scope, the
+  🤖 prefix on replies and its inbound filter, the twin-row dedup, and the
+  out-of-band `imsg`/`osascript` send guard. A typo is refused at boot, not read
+  as `self`. `owner_handles` keeps its meaning in both modes — it is still who
+  chief answers as the owner.
+- **`imessage.owner_db_path` + `imessage.self_handles` are the dedicated-mode
+  dual-store reach.** With its own Apple ID chief has its own `chat.db`, so the
+  owner's conversations — and the monitors on them — live in a store chief no
+  longer owns. Setting `owner_db_path` makes chief poll that store read-only
+  alongside its own; each store carries its own cursor, because rowids are
+  per-store and one shared cursor swallows everything below the higher rowid.
+  `self_handles` is the matching safety catch: **chief's own replies land in the
+  owner's store as ordinary `is_from_me = 0` rows from chief's handle**, and
+  dedicated mode has already turned off the 🤖 prefix that used to catch them,
+  so rows from these handles are dropped when read from the owner's store. Set
+  both or neither. This reach is a deliberate exception to the account boundary
+  — see docs/SECURITY.md.
 - **`quiet_hours` is `"HH:MM-HH:MM"`** and may span midnight; prompt-waking
   schedule fires inside the window defer to its end (command schedules run
   silently and are never deferred).

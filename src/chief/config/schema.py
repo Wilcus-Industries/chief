@@ -97,6 +97,20 @@ class Config:
         default_factory=lambda: Path.home() / "Library/Messages/chat.db"
     )
     imessage_poll_seconds: float = 2.0
+    # Dedicated mode only: the OWNER's chat.db, polled read-only alongside
+    # chief's own so monitors on the owner's conversations keep working. A
+    # plain statement of reach — the account boundary does not cover this one
+    # dataset (docs/SECURITY.md).
+    imessage_owner_db_path: Path | None = None
+    # Chief's own handles. Its replies land in the owner's store as ordinary
+    # is_from_me = 0 rows, so polling both stores without dropping these
+    # re-creates the echo loop by another route.
+    imessage_self_handles: tuple[str, ...] = ()
+    # Which Apple ID chief speaks as. "self" (default, today's install): the
+    # owner's own, so chief compensates for the shared self-chat — bot prefix,
+    # twin dedup, self-chat query scope, out-of-band send guard. "dedicated":
+    # chief's own Apple ID in its own user session; all four switch off.
+    imessage_mode: str = "self"
     # Context compaction: fold old history into a summary note when a thread's
     # transcript nears the model's context window. Threshold = ratio * window;
     # the window is the thread's *current* model's, resolved per turn (config
@@ -125,3 +139,13 @@ class Config:
     @property
     def default_model(self) -> str:
         return self.models["default"]
+
+    @property
+    def imessage_dedicated(self) -> bool:
+        return self.imessage_mode == "dedicated"
+
+    @property
+    def echo_guarded_handles(self) -> tuple[str, ...]:
+        """Handles the out-of-band send guard covers — none in dedicated mode,
+        where texting the owner is an ordinary send that never polls back."""
+        return () if self.imessage_dedicated else self.imessage_owner_handles

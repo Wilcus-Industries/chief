@@ -35,6 +35,7 @@ CHAT_PAGE = """<!doctype html>
   <span class="seg" id="model-seg">model &mdash;</span>
   <span class="seg grow"></span>
   <span class="seg" id="mon-seg">mon &hellip;</span>
+  <span class="seg" id="posture-seg">&hellip;</span>
 </header>
 <div id="main">
   <nav id="buffers">

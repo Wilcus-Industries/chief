@@ -5,19 +5,23 @@ The argument parser — the CLI's public surface — lives in :mod:`.cli`.
 
 import argparse
 import asyncio
+import getpass
 import os
 import sys
 import webbrowser
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from chief.config import load_config
 from chief.install.cli import build_parser
+from chief.install.dedicated import setup_account
 from chief.install.lifecycle import (
     uninstall,
     wait_for_health,
     web_url,
 )
+from chief.install.posture import chief_account, read_posture
 from chief.install.release import cut_release
 from chief.install.service import ServiceManager
 from chief.install.update import abort_update, update
@@ -62,9 +66,32 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             f"{result.model_auth}, budget {result.budget}."
         )
         return 0
+    if command == "account":
+        setup = setup_account(
+            platform="darwin" if sys.platform == "darwin" else "linux",
+            owner=getpass.getuser(),
+            home=Path.home(),
+            io=WizardIO(),
+            interactive=not args.non_interactive,
+            report=args.report,
+            **({"tree": args.tree} if args.tree else {}),
+        )
+        print(f"account: {setup.mode} ({setup.user}), session {setup.session}")
+        for line in setup.manual:
+            print(f"  - {line}")
+        return 0
     if command == "service-install":
-        ServiceManager.detect().install(repo_dir=args.repo, launcher=args.launcher)
-        print("autostart service installed and started.")
+        service = ServiceManager.detect()
+        if args.home:
+            service = replace(service, home=args.home, uid=args.uid or service.uid)
+        service.install(
+            repo_dir=args.repo, launcher=args.launcher, start=not args.no_start
+        )
+        print(
+            f"autostart service written to {service.definition_path}"
+            if args.no_start
+            else "autostart service installed and started."
+        )
         return 0
     if command == "service-uninstall":
         ServiceManager.detect().uninstall()
@@ -84,6 +111,12 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         url = web_url(args.port)
         up = wait_for_health(url, timeout=2.0)
         print(f"web:     {url} ({'responding' if up else 'not responding'})")
+        # The owner types this, so ask who chief actually is before probing.
+        user, uid = chief_account() or (getpass.getuser(), service.uid)
+        state = read_posture(platform=service.platform, user=user, uid=uid)
+        print(f"disk:    encryption {state.encryption}")
+        print(f"login:   auto {state.auto_login}, session {state.session}")
+        print(f"posture: {state.summary()}")
         return 0
     if command == "update":
         if args.abort:
@@ -114,6 +147,8 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             repo_dir=args.repo,
             purge_data=args.purge_data,
             assume_yes=args.yes,
+            remove_account=args.remove_account,
+            keep_account=args.keep_account,
         )
     if command == "await-health":
         url = web_url(args.port)

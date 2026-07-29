@@ -12,6 +12,9 @@ from pathlib import Path
 import httpx
 
 from chief.config import load_config
+from chief.install.account import DEFAULT_GROUP, DEFAULT_USER
+from chief.install.account_steps import remove_steps
+from chief.install.dedicated import StepRunner, default_step_runner
 from chief.install.service import ServiceManager
 
 DEFAULT_LAUNCHER = Path.home() / ".local" / "bin" / "chief"
@@ -47,10 +50,20 @@ def uninstall(
     repo_dir: Path,
     purge_data: bool,
     assume_yes: bool,
+    remove_account: bool = False,
+    keep_account: bool = False,
+    user: str = DEFAULT_USER,
+    group: str = DEFAULT_GROUP,
     confirm: Callable[[str], str] = input,
     say: Callable[[str], None] = print,
+    execute: StepRunner = default_step_runner,
 ) -> int:
-    """Remove service + launcher; ``purge_data`` also deletes data/secrets."""
+    """Remove service + launcher; ``purge_data`` also deletes data/secrets.
+
+    The dedicated system account is only removed when asked for — its home
+    holds chief's own message store. ``--remove-account`` / ``--keep-account``
+    are the non-interactive answers; without either, uninstall asks.
+    """
     if purge_data and not assume_yes:
         answer = confirm(
             f"Delete {repo_dir / 'data'} and {repo_dir / 'secrets'} too? [y/N] "
@@ -67,4 +80,30 @@ def uninstall(
         say("data + secrets removed.")
     else:
         say("data + secrets kept (pass --purge-data to remove them).")
+    if not keep_account and _account_wanted(
+        remove_account, assume_yes, user, confirm
+    ):
+        for step in remove_steps(service.platform, user, group):
+            say(f"  {step.description}")
+            execute(step)
+        say(f"system account {user} removed.")
+    else:
+        say(f"system account kept (pass --remove-account to delete {user}).")
     return 0
+
+
+def _account_wanted(
+    remove_account: bool,
+    assume_yes: bool,
+    user: str,
+    confirm: Callable[[str], str],
+) -> bool:
+    if remove_account:
+        return True
+    if assume_yes:
+        return False
+    answer = confirm(
+        f"Delete the {user} system account, its home and its message store "
+        "too? [y/N] "
+    )
+    return answer.strip().lower() in ("y", "yes")

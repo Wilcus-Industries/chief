@@ -92,12 +92,23 @@ hooks:
   disabled: []
 
 # iMessage adapter (macOS only; configured by the build-imessage package).
-# owner_handles: the self-chat handle(s) — owner texts run turns, everyone
+# owner_handles: the owner's handle(s) — owner texts run turns, everyone
 # else is logged + published for monitors.
+# mode: which Apple ID chief speaks as. self = the owner's own (today's
+# install; chief is texted through the self-chat and compensates for it with
+# the 🤖 prefix, twin dedup, self-chat scope and out-of-band send guard).
+# dedicated = chief's own Apple ID in its own user session; all four are off.
 imessage:
   enabled: false
   owner_handles: []
   poll_seconds: 2
+  mode: self
+  # Dedicated mode only: the owner's own chat.db, polled read-only alongside
+  # chief's so their existing monitors keep working, and chief's own handles,
+  # whose rows are dropped from that store (chief's replies land there as
+  # ordinary inbound rows and would otherwise poll back as input).
+  owner_db_path: ""
+  self_handles: []
 
 # Per-channel live stream policy. Every turn always emits its coarse activity
 # tick (and, for non-web threads, the rich inbound/final); this only governs

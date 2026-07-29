@@ -6,6 +6,7 @@ without touching the network, however git misbehaves.
 """
 
 import asyncio
+import getpass
 import json
 import os
 import subprocess
@@ -16,11 +17,24 @@ from pathlib import Path
 
 import pytest
 
+from chief.config.write import set_dedicated_mode
 from chief.hooks.context import TurnContext
 from chief.install import updatecheck, wizard_steps
+from chief.install.account import Step, account_plan, default_home
 from chief.install.commands import ensure_config, main
+from chief.install.dedicated import existing_home, setup_account
 from chief.install.lifecycle import uninstall
+from chief.install.posture import ON, UNKNOWN, Posture, chief_account, read_posture
 from chief.install.service import ServiceManager
+from chief.install.session import (
+    AUTO_LOGIN,
+    NO_SESSION,
+    SCREEN_SHARING,
+    SessionPlan,
+    disk_encrypted,
+    password_conflict,
+    session_plan,
+)
 from chief.install.units import default_path_env, launchd_plist, systemd_unit
 from chief.install.updatecheck import UpdateStatus
 from chief.install.wizard import WizardIO, run_wizard
@@ -456,3 +470,548 @@ async def test_concurrent_sessions_do_not_stampede_the_refresh(
     assert await hook(_turn()) is None
     await _drain()
     assert len(refreshes) == 1
+
+
+# --- dedicated account plan (#286)
+
+
+def test_darwin_account_plan_is_pinned() -> None:
+    plan = account_plan(
+        platform="darwin", owner="owner", password="hunter2", email="c@l"
+    )
+    assert [list(step.command()) for step in plan.steps] == [
+        ["sudo", "sysadminctl", "-addUser", "chief", "-fullName", "chief",
+         "-home", "/Users/chief", "-shell", "/bin/zsh", "-password", "-"],
+        ["sudo", "dseditgroup", "-o", "create", "chief"],
+        ["sudo", "dseditgroup", "-o", "edit", "-a", "chief", "-t", "user",
+         "chief"],
+        ["sudo", "dseditgroup", "-o", "edit", "-a", "owner", "-t", "user",
+         "chief"],
+        ["sudo", "chown", "-R", "chief:chief", "/opt/chief"],
+        ["sudo", "chmod", "-R", "g+rwX", "/opt/chief"],
+        ["sudo", "find", "/opt/chief", "-type", "d", "-exec", "chmod", "g+s",
+         "{}", "+"],
+        ["sudo", "chmod", "-R", "go-rwx", "/opt/chief/secrets"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.name",
+         "chief"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.email",
+         "c@l"],
+        ["git", "config", "--global", "--add", "safe.directory", "/opt/chief"],
+    ]
+    assert plan.home == Path("/Users/chief")
+
+
+def test_linux_account_plan_is_pinned() -> None:
+    plan = account_plan(
+        platform="linux", owner="owner", password="hunter2", email="c@l"
+    )
+    assert [list(step.command()) for step in plan.steps] == [
+        ["sudo", "useradd", "--create-home", "--home-dir", "/home/chief",
+         "--shell", "/bin/bash", "chief"],
+        ["sudo", "chpasswd"],
+        ["sudo", "groupadd", "--force", "chief"],
+        ["sudo", "usermod", "-aG", "chief", "chief"],
+        ["sudo", "usermod", "-aG", "chief", "owner"],
+        ["sudo", "chown", "-R", "chief:chief", "/opt/chief"],
+        ["sudo", "chmod", "-R", "g+rwX", "/opt/chief"],
+        ["sudo", "find", "/opt/chief", "-type", "d", "-exec", "chmod", "g+s",
+         "{}", "+"],
+        ["sudo", "chmod", "-R", "go-rwx", "/opt/chief/secrets"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.name",
+         "chief"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.email",
+         "c@l"],
+        ["git", "config", "--global", "--add", "safe.directory", "/opt/chief"],
+        ["sudo", "loginctl", "enable-linger", "chief"],
+    ]
+
+
+def test_the_account_password_never_reaches_an_argv() -> None:
+    """A pinned argv is printed, logged and diffed — the password must not be
+    in one. It rides stdin instead."""
+    for platform in ("darwin", "linux"):
+        plan = account_plan(platform=platform, owner="owner", password="hunter2")
+        assert not any("hunter2" in arg for s in plan.steps for arg in s.command())
+        assert any(s.stdin and "hunter2" in s.stdin for s in plan.steps)
+
+
+def test_using_an_existing_account_skips_creation_but_keeps_the_rest() -> None:
+    plan = account_plan(platform="linux", owner="owner", create=False)
+    joined = [" ".join(s.command()) for s in plan.steps]
+    assert not any("useradd" in c or "chpasswd" in c for c in joined)
+    assert "sudo usermod -aG chief owner" in joined
+    assert "sudo chmod -R go-rwx /opt/chief/secrets" in joined
+    assert "sudo loginctl enable-linger chief" in joined
+
+
+def test_secrets_are_carved_out_after_the_group_sweep() -> None:
+    """Ordering is the whole point: a later g+rwX sweep would re-open them."""
+    plan = account_plan(platform="linux", owner="owner", create=False)
+    joined = [" ".join(s.command()) for s in plan.steps]
+    assert joined.index("sudo chmod -R g+rwX /opt/chief") < joined.index(
+        "sudo chmod -R go-rwx /opt/chief/secrets"
+    )
+
+
+def test_account_plan_rejects_bad_input() -> None:
+    with pytest.raises(ValueError, match="unsupported platform"):
+        account_plan(platform="plan9", owner="owner", password="x")
+    with pytest.raises(ValueError, match="needs a password"):
+        account_plan(platform="linux", owner="owner")
+
+
+# --- login-session mechanism (#286)
+
+
+def test_filevault_state_decides_the_session_mechanism() -> None:
+    on = FakeRunner(stdout={"fdesetup": "FileVault is On.\n"})
+    off = FakeRunner(stdout={"fdesetup": "FileVault is Off.\n"})
+    assert disk_encrypted("darwin", on) is True
+    assert disk_encrypted("darwin", off) is False
+    assert disk_encrypted("linux", on) is None
+    assert not on.calls[1:]  # one probe, no retries
+
+
+def test_unreadable_filevault_state_is_treated_as_encrypted() -> None:
+    """Automatic login on an encrypted disk silently does nothing, so an
+    unknown answer must take the branch with the human step, not the one that
+    looks like it worked."""
+    broken = FakeRunner(fails={"fdesetup": "boom"})
+    assert disk_encrypted("darwin", broken) is None
+    plan = session_plan(
+        platform="darwin", encrypted=None, user="chief", password="pw"
+    )
+    assert plan.mechanism == SCREEN_SHARING
+    assert any("assuming encrypted" in line for line in plan.manual)
+
+
+def test_unencrypted_mac_gets_pinned_auto_login() -> None:
+    plan = session_plan(
+        platform="darwin", encrypted=False, user="chief", password="hunter2"
+    )
+    assert plan.mechanism == AUTO_LOGIN
+    assert [list(s.command()) for s in plan.steps] == [
+        ["sudo", "sysadminctl", "-autologin", "set", "-userName", "chief",
+         "-password", "-"],
+    ]
+    assert not any("hunter2" in a for s in plan.steps for a in s.command())
+    assert plan.steps[0].stdin == "hunter2\n"
+
+
+def test_encrypted_mac_gets_pinned_screen_sharing_and_a_human_step() -> None:
+    plan = session_plan(platform="darwin", encrypted=True, user="chief")
+    assert plan.mechanism == SCREEN_SHARING
+    assert [list(s.command()) for s in plan.steps] == [
+        ["sudo", "launchctl", "enable", "system/com.apple.screensharing"],
+        ["sudo", "launchctl", "load", "-w",
+         "/System/Library/LaunchDaemons/com.apple.screensharing.plist"],
+    ]
+    assert any("vnc://127.0.0.1" in line for line in plan.manual)
+    assert any("log in as chief" in line for line in plan.manual)
+
+
+def test_linux_needs_no_session_mechanism() -> None:
+    plan = session_plan(platform="linux", encrypted=None, user="chief")
+    assert plan == SessionPlan(NO_SESSION, (), ())
+
+
+def test_session_plan_rejects_bad_input() -> None:
+    with pytest.raises(ValueError, match="unsupported platform"):
+        session_plan(platform="plan9", encrypted=False, user="chief")
+    with pytest.raises(ValueError, match="needs chief's login password"):
+        session_plan(platform="darwin", encrypted=False, user="chief")
+
+
+def test_auto_login_refuses_a_password_matching_the_apple_id() -> None:
+    assert password_conflict("same", "same") is not None
+    assert password_conflict("login", "appleid") is None
+    assert password_conflict("", "") is None
+
+
+# --- boot check (#286)
+
+
+def _posture_runner(*, filevault: str, auto: str | None, session: bool) -> "FakeRunner":
+    fails = {} if auto is not None else {"autoLoginUser": "does not exist"}
+    if not session:
+        fails["launchctl print"] = "could not find service"
+    return FakeRunner(
+        stdout={"fdesetup": filevault, "autoLoginUser": (auto or "") + "\n"},
+        fails=fails,
+    )
+
+
+def test_posture_reads_the_three_facts() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is On.\n", auto=None, session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert (state.encryption, state.auto_login, state.session) == (
+        "on",
+        "off",
+        "present",
+    )
+    assert state.summary() == "ok"
+    assert ["launchctl", "print", "gui/502"] in runner.calls
+
+
+def test_posture_catches_the_silent_auto_login_breakage() -> None:
+    """The whole reason the check exists: an OS update clears autoLoginUser,
+    chief never comes back after the next reboot, and nothing says so."""
+    runner = _posture_runner(
+        filevault="FileVault is Off.\n", auto=None, session=False
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    problems = state.problems()
+    assert any("no graphical session" in p for p in problems)
+    assert any("automatic login is not set to chief" in p for p in problems)
+    assert state.summary() != "ok"
+
+
+def test_posture_flags_auto_login_that_an_encrypted_disk_will_ignore() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is On.\n", auto="chief", session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert any("macOS ignores it" in p for p in state.problems())
+
+
+def test_posture_is_quiet_on_a_healthy_unencrypted_mac() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is Off.\n", auto="chief", session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert state.problems() == ()
+
+
+def test_posture_on_linux_probes_nothing() -> None:
+    runner = FakeRunner()
+    state = read_posture(platform="linux", user="chief", uid=1000, runner=runner)
+    assert (state.encryption, state.auto_login, state.session) == ("n/a",) * 3
+    assert state.problems() == ()
+    assert runner.calls == []
+
+
+# --- dedicated account install flow (#286)
+
+
+class RecordingRunner:
+    """Records the steps it was handed; scripted failure by argv substring."""
+
+    def __init__(self, fail: str | None = None) -> None:
+        self.steps: list[Step] = []
+        self._fail = fail
+
+    def __call__(self, step: Step) -> "subprocess.CompletedProcess[str]":
+        self.steps.append(step)
+        joined = " ".join(step.command())
+        rc = 1 if self._fail and self._fail in joined else 0
+        return subprocess.CompletedProcess(list(step.command()), rc, "", "")
+
+
+def _answers(*replies: str) -> tuple[WizardIO, list[str], RecordingRunner]:
+    said: list[str] = []
+    prompts = iter(replies)
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=said.append,
+    )
+    return io, said, RecordingRunner()
+
+
+def test_a_scripted_run_refuses_to_create_a_system_account(tmp_path: Path) -> None:
+    """An unattended installer must not add a system user behind the owner's
+    back — it falls back to today's install and says so."""
+    io, said, runner = _answers()
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=False,
+        execute=runner,
+    )
+    assert setup.mode == "refused"
+    assert not setup.dedicated
+    assert runner.steps == []
+    assert any("will not create a system account" in line for line in said)
+
+
+def test_declining_leaves_todays_single_user_install(tmp_path: Path) -> None:
+    io, said, runner = _answers("n")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        execute=runner,
+    )
+    assert (setup.mode, setup.user) == ("declined", "owner")
+    assert runner.steps == []
+    assert any("runs as you" in line for line in said)
+
+
+def test_declining_at_the_confirmation_runs_nothing(tmp_path: Path) -> None:
+    io, _, runner = _answers("c", "", "", "", "n")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        encrypted=None,
+        execute=runner,
+    )
+    assert setup.mode == "declined"
+    assert runner.steps == []
+
+
+def test_creating_the_account_runs_the_plan_and_reports_what_is_left(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("imessage:\n  enabled: false\n  mode: self\n")
+    io, _, runner = _answers("c", "", "", "", "y")
+    setup = setup_account(
+        platform="darwin",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=config,
+        encrypted=True,
+        execute=runner,
+    )
+    assert setup.dedicated and setup.user == "chief"
+    assert setup.session == SCREEN_SHARING
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert any("sysadminctl -addUser chief" in c for c in ran)
+    assert any("go-rwx" in c for c in ran)
+    assert any("screensharing" in c for c in ran)
+    # The four self-DM compensations only come off in dedicated mode.
+    assert "mode: dedicated" in config.read_text()
+    assert any("does not reach already-open shells" in m for m in setup.manual)
+    assert any("not started" in m for m in setup.manual)
+
+
+def test_a_failed_step_stops_the_run_rather_than_half_building(
+    tmp_path: Path,
+) -> None:
+    prompts = iter(["c", "", "", "", "y"])
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=lambda _: None,
+    )
+    runner = RecordingRunner(fail="chmod -R g+rwX")
+    with pytest.raises(RuntimeError, match="failed"):
+        setup_account(
+            platform="linux",
+            owner="owner",
+            home=tmp_path,
+            io=io,
+            interactive=True,
+            tree=tmp_path / "tree",
+            config_path=tmp_path / "config.yaml",
+            encrypted=None,
+            execute=runner,
+        )
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert not any("go-rwx" in c for c in ran)  # nothing after the failure
+
+
+def test_granted_directories_are_group_permissions_and_never_the_home_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path
+    (home / "notes").mkdir()
+    prompts = iter(["c", "", str(home), f"{home / 'notes'}", "y"])
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=lambda _: None,
+    )
+    runner = RecordingRunner()
+    setup_account(
+        platform="linux",
+        owner="owner",
+        home=home,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=tmp_path / "config.yaml",
+        encrypted=None,
+        execute=runner,
+    )
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert f"sudo chgrp -R chief {home / 'notes'}" in ran
+    assert f"sudo chmod -R g+rwX {home / 'notes'}" in ran
+    # The home root was typed at the read prompt and must have been refused.
+    assert f"sudo chgrp -R chief {home}" not in ran
+
+
+def test_the_report_carries_what_install_sh_branches_on(tmp_path: Path) -> None:
+    io, _, runner = _answers("c", "", "", "", "y")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=tmp_path / "config.yaml",
+        encrypted=None,
+        execute=runner,
+    )
+    report = setup.report()
+    assert "mode=create" in report
+    assert "user=chief" in report
+    assert "home=/home/chief" in report
+
+
+def test_the_tree_writes_all_land_before_the_chown_takes_it_away(
+    tmp_path: Path,
+) -> None:
+    """The installer runs as the owner; the plan chowns the tree to chief and
+    this process's group membership does not update. Anything it still has to
+    write into that tree — config.yaml, the report install.sh branches on —
+    must already be on disk by the time the first permission step runs, or the
+    install dies mid-plan with a real account and a half-configured box."""
+    config = tmp_path / "config.yaml"
+    config.write_text("imessage:\n  enabled: false\n  mode: self\n")
+    report = tmp_path / "account-setup"
+    seen_at_chown: list[tuple[bool, bool]] = []
+
+    def execute(step: Step) -> "subprocess.CompletedProcess[str]":
+        if "chown" in step.command():
+            seen_at_chown.append(
+                ("mode: dedicated" in config.read_text(), report.exists())
+            )
+        return subprocess.CompletedProcess(list(step.command()), 0, "", "")
+
+    io, _, _ = _answers("c", "", "", "", "y")
+    setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=config,
+        report=report,
+        encrypted=None,
+        execute=execute,
+    )
+    assert seen_at_chown == [(True, True)]
+    assert "mode=create" in report.read_text()
+
+
+def test_the_mode_flip_finds_the_imessage_block_not_the_first_mode_key(
+    tmp_path: Path,
+) -> None:
+    """config.yaml is user-ordered and package-extended: a `mode:` under any
+    block above `imessage:` must not be the one that gets flipped."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "update:\n  mode: clean-only\nimessage:\n  enabled: true\n  mode: self\n"
+    )
+    assert set_dedicated_mode(config)
+    assert config.read_text() == (
+        "update:\n  mode: clean-only\nimessage:\n  enabled: true\n"
+        "  mode: dedicated\n"
+    )
+
+
+def test_an_existing_account_keeps_its_real_home() -> None:
+    """`existing_home` reads the account rather than guessing /Users/<user>:
+    the launchd plist is placed by that value, and a wrong one loads nowhere.
+    `root` is the discriminator — its home is never the guessed default."""
+    assert existing_home("no-such-user-for-chief-tests") is None
+    assert existing_home("root") not in (None, default_home("linux", "root"))
+    assert existing_home("root") != default_home("darwin", "root")
+
+
+def test_chief_status_probes_chiefs_account_not_the_owner_who_typed_it(
+    tmp_path: Path,
+) -> None:
+    """The owner is the only one who ever types `chief status`, so resolving
+    the posture user from the caller reports the owner's session as chief's."""
+    report = tmp_path / "account-setup"
+    report.write_text("mode=declined\nuser=owner\nhome=\nsession=none\n")
+    assert chief_account(report) is None  # single-user install: caller is right
+    report.write_text(f"mode=create\nuser={getpass.getuser()}\nhome=\n")
+    assert chief_account(report) == (getpass.getuser(), os.getuid())
+    assert chief_account(tmp_path / "absent") is None
+
+
+def test_an_unreadable_encryption_probe_still_flags_a_doomed_auto_login() -> None:
+    """`disk_encrypted` returns None for unknown and every caller must treat
+    that as encrypted — `problems()` was the one that stayed quiet."""
+    unknown = Posture("chief", UNKNOWN, "chief", "present")
+    assert any("macOS ignores it" in p for p in unknown.problems())
+    assert unknown.problems() == Posture("chief", ON, "chief", "present").problems()
+
+
+def test_the_service_definition_can_be_written_without_starting_it(
+    tmp_path: Path,
+) -> None:
+    """launchd cannot bootstrap into a session that does not exist yet: the
+    dedicated install writes the plist and lets chief's first login load it."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="darwin", home=tmp_path, runner=runner, uid=502
+    )
+    manager.install(
+        repo_dir=tmp_path, launcher=tmp_path / "chief", start=False
+    )
+    assert manager.plist_path.is_file()
+    assert runner.calls == []
+
+
+def test_uninstall_keeps_the_system_account_unless_asked(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    said: list[str] = []
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        confirm=lambda _: pytest.fail("must not ask with --yes"),
+        say=said.append,
+        execute=steps,
+    )
+    assert steps.steps == []
+    assert any("system account kept" in line for line in said)
+
+
+def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        remove_account=True,
+        say=lambda _: None,
+        execute=steps,
+    )
+    assert [" ".join(s.command()) for s in steps.steps] == [
+        "sudo userdel --remove chief",
+        "sudo groupdel --force chief",
+    ]

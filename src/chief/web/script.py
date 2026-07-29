@@ -161,9 +161,19 @@ async function monitors(){
   el("mon-seg").textContent = "mon " + (t === "none" ? 0 : t.split(";").length);
 }
 
+/* Automatic login breaks silently after an OS update: show it, don't infer it. */
+async function posture(){
+  const r = await fetch("/posture"); const t = (await r.text()).trim();
+  const seg = el("posture-seg");
+  seg.textContent = t === "ok" ? "session ok" : t;
+  seg.classList.toggle("bad", t !== "ok");
+}
+
 /* ---- boot ---- */
 (async () => {
   state.commands = await getJSON("/commands") || [];
-  await loadSessions(); monitors(); setInterval(monitors, 10000);
+  await loadSessions();
+  const poll = () => { monitors(); posture(); };
+  poll(); setInterval(poll, 10000);
 })();
 """ + POLICY_SCRIPT + TOOL_SCRIPT

@@ -14,6 +14,7 @@ from chief.config.schema import AliasSpec, BackendSpec, ConfigError
 from chief.policy import DEFAULT_CHANNEL_DEFAULTS, StreamPolicy
 
 AUTONOMY_VALUES = ("off", "clean-only", "full")
+IMESSAGE_MODES = ("self", "dedicated")
 
 
 def read_secret(path: Path) -> str:
@@ -67,6 +68,22 @@ def autonomy(value: Any) -> str:
         raise ConfigError(
             "update.autonomy must be "
             f"{', '.join(AUTONOMY_VALUES)} — got {parsed!r}"
+        )
+    return parsed
+
+
+def imessage_mode(value: Any) -> str:
+    """Coerce ``imessage.mode``; refuse anything outside the two postures.
+
+    A typo silently reading as ``self`` would leave the echo machinery on for
+    a chief that has its own Apple ID — replies stamped 🤖 and a scope that
+    can't see them — so it fails the boot instead.
+    """
+    parsed = str(value).strip()
+    if parsed not in IMESSAGE_MODES:
+        raise ConfigError(
+            f"imessage.mode must be {' or '.join(IMESSAGE_MODES)} — "
+            f"got {parsed!r}"
         )
     return parsed
 

@@ -5,12 +5,15 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import pytest
+
 from chief.adapters.base import Message
 from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
 from chief.adapters.imessage_send import owner_send_guard
 from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
+CHIEF = "chief@example.com"  # chief's own Apple ID handle (dedicated mode)
 
 # A real streamtyped attributedBody blob from a macOS chat.db (is_from_me=1,
 # text column NULL). Decodes to "I’ll take the edi too" (curly apostrophe).
@@ -119,6 +122,12 @@ class Harness:
         self.on_deliver: Callable[[Message], Awaitable[None]] | None = None
         # Optional poll-stage approval resolver (dispatcher.resolve_approval).
         self.resolve_approval: Callable[[Message], bool] | None = None
+        # imessage.mode = dedicated: chief on its own Apple ID, so the four
+        # self-DM compensations are off.
+        self.dedicated = False
+        # The owner's own chat.db, polled alongside chief's in dedicated mode.
+        self.owner_store: FakeStore | None = None
+        self.self_handles: tuple[str, ...] = ()
 
     def adapter(self) -> IMessageAdapter:
         async def on_message(message: Message) -> None:
@@ -138,6 +147,11 @@ class Harness:
             run_jxa=run_jxa,
             restart=self.restart,
             resolve_approval=self.resolve_approval,
+            dedicated=self.dedicated,
+            owner_db_path=(
+                None if self.owner_store is None else self.owner_store.path
+            ),
+            self_handles=self.self_handles,
         )
 
 
@@ -307,6 +321,74 @@ async def test_self_chat_scope_does_not_leak_other_conversations(
     assert [(m.sender, m.text) for m in harness.delivered] == [
         ("owner", "self note"),
     ]
+
+
+# --- dedicated mode: chief on its own Apple ID ----------------------------
+
+
+async def test_dedicated_mode_round_trip_reply_does_not_re_enter(
+    tmp_path: Path,
+) -> None:
+    """The central mechanism. On its own Apple ID chief's chat with the owner
+    is an ordinary conversation whose chat_identifier IS the owner's handle:
+    the owner's texts arrive is_from_me=0, chief's replies are is_from_me=1 in
+    that same chat. So the self-chat scope must be OFF, not repointed at the
+    owner — repointed, every reply below would poll straight back as owner
+    input and loop. Driven through the real query against a real store."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(OWNER, "hi chief", from_me=0, chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [(m.sender, m.thread_key, m.text) for m in harness.delivered] == [
+        ("owner", OWNER, "hi chief"),
+    ]
+
+    await adapter.send(OWNER, "hello back")
+    assert harness.jxa_calls[0][1] == (OWNER, "hello back")  # no BOT_PREFIX
+
+    # Chief's own reply as its store records it, then a second poll.
+    harness.store.add_message(OWNER, "hello back", from_me=1, chat=OWNER)
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["hi chief"]
+
+
+async def test_dedicated_mode_drops_the_self_dm_compensations(
+    tmp_path: Path,
+) -> None:
+    """Prefix filter and twin dedup are self-DM artefacts: in dedicated mode a
+    real owner message that happens to start with 🤖 must run a turn, and two
+    quick identical texts are two messages, not one row recorded twice."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(OWNER, BOT_PREFIX + "robot emoji", chat=OWNER)
+    harness.store.add_message(OWNER, "ok", chat=OWNER, date=100)
+    harness.store.add_message(OWNER, "ok", chat=OWNER, date=100)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == [
+        BOT_PREFIX + "robot emoji", "ok", "ok",
+    ]
+
+
+async def test_dedicated_mode_still_ignores_owner_sends_to_others(
+    tmp_path: Path,
+) -> None:
+    """Chief reads the owner's store too (monitors), so its own poll sees the
+    owner's outbound copies. Those are not messages to chief."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.store.add_message(
+        "+15554443333", "hey friend", from_me=1, chat="+15554443333"
+    )
+    harness.store.add_message("+15559998888", "yo from a stranger")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["yo from a stranger"]
 
 
 async def test_cursor_persists_across_restarts(tmp_path: Path) -> None:
@@ -520,3 +602,110 @@ def test_owner_send_guard_email_handle_matches_case_insensitively() -> None:
     assert guard("imsg send --to owner@icloud.com --text hi") is not None
     assert guard("IMSG send --to OWNER@ICLOUD.COM --text hi") is not None
     assert guard("imsg send --to friend@icloud.com --text hi") is None
+
+
+# --- dual-store reach: chief's own store plus the owner's (#286)
+
+
+async def test_dedicated_mode_polls_both_stores(tmp_path: Path) -> None:
+    """Chief keeps reading the owner's store so their existing monitors keep
+    working — the documented reach of the new account boundary."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.store.add_message(OWNER, "hi chief", chat=OWNER)
+    harness.owner_store.add_message("+15559998888", "a friend texts the owner")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == [
+        "hi chief",
+        "a friend texts the owner",
+    ]
+
+
+async def test_chiefs_own_reply_in_the_owners_store_never_polls_back(
+    tmp_path: Path,
+) -> None:
+    """The trap in dual-store reach: chief's reply lands in the OWNER's store
+    as an ordinary is_from_me = 0 row from chief's handle. Polling it would
+    re-create the echo loop by another route, with no BOT_PREFIX left to catch
+    it — dedicated mode turned that off."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.self_handles = (CHIEF,)
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.add_message(CHIEF, "hello back", chat=CHIEF)
+    harness.owner_store.add_message("+15559998888", "a friend texts the owner")
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["a friend texts the owner"]
+
+
+async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
+    """Rowids are per-store: one shared cursor would skip whichever store is
+    behind, silently dropping messages."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    for i in range(5):
+        harness.owner_store.add_message("+15559998888", f"owner-side {i}")
+    harness.store.add_message(OWNER, "to chief", chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert len(harness.delivered) == 6
+    # Across a restart both positions come back off disk. A shared cursor file
+    # would carry the owner store's much higher rowid into chief's store and
+    # swallow everything below it.
+    harness.store.add_message(OWNER, "second", chat=OWNER)
+    restarted = harness.adapter()
+    await restarted.start()
+    await restarted.poll_once()
+    await restarted.drain()
+    await restarted.stop()
+    assert [m.text for m in harness.delivered][-1:] == ["second"]
+
+
+async def test_an_unreadable_owner_store_costs_that_store_not_the_daemon(
+    tmp_path: Path,
+) -> None:
+    """Reading the owner's store needs a per-user Full Disk Access grant and a
+    readable ~/Library/Messages. Missing either must not take `Daemon.start`
+    down — the web UI is the other half of the boot check that would report
+    it."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.path.write_bytes(b"not a database at all")
+    adapter = harness.adapter()
+    # start() then stop() before polling by hand: start() leaves the poll loop
+    # running, and its first tick would race an explicit poll_once() over the
+    # same rows (both fetch before either advances the cursor).
+    await adapter.start()
+    await adapter.stop()
+    harness.store.add_message(OWNER, "hi chief", chat=OWNER)
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["hi chief"]
+
+
+async def test_chiefs_own_unreadable_store_still_fails_loudly(
+    tmp_path: Path,
+) -> None:
+    """Degrading is only right for the store chief merely reaches into. Losing
+    its own is the whole channel, and must not boot to a silent no-op."""
+    harness = Harness(tmp_path)
+    harness.store.path.write_bytes(b"not a database at all")
+    with pytest.raises(sqlite3.DatabaseError):
+        await harness.adapter().start()
+
+
+async def test_one_store_when_no_owner_store_is_configured(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "hi", chat=OWNER)
+    adapter = harness.adapter()
+    await adapter.start()
+    await adapter.stop()
+    assert not (tmp_path / "cursor.owner").exists()

@@ -66,10 +66,27 @@ class ServiceManager:
     def _domain_target(self) -> str:
         return f"gui/{self.uid}/{LAUNCHD_LABEL}"
 
-    def install(self, *, repo_dir: Path, launcher: Path) -> None:
-        """Write the definition and enable + start it; idempotent."""
+    def install(
+        self, *, repo_dir: Path, launcher: Path, start: bool = True
+    ) -> None:
+        """Write the definition and enable + start it; idempotent.
+
+        ``start=False`` writes the definition and stops: a launchd agent
+        cannot be bootstrapped into a graphical session that does not exist
+        yet, which is exactly the dedicated-account case (#286) — chief's
+        session appears at its first login, and the agent loads with it.
+        """
         path_env = default_path_env(launcher)
         self.definition_path.parent.mkdir(parents=True, exist_ok=True)
+        if not start:
+            self.definition_path.write_text(
+                launchd_plist(launcher=launcher, repo_dir=repo_dir, path_env=path_env)
+                if self.platform == "darwin"
+                else systemd_unit(
+                    launcher=launcher, repo_dir=repo_dir, path_env=path_env
+                )
+            )
+            return
         if self.platform == "darwin":
             # Bootstrap of an already-loaded label errors: bootout first
             # (a failure there just means "not loaded").
