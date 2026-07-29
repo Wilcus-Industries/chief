@@ -4,8 +4,10 @@
 # Core runs natively on this machine. This script checks prerequisites,
 # scaffolds the config/secrets/data layout, installs Python deps, walks the
 # first-run wizard (owner password → the web UI login, OpenRouter API key,
-# monthly budget cap), installs the `chief` launcher and the autostart
-# service, then starts the daemon, waits for health, and opens the web UI.
+# monthly budget cap), offers chief its own system account, installs the
+# `chief` launcher and the autostart service, then starts the daemon, waits
+# for health, and opens the web UI. A dedicated-account install ends WITHOUT
+# starting the daemon — chief has no graphical session until its first login.
 # There are no migrations — the daemon creates its schema at boot. Everything
 # beyond core (channels, Google, memory, …) installs later as packages, from
 # inside the chat. Normally invoked by bootstrap.sh (the curl|bash one-liner);
@@ -38,7 +40,7 @@ for arg in "$@"; do
     --non-interactive) NON_INTERACTIVE=1 ;;
     --single-user) SINGLE_USER=1 ;;
     -h|--help)
-      sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
@@ -126,7 +128,7 @@ case "\$CMD" in
   run)
     exec "\$UV_BIN" run python -m chief.entrypoint
     ;;
-  start|stop|status|update|check-updates|release|wizard|uninstall|compact)
+  start|stop|status|update|check-updates|release|wizard|uninstall|compact|account)
     shift
     exec "\$UV_BIN" run python -m chief.install "\$CMD" "\$@"
     ;;
@@ -142,6 +144,7 @@ chief — personal AI agent
   chief check-updates  is a newer core release out? (no changes)
   chief release <major|minor|patch>  cut a release (upstream repo only)
   chief wizard     re-run the first-run wizard (password / key / budget cap)
+  chief account    give chief its own system user (interactive only)
   chief compact <thread>  force-compact a thread's history now (via the daemon)
   chief uninstall  remove service + launcher (--purge-data removes data too)
 USAGE

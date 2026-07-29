@@ -15,6 +15,7 @@
 #   --ref TAG          install a specific tag instead of the latest release
 #   --no-service       skip the autostart service
 #   --no-launch        do not start the daemon / open the browser at the end
+#   --single-user      skip the dedicated-account offer (chief runs as you)
 #   --non-interactive  no prompts (env: CHIEF_OWNER_PASSWORD,
 #                      CHIEF_OPENROUTER_KEY, CHIEF_BUDGET_CAP)
 #
@@ -160,7 +161,7 @@ main() {
     case "$1" in
       --dir) dir="$2"; shift ;;
       --ref) ref="$2"; shift ;;
-      --no-service|--no-launch|--non-interactive)
+      --no-service|--no-launch|--non-interactive|--single-user)
         install_flags="$install_flags $1"
         ;;
       -h|--help) usage; exit 0 ;;
