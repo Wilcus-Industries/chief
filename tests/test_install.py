@@ -18,6 +18,7 @@ import pytest
 
 from chief.hooks.context import TurnContext
 from chief.install import updatecheck, wizard_steps
+from chief.install.account import account_plan
 from chief.install.commands import ensure_config, main
 from chief.install.lifecycle import uninstall
 from chief.install.service import ServiceManager
@@ -456,3 +457,91 @@ async def test_concurrent_sessions_do_not_stampede_the_refresh(
     assert await hook(_turn()) is None
     await _drain()
     assert len(refreshes) == 1
+
+
+# --- dedicated account plan (#286)
+
+
+def test_darwin_account_plan_is_pinned() -> None:
+    plan = account_plan(
+        platform="darwin", owner="owner", password="hunter2", email="c@l"
+    )
+    assert [list(step.command()) for step in plan.steps] == [
+        ["sudo", "sysadminctl", "-addUser", "chief", "-fullName", "chief",
+         "-home", "/Users/chief", "-shell", "/bin/zsh", "-password", "-"],
+        ["sudo", "dseditgroup", "-o", "create", "chief"],
+        ["sudo", "dseditgroup", "-o", "edit", "-a", "chief", "-t", "user",
+         "chief"],
+        ["sudo", "dseditgroup", "-o", "edit", "-a", "owner", "-t", "user",
+         "chief"],
+        ["sudo", "chown", "-R", "chief:chief", "/opt/chief"],
+        ["sudo", "chmod", "-R", "g+rwX", "/opt/chief"],
+        ["sudo", "find", "/opt/chief", "-type", "d", "-exec", "chmod", "g+s",
+         "{}", "+"],
+        ["sudo", "chmod", "-R", "go-rwx", "/opt/chief/secrets"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.name",
+         "chief"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.email",
+         "c@l"],
+        ["git", "config", "--global", "--add", "safe.directory", "/opt/chief"],
+    ]
+    assert plan.home == Path("/Users/chief")
+
+
+def test_linux_account_plan_is_pinned() -> None:
+    plan = account_plan(
+        platform="linux", owner="owner", password="hunter2", email="c@l"
+    )
+    assert [list(step.command()) for step in plan.steps] == [
+        ["sudo", "useradd", "--create-home", "--home-dir", "/home/chief",
+         "--shell", "/bin/bash", "chief"],
+        ["sudo", "chpasswd"],
+        ["sudo", "groupadd", "--force", "chief"],
+        ["sudo", "usermod", "-aG", "chief", "chief"],
+        ["sudo", "usermod", "-aG", "chief", "owner"],
+        ["sudo", "chown", "-R", "chief:chief", "/opt/chief"],
+        ["sudo", "chmod", "-R", "g+rwX", "/opt/chief"],
+        ["sudo", "find", "/opt/chief", "-type", "d", "-exec", "chmod", "g+s",
+         "{}", "+"],
+        ["sudo", "chmod", "-R", "go-rwx", "/opt/chief/secrets"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.name",
+         "chief"],
+        ["sudo", "-u", "chief", "git", "config", "--global", "user.email",
+         "c@l"],
+        ["git", "config", "--global", "--add", "safe.directory", "/opt/chief"],
+        ["sudo", "loginctl", "enable-linger", "chief"],
+    ]
+
+
+def test_the_account_password_never_reaches_an_argv() -> None:
+    """A pinned argv is printed, logged and diffed — the password must not be
+    in one. It rides stdin instead."""
+    for platform in ("darwin", "linux"):
+        plan = account_plan(platform=platform, owner="owner", password="hunter2")
+        assert not any("hunter2" in arg for s in plan.steps for arg in s.command())
+        assert any(s.stdin and "hunter2" in s.stdin for s in plan.steps)
+
+
+def test_using_an_existing_account_skips_creation_but_keeps_the_rest() -> None:
+    plan = account_plan(platform="linux", owner="owner", create=False)
+    joined = [" ".join(s.command()) for s in plan.steps]
+    assert not any("useradd" in c or "chpasswd" in c for c in joined)
+    assert "sudo usermod -aG chief owner" in joined
+    assert "sudo chmod -R go-rwx /opt/chief/secrets" in joined
+    assert "sudo loginctl enable-linger chief" in joined
+
+
+def test_secrets_are_carved_out_after_the_group_sweep() -> None:
+    """Ordering is the whole point: a later g+rwX sweep would re-open them."""
+    plan = account_plan(platform="linux", owner="owner", create=False)
+    joined = [" ".join(s.command()) for s in plan.steps]
+    assert joined.index("sudo chmod -R g+rwX /opt/chief") < joined.index(
+        "sudo chmod -R go-rwx /opt/chief/secrets"
+    )
+
+
+def test_account_plan_rejects_bad_input() -> None:
+    with pytest.raises(ValueError, match="unsupported platform"):
+        account_plan(platform="plan9", owner="owner", password="x")
+    with pytest.raises(ValueError, match="needs a password"):
+        account_plan(platform="linux", owner="owner")
