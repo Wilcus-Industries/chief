@@ -21,6 +21,7 @@ from chief.install import updatecheck, wizard_steps
 from chief.install.account import account_plan
 from chief.install.commands import ensure_config, main
 from chief.install.lifecycle import uninstall
+from chief.install.posture import read_posture
 from chief.install.service import ServiceManager
 from chief.install.session import (
     AUTO_LOGIN,
@@ -622,3 +623,67 @@ def test_auto_login_refuses_a_password_matching_the_apple_id() -> None:
     assert password_conflict("same", "same") is not None
     assert password_conflict("login", "appleid") is None
     assert password_conflict("", "") is None
+
+
+# --- boot check (#286)
+
+
+def _posture_runner(*, filevault: str, auto: str | None, session: bool) -> "FakeRunner":
+    fails = {} if auto is not None else {"autoLoginUser": "does not exist"}
+    if not session:
+        fails["launchctl print"] = "could not find service"
+    return FakeRunner(
+        stdout={"fdesetup": filevault, "autoLoginUser": (auto or "") + "\n"},
+        fails=fails,
+    )
+
+
+def test_posture_reads_the_three_facts() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is On.\n", auto=None, session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert (state.encryption, state.auto_login, state.session) == (
+        "on",
+        "off",
+        "present",
+    )
+    assert state.summary() == "ok"
+    assert ["launchctl", "print", "gui/502"] in runner.calls
+
+
+def test_posture_catches_the_silent_auto_login_breakage() -> None:
+    """The whole reason the check exists: an OS update clears autoLoginUser,
+    chief never comes back after the next reboot, and nothing says so."""
+    runner = _posture_runner(
+        filevault="FileVault is Off.\n", auto=None, session=False
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    problems = state.problems()
+    assert any("no graphical session" in p for p in problems)
+    assert any("automatic login is not set to chief" in p for p in problems)
+    assert state.summary() != "ok"
+
+
+def test_posture_flags_auto_login_that_an_encrypted_disk_will_ignore() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is On.\n", auto="chief", session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert any("macOS ignores it" in p for p in state.problems())
+
+
+def test_posture_is_quiet_on_a_healthy_unencrypted_mac() -> None:
+    runner = _posture_runner(
+        filevault="FileVault is Off.\n", auto="chief", session=True
+    )
+    state = read_posture(platform="darwin", user="chief", uid=502, runner=runner)
+    assert state.problems() == ()
+
+
+def test_posture_on_linux_probes_nothing() -> None:
+    runner = FakeRunner()
+    state = read_posture(platform="linux", user="chief", uid=1000, runner=runner)
+    assert (state.encryption, state.auto_login, state.session) == ("n/a",) * 3
+    assert state.problems() == ()
+    assert runner.calls == []

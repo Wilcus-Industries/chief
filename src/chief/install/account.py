@@ -5,13 +5,14 @@ every generated command byte-for-byte and the installer can print the whole
 plan before touching the machine. Passwords never appear in argv — they travel
 in ``stdin``, the one field the pinned commands do not carry.
 
-``run_as`` says whose authority a step needs: ``None`` is the owner running the
-installer, ``"root"`` escalates, and chief's own name is used for the steps
-that must land in chief's home (its git identity).
+The ``Step`` primitive and the account/group commands that differ by OS live
+in :mod:`.account_steps`; this module is the order they run in.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
+
+from chief.install.account_steps import Step, create_steps, group_steps
 
 DEFAULT_USER = "chief"
 DEFAULT_GROUP = "chief"
@@ -32,28 +33,6 @@ __all__ = [
 
 
 @dataclass(frozen=True)
-class Step:
-    """One command the installer runs, and whose authority it needs."""
-
-    description: str
-    argv: tuple[str, ...]
-    run_as: str | None = None
-    stdin: str | None = None
-
-    @property
-    def privileged(self) -> bool:
-        return self.run_as == "root"
-
-    def command(self) -> tuple[str, ...]:
-        """The argv as actually invoked, escalation prefix included."""
-        if self.run_as is None:
-            return self.argv
-        if self.run_as == "root":
-            return ("sudo", *self.argv)
-        return ("sudo", "-u", self.run_as, *self.argv)
-
-
-@dataclass(frozen=True)
 class AccountPlan:
     """The account chief will run as, and every step to get there."""
 
@@ -66,92 +45,6 @@ class AccountPlan:
 
 def default_home(platform: str, user: str) -> Path:
     return Path("/Users" if platform == "darwin" else "/home") / user
-
-
-def _create_steps(
-    platform: str, user: str, home: Path, password: str
-) -> tuple[Step, ...]:
-    if platform == "darwin":
-        return (
-            Step(
-                # Deliberately not -admin: chief logs in graphically, and an
-                # admin chief would be root-equivalent via its shell tool.
-                f"create the {user} account (non-admin)",
-                (
-                    "sysadminctl",
-                    "-addUser",
-                    user,
-                    "-fullName",
-                    user,
-                    "-home",
-                    str(home),
-                    "-shell",
-                    "/bin/zsh",
-                    "-password",
-                    "-",
-                ),
-                run_as="root",
-                stdin=f"{password}\n",
-            ),
-        )
-    return (
-        Step(
-            f"create the {user} account",
-            (
-                "useradd",
-                "--create-home",
-                "--home-dir",
-                str(home),
-                "--shell",
-                "/bin/bash",
-                user,
-            ),
-            run_as="root",
-        ),
-        Step(
-            f"set {user}'s login password",
-            ("chpasswd",),
-            run_as="root",
-            stdin=f"{user}:{password}\n",
-        ),
-    )
-
-
-def _group_steps(
-    platform: str, user: str, group: str, owner: str
-) -> tuple[Step, ...]:
-    if platform == "darwin":
-        add = (
-            Step(
-                f"add {member} to the shared group",
-                ("dseditgroup", "-o", "edit", "-a", member, "-t", "user", group),
-                run_as="root",
-            )
-            for member in (user, owner)
-        )
-        return (
-            Step(
-                "create the shared group",
-                ("dseditgroup", "-o", "create", group),
-                run_as="root",
-            ),
-            *add,
-        )
-    return (
-        Step(
-            "create the shared group",
-            ("groupadd", "--force", group),
-            run_as="root",
-        ),
-        *(
-            Step(
-                f"add {member} to the shared group",
-                ("usermod", "-aG", group, member),
-                run_as="root",
-            )
-            for member in (user, owner)
-        ),
-    )
 
 
 def _permission_steps(tree: Path, user: str, group: str) -> tuple[Step, ...]:
@@ -225,11 +118,11 @@ def account_plan(
     resolved_home = home or default_home(platform, user)
     steps = (
         *(
-            _create_steps(platform, user, resolved_home, password or "")
+            create_steps(platform, user, resolved_home, password or "")
             if create
             else ()
         ),
-        *_group_steps(platform, user, group, owner),
+        *group_steps(platform, user, group, owner),
         *_permission_steps(tree, user, group),
         *_git_steps(tree, user, email),
         *(

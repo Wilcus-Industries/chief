@@ -26,7 +26,9 @@ body{
 .seg.brand{color:var(--bg0); background:var(--orange); font-weight:700;
   letter-spacing:.06em;}
 .seg.buf{color:var(--fg);}
-#mon-seg{border-right:none; border-left:1px solid var(--bg2); color:var(--yellow);}
+#mon-seg{border-left:1px solid var(--bg2); color:var(--yellow);}
+#posture-seg{border-right:none; color:var(--faint);}
+#posture-seg.bad{color:var(--red);}
 .dot{width:7px; height:7px; border-radius:50%; background:var(--faint);
   margin-right:.5rem; box-shadow:0 0 6px transparent;}
 #conn.live .dot{background:var(--aqua); box-shadow:0 0 6px var(--aqua);}

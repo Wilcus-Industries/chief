@@ -29,6 +29,7 @@ from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
+from chief.web.status_routes import build_status_routes
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript, tool_call_response
 
@@ -161,16 +162,6 @@ def build_web_app(
             return unauthorized()
         return JSONResponse(palette())
 
-    async def monitor_list(request: Request) -> Response:
-        if not auth.is_authed(request):
-            return unauthorized()
-        rows = await monitors.list_monitors()
-        if not rows:
-            return PlainTextResponse("none")
-        return PlainTextResponse(
-            "; ".join(f"#{r.id} {r.description}" for r in rows)
-        )
-
     async def app_css(request: Request) -> Response:
         return Response(STYLES, media_type="text/css")
 
@@ -191,7 +182,7 @@ def build_web_app(
             *build_policy_routes(
                 store, channel_defaults, auth.is_authed, unauthorized
             ),
-            Route("/monitors", monitor_list),
+            *build_status_routes(monitors, auth.is_authed, unauthorized),
             Route("/app.css", app_css),
             Route("/app.js", app_js),
         ]

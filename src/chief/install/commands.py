@@ -5,6 +5,7 @@ The argument parser — the CLI's public surface — lives in :mod:`.cli`.
 
 import argparse
 import asyncio
+import getpass
 import os
 import sys
 import webbrowser
@@ -18,6 +19,7 @@ from chief.install.lifecycle import (
     wait_for_health,
     web_url,
 )
+from chief.install.posture import read_posture
 from chief.install.release import cut_release
 from chief.install.service import ServiceManager
 from chief.install.update import abort_update, update
@@ -84,6 +86,12 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         url = web_url(args.port)
         up = wait_for_health(url, timeout=2.0)
         print(f"web:     {url} ({'responding' if up else 'not responding'})")
+        state = read_posture(
+            platform=service.platform, user=getpass.getuser(), uid=service.uid
+        )
+        print(f"disk:    encryption {state.encryption}")
+        print(f"login:   auto {state.auto_login}, session {state.session}")
+        print(f"posture: {state.summary()}")
         return 0
     if command == "update":
         if args.abort:
