@@ -86,7 +86,7 @@ class CommandSet:
         return f"commands: {names}"
 
     async def _list_monitors(self, args: str, message: Message) -> str:
-        rows = await self._monitors.list_enabled()
+        rows = await self._monitors.list_monitors()
         if not rows:
             return "no monitors"
         return "\n".join(

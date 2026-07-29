@@ -15,28 +15,38 @@ from chief.classifiers import ClassifierDef
 MATCHABLE_FIELDS = ("text", "sender", "thread_key")
 
 
+def scope_values(scope: Any) -> dict[str, str]:
+    """The usable scope entries — non-empty ``sender``/``thread_key`` only.
+
+    One source of truth for "does this row have a scope", so the boot sweep and
+    the runtime check can't disagree about an empty or malformed one.
+    """
+    if not isinstance(scope, dict):
+        return {}
+    return {f: str(scope[f]) for f in ("sender", "thread_key") if scope.get(f)}
+
+
 def is_unscoped_classifier(predicate: dict[str, Any]) -> bool:
-    """A classifier predicate with no scope — the leak #285 closes."""
-    return predicate.get("kind") == "classifier" and not isinstance(
-        predicate.get("scope"), dict
-    )
+    """A classifier predicate with no usable scope — the leak #285 closes."""
+    kind_is_classifier = predicate.get("kind") == "classifier"
+    return kind_is_classifier and not scope_values(predicate.get("scope"))
 
 
 def in_scope(predicate: dict[str, Any], payload: dict[str, Any]) -> bool:
     """Whether this event is one the monitor is allowed to read (#285).
 
-    A classifier predicate without a scope matches nothing — fail closed, so a
-    row written before this rule (or by any other path) can't leak while it
-    waits to be disabled at load.
+    A classifier predicate without a usable scope matches nothing — fail
+    closed, so a row written before this rule (or by any other path) can't leak
+    while it waits to be disabled at load. Two scope fields at once is likewise
+    dead: creation forbids it, so such a row was hand-written and honouring
+    either half would silently drop the other constraint.
     """
-    scope = predicate.get("scope")
-    if not isinstance(scope, dict):
-        return predicate.get("kind") == "code"
-    for field in ("sender", "thread_key"):
-        wanted = scope.get(field)
-        if wanted:
-            return str(payload.get(field, "")).lower() == str(wanted).lower()
-    return False
+    wanted = scope_values(predicate.get("scope"))
+    if len(wanted) != 1:
+        # No scope at all is fine for a local regex, and only for that.
+        return not wanted and predicate.get("kind") == "code"
+    field, value = next(iter(wanted.items()))
+    return str(payload.get(field, "")).lower() == value.lower()
 
 
 def build_predicate(
@@ -71,6 +81,10 @@ def build_predicate(
             f"error: '{field}' is not a matchable event field "
             f"({', '.join(MATCHABLE_FIELDS)})"
         )
+    # Whitespace-only is no scope at all: it would build a monitor that reports
+    # success and can never match, which is a dead security control.
+    scope_sender = (scope_sender or "").strip() or None
+    scope_thread = (scope_thread or "").strip() or None
     if scope_sender and scope_thread:
         return "error: give one of scope_sender or scope_thread, not both"
     scope = (
@@ -98,8 +112,9 @@ def build_predicate(
         return (
             "error: a classifier monitor must be scoped to whose messages it "
             "may read — give scope_sender (one contact's handle, number, or "
-            "email) or scope_thread (one thread_key, e.g. a group chat). Ask "
-            "the owner which contact or group; do not guess."
+            "email) or scope_thread (one thread_key, e.g. a group chat). The "
+            "value must equal the event field exactly (+16505551212, not "
+            "650-555-1212). Ask the owner which contact or group; don't guess."
         )
     if instruction is not None:
         return {

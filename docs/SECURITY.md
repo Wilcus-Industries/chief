@@ -146,14 +146,22 @@ the machine, so scanning every message leaks nothing. The asymmetry is the
 point; don't "simplify" it into one uniform rule.
 
 - Scope is `{"sender": ...}` or `{"thread_key": ...}` inside the JSON
-  `predicate` — exactly one, exact match, compared case-insensitively.
+  `predicate` — exactly one, exact match, compared case-insensitively. No
+  normalization: the value must equal the event field as the adapter writes it
+  (`+16505551212`, not `650-555-1212`), or the monitor is simply dead.
+- `predicate.scope_values()` is the single definition of "has a usable scope",
+  so the boot sweep and the runtime check can't disagree about an empty one.
+  Blank or whitespace scopes are refused at creation and swept at boot rather
+  than becoming monitors that report success and never fire.
 - `build_predicate` refuses an unscoped classifier form with an `error: ...`
   string, and refuses a scope on the pattern form.
 - `MonitorService._on_event` checks `in_scope` **before** `_matches`. Keep that
   order — after `_matches`, the model has already read the message.
-- A classifier row with no scope matches nothing (`in_scope` fails closed), and
+- A classifier row with no usable scope matches nothing (`in_scope` fails
+  closed — including a hand-written row scoping on *both* fields), and
   `disable_unscoped()` — run from `App.start` — disables it at boot, logging
-  each by id and description at WARNING. Read the log after a deploy.
+  each by id and description at WARNING. `monitor list` shows every row with
+  its scope, disabled ones included, so a swept monitor stays visible.
 
 **Scoping to a group trusts every current and future member of that group.** A
 group monitor has to scope on `thread_key`, because you cannot name who will
@@ -164,7 +172,9 @@ documented, accepted exception, not a bug. For 1:1 senders the rule closes the
 path completely: an unknown sender can never reach a classifier, because the
 owner cannot name a contact they do not know.
 
-`_fire` wraps the payload in `UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers,
+`_fire` wraps the payload in `UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers, each
+carrying a per-fire nonce so a sender can't type the close marker into their own
+message and land the rest of their text outside the frame. It does this
 because the wake dispatches as `sender="system"` and so takes the owner path in
 `dispatch.handle` — a full turn, with external text as trusted-origin content.
 The marker does not make injection impossible; nothing does. It is the cheapest

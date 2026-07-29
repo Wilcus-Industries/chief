@@ -366,7 +366,7 @@ async def test_agent_creates_a_monitor_and_it_fires(
         send_frame(streams, "watch this channel for urgent stuff", thread="t1")
         first = await read_finals(streams, 1)
         assert first[0]["text"] == "watching for urgent messages"
-        monitors = await app.monitor_service.list_enabled()
+        monitors = await app.monitor_service.list_monitors()
         assert len(monitors) == 1
         assert monitors[0].wake_thread == "cli:t1"
 
