@@ -18,11 +18,28 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     wizard = sub.add_parser("wizard", help="run the first-run wizard")
     wizard.add_argument("--non-interactive", action="store_true")
+    account = sub.add_parser(
+        "account", help="give chief its own system user (interactive only)"
+    )
+    account.add_argument("--non-interactive", action="store_true")
+    account.add_argument("--tree", type=Path, default=None)
+    account.add_argument(
+        "--report", type=Path, default=None, help="write key=value facts here"
+    )
     service_install = sub.add_parser(
         "service-install", help="install + start the autostart service"
     )
     service_install.add_argument("--repo", type=Path, default=Path.cwd())
     service_install.add_argument("--launcher", type=Path, default=DEFAULT_LAUNCHER)
+    service_install.add_argument(
+        "--home", type=Path, default=None, help="whose home the definition goes in"
+    )
+    service_install.add_argument("--uid", type=int, default=None)
+    service_install.add_argument(
+        "--no-start",
+        action="store_true",
+        help="write the definition only — it loads at that account's next login",
+    )
     sub.add_parser("service-uninstall", help="remove the autostart service")
     sub.add_parser("start", help="start the daemon via the service")
     sub.add_parser("stop", help="stop the daemon via the service")
@@ -47,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_cmd.add_argument("--launcher", type=Path, default=DEFAULT_LAUNCHER)
     uninstall_cmd.add_argument("--purge-data", action="store_true")
     uninstall_cmd.add_argument("--yes", action="store_true")
+    uninstall_cmd.add_argument(
+        "--remove-account",
+        action="store_true",
+        help="also delete chief's system user, its home and the shared group",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-account",
+        action="store_true",
+        help="keep chief's system user without being asked",
+    )
     health = sub.add_parser("await-health", help="wait until the web UI answers")
     health.add_argument("--timeout", type=float, default=120.0)
     health.add_argument("--port", type=int, default=None)

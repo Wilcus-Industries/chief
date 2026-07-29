@@ -9,6 +9,7 @@ The ``Step`` primitive and the account/group commands that differ by OS live
 in :mod:`.account_steps`; this module is the order they run in.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,8 @@ __all__ = [
     "Step",
     "account_plan",
     "default_home",
+    "grant_reason",
+    "grant_steps",
 ]
 
 
@@ -91,6 +94,56 @@ def _git_steps(tree: Path, user: str, email: str) -> tuple[Step, ...]:
             ("git", "config", "--global", "--add", "safe.directory", str(tree)),
         ),
     )
+
+
+def grant_reason(path: Path, home: Path) -> str | None:
+    """Why this directory may not be granted, or ``None`` if it may."""
+    if not path.is_absolute():
+        return f"{path} is not an absolute path"
+    if path in (home, Path("/")):
+        return f"{path} is a home or filesystem root — grant a subdirectory"
+    return None
+
+
+def grant_steps(
+    *,
+    group: str = DEFAULT_GROUP,
+    read: Sequence[Path] = (),
+    write: Sequence[Path] = (),
+) -> tuple[Step, ...]:
+    """Group permissions for the owner directories chief may reach.
+
+    Read grants stop at ``g+rX``; write grants add ``g+w`` and the setgid bit
+    so files chief creates stay in the shared group.
+    """
+    steps: list[Step] = []
+    for path, mode, verb in (
+        *((p, "g+rX", "read") for p in read),
+        *((p, "g+rwX", "write") for p in write),
+    ):
+        steps.append(
+            Step(
+                f"let chief {verb} {path}",
+                ("chgrp", "-R", group, str(path)),
+                run_as="root",
+            )
+        )
+        steps.append(
+            Step(
+                f"apply {verb} permissions to {path}",
+                ("chmod", "-R", mode, str(path)),
+                run_as="root",
+            )
+        )
+    for path in write:
+        steps.append(
+            Step(
+                f"keep new files under {path} in the shared group",
+                ("find", str(path), "-type", "d", "-exec", "chmod", "g+s", "{}", "+"),
+                run_as="root",
+            )
+        )
+    return tuple(steps)
 
 
 def account_plan(

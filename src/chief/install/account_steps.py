@@ -12,7 +12,7 @@ must land in chief's home (its git identity).
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["Step", "create_steps", "group_steps"]
+__all__ = ["Step", "create_steps", "group_steps", "remove_steps"]
 
 
 @dataclass(frozen=True)
@@ -119,5 +119,38 @@ def group_steps(
                 run_as="root",
             )
             for member in (user, owner)
+        ),
+    )
+
+
+def remove_steps(platform: str, user: str, group: str) -> tuple[Step, ...]:
+    """Delete chief's account, its home and the shared group.
+
+    Destructive and never the default: chief's home holds its message store,
+    which the dedicated Apple ID's whole conversation lives in.
+    """
+    if platform == "darwin":
+        return (
+            Step(
+                f"delete the {user} account and its home",
+                ("sysadminctl", "-deleteUser", user, "-secure"),
+                run_as="root",
+            ),
+            Step(
+                "delete the shared group",
+                ("dseditgroup", "-o", "delete", group),
+                run_as="root",
+            ),
+        )
+    return (
+        Step(
+            f"delete the {user} account and its home",
+            ("userdel", "--remove", user),
+            run_as="root",
+        ),
+        Step(
+            "delete the shared group",
+            ("groupdel", "--force", group),
+            run_as="root",
         ),
     )

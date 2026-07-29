@@ -10,10 +10,12 @@ import os
 import sys
 import webbrowser
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from chief.config import load_config
 from chief.install.cli import build_parser
+from chief.install.dedicated import setup_account
 from chief.install.lifecycle import (
     uninstall,
     wait_for_health,
@@ -64,9 +66,35 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             f"{result.model_auth}, budget {result.budget}."
         )
         return 0
+    if command == "account":
+        setup = setup_account(
+            platform="darwin" if sys.platform == "darwin" else "linux",
+            owner=getpass.getuser(),
+            home=Path.home(),
+            io=WizardIO(),
+            interactive=not args.non_interactive,
+            **({"tree": args.tree} if args.tree else {}),
+        )
+        print(f"account: {setup.mode} ({setup.user}), session {setup.session}")
+        for line in setup.manual:
+            print(f"  - {line}")
+        if args.report:
+            # install.sh reads this rather than parsing stdout, which is busy
+            # carrying the wizard's own prompts.
+            args.report.write_text(setup.report())
+        return 0
     if command == "service-install":
-        ServiceManager.detect().install(repo_dir=args.repo, launcher=args.launcher)
-        print("autostart service installed and started.")
+        service = ServiceManager.detect()
+        if args.home:
+            service = replace(service, home=args.home, uid=args.uid or service.uid)
+        service.install(
+            repo_dir=args.repo, launcher=args.launcher, start=not args.no_start
+        )
+        print(
+            f"autostart service written to {service.definition_path}"
+            if args.no_start
+            else "autostart service installed and started."
+        )
         return 0
     if command == "service-uninstall":
         ServiceManager.detect().uninstall()
@@ -122,6 +150,8 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             repo_dir=args.repo,
             purge_data=args.purge_data,
             assume_yes=args.yes,
+            remove_account=args.remove_account,
+            keep_account=args.keep_account,
         )
     if command == "await-health":
         url = web_url(args.port)

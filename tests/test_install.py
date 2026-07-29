@@ -18,8 +18,9 @@ import pytest
 
 from chief.hooks.context import TurnContext
 from chief.install import updatecheck, wizard_steps
-from chief.install.account import account_plan
+from chief.install.account import Step, account_plan
 from chief.install.commands import ensure_config, main
+from chief.install.dedicated import setup_account
 from chief.install.lifecycle import uninstall
 from chief.install.posture import read_posture
 from chief.install.service import ServiceManager
@@ -687,3 +688,245 @@ def test_posture_on_linux_probes_nothing() -> None:
     assert (state.encryption, state.auto_login, state.session) == ("n/a",) * 3
     assert state.problems() == ()
     assert runner.calls == []
+
+
+# --- dedicated account install flow (#286)
+
+
+class RecordingRunner:
+    """Records the steps it was handed; scripted failure by argv substring."""
+
+    def __init__(self, fail: str | None = None) -> None:
+        self.steps: list[Step] = []
+        self._fail = fail
+
+    def __call__(self, step: Step) -> "subprocess.CompletedProcess[str]":
+        self.steps.append(step)
+        joined = " ".join(step.command())
+        rc = 1 if self._fail and self._fail in joined else 0
+        return subprocess.CompletedProcess(list(step.command()), rc, "", "")
+
+
+def _answers(*replies: str) -> tuple[WizardIO, list[str], RecordingRunner]:
+    said: list[str] = []
+    prompts = iter(replies)
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=said.append,
+    )
+    return io, said, RecordingRunner()
+
+
+def test_a_scripted_run_refuses_to_create_a_system_account(tmp_path: Path) -> None:
+    """An unattended installer must not add a system user behind the owner's
+    back — it falls back to today's install and says so."""
+    io, said, runner = _answers()
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=False,
+        execute=runner,
+    )
+    assert setup.mode == "refused"
+    assert not setup.dedicated
+    assert runner.steps == []
+    assert any("will not create a system account" in line for line in said)
+
+
+def test_declining_leaves_todays_single_user_install(tmp_path: Path) -> None:
+    io, said, runner = _answers("n")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        execute=runner,
+    )
+    assert (setup.mode, setup.user) == ("declined", "owner")
+    assert runner.steps == []
+    assert any("runs as you" in line for line in said)
+
+
+def test_declining_at_the_confirmation_runs_nothing(tmp_path: Path) -> None:
+    io, _, runner = _answers("c", "", "", "", "n")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        encrypted=None,
+        execute=runner,
+    )
+    assert setup.mode == "declined"
+    assert runner.steps == []
+
+
+def test_creating_the_account_runs_the_plan_and_reports_what_is_left(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("imessage:\n  enabled: false\n  mode: self\n")
+    io, _, runner = _answers("c", "", "", "", "y")
+    setup = setup_account(
+        platform="darwin",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=config,
+        encrypted=True,
+        execute=runner,
+    )
+    assert setup.dedicated and setup.user == "chief"
+    assert setup.session == SCREEN_SHARING
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert any("sysadminctl -addUser chief" in c for c in ran)
+    assert any("go-rwx" in c for c in ran)
+    assert any("screensharing" in c for c in ran)
+    # The four self-DM compensations only come off in dedicated mode.
+    assert "mode: dedicated" in config.read_text()
+    assert any("does not reach already-open shells" in m for m in setup.manual)
+    assert any("not started" in m for m in setup.manual)
+
+
+def test_a_failed_step_stops_the_run_rather_than_half_building(
+    tmp_path: Path,
+) -> None:
+    prompts = iter(["c", "", "", "", "y"])
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=lambda _: None,
+    )
+    runner = RecordingRunner(fail="chmod -R g+rwX")
+    with pytest.raises(RuntimeError, match="failed"):
+        setup_account(
+            platform="linux",
+            owner="owner",
+            home=tmp_path,
+            io=io,
+            interactive=True,
+            tree=tmp_path / "tree",
+            config_path=tmp_path / "config.yaml",
+            encrypted=None,
+            execute=runner,
+        )
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert not any("go-rwx" in c for c in ran)  # nothing after the failure
+
+
+def test_granted_directories_are_group_permissions_and_never_the_home_root(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path
+    (home / "notes").mkdir()
+    prompts = iter(["c", "", str(home), f"{home / 'notes'}", "y"])
+    secrets = iter(["hunter22", "hunter22", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: next(secrets),
+        say=lambda _: None,
+    )
+    runner = RecordingRunner()
+    setup_account(
+        platform="linux",
+        owner="owner",
+        home=home,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=tmp_path / "config.yaml",
+        encrypted=None,
+        execute=runner,
+    )
+    ran = [" ".join(s.command()) for s in runner.steps]
+    assert f"sudo chgrp -R chief {home / 'notes'}" in ran
+    assert f"sudo chmod -R g+rwX {home / 'notes'}" in ran
+    # The home root was typed at the read prompt and must have been refused.
+    assert f"sudo chgrp -R chief {home}" not in ran
+
+
+def test_the_report_carries_what_install_sh_branches_on(tmp_path: Path) -> None:
+    io, _, runner = _answers("c", "", "", "", "y")
+    setup = setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=tmp_path / "config.yaml",
+        encrypted=None,
+        execute=runner,
+    )
+    report = setup.report()
+    assert "mode=create" in report
+    assert "user=chief" in report
+    assert "home=/home/chief" in report
+
+
+def test_the_service_definition_can_be_written_without_starting_it(
+    tmp_path: Path,
+) -> None:
+    """launchd cannot bootstrap into a session that does not exist yet: the
+    dedicated install writes the plist and lets chief's first login load it."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="darwin", home=tmp_path, runner=runner, uid=502
+    )
+    manager.install(
+        repo_dir=tmp_path, launcher=tmp_path / "chief", start=False
+    )
+    assert manager.plist_path.is_file()
+    assert runner.calls == []
+
+
+def test_uninstall_keeps_the_system_account_unless_asked(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    said: list[str] = []
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        confirm=lambda _: pytest.fail("must not ask with --yes"),
+        say=said.append,
+        execute=steps,
+    )
+    assert steps.steps == []
+    assert any("system account kept" in line for line in said)
+
+
+def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        remove_account=True,
+        say=lambda _: None,
+        execute=steps,
+    )
+    assert [" ".join(s.command()) for s in steps.steps] == [
+        "sudo userdel --remove chief",
+        "sudo groupdel --force chief",
+    ]

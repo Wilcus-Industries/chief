@@ -13,12 +13,14 @@
 # secrets, data, and services are kept. macOS (bash 3.2) and Linux compatible.
 #
 # Usage:
-#   ./install.sh [--no-service] [--no-launch] [--non-interactive]
+#   ./install.sh [--no-service] [--no-launch] [--non-interactive] [--single-user]
 #
 #   --no-service       skip the autostart service (launchd agent / systemd user unit)
 #   --no-launch        do not start the daemon or open the browser at the end
 #   --non-interactive  no wizard prompts (env: CHIEF_OWNER_PASSWORD,
-#                      CHIEF_OPENROUTER_KEY, CHIEF_BUDGET_CAP)
+#                      CHIEF_OPENROUTER_KEY, CHIEF_BUDGET_CAP). Never creates a
+#                      system account — chief runs as you.
+#   --single-user      skip the dedicated-account offer outright
 
 set -euo pipefail
 
@@ -28,13 +30,15 @@ cd "$REPO_DIR"
 NO_SERVICE=0
 NO_LAUNCH=0
 NON_INTERACTIVE=0
+SINGLE_USER=0
 for arg in "$@"; do
   case "$arg" in
     --no-service) NO_SERVICE=1 ;;
     --no-launch) NO_LAUNCH=1 ;;
     --non-interactive) NON_INTERACTIVE=1 ;;
+    --single-user) SINGLE_USER=1 ;;
     -h|--help)
-      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
@@ -79,6 +83,27 @@ elif [ -r /dev/tty ]; then
 else
   say "first-run wizard (no terminal — non-interactive)"
   uv run python -m chief.install wizard --non-interactive
+fi
+
+# ---- dedicated account -----------------------------------------------------------
+# After the wizard on purpose: the account plan chowns the tree and locks down
+# secrets/, and the wizard is what writes the files in there.
+CHIEF_USER=""
+CHIEF_HOME=""
+ACCOUNT_REPORT="$REPO_DIR/data/account-setup"
+rm -f "$ACCOUNT_REPORT"
+if [ "$SINGLE_USER" = 1 ]; then
+  say "skipping the dedicated-account offer (--single-user)"
+elif [ "$NON_INTERACTIVE" = 1 ] || [ ! -r /dev/tty ]; then
+  say "dedicated account: not offered (no terminal) — chief runs as you"
+else
+  say "dedicated system account"
+  uv run python -m chief.install account \
+    --tree "$REPO_DIR" --report "$ACCOUNT_REPORT" < /dev/tty
+  if grep -q '^mode=\(create\|existing\)$' "$ACCOUNT_REPORT" 2>/dev/null; then
+    CHIEF_USER=$(sed -n 's/^user=//p' "$ACCOUNT_REPORT")
+    CHIEF_HOME=$(sed -n 's/^home=//p' "$ACCOUNT_REPORT")
+  fi
 fi
 
 # ---- launcher -------------------------------------------------------------------
@@ -137,6 +162,15 @@ esac
 # ---- autostart service ------------------------------------------------------------
 if [ "$NO_SERVICE" = 1 ]; then
   say "skipping the autostart service (--no-service)"
+elif [ -n "$CHIEF_USER" ]; then
+  # A launchd agent cannot be bootstrapped into a session that does not exist
+  # yet: write the definition into chief's home and let its first login load it.
+  say "writing the autostart service into $CHIEF_USER's account (not started)"
+  uv run python -m chief.install service-install \
+    --repo "$REPO_DIR" --launcher "$BIN_DIR/chief" \
+    --home "$CHIEF_HOME" --uid "$(id -u "$CHIEF_USER")" --no-start
+  sudo chown -R "$CHIEF_USER" "$CHIEF_HOME/Library/LaunchAgents" 2>/dev/null \
+    || sudo chown -R "$CHIEF_USER" "$CHIEF_HOME/.config/systemd" 2>/dev/null || true
 else
   say "installing the autostart service (launchd agent / systemd user unit)"
   uv run python -m chief.install service-install \
@@ -144,7 +178,10 @@ else
 fi
 
 # ---- launch -----------------------------------------------------------------------
-if [ "$NO_LAUNCH" = 1 ]; then
+if [ -n "$CHIEF_USER" ]; then
+  say "not starting the daemon — $CHIEF_USER has no login session yet"
+  echo "  remaining steps were printed above; chief starts at ${CHIEF_USER}'s first login."
+elif [ "$NO_LAUNCH" = 1 ]; then
   say "skipping launch (--no-launch)"
   echo "  start chief with: chief start (service) or chief run (foreground)"
 else
