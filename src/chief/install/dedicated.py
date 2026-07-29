@@ -9,12 +9,13 @@ which is what lets the whole thing work under ``curl … | bash``: ``sudo``
 reads the tty directly, so the piped installer never has to forward it.
 """
 
-import re
+import pwd
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from chief.config.write import set_dedicated_mode
 from chief.install.account import DEFAULT_TREE, Step, account_plan, grant_steps
 from chief.install.dedicated_ask import (
     CREATE,
@@ -36,7 +37,20 @@ REFUSED = "refused"
 #: Runs one step for real, letting sudo talk to the terminal.
 StepRunner = Callable[[Step], "subprocess.CompletedProcess[str]"]
 
-__all__ = ["REFUSED", "Setup", "set_dedicated_mode", "setup_account"]
+__all__ = ["REFUSED", "Setup", "existing_home", "setup_account"]
+
+
+def existing_home(user: str) -> Path | None:
+    """An already-existing account's real home — read, never guessed.
+
+    ``account_plan`` falls back to ``/Users/<user>``, which is where the
+    launchd plist would then be written for an account whose home is anywhere
+    else: no error, and the agent never loads.
+    """
+    try:
+        return Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        return None
 
 
 def default_step_runner(step: Step) -> "subprocess.CompletedProcess[str]":
@@ -68,25 +82,6 @@ class Setup:
         )
 
 
-def set_dedicated_mode(config_path: Path) -> bool:
-    """Flip ``imessage.mode`` to ``dedicated`` in place.
-
-    A surgical edit, not a YAML re-dump: config.yaml is seeded from the
-    commented template and a round-trip would strip every comment.
-    """
-    if not config_path.exists():
-        return False
-    text = config_path.read_text()
-    match = re.search(r"^(\s*)mode:[ \t]*\S+[ \t]*$", text, re.M)
-    if match is None:
-        return False
-    config_path.write_text(
-        text[: match.start()] + f"{match.group(1)}mode: dedicated"
-        + text[match.end():]
-    )
-    return True
-
-
 def _run(steps: tuple[Step, ...], io: WizardIO, execute: StepRunner) -> None:
     for step in steps:
         io.say(f"  {step.description}")
@@ -106,6 +101,7 @@ def setup_account(
     interactive: bool,
     tree: Path = DEFAULT_TREE,
     config_path: Path = Path("config.yaml"),
+    report: Path | None = None,
     encrypted: bool | None = None,
     execute: StepRunner = default_step_runner,
 ) -> Setup:
@@ -140,6 +136,7 @@ def setup_account(
         password=answers.password or None,
         user=answers.user,
         tree=tree,
+        home=existing_home(answers.user) if answers.choice == EXISTING else None,
     )
     steps = (
         *plan.steps,
@@ -156,16 +153,25 @@ def setup_account(
     if io.prompt("  run them? [y/N]: ").strip().lower() not in ("y", "yes"):
         io.say("account: declined — chief runs as you, exactly as before.")
         return Setup(DECLINED, owner, NO_SESSION, ())
-    _run(steps, io, execute)
-    if not set_dedicated_mode(config_path):
-        io.say("  note: could not set imessage.mode — set it to `dedicated`.")
-    return Setup(
+    setup = Setup(
         answers.choice,
         answers.user,
         session.mechanism,
         _manual(answers, session),
         home=plan.home,
     )
+    # Both writes land in the tree, so both must happen BEFORE the permission
+    # steps chown it to chief: group membership does not reach this already-
+    # running process, so afterwards the owner cannot write its own tree.
+    # A failed step aborts the installer, which never reads either file.
+    if not set_dedicated_mode(config_path):
+        io.say("  note: could not set imessage.mode — set it to `dedicated`.")
+    if report is not None:
+        # install.sh reads this rather than parsing stdout, which is busy
+        # carrying the wizard's own prompts.
+        report.write_text(setup.report())
+    _run(steps, io, execute)
+    return setup
 
 
 def _manual(answers: Answers, session: SessionPlan) -> tuple[str, ...]:

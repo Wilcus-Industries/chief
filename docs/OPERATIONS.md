@@ -306,7 +306,16 @@ down **before** starting; it is the last section here.
 9. Set `imessage.owner_handles` to your handle, `imessage.self_handles` to
    chief's new one, and `imessage.owner_db_path` to your own `chat.db` if you
    want your existing monitors to keep working. `imessage.mode` is already
-   `dedicated`.
+   `dedicated`. Set `self_handles` and `owner_db_path` **together** — the boot
+   rejects one without the other, because `self_handles` is the only thing
+   stopping chief from reading its own replies back out of your store.
+   Reaching your store needs two grants the account plan does not make for you:
+   `~/Library/Messages` is `drwx------`, so aim a read grant at it
+   (`sudo chgrp -R chief ~/Library/Messages && sudo chmod -R g+rX ~/Library/Messages`),
+   and macOS TCC is **per user** — chief's account needs its own Full Disk
+   Access grant, given from chief's own login session in step 10
+   (`packages/build-imessage/INSTALL.md` walks the same screen). Without either,
+   chief logs `dropping unreadable …` and runs on its own store alone.
 10. Log in as chief (console, or Screen Sharing to `vnc://127.0.0.1` on an
     encrypted disk) and sign Messages into chief's Apple ID. One iMessage
     account per user session — this is the step the whole design rests on.

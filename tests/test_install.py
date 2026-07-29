@@ -6,6 +6,7 @@ without touching the network, however git misbehaves.
 """
 
 import asyncio
+import getpass
 import json
 import os
 import subprocess
@@ -16,13 +17,14 @@ from pathlib import Path
 
 import pytest
 
+from chief.config.write import set_dedicated_mode
 from chief.hooks.context import TurnContext
 from chief.install import updatecheck, wizard_steps
-from chief.install.account import Step, account_plan
+from chief.install.account import Step, account_plan, default_home
 from chief.install.commands import ensure_config, main
-from chief.install.dedicated import setup_account
+from chief.install.dedicated import existing_home, setup_account
 from chief.install.lifecycle import uninstall
-from chief.install.posture import read_posture
+from chief.install.posture import ON, UNKNOWN, Posture, chief_account, read_posture
 from chief.install.service import ServiceManager
 from chief.install.session import (
     AUTO_LOGIN,
@@ -871,6 +873,89 @@ def test_the_report_carries_what_install_sh_branches_on(tmp_path: Path) -> None:
     assert "mode=create" in report
     assert "user=chief" in report
     assert "home=/home/chief" in report
+
+
+def test_the_tree_writes_all_land_before_the_chown_takes_it_away(
+    tmp_path: Path,
+) -> None:
+    """The installer runs as the owner; the plan chowns the tree to chief and
+    this process's group membership does not update. Anything it still has to
+    write into that tree — config.yaml, the report install.sh branches on —
+    must already be on disk by the time the first permission step runs, or the
+    install dies mid-plan with a real account and a half-configured box."""
+    config = tmp_path / "config.yaml"
+    config.write_text("imessage:\n  enabled: false\n  mode: self\n")
+    report = tmp_path / "account-setup"
+    seen_at_chown: list[tuple[bool, bool]] = []
+
+    def execute(step: Step) -> "subprocess.CompletedProcess[str]":
+        if "chown" in step.command():
+            seen_at_chown.append(
+                ("mode: dedicated" in config.read_text(), report.exists())
+            )
+        return subprocess.CompletedProcess(list(step.command()), 0, "", "")
+
+    io, _, _ = _answers("c", "", "", "", "y")
+    setup_account(
+        platform="linux",
+        owner="owner",
+        home=tmp_path,
+        io=io,
+        interactive=True,
+        tree=tmp_path / "tree",
+        config_path=config,
+        report=report,
+        encrypted=None,
+        execute=execute,
+    )
+    assert seen_at_chown == [(True, True)]
+    assert "mode=create" in report.read_text()
+
+
+def test_the_mode_flip_finds_the_imessage_block_not_the_first_mode_key(
+    tmp_path: Path,
+) -> None:
+    """config.yaml is user-ordered and package-extended: a `mode:` under any
+    block above `imessage:` must not be the one that gets flipped."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "update:\n  mode: clean-only\nimessage:\n  enabled: true\n  mode: self\n"
+    )
+    assert set_dedicated_mode(config)
+    assert config.read_text() == (
+        "update:\n  mode: clean-only\nimessage:\n  enabled: true\n"
+        "  mode: dedicated\n"
+    )
+
+
+def test_an_existing_account_keeps_its_real_home() -> None:
+    """`existing_home` reads the account rather than guessing /Users/<user>:
+    the launchd plist is placed by that value, and a wrong one loads nowhere.
+    `root` is the discriminator — its home is never the guessed default."""
+    assert existing_home("no-such-user-for-chief-tests") is None
+    assert existing_home("root") not in (None, default_home("linux", "root"))
+    assert existing_home("root") != default_home("darwin", "root")
+
+
+def test_chief_status_probes_chiefs_account_not_the_owner_who_typed_it(
+    tmp_path: Path,
+) -> None:
+    """The owner is the only one who ever types `chief status`, so resolving
+    the posture user from the caller reports the owner's session as chief's."""
+    report = tmp_path / "account-setup"
+    report.write_text("mode=declined\nuser=owner\nhome=\nsession=none\n")
+    assert chief_account(report) is None  # single-user install: caller is right
+    report.write_text(f"mode=create\nuser={getpass.getuser()}\nhome=\n")
+    assert chief_account(report) == (getpass.getuser(), os.getuid())
+    assert chief_account(tmp_path / "absent") is None
+
+
+def test_an_unreadable_encryption_probe_still_flags_a_doomed_auto_login() -> None:
+    """`disk_encrypted` returns None for unknown and every caller must treat
+    that as encrypted — `problems()` was the one that stayed quiet."""
+    unknown = Posture("chief", UNKNOWN, "chief", "present")
+    assert any("macOS ignores it" in p for p in unknown.problems())
+    assert unknown.problems() == Posture("chief", ON, "chief", "present").problems()
 
 
 def test_the_service_definition_can_be_written_without_starting_it(

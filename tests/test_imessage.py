@@ -5,6 +5,8 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+import pytest
+
 from chief.adapters.base import Message
 from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
 from chief.adapters.imessage_send import owner_send_guard
@@ -664,6 +666,37 @@ async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
     await restarted.drain()
     await restarted.stop()
     assert [m.text for m in harness.delivered][-1:] == ["second"]
+
+
+async def test_an_unreadable_owner_store_costs_that_store_not_the_daemon(
+    tmp_path: Path,
+) -> None:
+    """Reading the owner's store needs a per-user Full Disk Access grant and a
+    readable ~/Library/Messages. Missing either must not take `Daemon.start`
+    down — the web UI is the other half of the boot check that would report
+    it."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.path.write_bytes(b"not a database at all")
+    adapter = harness.adapter()
+    await adapter.start()
+    harness.store.add_message(OWNER, "hi chief", chat=OWNER)
+    await adapter.poll_once()
+    await adapter.drain()
+    await adapter.stop()
+    assert [m.text for m in harness.delivered] == ["hi chief"]
+
+
+async def test_chiefs_own_unreadable_store_still_fails_loudly(
+    tmp_path: Path,
+) -> None:
+    """Degrading is only right for the store chief merely reaches into. Losing
+    its own is the whole channel, and must not boot to a silent no-op."""
+    harness = Harness(tmp_path)
+    harness.store.path.write_bytes(b"not a database at all")
+    with pytest.raises(sqlite3.DatabaseError):
+        await harness.adapter().start()
 
 
 async def test_one_store_when_no_owner_store_is_configured(tmp_path: Path) -> None:

@@ -315,7 +315,22 @@ What the boundary buys:
   as group permissions. The home directory root is never offered
   (`grant_reason`).
 
-What it deliberately does **not** cover:
+### What the boundary does not cover
+
+**It is accident-scoped, not adversary-proof.** The tree is chief-owned and
+group-writable, so chief can rewrite every file in it — including
+`src/chief/install/*.py`, `.git/hooks/*` and `.git/config`. The `chief` launcher
+and any `git` command the owner types inside that tree run **as the owner**, so
+chief-authored code executes with the owner's uid and the owner's cached sudo
+timestamp. `chief update` is the documented deploy path and it goes through
+exactly that. "Its mistakes stop at its own account" is true; "an injected chief
+cannot reach the owner" is not, and this document does not claim it. Closing
+that would mean re-execing the launcher under `sudo -u chief`, which is not what
+ships today.
+
+The corollary: **treat the tree as chief's code, not yours.** Read a self-edit
+diff before running anything in that directory, the same way you would a pull
+request from a stranger.
 
 - **Chief gets no privilege escalation. None, not deferred.** When it needs a
   system package it tells the owner what to run. Granting package installation
@@ -354,8 +369,9 @@ own reply for input.
     before the classifier, and an unscoped row is disabled at boot.
 11. **`secrets/` is chief-only, and the carve-out runs after the group sweep.**
     Reversed, the sweep re-opens it.
-12. **Chief never escalates.** No sudo rule, no broker, no approval flow — it
-    reports what the owner should run.
+12. **Chief never escalates *on its own*.** No sudo rule, no broker, no approval
+    flow — it reports what the owner should run. The boundary is accident-scoped,
+    not adversary-proof: see "What the boundary does not cover".
 13. **A non-interactive install never creates a system account.**
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,

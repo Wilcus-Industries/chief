@@ -83,8 +83,18 @@ class IMessageAdapter(Adapter):
             )
 
     async def start(self) -> None:
-        for store in self._stores:
-            await asyncio.to_thread(store.prime)
+        for store in list(self._stores):
+            try:
+                await asyncio.to_thread(store.prime)
+            except Exception:
+                if store.mine:
+                    raise
+                # The owner's store needs its own Full Disk Access grant and a
+                # readable ~/Library/Messages (docs/OPERATIONS.md). Missing
+                # either must cost chief that store, not the daemon — and with
+                # it the web UI, which is the other half of the boot check.
+                logger.exception("imessage: dropping unreadable %s", store.db_path)
+                self._stores.remove(store)
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:

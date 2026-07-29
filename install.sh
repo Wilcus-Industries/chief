@@ -102,7 +102,9 @@ else
   say "dedicated system account"
   uv run python -m chief.install account \
     --tree "$REPO_DIR" --report "$ACCOUNT_REPORT" < /dev/tty
-  if grep -q '^mode=\(create\|existing\)$' "$ACCOUNT_REPORT" 2>/dev/null; then
+  # -E, not BRE alternation: BSD grep (macOS — the platform this targets) does
+  # not understand \(a\|b\), and a silent no-match installs the wrong mode.
+  if grep -qE '^mode=(create|existing)$' "$ACCOUNT_REPORT" 2>/dev/null; then
     CHIEF_USER=$(sed -n 's/^user=//p' "$ACCOUNT_REPORT")
     CHIEF_HOME=$(sed -n 's/^home=//p' "$ACCOUNT_REPORT")
   fi
@@ -169,11 +171,18 @@ elif [ -n "$CHIEF_USER" ]; then
   # A launchd agent cannot be bootstrapped into a session that does not exist
   # yet: write the definition into chief's home and let its first login load it.
   say "writing the autostart service into $CHIEF_USER's account (not started)"
-  uv run python -m chief.install service-install \
+  # The tree and the launcher both sit under the owner's home, which chief has
+  # to traverse. macOS homes are 0755; distros that honour HOME_MODE=0700 are
+  # not, and the service would fail at first login with an opaque exec error.
+  sudo -u "$CHIEF_USER" test -r "$REPO_DIR/pyproject.toml" \
+    || fail "$CHIEF_USER cannot read $REPO_DIR — grant it traversal (chmod o+x on the parents) or move the tree, then re-run"
+  sudo -u "$CHIEF_USER" test -x "$BIN_DIR/chief" \
+    || fail "$CHIEF_USER cannot run $BIN_DIR/chief — grant traversal or move the launcher somewhere shared, then re-run"
+  # Written BY chief: the definition lands in chief's home, which the owner
+  # cannot write (macOS ~/Library is 0700), and a chown afterwards is too late.
+  sudo -u "$CHIEF_USER" -H "$UV_BIN" run python -m chief.install service-install \
     --repo "$REPO_DIR" --launcher "$BIN_DIR/chief" \
     --home "$CHIEF_HOME" --uid "$(id -u "$CHIEF_USER")" --no-start
-  sudo chown -R "$CHIEF_USER" "$CHIEF_HOME/Library/LaunchAgents" 2>/dev/null \
-    || sudo chown -R "$CHIEF_USER" "$CHIEF_HOME/.config/systemd" 2>/dev/null || true
 else
   say "installing the autostart service (launchd agent / systemd user unit)"
   uv run python -m chief.install service-install \

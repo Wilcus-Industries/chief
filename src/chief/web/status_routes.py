@@ -6,6 +6,7 @@ see chief's session state rather than notice its absence. Split out of
 ``app.py`` to keep that file under the length cap (#261 precedent).
 """
 
+import asyncio
 import getpass
 import os
 import sys
@@ -41,8 +42,10 @@ def build_status_routes(
             return unauthorized()
         platform = "darwin" if sys.platform == "darwin" else "linux"
         # getpass, not os.getlogin(): a daemon has no controlling terminal.
-        state = read_posture(
-            platform=platform, user=getpass.getuser(), uid=os.getuid()
+        # Off the loop: three subprocesses, one of them `fdesetup status`, and
+        # the statusbar polls this every 10s per open tab.
+        state = await asyncio.to_thread(
+            read_posture, platform=platform, user=getpass.getuser(), uid=os.getuid()
         )
         return PlainTextResponse(state.summary())
 

@@ -21,7 +21,7 @@ from chief.install.lifecycle import (
     wait_for_health,
     web_url,
 )
-from chief.install.posture import read_posture
+from chief.install.posture import chief_account, read_posture
 from chief.install.release import cut_release
 from chief.install.service import ServiceManager
 from chief.install.update import abort_update, update
@@ -73,15 +73,12 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
             home=Path.home(),
             io=WizardIO(),
             interactive=not args.non_interactive,
+            report=args.report,
             **({"tree": args.tree} if args.tree else {}),
         )
         print(f"account: {setup.mode} ({setup.user}), session {setup.session}")
         for line in setup.manual:
             print(f"  - {line}")
-        if args.report:
-            # install.sh reads this rather than parsing stdout, which is busy
-            # carrying the wizard's own prompts.
-            args.report.write_text(setup.report())
         return 0
     if command == "service-install":
         service = ServiceManager.detect()
@@ -114,9 +111,9 @@ def _dispatch(args: argparse.Namespace) -> int:  # noqa: PLR0911
         url = web_url(args.port)
         up = wait_for_health(url, timeout=2.0)
         print(f"web:     {url} ({'responding' if up else 'not responding'})")
-        state = read_posture(
-            platform=service.platform, user=getpass.getuser(), uid=service.uid
-        )
+        # The owner types this, so ask who chief actually is before probing.
+        user, uid = chief_account() or (getpass.getuser(), service.uid)
+        state = read_posture(platform=service.platform, user=user, uid=uid)
         print(f"disk:    encryption {state.encryption}")
         print(f"login:   auto {state.auto_login}, session {state.session}")
         print(f"posture: {state.summary()}")

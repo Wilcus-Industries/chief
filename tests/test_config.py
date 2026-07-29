@@ -345,6 +345,27 @@ def test_a_typo_in_imessage_mode_is_refused_not_coerced(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_reaching_the_owners_store_without_self_handles_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`self_handles` is the only thing stopping the echo loop once chief also
+    polls the owner's store: chief's replies land there as ordinary inbound
+    rows and dedicated mode has already turned BOT_PREFIX off. "Set both or
+    neither" is documented — fail closed on it like `imessage.mode` does."""
+    path = tmp_path / "config.yaml"
+    both = "imessage:\n  mode: dedicated\n  owner_db_path: /o/chat.db\n"
+    path.write_text(both)
+    with pytest.raises(ConfigError, match="self_handles"):
+        load_config(path)
+    path.write_text(both + "  self_handles: ['chief@example.com']\n")
+    assert load_config(path).imessage_self_handles == ("chief@example.com",)
+    # Neither is fine, and `self` mode never reaches the owner's store at all.
+    path.write_text("imessage:\n  mode: dedicated\n")
+    assert load_config(path).imessage_owner_db_path is None
+    path.write_text("imessage:\n  mode: self\n  owner_db_path: /o/chat.db\n")
+    assert load_config(path).imessage_owner_db_path == Path("/o/chat.db")
+
+
 def test_a_typo_in_update_autonomy_is_refused_not_coerced(tmp_path: Path) -> None:
     """Neither "silently off" nor "silently on" is an acceptable reading of a
     typo in the key that governs unattended conflict resolution."""

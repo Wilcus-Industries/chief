@@ -7,11 +7,14 @@ web UI polls it, ``chief status`` prints it) rather than kept by a background
 loop: none of these probes is expensive and there is no state worth holding.
 """
 
+import pwd
 from dataclasses import dataclass
+from pathlib import Path
 
 from chief.install.session import disk_encrypted
 from chief.install.units import Runner, default_runner
 
+ACCOUNT_REPORT = Path("data/account-setup")
 LOGIN_WINDOW = "/Library/Preferences/com.apple.loginwindow"
 NOT_APPLICABLE = "n/a"
 UNKNOWN = "unknown"
@@ -20,7 +23,28 @@ ON = "on"
 PRESENT = "present"
 ABSENT = "absent"
 
-__all__ = ["Posture", "read_posture"]
+__all__ = ["Posture", "chief_account", "read_posture"]
+
+
+def chief_account(report: Path = ACCOUNT_REPORT) -> tuple[str, int] | None:
+    """chief's own user and uid, or ``None`` if it runs as the owner.
+
+    ``chief status`` is typed by the *owner*, so the caller's identity is
+    never the one to probe on a dedicated box — it would report the owner's
+    session as chief's. The installer's report is what remembers whose it is.
+    """
+    try:
+        fields = dict(
+            line.split("=", 1)
+            for line in report.read_text().splitlines()
+            if "=" in line
+        )
+        if fields.get("mode") not in ("create", "existing"):
+            return None
+        entry = pwd.getpwnam(fields["user"])
+    except (OSError, KeyError):
+        return None
+    return entry.pw_name, entry.pw_uid
 
 
 @dataclass(frozen=True)
@@ -45,7 +69,9 @@ class Posture:
                 f"automatic login is not set to {self.user} — a reboot leaves "
                 "chief with no session"
             )
-        if self.encryption == ON and self.auto_login == self.user:
+        # UNKNOWN counts as ON here for the same reason session_plan treats it
+        # that way: an auto-login macOS is silently ignoring must not read ok.
+        if self.encryption in (ON, UNKNOWN) and self.auto_login == self.user:
             found.append(
                 "automatic login is set but the disk is encrypted — "
                 "macOS ignores it; use the screen-sharing reconnect step"
