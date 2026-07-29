@@ -2,8 +2,9 @@
 
 from typing import Any
 
-from chief.monitors.predicate import MATCHABLE_FIELDS, build_predicate
+from chief.monitors.predicate import MATCHABLE_FIELDS, build_predicate, scope_values
 from chief.monitors.service import MonitorService
+from chief.persistence.models import MonitorRow
 from chief.provider.base import ToolSpec
 from chief.tools import Tool, ToolContext, ToolRegistry
 
@@ -18,7 +19,11 @@ _SPEC = ToolSpec(
         "match a contact with field=`sender`), `instruction` (a "
         "yes/no judgment via the built-in wake-judge classifier), or "
         "`classifier` (a named categorical classifier, which requires "
-        "`fire_label` — the label that fires the monitor). Plus optional "
+        "`fire_label` — the label that fires the monitor). The `instruction` "
+        "and `classifier` forms send message text to a model, so each MUST be "
+        "scoped to one contact (`scope_sender`) or one thread/group chat "
+        "(`scope_thread`) — ask the owner whose messages it may read, never "
+        "guess. `pattern` is local regex and takes no scope. Plus optional "
         "`watch_channel` (defaults to this thread's channel) and "
         "`target_session` (an existing session's thread_key; which session the "
         "wake runs in, default this thread). "
@@ -54,6 +59,22 @@ _SPEC = ToolSpec(
                     "this thread. Must already exist (see the session tool)."
                 ),
             },
+            "scope_sender": {
+                "type": "string",
+                "description": (
+                    "the one sender an instruction/classifier monitor may "
+                    "read. Must equal the event's `sender` exactly (case "
+                    "aside): the handle as it appears in events, e.g. "
+                    "+16505551212, never 650-555-1212"
+                ),
+            },
+            "scope_thread": {
+                "type": "string",
+                "description": (
+                    "the one thread_key an instruction/classifier monitor may "
+                    "read (e.g. a group chat id), matched exactly"
+                ),
+            },
             "monitor_id": {"type": "integer"},
         },
         "required": ["action"],
@@ -74,6 +95,8 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         watch_channel: str | None,
         field: str | None,
         target_session: str | None,
+        scope_sender: str | None,
+        scope_thread: str | None,
     ) -> str:
         if context is None:
             return "error: create needs a session context"
@@ -81,7 +104,7 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return "error: create needs a description"
         predicate = build_predicate(
             pattern, instruction, classifier, fire_label, field,
-            service.classifier_def,
+            service.classifier_def, scope_sender, scope_thread,
         )
         if isinstance(predicate, str):
             return predicate  # a validation error
@@ -118,14 +141,21 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
             return f"error: no such session '{target_session}'"
         return f"monitor #{monitor_id} now wakes {wake_thread}"
 
-    async def _list() -> str:
-        rows = await service.list_enabled()
-        if not rows:
-            return "no monitors"
-        return "\n".join(
-            f"#{r.id} [{r.watch_channel}] {r.description} -> wakes {r.wake_thread}"
-            for r in rows
+    def _describe(row: MonitorRow) -> str:
+        # Scope and disabled state both show: a boot sweep can disable a row
+        # (#285), and an invisible one is one the owner never rescopes.
+        scope = scope_values(row.predicate.get("scope"))
+        suffix = "".join(f" scope={f}:{v}" for f, v in scope.items())
+        if not row.enabled:
+            suffix += " [disabled: unscoped classifier — recreate it scoped]"
+        return (
+            f"#{row.id} [{row.watch_channel}] {row.description} "
+            f"-> wakes {row.wake_thread}{suffix}"
         )
+
+    async def _list() -> str:
+        rows = await service.list_monitors(include_disabled=True)
+        return "\n".join(_describe(r) for r in rows) if rows else "no monitors"
 
     async def monitor(
         action: str,
@@ -139,18 +169,14 @@ def register_monitor_tools(registry: ToolRegistry, service: MonitorService) -> N
         monitor_id: Any = None,
         field: str | None = None,
         target_session: str | None = None,
+        scope_sender: str | None = None,
+        scope_thread: str | None = None,
     ) -> str:
         if action == "create":
             return await _create(
-                context,
-                description,
-                pattern,
-                instruction,
-                classifier,
-                fire_label,
-                watch_channel,
-                field,
-                target_session,
+                context, description, pattern, instruction, classifier,
+                fire_label, watch_channel, field, target_session,
+                scope_sender, scope_thread,
             )
         if action == "retarget":
             return await _retarget(context, monitor_id, target_session)

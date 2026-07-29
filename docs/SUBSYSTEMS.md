@@ -145,8 +145,13 @@ only `code` and `classifier` exist.
 | Agent form | Lowers to |
 |---|---|
 | `pattern` | `{kind: code, field, pattern}` |
-| `instruction` | `{kind: classifier, classifier: "wake-judge", fire_label: "YES", instruction}` |
-| `classifier` + `fire_label` | `{kind: classifier, classifier, fire_label}` |
+| `instruction` | `{kind: classifier, ..., fire_label: "YES", instruction, scope}` |
+| `classifier` + `fire_label` | `{kind: classifier, classifier, fire_label, scope}` |
+
+Both classifier forms carry a `scope` — `{sender}` or `{thread_key}` — checked
+in `_on_event` **before** `_matches`, so an out-of-scope event never reaches the
+model. The pattern form takes none. That is a prompt-injection boundary, not an
+optimization: see `docs/SECURITY.md`.
 
 Evaluation in `_matches`:
 
@@ -163,7 +168,8 @@ sender**, so matching a contact requires `field="sender"`.
 
 Create-time validation also requires exactly one of the three forms, a
 description, a context, `fire_label` with `classifier`, `field` only on the
-pattern form, and that the named classifier **exists and declares that label**.
+pattern form, a scope on the classifier forms only, and that the named
+classifier **exists and declares that label**.
 
 ### There is no scheduling
 

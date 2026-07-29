@@ -70,18 +70,23 @@ How to build the monitor the owner asked for — owner messages carry sender
 exclude `owner` from the predicate so the monitor never double-fires on
 messages that already ran a turn.
 
-- **A specific person** — code predicate on `sender`, pattern
+- **A specific person** — `pattern` with `field=sender`, pattern
   `^\+15550001111$` (regex-escape the handle); match several with
   `^(\+15550001111|friend@example\.com)$`.
-- **A specific group** — code predicate on `thread_key`, pattern
+- **A specific group** — `pattern` with `field=thread_key`, pattern
   `^3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c$` (the group's opaque hex id; resolve it
   first, see "Group chats").
-- **Optional cheap screen** — instead of (or narrowing) a code match, a
-  `model` predicate is a cheap first-pass filter: instruction like "Sender is
-  not the owner and this message is worth waking the owner's agent for
+- **Optional cheap screen** — instead of (or narrowing) a pattern match, an
+  `instruction` predicate is a cheap first-pass filter: "Sender is not the
+  owner and this message is worth waking the owner's agent for
   (time-sensitive, important, or actionable). Ignore chatter." — runs on the
   default_classifier role. Useful for a chatty chat the owner still wants
-  watched.
+  watched. It **must** carry `scope_sender` (one handle, written exactly as
+  events carry it: `+15550001111`, never `555-000-1111`) or `scope_thread`
+  (one group's chat id): it sends message text to a model, so ask the owner
+  whose messages it may read and never guess. Scoping to a group trusts every
+  current **and future** member of that group. A pattern predicate is local
+  regex and takes no scope.
 
 Set `wake_thread` to the owner's self-chat handle and `wake_channel` to
 `imessage` so wakes land where the owner reads.

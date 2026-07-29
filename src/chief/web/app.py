@@ -164,7 +164,7 @@ def build_web_app(
     async def monitor_list(request: Request) -> Response:
         if not auth.is_authed(request):
             return unauthorized()
-        rows = await monitors.list_enabled()
+        rows = await monitors.list_monitors()
         if not rows:
             return PlainTextResponse("none")
         return PlainTextResponse(
