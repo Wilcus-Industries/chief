@@ -284,6 +284,30 @@ A human runs this, once, on one machine. There is no `chief migrate` command and
 there should not be — every step below wants eyes on it. Write the abort path
 down **before** starting; it is the last section here.
 
+> **This checklist has never been run end to end on real hardware.** It is
+> written from the code, not from a completed migration. The box it was written
+> for never got past step 4 — Apple declined to issue the second Apple ID, and
+> without one the dedicated posture is impossible, since it rests on one iMessage
+> account per user session.
+>
+> Two things follow. First, treat the abort path as the load-bearing part: have
+> it written down and the backup taken before step 6, because you are the one
+> finding the bugs. Second, the interactive path this checklist drives has the
+> thinnest test coverage in the installer — `installer-e2e` runs
+> `--non-interactive`, which skips the whole dedicated branch, and every one of
+> the three high-severity findings in the review of #288 lived in exactly that
+> gap. Known-open holes at the time of writing: #289 (`grant_reason` accepts
+> paths it should not), #290 (a group chat both accounts are in delivers twice),
+> #291 (uninstall offers to delete an account it never created).
+>
+> What *is* verified on real macOS (26.5.2): `sysadminctl -addUser … -password -`
+> reads the password from piped stdin, so the create step neither hangs nor
+> leaks the password onto argv. Ignore the `No clear text password or
+> interactive option was specified` line it prints — it appears on success too.
+>
+> If you run this and it works, delete this notice. If it does not, please file
+> an issue with the step number.
+
 **Before you touch anything**
 
 1. Take a full backup of the tree (`data/`, `secrets/`, `config.yaml`, and the
@@ -292,7 +316,11 @@ down **before** starting; it is the last section here.
 2. Note the current service definition's path and contents, and where the tree
    lives now. That pair is what the abort path restores.
 3. `chief status` and record it. This is the "known good" you are comparing to.
-4. Create chief's Apple ID (email-only) but do **not** sign in yet.
+4. Create chief's Apple ID (email-only) but do **not** sign in yet. There is no
+   CLI or API for this — it is browser-only, and Apple can simply refuse, which
+   is where this checklist's own trial run ended. Do this step *first*: if you
+   cannot get a second Apple ID, nothing below is worth starting. Step 7 also
+   asks for its password, to check chief's login password differs.
 5. Check the machine's disk-encryption state — it decides the session mechanism
    and therefore whether reboots are unattended.
 
