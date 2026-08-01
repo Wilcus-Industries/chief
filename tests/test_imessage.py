@@ -643,6 +643,28 @@ async def test_chiefs_own_reply_in_the_owners_store_never_polls_back(
     assert [m.text for m in harness.delivered] == ["a friend texts the owner"]
 
 
+async def test_a_group_both_accounts_are_in_is_delivered_once(
+    tmp_path: Path,
+) -> None:
+    """Adding chief to a family group is the natural thing to do with a chief
+    that has its own contact card — and then every message in it exists in
+    BOTH stores under different rowids. Dedicated mode switches the twin dedup
+    off wholesale, which is right for chief's own store (no self-DM twins
+    there) but hands the owner's store a second delivery of every group
+    message: two stranger rows, two monitor runs, two classifier calls."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.store.add_message("+15557776666", "dinner at 7", group=True, date=90)
+    harness.owner_store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["dinner at 7"]
+
+
 async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
     """Rowids are per-store: one shared cursor would skip whichever store is
     behind, silently dropping messages."""

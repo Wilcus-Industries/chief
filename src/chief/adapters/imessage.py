@@ -141,10 +141,16 @@ class IMessageAdapter(Adapter):
                 message = self._map(sender, text, from_me, group_chat, in_self)
                 if message is None:
                     continue
-                if not self._dedicated and self._dedup.is_duplicate(
+                # Always record, so a group both accounts are in primes the
+                # window from whichever store reads it first; suppress only
+                # where a repeat is an artefact rather than a real message.
+                # Chief's own store in dedicated mode is the one place two
+                # identical texts seconds apart are genuinely two messages.
+                twin = self._dedup.is_duplicate(
                     (message.thread_key, message.sender, message.text), date
-                ):
-                    continue  # twin rows are a self-DM artefact only
+                )
+                if twin and not (self._dedicated and store.mine):
+                    continue
                 if self._resolve_approval is not None and self._resolve_approval(
                     message
                 ):
