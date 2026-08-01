@@ -312,8 +312,10 @@ What the boundary buys:
   just closed (`install/account.py`).
 - **The owner picks what chief may reach.** The wizard asks two questions —
   directories to read, directories to write — defaulting to **none**, applied
-  as group permissions. The home directory root is never offered
-  (`grant_reason`).
+  as group permissions. The home directory root is never offered, judged on
+  the *resolved* path so `~/..` cannot smuggle it in, and a directory that does
+  not exist is refused rather than left to fail its own step
+  (`install/dedicated_ask.py`, `grant_reason`).
 
 ### What the boundary does not cover
 

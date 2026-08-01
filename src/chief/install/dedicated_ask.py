@@ -4,18 +4,39 @@ Asking is separated from doing (:mod:`.dedicated`) so the answers can be
 inspected and pinned without a terminal or a machine to change.
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chief.install.account import DEFAULT_USER, grant_reason
+from chief.install.account import DEFAULT_USER
 from chief.install.session import password_conflict
 from chief.install.wizard_io import MIN_PASSWORD_LENGTH, WizardIO
 
 CREATE = "create"
 EXISTING = "existing"
 DECLINED = "declined"
+ACCOUNT_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-__all__ = ["CREATE", "DECLINED", "EXISTING", "Answers", "ask"]
+__all__ = ["CREATE", "DECLINED", "EXISTING", "Answers", "ask", "grant_reason"]
+
+
+def grant_reason(path: Path, home: Path) -> str | None:
+    """Why this directory may not be granted, or ``None`` if it may.
+
+    Judged on the *resolved* path: the grant is a recursive, irreversible
+    ``chgrp``, and ``~/..`` reaches every account on the box under a name that
+    does not look like it. A path that does not exist is refused here rather
+    than left to fail its step, which aborts the plan after the account and
+    tree steps have already landed.
+    """
+    if not path.is_absolute():
+        return f"{path} is not an absolute path"
+    target = path.resolve()
+    if target == Path("/") or home.resolve().is_relative_to(target):
+        return f"{path} holds your home or the filesystem root — pick a subdirectory"
+    if not target.is_dir():
+        return f"{path} is not an existing directory"
+    return None
 
 
 @dataclass(frozen=True)
@@ -53,6 +74,18 @@ def _password(io: WizardIO, user: str) -> str:
         return password
 
 
+def _name(io: WizardIO) -> str:
+    """The name reaches argv unquoted and becomes chief's home path — `..` in
+    it makes `useradd --home-dir /Users` on macOS."""
+    while True:
+        user = (
+            io.prompt(f"  account name [{DEFAULT_USER}]: ").strip() or DEFAULT_USER
+        )
+        if ACCOUNT_NAME.match(user):
+            return user
+        io.say("  lowercase letters, digits, _ and - only — try again.")
+
+
 def _dirs(io: WizardIO, verb: str, home: Path) -> tuple[Path, ...]:
     raw = io.prompt(
         f"  directories chief may {verb}, space-separated (empty = none): "
@@ -81,9 +114,7 @@ def ask(io: WizardIO, *, home: Path) -> Answers:
     if answer in ("n", "no"):
         io.say("account: declined — chief runs as you, exactly as before.")
         return Answers(DECLINED)
-    user = (
-        io.prompt(f"  account name [{DEFAULT_USER}]: ").strip() or DEFAULT_USER
-    )
+    user = _name(io)
     choice = EXISTING if answer in ("e", "existing") else CREATE
     password = _password(io, user) if choice == CREATE else ""
     io.say("Which of your directories may chief reach? Default is none.")
