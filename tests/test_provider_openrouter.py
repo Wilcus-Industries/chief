@@ -129,10 +129,91 @@ async def test_connection_error_wraps_as_loud_provider_error() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider = OpenRouterProvider(
-        "k", base_url="http://127.0.0.1:8000/v1", client=client
+        "k", base_url="http://127.0.0.1:8000/v1", client=client, retry_backoff=0.0
     )
     with pytest.raises(ProviderError, match="unreachable.*8000"):
         await collect(provider)
+
+
+class _RaisingStream(httpx.AsyncByteStream):
+    """A response body that yields some bytes, then drops mid-stream."""
+
+    def __init__(self, chunks: list[bytes], exc: BaseException) -> None:
+        self._chunks = chunks
+        self._exc = exc
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        for chunk in self._chunks:
+            yield chunk
+        raise self._exc
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _flaky_provider(
+    fail_times: int, exc: BaseException, chunks: list[dict[str, Any]]
+) -> OpenRouterProvider:
+    """Provider whose backend raises `exc` on the first `fail_times` calls
+    (before sending any body), then streams `chunks` successfully."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= fail_times:
+            raise exc
+        return httpx.Response(
+            200, text=sse_body(chunks), headers={"content-type": "text/event-stream"}
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return OpenRouterProvider("k", client=client, retry_backoff=0.0)
+
+
+async def test_transient_drop_before_output_is_retried_then_succeeds() -> None:
+    # A single mid-connect transport blip must be retried, not surfaced — the
+    # proxy occasionally resets a stream under load and one turn shouldn't die.
+    provider = _flaky_provider(
+        fail_times=1,
+        exc=httpx.ReadError("connection reset"),
+        chunks=[delta_chunk({"content": "hi"})],
+    )
+    events = await collect(provider)
+    assert events[0] == TextDelta("hi")
+    assert isinstance(events[-1], Completion)
+
+
+async def test_retry_exhausted_names_the_underlying_exception_type() -> None:
+    # When retries run out the loud error must name the real cause (a dropped
+    # stream is a ReadError, NOT literally "unreachable") so it is diagnosable.
+    provider = _flaky_provider(
+        fail_times=99, exc=httpx.ReadError("reset"), chunks=[]
+    )
+    with pytest.raises(ProviderError, match="ReadError"):
+        await collect(provider)
+
+
+async def test_drop_after_first_delta_is_not_retried() -> None:
+    # Once output has been yielded a retry would double-emit — must fail loud.
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = b'data: {"choices": [{"delta": {"content": "par"}}]}\n\n'
+        return httpx.Response(
+            200,
+            stream=_RaisingStream([body], httpx.RemoteProtocolError("peer closed")),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenRouterProvider("k", client=client, retry_backoff=0.0)
+    events: list[Any] = []
+    with pytest.raises(ProviderError, match="RemoteProtocolError"):
+        async for event in provider.stream(model="m", messages=[], tools=[]):
+            events.append(event)
+    assert events == [TextDelta("par")]
+    assert calls["n"] == 1  # never retried after emitting output
 
 
 async def test_base_url_override_targets_local_proxy() -> None:
