@@ -132,7 +132,11 @@ and `secrets/`; without `--purge-data` it explicitly says both were kept. It the
 asks about the **system account** separately — `--remove-account` /
 `--keep-account` are the non-interactive answers, and keeping is the default,
 because chief's home holds its own message store and the dedicated Apple ID's
-whole conversation lives there.
+whole conversation lives there. The question is only asked when
+`data/account-setup` records an account *this* install created and that account
+still exists: a single-user install is never offered the deletion, and
+`--remove-account` there is a no-op rather than a `userdel` aimed at whatever
+pre-existing account happens to be named `chief`.
 
 ## The service
 

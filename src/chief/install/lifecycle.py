@@ -12,9 +12,10 @@ from pathlib import Path
 import httpx
 
 from chief.config import load_config
-from chief.install.account import DEFAULT_GROUP, DEFAULT_USER
+from chief.install.account import DEFAULT_GROUP
 from chief.install.account_steps import remove_steps
 from chief.install.dedicated import StepRunner, default_step_runner
+from chief.install.posture import ACCOUNT_REPORT, chief_account
 from chief.install.service import ServiceManager
 
 DEFAULT_LAUNCHER = Path.home() / ".local" / "bin" / "chief"
@@ -52,7 +53,6 @@ def uninstall(
     assume_yes: bool,
     remove_account: bool = False,
     keep_account: bool = False,
-    user: str = DEFAULT_USER,
     group: str = DEFAULT_GROUP,
     confirm: Callable[[str], str] = input,
     say: Callable[[str], None] = print,
@@ -62,7 +62,8 @@ def uninstall(
 
     The dedicated system account is only removed when asked for — its home
     holds chief's own message store. ``--remove-account`` / ``--keep-account``
-    are the non-interactive answers; without either, uninstall asks.
+    are the non-interactive answers; without either, uninstall asks. A
+    single-user install has no such account, and is never asked.
     """
     if purge_data and not assume_yes:
         answer = confirm(
@@ -80,15 +81,29 @@ def uninstall(
         say("data + secrets removed.")
     else:
         say("data + secrets kept (pass --purge-data to remove them).")
-    if not keep_account and _account_wanted(
-        remove_account, assume_yes, user, confirm
+    # Only this install's own report names an account it made; a bare `chief`
+    # in passwd may be someone else's, and userdel --remove takes the home
+    # with it. No report, no question and no steps.
+    account = chief_account(repo_dir / ACCOUNT_REPORT)
+    if account is None:
+        say("no dedicated system account was created by this install.")
+    elif keep_account or not _account_wanted(
+        remove_account, assume_yes, account[0], confirm
     ):
-        for step in remove_steps(service.platform, user, group):
-            say(f"  {step.description}")
-            execute(step)
-        say(f"system account {user} removed.")
+        say(
+            "system account kept "
+            f"(pass --remove-account to delete {account[0]})."
+        )
     else:
-        say(f"system account kept (pass --remove-account to delete {user}).")
+        failed = False
+        for step in remove_steps(service.platform, account[0], group):
+            say(f"  {step.description}")
+            failed |= execute(step).returncode != 0
+        say(
+            f"system account {account[0]} could not be removed — see above."
+            if failed
+            else f"system account {account[0]} removed."
+        )
     return 0
 
 
