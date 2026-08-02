@@ -6,13 +6,14 @@ Spawning runs a sub-session with its own tool loop and returns the final
 text. Subagents can never spawn further subagents.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
 
 from chief.agent.loop import run_turn
 from chief.budget import Budget
+from chief.gate import GatedFactory
 from chief.provider.base import Provider, ToolCall, ToolSpec
 from chief.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
 
@@ -22,7 +23,7 @@ class AgentDef:
     name: str
     description: str
     system_prompt: str
-    tools: tuple[str, ...] | None  # None = every tool (minus spawn)
+    tools: tuple[str, ...]  # default-closed: an omitted `tools:` grants none
     model: str | None
 
 
@@ -50,7 +51,7 @@ def _parse(path: Path) -> AgentDef | None:
         name=str(meta.get("name") or path.stem),
         description=str(meta.get("description") or "").strip(),
         system_prompt=body.strip(),
-        tools=tuple(tools) if tools else None,
+        tools=tuple(tools or ()),
         model=meta.get("model"),
     )
 
@@ -58,14 +59,14 @@ def _parse(path: Path) -> AgentDef | None:
 class FilteredTools:
     """A ToolDispatcher restricted to an allowlist (spawn always excluded)."""
 
-    def __init__(self, inner: ToolDispatcher, allow: tuple[str, ...] | None) -> None:
+    def __init__(self, inner: ToolDispatcher, allow: tuple[str, ...]) -> None:
         self._inner = inner
         self._allow = allow
 
     def _allowed(self, name: str) -> bool:
         if name == "spawn_agent":
             return False
-        return self._allow is None or name in self._allow
+        return name in self._allow
 
     def specs(self) -> list[ToolSpec]:
         return [s for s in self._inner.specs() if self._allowed(s.name)]
@@ -98,18 +99,36 @@ def register_spawn_tool(
     provider: Provider,
     default_model: str,
     budget: Budget | None = None,
+    *,
+    gated: GatedFactory,
 ) -> None:
-    """Expose spawn_agent; sub-sessions reuse the shared registry, filtered."""
+    """Expose spawn_agent; sub-sessions reuse the shared registry, filtered.
 
-    async def spawn_agent(name: str, task: str) -> str:
+    ``gated`` wraps the sub-session's dispatcher in the same gate as the
+    parent's, bound to the parent's ToolContext, so a subagent's tool calls
+    face the same never/approved/read_only/card decisions and land in the same
+    audit log. It is required, not optional: an ungated sub-session would skip
+    the gate entirely, ``gate.never`` included (#297).
+    """
+
+    async def spawn_agent(name: str, task: str, context: ToolContext | None) -> str:
         definition = agents.get(name)
         if definition is None:
             known = ", ".join(d.name for d in agents.scan()) or "none"
             return f"error: no agent named '{name}' (known: {known})"
+        if context is None:
+            # Nothing to card on and nobody to attribute to — never run ungated.
+            return "error: spawn_agent needs a session context"
 
         async def drop_delta(text: str) -> None:
             pass
 
+        # Gate outermost, filter inside: GatedTools.specs() then sees the
+        # filtered set, so a disallowed tool takes the plain unknown-tool
+        # error instead of carding the owner for an unreachable call.
+        tools = gated(
+            replace(context, agent=name), FilteredTools(registry, definition.tools)
+        )
         result = await run_turn(
             provider=provider,
             model=definition.model or default_model,
@@ -117,11 +136,11 @@ def register_spawn_tool(
                 {"role": "system", "content": definition.system_prompt},
                 {"role": "user", "content": task},
             ],
-            tools=FilteredTools(registry, definition.tools),
+            tools=tools,
             on_delta=drop_delta,
         )
         if budget is not None:
             await budget.record(f"subagent:{name}", result.usage.cost)
         return result.text
 
-    registry.register(Tool(_SPAWN_SPEC, spawn_agent))
+    registry.register(Tool(_SPAWN_SPEC, spawn_agent, wants_context=True))

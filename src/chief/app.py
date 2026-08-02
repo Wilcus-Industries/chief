@@ -77,26 +77,27 @@ async def _build_agent_core(
     registry = ToolRegistry()
     hooks, classifier = build_hooks(config, provider, budget)
 
-    def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
-        context = ToolContext(thread_key=thread_key, channel=channel)
+    async def announce(ctx: ToolContext, text: str) -> None:
+        if ctx.agent:  # name the subagent — the owner did not initiate this
+            text = f"subagent '{ctx.agent}' {text}"
+        await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
 
-        async def announce(ctx: ToolContext, text: str) -> None:
-            await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
-
+    def gated(context: ToolContext, inner: ToolDispatcher) -> ToolDispatcher:
         return GatedTools(
-            registry=registry, policy=gate.policy, audit=gate.audit,
+            registry=inner, policy=gate.policy, audit=gate.audit,
             context=context, ask=approval_asker(dispatcher, gate.approvals),
             on_always=gate.allow_always,
             announce=announce if config.gate_announce else None,
         )
 
+    def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
+        return gated(ToolContext(thread_key=thread_key, channel=channel), registry)
+
     restart = RestartController(repo_root=Path.cwd())
     window_resolver = WindowResolver(
-        windows=config.compaction_windows,
+        windows=config.compaction_windows, base_url=config.provider_base_url,
         default_window=config.compaction_default_window,
-        aliases=config.provider_aliases.keys(),
-        base_url=config.provider_base_url,
-        api_key=config.openrouter_api_key,
+        aliases=config.provider_aliases.keys(), api_key=config.openrouter_api_key,
     )
     manager = SessionManager(
         provider=provider,
@@ -108,11 +109,8 @@ async def _build_agent_core(
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
         compactor=Compactor(
-            provider,
-            config.default_model,
-            window_resolver,
-            ratio=config.compaction_ratio,
-            keep_recent=config.compaction_keep_recent,
+            provider, config.default_model, window_resolver,
+            ratio=config.compaction_ratio, keep_recent=config.compaction_keep_recent,
         ),
         restart_gate=restart,
         hooks=hooks,
@@ -129,7 +127,8 @@ async def _build_agent_core(
         run_command=guarded_runner(shell_service, shell_guards),
     )
     return Core(
-        budget, bus, hub, registry, restart, manager, dispatcher, monitors, cron
+        budget, bus, hub, registry, restart, manager, dispatcher, monitors, cron,
+        gated,
     )
 
 
@@ -156,19 +155,12 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     model_aliases = frozenset(config.provider_aliases)
     register_native_tools(
         core.registry,
-        manager=core.manager,
-        monitor_service=core.monitors,
-        cron_service=core.cron,
-        selfedit_pipeline=selfedit_pipeline,
-        skills=skills,
-        shell_service=shell_service,
-        provider=provider,
-        agents_dir=config.agents_dir,
-        default_model=config.default_model,
-        budget=core.budget,
-        root=Path.cwd(),
-        shell_guards=shell_guards,
-        model_aliases=model_aliases,
+        manager=core.manager, monitor_service=core.monitors, cron_service=core.cron,
+        selfedit_pipeline=selfedit_pipeline, skills=skills,
+        shell_service=shell_service, provider=provider,
+        agents_dir=config.agents_dir, default_model=config.default_model,
+        budget=core.budget, root=Path.cwd(), shell_guards=shell_guards,
+        model_aliases=model_aliases, gated=core.gated,
         ask=approval_asker(core.dispatcher, gate.approvals),
     )
     await ensure_update_schedule(core.cron, config)

@@ -18,7 +18,7 @@ from chief.agent.session_tools import register_session_tools
 from chief.budget import Budget
 from chief.cron.service import CronService
 from chief.cron.tools import register_cron_tools
-from chief.gate import AskApproval
+from chief.gate import AskApproval, GatedFactory
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.provider.base import Provider
@@ -45,6 +45,7 @@ def register_native_tools(
     default_model: str,
     budget: Budget,
     root: Path,
+    gated: GatedFactory,
     shell_guards: Sequence[ShellGuard] = (),
     model_aliases: frozenset[str] = frozenset(),
     ask: AskApproval | None = None,
@@ -55,9 +56,10 @@ def register_native_tools(
     ``agents_dir`` seeds the subagent registry for ``spawn_agent``;
     ``shell_service`` owns the host shells the ``shell`` tool drives;
     ``model_aliases`` are the configured ``provider_aliases`` keys that
-    ``switch_model`` validates against; ``ask`` is the approval-card path the
-    ``schedule`` tool raises for command schedules (without it, creating one is
-    refused).
+    ``switch_model`` validates against; ``gated`` re-gates a subagent's
+    sub-session against its parent's context (#297); ``ask`` is the
+    approval-card path the ``schedule`` tool raises for command schedules
+    (without it, creating one is refused).
     """
     register_session_tools(registry, manager)
     register_switch_model_tool(registry, manager, model_aliases=model_aliases)
@@ -68,5 +70,6 @@ def register_native_tools(
     register_restart_tool(registry, selfedit_pipeline)
     register_skill_tools(registry, skills)
     register_spawn_tool(
-        registry, AgentRegistry(agents_dir), provider, default_model, budget
+        registry, AgentRegistry(agents_dir), provider, default_model, budget,
+        gated=gated,
     )
