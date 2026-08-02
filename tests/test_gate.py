@@ -94,6 +94,39 @@ def test_grant_covers_only_the_argument_it_names() -> None:
     assert policy.decide("peek", {"actions": [], "fill": "x"}) is Decision.ASK
 
 
+def test_a_grant_approves_without_the_bare_name_being_approved() -> None:
+    """The tap that raised the card has to be enough on its own.
+
+    A composite grant lifts the ask_when veto, but the decision used to fall
+    through to the bare-name check — so "always" on a tool that is not
+    independently approved granted nothing usable and re-carded forever. Every
+    other ask_when test seeds the bare name alongside the grant, which is why
+    this went unnoticed.
+    """
+    policy = GatePolicy(
+        approved={grant_key("peek", "actions")},
+        ask_when={"peek": ("actions",)},
+    )
+    assert policy.pending_arguments("peek", {"actions": []}) == ()
+    assert policy.decide("peek", {"actions": []}) is Decision.APPROVED
+    # Still argument-scoped: a call not carrying a watched argument is decided
+    # by the ordinary lists, where `peek` is approved by nothing.
+    assert policy.decide("peek", {"url": "u"}) is Decision.ASK
+
+
+def test_always_on_an_ask_when_card_stops_the_carding_next_time() -> None:
+    """The round trip the owner actually performs, at the policy layer.
+
+    Mirrors what ``GatedTools._ask_card`` persists on an ALWAYS answer.
+    """
+    policy = GatePolicy(ask_when={"peek": ("actions",)})
+    call = {"actions": [{"click": "a"}]}
+    assert policy.decide("peek", call) is Decision.ASK
+    for argument in policy.pending_arguments("peek", call):
+        policy.allow_always(grant_key("peek", argument))
+    assert policy.decide("peek", call) is Decision.APPROVED
+
+
 def make_gated(
     tmp_path: Path,
     answer: Approval,

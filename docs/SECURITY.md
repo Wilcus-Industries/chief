@@ -24,24 +24,39 @@ Three sender values matter (`dispatch.py`): `owner`, `system`, and anything else
 
 ## The gate — `gate.py`
 
-**Gating is by tool name only.** Arguments are never inspected for the decision;
-they are only rendered into announcement and card text. A tool approved once with
-"always" is approved for every argument it will ever receive — an approved `shell`
-is an approved *anything*.
+**Gating is by tool name, plus `ask_when`'s argument *presence*.** Argument
+*values* are never inspected for the decision; they are only rendered into
+announcement and card text. Outside an `ask_when` rule, a tool approved once
+with "always" is approved for every argument it will ever receive — an approved
+`shell` is an approved *anything*.
 
 `GatedTools.dispatch` decides in strict order:
 
 1. **Unknown tool name** → record `unknown_tool`, pass through to the registry for
    a helpful error. **A hallucinated name must never raise a card**, and must
    never be able to persist an "always" for a tool that doesn't exist.
-2. **`policy.decide(name)`** — `never` → NEVER; `"*"` or an exact name in
-   `approved` → APPROVED; else ASK. **`never` is checked first and beats the `"*"`
-   wildcard.**
-3. **ASK + `read_only`** → auto-approved and announced.
+2. **`policy.decide(name, arguments)`** — `never` → NEVER. Then, if the call
+   carries any argument named by that tool's `ask_when` rule, **the call is
+   decided by its grants alone**: every carried watched argument holding a
+   `tool:argument` grant → APPROVED, otherwise ASK. The bare name is neither
+   required nor sufficient there. Only when no watched argument is present do
+   `"*"` or an exact name in `approved` → APPROVED; else ASK. **`never` is
+   checked first and beats everything; `ask_when` beats `"*"` and an explicit
+   approve.**
+3. **ASK + `read_only`** → auto-approved and announced — *unless* the call has
+   pending watched arguments. **`ask_when` outranks `read_only`**: the tool may
+   only read, but the argument is what makes it act.
 4. **ASK otherwise** → approval card. Deliberately *not* announced — the card
    already shows the call, and a second line would double it.
 5. **NEVER** → returns an error *string* to the model, not an exception. The turn
    continues and the model sees the denial.
+
+**"always" on an `ask_when` card grants `tool:argument`, not the tool.** That is
+why step 2 checks grants before the bare name: a composite grant only lifts the
+veto, so consulting the bare name first would make "always" a no-op that re-cards
+forever on a tool nothing else approves. The grant is still narrow — it never
+approves a call that doesn't carry that argument, and never covers a sibling
+argument.
 
 `ASK` is never terminal; it always resolves to NEVER or APPROVED.
 

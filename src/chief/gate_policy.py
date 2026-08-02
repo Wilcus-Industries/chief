@@ -61,11 +61,25 @@ class GatePolicy:
     ) -> Decision:
         if tool_name in self.never:
             return Decision.NEVER
-        if self.pending_arguments(tool_name, arguments):
-            return Decision.ASK
+        if self._watched_present(tool_name, arguments):
+            # A call carrying a watched argument is decided by its grants
+            # alone — the bare name is neither required nor sufficient. This
+            # must come *before* the bare-name branch: a composite grant only
+            # lifts the veto, so falling through would leave "always" a no-op
+            # that re-cards forever on a tool nothing else approves.
+            if self.pending_arguments(tool_name, arguments):
+                return Decision.ASK
+            return Decision.APPROVED
         if "*" in self.approved or tool_name in self.approved:
             return Decision.APPROVED
         return Decision.ASK
+
+    def _watched_present(
+        self, tool_name: str, arguments: Mapping[str, Any] | None
+    ) -> tuple[str, ...]:
+        """The watched argument names this call actually carries."""
+        watched = self.ask_when.get(tool_name) or ()
+        return tuple(name for name in watched if name in (arguments or {}))
 
     def pending_arguments(
         self, tool_name: str, arguments: Mapping[str, Any] | None = None
@@ -74,10 +88,10 @@ class GatePolicy:
 
         Non-empty means the call must be carded no matter what the lists say.
         """
-        watched = self.ask_when.get(tool_name) or ()
-        present = (name for name in watched if name in (arguments or {}))
         return tuple(
-            name for name in present if grant_key(tool_name, name) not in self.approved
+            name
+            for name in self._watched_present(tool_name, arguments)
+            if grant_key(tool_name, name) not in self.approved
         )
 
     def allow_always(self, tool_name: str) -> None:

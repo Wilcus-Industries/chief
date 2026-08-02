@@ -112,6 +112,18 @@ Notes on specific keys:
   wins. Answering **always** to such a card persists `mcp_hound_smart_fetch:actions`
   (tool + the argument that raised it) rather than the bare tool name, so one
   tap never approves the tool's other watched arguments.
+
+  Two consequences of matching on presence alone. **One "always" covers every
+  future value of that argument** — granting `actions` once approves every later
+  call carrying `actions`, whatever it clicks; the gate does not read what is
+  inside. And the grant *is* the approval: a tool that is otherwise unapproved
+  becomes callable **only** for calls carrying a granted argument, and still
+  cards for anything else.
+
+  The argument name is matched verbatim against the call's arguments and is
+  **not validated against the tool's schema** — a typo names an argument that
+  never arrives, silently leaving the tool on whatever its ordinary listing
+  says. Check the spelling against the tool's parameters.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
 - **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,
   today's install: the owner's own, chief texted through the self-chat) or
