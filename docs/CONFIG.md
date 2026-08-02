@@ -55,6 +55,7 @@ template line.
 | *(secret file)* | `openrouter_api_key` | `str` | `""` | `OPENROUTER_API_KEY` |
 | `gate.never` | `gate_never` | `tuple` | `()` | — |
 | `gate.approved` | `gate_approved` | `tuple` | `()` | — |
+| `gate.ask_when` | `gate_ask_when` | `dict` | `{}` | — |
 | `gate.announce` | `gate_announce` | `bool` | `True` | — |
 | `budget.cap_usd` | `budget_cap_usd` | `float` | `0.0` (unlimited) | — |
 | `budget.warn_ratio` | `budget_warn_ratio` | `float` | `0.8` | — |
@@ -95,6 +96,22 @@ Notes on specific keys:
   env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
   closed and no listener is built.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
+- **`gate.ask_when` cards an approved tool when a named argument is present** —
+  for tools that are two actions in one. hound's `smart_fetch` reads a page, but
+  the same call carrying `actions` clicks and submits on it:
+
+  ```yaml
+  gate:
+    approved: [mcp_hound_smart_fetch]
+    ask_when:
+      mcp_hound_smart_fetch: [actions]
+  ```
+
+  Matching is on presence, not value, and it outranks every auto-approve —
+  `"*"`, an explicit approve, and the read-only fast path. `gate.never` still
+  wins. Answering **always** to such a card persists `mcp_hound_smart_fetch:actions`
+  (tool + the argument that raised it) rather than the bare tool name, so one
+  tap never approves the tool's other watched arguments.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
 - **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,
   today's install: the owner's own, chief texted through the self-chat) or
@@ -164,7 +181,7 @@ hand-edit config from a package install; use `config_apply`.
 | `chief.db` | sqlite sessions + transcripts; schema created at boot, **no migrations** |
 | `chief.sock` | unix socket for `chief-cli` |
 | `audit.jsonl` | every gated tool call |
-| `gate_approved.json` | persisted "always allow" set, minus config-approved |
+| `gate_approved.json` | persisted "always allow" set, minus config-approved; a `tool:argument` entry is an `ask_when` grant |
 | `installed.yaml` | package install registry |
 | `packages/` | clone of `packages_repo`, pulled by `chief-pkg update` |
 | `hooks/<package>/` | per-package hook scratch state |

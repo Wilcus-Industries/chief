@@ -3,22 +3,22 @@
 NEVER and APPROVED lists decide most calls; read-only tools auto-approve; the
 remaining gray zone raises an approval card on the session's own surface. From
 a card the owner can approve once or "always allow" a tool, which persists it
-to the approved set (#187). Every call that does *not* raise a card is instead
-announced on the session's surface as it starts, so an approved or "always"
-tool stays visible to the owner instead of running silently. Everything
-behavioral lives in prompts — this file only enforces.
+to the approved set (#187). A ``gate.ask_when`` argument pulls an otherwise
+approved tool back into the card path — see :mod:`chief.gate_policy` for the
+rules and for what "always" persists there. Every call that does *not* raise a
+card is instead announced on the session's surface as it starts, so an approved
+or "always" tool stays visible to the owner instead of running silently.
+Everything behavioral lives in prompts — this file only enforces.
 """
 
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
 
 from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.dispatch import WEB_CHANNEL, Dispatcher
+from chief.gate_policy import Decision, GatePolicy, grant_key
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import ToolContext, ToolDispatcher
 
@@ -27,37 +27,6 @@ logger = logging.getLogger(__name__)
 # Arguments are rendered into the announcement line; a shell heredoc or a
 # whole file body would otherwise flood the owner's channel.
 ANNOUNCE_ARG_LIMIT = 160
-
-
-class Decision(Enum):
-    NEVER = "never"
-    APPROVED = "approved"
-    ASK = "ask"
-
-
-@dataclass
-class GatePolicy:
-    """The code-enforced lists; anything on neither list asks.
-
-    ``approved`` is a live set — an "always allow" answer adds to it so the
-    tool stops asking for the rest of the process (and is persisted so it
-    survives a restart). A ``"*"`` entry in ``approved`` matches every tool
-    name (the config-driven "all tools" switch); ``never`` still takes
-    precedence over it.
-    """
-
-    never: frozenset[str] = frozenset()
-    approved: set[str] = field(default_factory=set)
-
-    def decide(self, tool_name: str) -> Decision:
-        if tool_name in self.never:
-            return Decision.NEVER
-        if "*" in self.approved or tool_name in self.approved:
-            return Decision.APPROVED
-        return Decision.ASK
-
-    def allow_always(self, tool_name: str) -> None:
-        self.approved.add(tool_name)
 
 
 AskApproval = Callable[[ToolContext, str], Awaitable[Approval]]
@@ -100,19 +69,6 @@ def announce_text(call: ToolCall, *, denied: bool = False) -> str:
     return f"⚙ {call.name} {arguments}{suffix}"
 
 
-def load_approved(path: Path) -> set[str]:
-    """Read the persisted "always allow" tool names (empty if absent)."""
-    if not path.exists():
-        return set()
-    return set(json.loads(path.read_text()))
-
-
-def save_approved(names: set[str], path: Path) -> None:
-    """Persist the "always allow" tool names, sorted for a stable file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted(names)))
-
-
 class GatedTools:
     """Per-session tool dispatcher: gate + audit around the shared registry."""
 
@@ -148,14 +104,17 @@ class GatedTools:
             # self-correct. Nothing runs, so nothing is announced either.
             self._record(call, "unknown_tool")
             return await self._registry.dispatch(call, self._context)
-        decision = self._policy.decide(call.name)
-        if decision is Decision.ASK and call.name in self._read_only():
+        decision = self._policy.decide(call.name, call.arguments)
+        # A watched argument outranks every auto-approve, read_only included:
+        # the tool may only read, but the argument is what makes it act.
+        pending = self._policy.pending_arguments(call.name, call.arguments)
+        if decision is Decision.ASK and not pending and call.name in self._read_only():
             decision = Decision.APPROVED
             self._record(call, "read_only")
             await self._announce_call(call, denied=False)
         elif decision is Decision.ASK:
             # The card already shows the call; a second line would double it.
-            decision = await self._ask_card(call)
+            decision = await self._ask_card(call, pending)
         else:
             self._record(call, f"list:{decision.value}")
             await self._announce_call(call, denied=decision is Decision.NEVER)
@@ -177,11 +136,20 @@ class GatedTools:
         except Exception:
             logger.exception("failed to announce tool call %s", call.name)
 
-    async def _ask_card(self, call: ToolCall) -> Decision:
-        question = f"approve tool call {call.name}({call.arguments})? yes / always / no"
+    async def _ask_card(
+        self, call: ToolCall, pending: tuple[str, ...] = ()
+    ) -> Decision:
+        carries = f" — carries {', '.join(pending)}" if pending else ""
+        question = (
+            f"approve tool call {call.name}({call.arguments})"
+            f"{carries}? yes / always / no"
+        )
         answer = await self._ask(self._context, question)
         if answer is Approval.ALWAYS:
-            self._on_always(call.name)
+            # An ask_when card grants the argument that raised it, not the
+            # whole tool — otherwise one tap would approve every other use.
+            for grant in [grant_key(call.name, arg) for arg in pending] or [call.name]:
+                self._on_always(grant)
         self._record(call, f"card:{answer.value}")
         return Decision.NEVER if answer is Approval.DENY else Decision.APPROVED
 

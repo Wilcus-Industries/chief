@@ -72,6 +72,10 @@ class Config:
     provider_aliases: dict[str, "AliasSpec"] = field(default_factory=dict)
     gate_never: tuple[str, ...] = ()
     gate_approved: tuple[str, ...] = ()
+    # Tool name -> argument names that force an approval card even when the
+    # tool is approved, for tools that are two actions in one (hound's
+    # smart_fetch reads a page; the same call carrying `actions` clicks on it).
+    gate_ask_when: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Announce every non-card tool call on the session's own surface, so an
     # approved / "always allow"ed tool stays visible instead of silent.
     gate_announce: bool = True

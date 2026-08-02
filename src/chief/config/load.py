@@ -103,6 +103,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         provider_aliases=coerce.aliases(raw.get("provider_aliases") or {}),
         gate_never=tuple(gate.get("never") or ()),
         gate_approved=tuple(gate.get("approved") or ()),
+        gate_ask_when=coerce.ask_when(gate.get("ask_when")),
         gate_announce=bool(gate.get("announce", True)),
         budget_cap_usd=float(budget.get("cap_usd", 0.0)),
         budget_warn_ratio=float(budget.get("warn_ratio", 0.8)),

@@ -23,13 +23,9 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
-from chief.gate import GatePolicy, load_approved, save_approved
+from chief.gate_policy import GatePolicy, load_approved, save_approved
 from chief.hub import ObserverHub
-from chief.mcpclient.manager import (
-    McpManager,
-    ServerConfig,
-    server_config_from_entry,
-)
+from chief.mcpclient.manager import McpManager, ServerConfig, server_config_from_entry
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -134,6 +130,7 @@ def build_gate(config: Config) -> Gate:
     policy = GatePolicy(
         never=frozenset(config.gate_never),
         approved=config_approved | load_approved(approved_path),
+        ask_when=config.gate_ask_when,
     )
 
     def allow_always(tool_name: str) -> None:

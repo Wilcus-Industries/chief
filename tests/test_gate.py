@@ -9,11 +9,11 @@ from chief.agent.manager import SessionManager
 from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
-from chief.gate import (
+from chief.gate import GatedTools, approval_asker
+from chief.gate_policy import (
     Decision,
-    GatedTools,
     GatePolicy,
-    approval_asker,
+    grant_key,
     load_approved,
     save_approved,
 )
@@ -53,16 +53,58 @@ def test_star_wildcard_approves_every_tool() -> None:
     assert policy.decide("rm_rf") is Decision.NEVER
 
 
+def ask_when_policy(*grants: str) -> GatePolicy:
+    """``peek`` is read-only and ``echo`` approved — both watch ``actions``."""
+    return GatePolicy(
+        never=frozenset({"rm_rf"}),
+        approved={"echo", *grants},
+        ask_when={"echo": ("actions",), "peek": ("actions", "fill")},
+    )
+
+
+def test_ask_when_argument_cards_an_otherwise_approved_tool() -> None:
+    policy = ask_when_policy()
+    assert policy.decide("echo", {"text": "x"}) is Decision.APPROVED
+    assert policy.decide("echo", {"actions": [{"click": "a"}]}) is Decision.ASK
+
+
+def test_ask_when_beats_the_star_wildcard() -> None:
+    policy = GatePolicy(
+        never=frozenset({"rm_rf"}),
+        approved={"*"},
+        ask_when={"fetch": ("actions",)},
+    )
+    assert policy.decide("fetch", {"url": "u"}) is Decision.APPROVED
+    assert policy.decide("fetch", {"actions": []}) is Decision.ASK
+    assert policy.decide("rm_rf", {"actions": []}) is Decision.NEVER
+
+
+def test_argument_scoped_grant_stops_the_carding() -> None:
+    policy = ask_when_policy(grant_key("echo", "actions"))
+    assert policy.decide("echo", {"actions": []}) is Decision.APPROVED
+
+
+def test_grant_covers_only_the_argument_it_names() -> None:
+    """Granting ``actions`` must not silently approve a sibling argument."""
+    policy = GatePolicy(
+        approved={"peek", grant_key("peek", "actions")},
+        ask_when={"peek": ("actions", "fill")},
+    )
+    assert policy.decide("peek", {"actions": []}) is Decision.APPROVED
+    assert policy.decide("peek", {"actions": [], "fill": "x"}) is Decision.ASK
+
+
 def make_gated(
     tmp_path: Path,
     answer: Approval,
     *,
     on_always: object = None,
     announced: list[str] | None = None,
+    policy: GatePolicy | None = None,
 ) -> tuple[GatedTools, list[str]]:
     registry = ToolRegistry()
 
-    async def echo(text: str = "") -> str:
+    async def echo(text: str = "", **_ignored: object) -> str:
         return f"ran:{text}"
 
     specs = [
@@ -85,7 +127,7 @@ def make_gated(
 
     gated = GatedTools(
         registry=registry,
-        policy=make_policy(),
+        policy=policy or make_policy(),
         audit=AuditLog(tmp_path / "audit.jsonl"),
         context=CONTEXT,
         ask=ask,
@@ -139,6 +181,72 @@ async def test_always_answer_runs_and_persists_tool(tmp_path: Path) -> None:
     result = await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
     assert result == "ran:"
     assert promoted == ["gray"]
+
+
+async def test_ask_when_beats_the_read_only_auto_approve(tmp_path: Path) -> None:
+    """``peek`` is read-only, but a watched argument still has to be carded."""
+    gated, questions = make_gated(
+        tmp_path, Approval.ONCE, policy=ask_when_policy()
+    )
+    result = await gated.dispatch(
+        ToolCall(id="1", name="peek", arguments={"actions": [{"click": "a"}]})
+    )
+    assert result == "ran:"
+    assert len(questions) == 1
+    assert "actions" in questions[0]
+
+
+async def test_read_only_tool_still_auto_approves_without_the_argument(
+    tmp_path: Path,
+) -> None:
+    gated, questions = make_gated(
+        tmp_path, Approval.DENY, policy=ask_when_policy()
+    )
+    assert await gated.dispatch(ToolCall(id="1", name="peek", arguments={})) == "ran:"
+    assert questions == []
+
+
+async def test_always_on_an_ask_when_card_grants_only_that_argument(
+    tmp_path: Path,
+) -> None:
+    """The switch stays consistent with every other card — it just persists
+    the tool+argument the rule named, not the tool wholesale."""
+    promoted: list[str] = []
+    gated, _ = make_gated(
+        tmp_path,
+        Approval.ALWAYS,
+        on_always=promoted.append,
+        policy=ask_when_policy(),
+    )
+    await gated.dispatch(
+        ToolCall(id="1", name="echo", arguments={"actions": [], "text": "x"})
+    )
+    assert promoted == ["echo:actions"]
+
+
+async def test_always_on_an_ordinary_card_still_grants_the_bare_name(
+    tmp_path: Path,
+) -> None:
+    promoted: list[str] = []
+    gated, _ = make_gated(
+        tmp_path,
+        Approval.ALWAYS,
+        on_always=promoted.append,
+        policy=ask_when_policy(),
+    )
+    await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
+    assert promoted == ["gray"]
+
+
+async def test_never_still_wins_over_a_watched_argument(tmp_path: Path) -> None:
+    gated, questions = make_gated(
+        tmp_path, Approval.ONCE, policy=ask_when_policy()
+    )
+    result = await gated.dispatch(
+        ToolCall(id="1", name="rm_rf", arguments={"actions": []})
+    )
+    assert result == "error: tool 'rm_rf' denied by the gate"
+    assert questions == []
 
 
 async def test_unknown_tool_errors_without_card(tmp_path: Path) -> None:
@@ -230,7 +338,7 @@ async def test_announce_failure_does_not_break_the_call(tmp_path: Path) -> None:
     """A dead channel must not turn a working tool call into an error."""
     registry = ToolRegistry()
 
-    async def echo(text: str = "") -> str:
+    async def echo(text: str = "", **_ignored: object) -> str:
         return f"ran:{text}"
 
     registry.register(
