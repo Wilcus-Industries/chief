@@ -665,6 +665,29 @@ async def test_a_group_both_accounts_are_in_is_delivered_once(
     assert [m.text for m in harness.delivered] == ["dinner at 7"]
 
 
+async def test_a_group_delivers_once_whichever_store_sees_it_first(
+    tmp_path: Path,
+) -> None:
+    """The two stores keep independent cursors and two Messages processes write
+    them independently, so the owner's copy can land a tick ahead of chief's.
+    Suppressing only on the chief-first order leaves the other order double-
+    delivering — and the window cannot save it, being measured on the row's own
+    date, which is identical in both stores."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()  # owner's store gets there first
+    await adapter.drain()
+    harness.store.add_message("+15557776666", "dinner at 7", group=True, date=100)
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["dinner at 7"]
+
+
 async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
     """Rowids are per-store: one shared cursor would skip whichever store is
     behind, silently dropping messages."""

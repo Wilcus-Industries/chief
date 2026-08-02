@@ -133,10 +133,15 @@ asks about the **system account** separately — `--remove-account` /
 `--keep-account` are the non-interactive answers, and keeping is the default,
 because chief's home holds its own message store and the dedicated Apple ID's
 whole conversation lives there. The question is only asked when
-`data/account-setup` records an account *this* install created and that account
-still exists: a single-user install is never offered the deletion, and
+`data/account-setup` records the account this install set chief up with —
+created *or* adopted (`mode=existing`) — and that account still resolves to a
+real passwd entry: a single-user install is never offered the deletion, and
 `--remove-account` there is a no-op rather than a `userdel` aimed at whatever
-pre-existing account happens to be named `chief`.
+pre-existing account happens to be named `chief`. An adopted account is
+removable the same way a created one is, so on an `existing` install
+`--remove-account` deletes a user that predates chief, home and all. The report
+survives re-runs that skip or decline the account offer; only a fresh
+create/adopt answer replaces it.
 
 ## The service
 

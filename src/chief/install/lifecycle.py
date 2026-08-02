@@ -72,6 +72,10 @@ def uninstall(
         if answer.strip().lower() not in ("y", "yes"):
             say("aborted — nothing removed.")
             return 1
+    # Read before the purge: --purge-data deletes data/, which is where the
+    # report lives, and a run told to remove the account would then find no
+    # record of one and report that it never existed.
+    account = chief_account(repo_dir / ACCOUNT_REPORT)
     service.uninstall()
     launcher.unlink(missing_ok=True)
     say("service + launcher removed.")
@@ -81,12 +85,11 @@ def uninstall(
         say("data + secrets removed.")
     else:
         say("data + secrets kept (pass --purge-data to remove them).")
-    # Only this install's own report names an account it made; a bare `chief`
-    # in passwd may be someone else's, and userdel --remove takes the home
-    # with it. No report, no question and no steps.
-    account = chief_account(repo_dir / ACCOUNT_REPORT)
+    # Only this install's own report names the account it set chief up with; a
+    # bare `chief` in passwd may be someone else's, and userdel --remove takes
+    # the home with it. No report, no question and no steps.
     if account is None:
-        say("no dedicated system account was created by this install.")
+        say("no dedicated system account is recorded for this install.")
     elif keep_account or not _account_wanted(
         remove_account, assume_yes, account[0], confirm
     ):
@@ -95,15 +98,14 @@ def uninstall(
             f"(pass --remove-account to delete {account[0]})."
         )
     else:
-        failed = False
         for step in remove_steps(service.platform, account[0], group):
             say(f"  {step.description}")
-            failed |= execute(step).returncode != 0
-        say(
-            f"system account {account[0]} could not be removed — see above."
-            if failed
-            else f"system account {account[0]} removed."
-        )
+            if execute(step).returncode != 0:
+                # Stop: groupdel --force after a failed userdel takes the group
+                # out from under an account that is still there.
+                say(f"system account {account[0]} could not be removed.")
+                return 1
+        say(f"system account {account[0]} removed.")
     return 0
 
 

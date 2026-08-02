@@ -866,8 +866,16 @@ def test_a_grant_that_reaches_past_the_home_root_is_refused(
     than failing its step after the account and tree steps have landed."""
     home = tmp_path / "home" / "owner"
     (home / "notes").mkdir(parents=True)
-    for refused in (home / "..", home, Path("/"), Path("notes"), home / "nope"):
-        assert grant_reason(refused, home) is not None, refused
+    refused = (
+        home / "..",  # resolves to the parent of every account on the box
+        home,
+        Path("/"),
+        Path("notes"),  # relative
+        home / "nope",  # a typo, whose chgrp would abort the plan mid-flight
+        Path("/etc"),  # group-write on sudoers/shadow is root, not a grant
+    )
+    for path in refused:
+        assert grant_reason(path, home) is not None, path
     assert grant_reason(home / "notes", home) is None
 
 
@@ -1001,8 +1009,16 @@ def test_the_service_definition_can_be_written_without_starting_it(
     assert runner.calls == []
 
 
-def _account_report(repo_dir: Path, user: str) -> None:
-    """The installer's record that *this* install owns an account named `user`."""
+def _account_report(repo_dir: Path, user: str = "nobody") -> None:
+    """The installer's record that *this* install owns an account named `user`.
+
+    `nobody` on purpose: `chief_account` resolves the name through
+    `pwd.getpwnam`, so it must exist — and these tests build real
+    `sudo userdel --remove <user>` steps. They only stay inert because every
+    call site passes a recording executor; `uninstall`'s own default is a live
+    `subprocess.run`. The one account that exists everywhere and belongs to
+    nobody is the only safe name to write here.
+    """
     (repo_dir / "data").mkdir(parents=True, exist_ok=True)
     (repo_dir / "data" / "account-setup").write_text(f"mode=create\nuser={user}\n")
 
@@ -1012,7 +1028,7 @@ def test_uninstall_keeps_the_system_account_unless_asked(tmp_path: Path) -> None
     manager = ServiceManager(
         platform="linux", home=tmp_path, runner=runner, uid=1000
     )
-    _account_report(tmp_path, getpass.getuser())
+    _account_report(tmp_path)
     said: list[str] = []
     steps = RecordingRunner()
     uninstall(
@@ -1034,8 +1050,8 @@ def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
     manager = ServiceManager(
         platform="linux", home=tmp_path, runner=runner, uid=1000
     )
-    me = getpass.getuser()
-    _account_report(tmp_path, me)
+    me = "nobody"
+    _account_report(tmp_path)
     steps = RecordingRunner()
     uninstall(
         service=manager,
@@ -1080,6 +1096,61 @@ def test_uninstall_never_touches_an_account_this_install_did_not_create(
     assert not any("system account chief removed." in line for line in said)
 
 
+def test_purging_data_does_not_hide_the_account_from_the_same_run(
+    tmp_path: Path,
+) -> None:
+    """--purge-data deletes data/, which is where the account report lives. Read
+    it before the rmtree or the run that was told to remove the account finds
+    no record of one, keeps it, and says it never existed."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=True,
+        assume_yes=True,
+        remove_account=True,
+        say=said.append,
+        execute=steps,
+    )
+    assert "sudo userdel --remove nobody" in [
+        " ".join(s.command()) for s in steps.steps
+    ]
+    assert "system account nobody removed." in said
+
+
+def test_uninstall_stops_and_fails_when_a_removal_step_fails(
+    tmp_path: Path,
+) -> None:
+    """groupdel --force after a failed userdel deletes the group out from under
+    an account that still exists, and a scripted uninstall reads exit 0 as
+    success."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    steps = RecordingRunner(fail="userdel")
+    code = uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        remove_account=True,
+        say=lambda _: None,
+        execute=steps,
+    )
+    assert code == 1
+    assert not any("groupdel" in " ".join(s.command()) for s in steps.steps)
+
+
 def test_uninstall_does_not_claim_removal_when_the_steps_fail(
     tmp_path: Path,
 ) -> None:
@@ -1089,8 +1160,8 @@ def test_uninstall_does_not_claim_removal_when_the_steps_fail(
     manager = ServiceManager(
         platform="linux", home=tmp_path, runner=runner, uid=1000
     )
-    me = getpass.getuser()
-    _account_report(tmp_path, me)
+    me = "nobody"
+    _account_report(tmp_path)
     said: list[str] = []
     uninstall(
         service=manager,

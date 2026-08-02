@@ -93,20 +93,28 @@ fi
 CHIEF_USER=""
 CHIEF_HOME=""
 ACCOUNT_REPORT="$REPO_DIR/data/account-setup"
-rm -f "$ACCOUNT_REPORT"
 if [ "$SINGLE_USER" = 1 ]; then
   say "skipping the dedicated-account offer (--single-user)"
 elif [ "$NON_INTERACTIVE" = 1 ] || [ ! -r /dev/tty ]; then
   say "dedicated account: not offered (no terminal) — chief runs as you"
 else
   say "dedicated system account"
+  # Written aside and moved over the real report only on an account answer.
+  # Re-runs are idempotent and the offer can be skipped (--single-user, no
+  # tty) or declined, and none of those mean the account an earlier run set up
+  # has gone away — but `chief uninstall` reads this file to decide whether
+  # there is an account to remove at all, so erasing it strands one.
+  FRESH_REPORT=$(mktemp)
   uv run python -m chief.install account \
-    --tree "$REPO_DIR" --report "$ACCOUNT_REPORT" < /dev/tty
+    --tree "$REPO_DIR" --report "$FRESH_REPORT" < /dev/tty
   # -E, not BRE alternation: BSD grep (macOS — the platform this targets) does
   # not understand \(a\|b\), and a silent no-match installs the wrong mode.
-  if grep -qE '^mode=(create|existing)$' "$ACCOUNT_REPORT" 2>/dev/null; then
+  if grep -qE '^mode=(create|existing)$' "$FRESH_REPORT" 2>/dev/null; then
+    mv "$FRESH_REPORT" "$ACCOUNT_REPORT"
     CHIEF_USER=$(sed -n 's/^user=//p' "$ACCOUNT_REPORT")
     CHIEF_HOME=$(sed -n 's/^home=//p' "$ACCOUNT_REPORT")
+  else
+    rm -f "$FRESH_REPORT"
   fi
 fi
 

@@ -141,15 +141,23 @@ class IMessageAdapter(Adapter):
                 message = self._map(sender, text, from_me, group_chat, in_self)
                 if message is None:
                     continue
-                # Always record, so a group both accounts are in primes the
-                # window from whichever store reads it first; suppress only
-                # where a repeat is an artefact rather than a real message.
-                # Chief's own store in dedicated mode is the one place two
-                # identical texts seconds apart are genuinely two messages.
-                twin = self._dedup.is_duplicate(
-                    (message.thread_key, message.sender, message.text), date
+                # Recorded either way, so a group chat both accounts are in
+                # primes the window from whichever store gets there first (the
+                # cursors are independent, so either order happens). A repeat
+                # across stores is one message counted twice; one inside
+                # chief's own store is a self-DM twin — except in dedicated
+                # mode, where two identical texts really are two messages.
+                # Cost: keyed (thread_key, sender, text) over 5s, so a text
+                # sent to both accounts at once reaches chief once, losing the
+                # owner's-store copy — that path feeds monitors only.
+                prev = self._dedup.see(
+                    (message.thread_key, message.sender, message.text),
+                    date,
+                    store.mine,
                 )
-                if twin and not (self._dedicated and store.mine):
+                if prev is not None and not (
+                    self._dedicated and store.mine and prev[1]
+                ):
                     continue
                 if self._resolve_approval is not None and self._resolve_approval(
                     message

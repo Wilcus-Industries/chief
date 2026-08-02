@@ -23,17 +23,22 @@ __all__ = ["CREATE", "DECLINED", "EXISTING", "Answers", "ask", "grant_reason"]
 def grant_reason(path: Path, home: Path) -> str | None:
     """Why this directory may not be granted, or ``None`` if it may.
 
-    Judged on the *resolved* path: the grant is a recursive, irreversible
-    ``chgrp``, and ``~/..`` reaches every account on the box under a name that
-    does not look like it. A path that does not exist is refused here rather
-    than left to fail its step, which aborts the plan after the account and
-    tree steps have already landed.
+    The question asked is which of *your* directories chief may reach, and
+    strictly-inside-your-home is that question's own answer — which is also
+    what makes it the whole check. It refuses the home root and ``/``, ``~/..``
+    and any other route out (judged on the *resolved* path, since the grant is
+    a recursive, irreversible ``chgrp``), and every system root: ``chmod -R
+    g+rwX /etc`` hands chief group-write on ``sudoers`` and is root by another
+    name, which the no-escalation promise in docs/SECURITY.md rules out.
+
+    A path that does not exist is refused here rather than left to fail its own
+    step, which aborts the plan after the account and tree steps have landed.
     """
     if not path.is_absolute():
         return f"{path} is not an absolute path"
-    target = path.resolve()
-    if target == Path("/") or home.resolve().is_relative_to(target):
-        return f"{path} holds your home or the filesystem root — pick a subdirectory"
+    target, root = path.resolve(), home.resolve()
+    if target == root or not target.is_relative_to(root):
+        return f"{path} is not inside {root} — grant a directory of your own"
     if not target.is_dir():
         return f"{path} is not an existing directory"
     return None
@@ -75,8 +80,9 @@ def _password(io: WizardIO, user: str) -> str:
 
 
 def _name(io: WizardIO) -> str:
-    """The name reaches argv unquoted and becomes chief's home path — `..` in
-    it makes `useradd --home-dir /Users` on macOS."""
+    """The name reaches argv unquoted and is joined onto the home root, where
+    an *absolute* one swallows the join whole: `Path("/Users") / "/etc"` is
+    `/etc`, i.e. `sysadminctl -addUser … -home /etc`."""
     while True:
         user = (
             io.prompt(f"  account name [{DEFAULT_USER}]: ").strip() or DEFAULT_USER

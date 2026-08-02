@@ -70,19 +70,31 @@ class RecentDedup:
     the same text (owner types it again minutes on) from being swallowed. State
     is in-memory: a fresh boot re-primes from the store cursor, never replaying
     an already-delivered twin.
+
+    Which store logged a sighting is kept alongside it, because the caller's
+    answer differs by origin: a repeat across two stores is always the same
+    message counted twice, while a repeat inside chief's own store may be two
+    people typing the same thing.
     """
 
     def __init__(self, window_ns: int = DEDUP_WINDOW_NS) -> None:
         self._window = window_ns
-        self._seen: dict[tuple[str, ...], int] = {}
+        self._seen: dict[tuple[str, ...], tuple[int, bool]] = {}
 
-    def is_duplicate(self, key: tuple[str, ...], date_ns: int) -> bool:
+    def see(
+        self, key: tuple[str, ...], date_ns: int, mine: bool = True
+    ) -> tuple[int, bool] | None:
+        """Log this sighting; return the one it repeats, if any is still live.
+
+        Recording is unconditional so the first store to read a message primes
+        the window for the other, whichever order the two get there in.
+        """
         self._seen = {
-            k: d for k, d in self._seen.items() if date_ns - d <= self._window
+            k: v for k, v in self._seen.items() if date_ns - v[0] <= self._window
         }
         prev = self._seen.get(key)
-        self._seen[key] = date_ns
-        return prev is not None and date_ns - prev <= self._window
+        self._seen[key] = (date_ns, mine)
+        return prev if prev is not None and date_ns - prev[0] <= self._window else None
 
 
 def decode_attributed_body(data: bytes) -> str:
