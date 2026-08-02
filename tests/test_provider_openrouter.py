@@ -216,6 +216,39 @@ async def test_drop_after_first_delta_is_not_retried() -> None:
     assert calls["n"] == 1  # never retried after emitting output
 
 
+async def test_drop_after_tool_call_bytes_is_not_retried() -> None:
+    # A tool-call-only turn yields NO TextDelta, but its fragments are real
+    # generation bytes — a drop after they arrive must fail loud, not retry
+    # (retrying re-generates the whole turn and re-bills it).
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        frag = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "c1", "function": {"name": "echo"}}
+                        ]
+                    }
+                }
+            ]
+        }
+        body = f"data: {json.dumps(frag)}\n\n".encode()
+        return httpx.Response(
+            200,
+            stream=_RaisingStream([body], httpx.ReadError("reset")),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenRouterProvider("k", client=client, retry_backoff=0.0)
+    with pytest.raises(ProviderError, match="ReadError"):
+        await collect(provider)
+    assert calls["n"] == 1  # tool-call bytes count as progress → no re-generation
+
+
 async def test_base_url_override_targets_local_proxy() -> None:
     requests: list[httpx.Request] = []
 
