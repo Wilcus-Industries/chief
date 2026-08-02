@@ -35,6 +35,29 @@ def test_shell_timeout_yaml_override(tmp_path: Path) -> None:
     assert load_config(path).shell_timeout_seconds == 45.0
 
 
+def test_gate_ask_when_loads_per_tool_argument_names(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "gate:\n"
+        "  approved: [mcp_hound_smart_fetch]\n"
+        "  ask_when:\n"
+        "    mcp_hound_smart_fetch: [actions]\n"
+    )
+    config = load_config(path)
+    assert config.gate_approved == ("mcp_hound_smart_fetch",)
+    assert config.gate_ask_when == {"mcp_hound_smart_fetch": ("actions",)}
+
+
+def test_gate_ask_when_accepts_a_bare_string_argument(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("gate:\n  ask_when:\n    fetch: actions\n")
+    assert load_config(path).gate_ask_when == {"fetch": ("actions",)}
+
+
+def test_gate_ask_when_defaults_empty(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "missing.yaml").gate_ask_when == {}
+
+
 def test_yaml_values_override_defaults(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(

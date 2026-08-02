@@ -45,6 +45,23 @@ def as_handles(value: Any) -> tuple[str, ...]:
     )
 
 
+def ask_when(raw: Any) -> dict[str, tuple[str, ...]]:
+    """Coerce ``gate.ask_when`` to ``tool name -> watched argument names``.
+
+    Values take the same shapes :func:`as_handles` accepts, so a single
+    argument needs no list (``fetch: actions``).
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            "gate.ask_when must be a mapping of tool name -> argument names "
+            f"(e.g. {{mcp_hound_smart_fetch: [actions]}}), got "
+            f"{type(raw).__name__} {raw!r}"
+        )
+    return {str(tool): as_handles(args) for tool, args in raw.items()}
+
+
 def autonomy(value: Any) -> str:
     """Coerce ``update.autonomy``; reject anything outside the three values.
 

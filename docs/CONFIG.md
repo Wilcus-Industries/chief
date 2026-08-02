@@ -55,6 +55,7 @@ template line.
 | *(secret file)* | `openrouter_api_key` | `str` | `""` | `OPENROUTER_API_KEY` |
 | `gate.never` | `gate_never` | `tuple` | `()` | — |
 | `gate.approved` | `gate_approved` | `tuple` | `()` | — |
+| `gate.ask_when` | `gate_ask_when` | `dict` | `{}` | — |
 | `gate.announce` | `gate_announce` | `bool` | `True` | — |
 | `budget.cap_usd` | `budget_cap_usd` | `float` | `0.0` (unlimited) | — |
 | `budget.warn_ratio` | `budget_warn_ratio` | `float` | `0.8` | — |
@@ -95,6 +96,34 @@ Notes on specific keys:
   env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
   closed and no listener is built.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
+- **`gate.ask_when` cards an approved tool when a named argument is present** —
+  for tools that are two actions in one. hound's `smart_fetch` reads a page, but
+  the same call carrying `actions` clicks and submits on it:
+
+  ```yaml
+  gate:
+    approved: [mcp_hound_smart_fetch]
+    ask_when:
+      mcp_hound_smart_fetch: [actions]
+  ```
+
+  Matching is on presence, not value, and it outranks every auto-approve —
+  `"*"`, an explicit approve, and the read-only fast path. `gate.never` still
+  wins. Answering **always** to such a card persists `mcp_hound_smart_fetch:actions`
+  (tool + the argument that raised it) rather than the bare tool name, so one
+  tap never approves the tool's other watched arguments.
+
+  Two consequences of matching on presence alone. **One "always" covers every
+  future value of that argument** — granting `actions` once approves every later
+  call carrying `actions`, whatever it clicks; the gate does not read what is
+  inside. And the grant *is* the approval: a tool that is otherwise unapproved
+  becomes callable **only** for calls carrying a granted argument, and still
+  cards for anything else.
+
+  The argument name is matched verbatim against the call's arguments and is
+  **not validated against the tool's schema** — a typo names an argument that
+  never arrives, silently leaving the tool on whatever its ordinary listing
+  says. Check the spelling against the tool's parameters.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
 - **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,
   today's install: the owner's own, chief texted through the self-chat) or
@@ -164,7 +193,7 @@ hand-edit config from a package install; use `config_apply`.
 | `chief.db` | sqlite sessions + transcripts; schema created at boot, **no migrations** |
 | `chief.sock` | unix socket for `chief-cli` |
 | `audit.jsonl` | every gated tool call |
-| `gate_approved.json` | persisted "always allow" set, minus config-approved |
+| `gate_approved.json` | persisted "always allow" set, minus config-approved; a `tool:argument` entry is an `ask_when` grant |
 | `installed.yaml` | package install registry |
 | `packages/` | clone of `packages_repo`, pulled by `chief-pkg update` |
 | `hooks/<package>/` | per-package hook scratch state |
