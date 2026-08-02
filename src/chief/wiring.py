@@ -23,7 +23,7 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
-from chief.gate import GatePolicy, load_approved, save_approved
+from chief.gate import GatedFactory, GatePolicy, load_approved, save_approved
 from chief.hub import ObserverHub
 from chief.mcpclient.manager import (
     McpManager,
@@ -72,6 +72,7 @@ class Core:
     dispatcher: Dispatcher
     monitors: MonitorService
     cron: CronService
+    gated: GatedFactory  # re-gates an inner dispatcher (subagents, #297)
 
 
 @dataclass
@@ -153,8 +154,7 @@ def build_mcp(
     ``server_config_from_entry`` — see there for why.
     """
     mcp_configs = tuple(
-        sc
-        for name, entry in config.mcp_servers.items()
+        sc for name, entry in config.mcp_servers.items()
         if (sc := server_config_from_entry(name, entry)) is not None
     )
     return McpManager(registry), mcp_configs

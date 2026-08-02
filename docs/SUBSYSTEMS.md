@@ -256,12 +256,14 @@ Structurally near-identical to classifiers — same registry and frontmatter sha
 but with a tool and a real tool loop. Uses plain `yaml.safe_load`; there is no
 label problem here.
 
-`AgentDef`: `name`, `description`, `system_prompt`, `tools | None` (None = every
-tool minus spawn), `model | None`.
+`AgentDef`: `name`, `description`, `system_prompt`, `tools` (**default-closed** —
+an omitted `tools:` key gives `()`, i.e. nothing), `model | None`.
 
-`spawn_agent(name, task)`:
+`spawn_agent(name, task, context)`:
 
 1. Unknown name returns an error string enumerating the known agents.
+1a. A missing `context` returns an error — it is `wants_context=True` and **fails
+   closed**, because without the parent's surface there is nowhere to card (#297).
 2. Runs the standard `agent.loop.run_turn` with the agent's system prompt and the
    task, on `definition.model or default_model`.
 3. `on_delta` is a **no-op** — subagent output does not stream to any channel;
@@ -280,5 +282,11 @@ a subagent can never spawn further subagents even if its frontmatter names it.
 The filter applies in both directions — `specs()` hides disallowed tools from the
 model, and `dispatch()` re-checks at call time and returns an error string.
 Defense in depth against a hallucinated call.
+
+**The filter is wrapped in the gate, not a substitute for it** (#297). The
+sub-session's dispatcher is `gated(context, FilteredTools(...))`, bound to the
+parent's `ToolContext` with `agent=<name>`, so subagent calls face the same
+never/approved/read_only/card decisions and land in the same audit log. Gate
+outermost, filter inside — see [SECURITY.md](./SECURITY.md).
 
 **Subagents never fire hooks.** Only `Session._one_turn` does.

@@ -71,6 +71,37 @@ other thread, on every channel.
 `dispatch()` ignores its own `context` parameter and always uses `self._context`.
 Passing one does nothing.
 
+### Subagents are gated too (#297)
+
+**The gate is a wrapper, not a property of the registry**, so anything handed the
+raw `ToolRegistry` bypasses every rule above. `spawn_agent` therefore builds its
+sub-session's dispatcher as `gated(context, FilteredTools(registry, allow))` —
+the same `GatedTools`, same policy, same audit log, bound to the **parent's**
+`ToolContext` with `agent=<name>` set.
+
+**Gate outermost, filter inside.** That order matters: `GatedTools.specs()` sees
+the filtered set, so a tool outside the definition's allowlist takes the
+unknown-tool branch and returns a plain error — it never cards the owner for a
+call the subagent could not have made anyway.
+
+Consequences worth knowing:
+
+- Cards raise on the **parent's thread and channel** — the owner's live surface.
+  Card and announce text are prefixed `subagent '<name>'` because the owner did
+  not initiate the call.
+- **"always" from inside a subagent persists globally**, exactly like a
+  main-session tap. Deliberate — no strange exceptions across packages — but a
+  tap inside a subagent does widen the main session's permissions.
+- Audit rows carry the parent's `thread` plus an `agent` field naming the
+  subagent (`null` for the owner's own calls).
+- `spawn_agent` is `wants_context=True` and **fails closed** without one: no
+  surface to card on means the sub-session does not run.
+- **No deadlock.** The dispatcher offers inbound messages to `resolve()` before
+  starting a turn, so a card answers even while the parent is blocked inside
+  `spawn_agent`. Only one subagent is in flight per thread (`loop.py` dispatches
+  tool calls sequentially), so the one-card-per-thread rule cannot self-collide.
+- An agent definition that **omits `tools:` gets no tools** — default-closed.
+
 ## Approvals — `approvals.py`
 
 **Cards ride the session's own channel, and mirror to the dashboard (#267).**

@@ -19,10 +19,16 @@ ToolHandler = Callable[..., Awaitable[str]]
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Where a tool call came from; injected into tools that want it."""
+    """Where a tool call came from; injected into tools that want it.
+
+    ``agent`` names the subagent a call was made from — its surface is still
+    the parent's thread/channel, so the gate needs this to tell the owner (and
+    the audit log) who is actually asking.
+    """
 
     thread_key: str
     channel: str
+    agent: str | None = None
 
 
 @dataclass(frozen=True)

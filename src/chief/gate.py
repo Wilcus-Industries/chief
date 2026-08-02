@@ -24,8 +24,7 @@ from chief.tools import ToolContext, ToolDispatcher
 
 logger = logging.getLogger(__name__)
 
-# Arguments are rendered into the announcement line; a shell heredoc or a
-# whole file body would otherwise flood the owner's channel.
+# Announced arguments are truncated: a heredoc or file body would flood the channel.
 ANNOUNCE_ARG_LIMIT = 160
 
 
@@ -63,6 +62,8 @@ class GatePolicy:
 AskApproval = Callable[[ToolContext, str], Awaitable[Approval]]
 AllowAlways = Callable[[str], None]
 Announce = Callable[[ToolContext, str], Awaitable[None]]
+# Wraps an inner dispatcher in this gate, bound to a context (subagents, #297).
+GatedFactory = Callable[[ToolContext, ToolDispatcher], ToolDispatcher]
 
 
 def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskApproval:
@@ -179,6 +180,8 @@ class GatedTools:
 
     async def _ask_card(self, call: ToolCall) -> Decision:
         question = f"approve tool call {call.name}({call.arguments})? yes / always / no"
+        if self._context.agent:  # the owner did not initiate this call
+            question = f"subagent '{self._context.agent}': {question}"
         answer = await self._ask(self._context, question)
         if answer is Approval.ALWAYS:
             self._on_always(call.name)
@@ -190,10 +193,7 @@ class GatedTools:
 
     def _record(self, call: ToolCall, outcome: str) -> None:
         self._audit.record(
-            "tool_call",
-            tool=call.name,
-            arguments=call.arguments,
-            outcome=outcome,
-            thread=self._context.thread_key,
-            channel=self._context.channel,
+            "tool_call", tool=call.name, arguments=call.arguments,
+            outcome=outcome, thread=self._context.thread_key,
+            channel=self._context.channel, agent=self._context.agent,
         )

@@ -82,11 +82,18 @@ core services call classifiers by name.
 
 ## Add a subagent
 
-Drop a `<name>.md` in `agents/` with frontmatter `name`, `description`, optional
-`tools` allowlist and `model`; the body is its system prompt.
+Drop a `<name>.md` in `agents/` with frontmatter `name`, `description`, a
+`tools` allowlist and optional `model`; the body is its system prompt.
 
-Omitting `tools` grants every tool **minus `spawn_agent`** — the recursion guard is
+**`tools` is default-closed: omit it and the agent gets nothing.** Name every
+tool it needs. `spawn_agent` is excluded either way — the recursion guard is
 hardcoded ahead of the allowlist, so a subagent can never spawn another one.
+
+**Subagent tool calls are gated exactly like the owner's own** (#297): cards
+raise on the parent's thread prefixed with the agent's name, `gate.never` still
+denies, `read_only` still auto-approves, and every call is audited with an
+`agent` field. A tool outside the allowlist returns a plain error and never
+cards. See [SECURITY.md](./SECURITY.md).
 
 Subagent output does not stream; only the final text returns as the tool result.
 Subagents never fire hooks.
