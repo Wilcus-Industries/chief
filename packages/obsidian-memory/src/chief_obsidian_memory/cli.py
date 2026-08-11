@@ -1,5 +1,9 @@
 """The ``chief-memory`` command line: search, refresh, and reindex a vault.
 
+Three retrieval verbs, narrowing: ``search`` blends meaning and literal matches
+(what you almost always want), ``semantic`` and ``grep`` are the halves on their
+own for when the caller knows which one it needs.
+
 Settings resolve from the daemon's ``obsidian_memory`` config block — the same
 source the ambient hook reads via ``HookContext.config`` — so the CLI and the
 hook resolve the identical vault, index home, and embedding model. That keeps
@@ -26,7 +30,7 @@ from chief_obsidian_memory.config import (
     package_data_dir,
 )
 from chief_obsidian_memory.graph import VaultGraph, related
-from chief_obsidian_memory.index import VaultIndex
+from chief_obsidian_memory.index import SearchHit, VaultIndex
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,10 +46,26 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     common = _common()
 
-    search = sub.add_parser("search", parents=[common], help="search the vault")
+    search = sub.add_parser(
+        "search", parents=[common], help="search the vault (meaning + keyword)"
+    )
     search.add_argument("query")
     search.add_argument("--k", type=int, default=MemorySettings().top_k)
     search.set_defaults(run=_search)
+
+    semantic = sub.add_parser(
+        "semantic", parents=[common], help="meaning only: vector similarity"
+    )
+    semantic.add_argument("query")
+    semantic.add_argument("--k", type=int, default=MemorySettings().top_k)
+    semantic.set_defaults(run=_semantic)
+
+    grep = sub.add_parser(
+        "grep", parents=[common], help="literal only: keyword match, BM25-ranked"
+    )
+    grep.add_argument("query")
+    grep.add_argument("--k", type=int, default=MemorySettings().top_k)
+    grep.set_defaults(run=_grep)
 
     reindex = sub.add_parser(
         "reindex", parents=[common], help="rebuild the whole index"
@@ -85,8 +105,25 @@ def _common() -> argparse.ArgumentParser:
 
 
 def _search(args: argparse.Namespace) -> int:
+    return _print(args, _index(args).search(args.query, args.k), tagged=True)
+
+
+def _semantic(args: argparse.Namespace) -> int:
+    return _print(args, _index(args).semantic(args.query, args.k))
+
+
+def _grep(args: argparse.Namespace) -> int:
+    return _print(args, _index(args).grep(args.query, args.k))
+
+
+def _print(
+    args: argparse.Namespace, hits: list[SearchHit], tagged: bool = False
+) -> int:
+    """One line per hit, or the fail-visible empty message.
+
+    ``tagged`` adds the provenance marker, which only ``search`` has anything
+    to say about — the narrow verbs are their own answer to "which half"."""
     settings = _settings(args)
-    hits = _index(args).search(args.query, args.k)
     if not hits:
         # Name the resolved paths so an empty answer is checkable, never
         # mistaken for a broken tool.
@@ -98,7 +135,10 @@ def _search(args: argparse.Namespace) -> int:
     for hit in hits:
         # Absolute path so the agent read_files it directly — a vault-relative
         # path does not resolve from the repo root the daemon runs in.
-        print(f"{hit.score:.3f}  {vault / hit.note_path} :: {hit.heading}")
+        # The tag rides in the score field, single-spaced: consumers split the
+        # line on the double space to get the path, and that must keep working.
+        tag = f" [{hit.source}]" if tagged else ""
+        print(f"{hit.score:.3f}{tag}  {vault / hit.note_path} :: {hit.heading}")
     return 0
 
 

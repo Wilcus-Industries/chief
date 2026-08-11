@@ -1,8 +1,10 @@
-"""Cross-process lock over a chroma index home.
+"""Cross-process lock over the index home.
 
 The ambient hook (in the daemon) and the ``chief-memory`` CLI open the same
-persistent chromadb store from different processes; a CLI ``reindex`` racing
-the hook's self-heal would mutate one store concurrently. Every mutating or
+SQLite store from different processes; a CLI ``reindex`` racing the hook's
+self-heal would mutate one store concurrently. SQLite's own locking would keep
+the file intact but not the *work*: a rebuild interleaved with a sweep can drop
+rows one of them still assumes are there. Every mutating or
 self-healing entry point takes this advisory flock first — the
 ``chief.instance_lock`` pattern, but blocking (the loser waits its turn, then
 proceeds) and re-entrant within a process (search's self-heal calls build

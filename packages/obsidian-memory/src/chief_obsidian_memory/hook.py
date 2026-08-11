@@ -2,7 +2,7 @@
 
 ``register`` is the package entry point the boot loader calls. It stays light —
 config only — and defers every heavy import (the index, the gate, and through
-them chromadb/model2vec) to the moment the recall hook actually fires, so boot
+them sqlite-vec/model2vec) to the moment the recall hook actually fires, so boot
 never pays for the vector stack. Recall is owner-gated first of all: a non-owner
 turn (a monitor/cron ``system`` wake, a stranger) never reaches the vault.
 
@@ -39,7 +39,7 @@ def register(context: HookContext, hooks: PackageHookRegistrar) -> None:
     settings = MemorySettings.from_config(context.config.get("obsidian_memory"))
     index_home = index_home_for(context.data_dir)
     counters: dict[str, int] = {}
-    # Guards the chroma index build/rebuild once two thread firings genuinely
+    # Guards the index build/rebuild once two thread firings genuinely
     # run in parallel; unrelated (non-recall) turns never touch it.
     build_lock = threading.Lock()
 
@@ -77,7 +77,7 @@ async def _recall(
 ) -> str | None:
     from chief_obsidian_memory.judge import format_transcript, run_judge
 
-    # The heavy, blocking work — opening chroma, a possible full vault build
+    # The heavy, blocking work — opening the store, a possible full vault build
     # (embedding every chunk, worst case a model2vec weight download), and the
     # in-process candidate fetch — runs off the event loop. asyncio.wait_for
     # (#208's per-hook timeout) still can't cancel an in-flight thread, but the
@@ -101,12 +101,12 @@ def _fetch_candidates(
     build_lock: threading.Lock,
 ) -> list[SearchHit]:
     # Heavy imports live here: importing this module at boot must not pull in
-    # chromadb/model2vec (asserted by the test suite).
+    # sqlite_vec/model2vec (asserted by the test suite).
     from chief_obsidian_memory.index import VaultIndex
 
     index = VaultIndex(vault, index_home, settings)
-    # search() may build/self-heal the collection; serialize so two parallel
-    # firings can't race a concurrent create/rebuild of the same chroma store.
+    # search() may build/self-heal the store; serialize so two parallel
+    # firings can't race a concurrent create/rebuild of the same SQLite file.
     with build_lock:
         return index.search(query, settings.top_k)
 

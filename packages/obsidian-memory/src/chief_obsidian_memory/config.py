@@ -28,8 +28,9 @@ def package_data_dir() -> Path:
 
 
 def index_home_for(data_dir: Path) -> Path:
-    """The chroma index home under a package data dir. The single derivation
-    the ambient hook and the CLI share, so both open the same collection."""
+    """The index home under a package data dir — the directory holding the
+    SQLite store. The single derivation the ambient hook and the CLI share, so
+    both open the same store."""
     return data_dir / "index"
 
 
@@ -41,7 +42,10 @@ class MemorySettings:
     ``window`` — transcript messages the relevance gate sees. ``top_k`` —
     candidates pre-fetched per query, and so also the number of gate calls per
     firing; small on purpose now that recall emits pointers rather than note
-    bodies. ``injection_cap_tokens`` — backstop ceiling on the pointer nudge.
+    bodies. Four rather than two because retrieval is hybrid — half the slots
+    are reserved for literal matches, so four is the smallest split that lets
+    both halves reach the gate with more than one candidate each.
+    ``injection_cap_tokens`` — backstop ceiling on the pointer nudge.
     ``include``/``exclude`` — vault-relative path prefixes gating what indexes.
     ``vault_paths`` — the vault root; only the first entry is used (the code
     is single-vault end-to-end). ``writable_paths`` — where the agent
@@ -64,7 +68,7 @@ class MemorySettings:
 
     ambient_n: int = 5
     window: int = 10
-    top_k: int = 2
+    top_k: int = 4
     injection_cap_tokens: int = 1500
     embed_model: str = "minishlab/potion-base-8M"
     include: tuple[str, ...] = ()

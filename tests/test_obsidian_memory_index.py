@@ -32,10 +32,12 @@ def test_chunk_note_keeps_pre_heading_content_as_leading_chunk() -> None:
 
 def test_recall_defaults_are_tuned_small() -> None:
     # Tuned for the fast gate: a short transcript window and few candidates keep
-    # each firing cheap (see the memory-relevance model default).
+    # each firing cheap (see the memory-relevance model default). Four rather
+    # than two because retrieval is hybrid — search reserves half the slots for
+    # literal matches, and two would leave each half a single candidate.
     settings = MemorySettings()
     assert settings.window == 10
-    assert settings.top_k == 2
+    assert settings.top_k == 4
 
 
 def test_auto_refresh_defaults_on_with_a_60s_throttle() -> None:
@@ -88,10 +90,10 @@ def test_index_home_lives_outside_the_vault(
 ) -> None:
     index = _index(vault, embedder)
     index.build()
-    # Indexing writes chromadb state under index_home, never into the vault.
+    # Indexing writes the SQLite store under index_home, never into the vault.
     assert list((tmp_path / "index").rglob("*")) != []
+    assert list(vault.rglob("*.db")) == []
     assert list(vault.rglob("*.sqlite3")) == []
-    assert list(vault.rglob("*.bin")) == []
     assert {p.name for p in vault.iterdir()} >= {"roof.md", ".obsidian"}
 
 
