@@ -18,7 +18,15 @@ from typing import Any
 
 import pytest
 from chief_obsidian_memory.config import MemorySettings
-from chief_obsidian_memory.index import BOTH, KEYWORD, SEMANTIC, VaultIndex
+from chief_obsidian_memory.index import (
+    BOTH,
+    KEYWORD,
+    SEMANTIC,
+    SearchHit,
+    VaultIndex,
+    _dedup,
+    _rrf,
+)
 
 # An invented token no note but one contains — a stand-in for the project
 # names, people, and tools a personal vault is mostly made of.
@@ -140,19 +148,56 @@ def test_a_note_found_by_both_halves_outranks_one_half(
     assert all(hits[0].score > hit.score for hit in single)
 
 
-def test_search_reserves_slots_for_both_halves(
+def test_search_keeps_a_slot_for_the_best_literal_match(
     crowded_vault: Path, embedder: Any
 ) -> None:
-    # A lopsided query: only the literal half can reach vendors.md. Reserved
-    # slots are why fusion cannot drop it — every result being 'sem' would mean
-    # the vector half took the lot.
+    # The one correction to plain RRF, and deliberately the smallest that
+    # works. Fusion ranks by position, so a plateau of notes sharing the
+    # query's ordinary words out-scores the single note holding the rare term;
+    # the best literal match therefore keeps the last slot when fusion drops
+    # it. Reserving a *share* of the slots would also fix this case, at the
+    # cost of evicting agreed-on notes from ordinary queries — see
+    # test_search_does_not_spend_slots_on_the_keyword_half.
     index = _index(crowded_vault, embedder)
     index.build()
-    hits = index.search(f"what did we agree with {_RARE}", k=4)
-    assert len(hits) == 4
-    assert {SEMANTIC, KEYWORD} & {hit.source for hit in hits} != set()
-    assert any(hit.source in (KEYWORD, BOTH) for hit in hits)
-    assert any(hit.source in (SEMANTIC, BOTH) for hit in hits)
+    query = f"what did we agree with {_RARE} about the north wing"
+    assert index.grep(query, k=1)[0].note_path == "vendors.md"
+    hits = index.search(query, k=4)
+    assert hits[-1].note_path == "vendors.md"
+    assert len(hits) == len({hit.note_path for hit in hits}) == 4
+
+
+def test_search_costs_plain_fusion_at_most_one_slot(
+    crowded_vault: Path, embedder: Any
+) -> None:
+    """The guarantee is bounded: it may displace one result, never a quota.
+
+    This is the property that makes it the *small* correction. A policy that
+    reserved a share of the slots for each half could displace several — and
+    would do so on every query, including conceptual ones where the keyword
+    half earned nothing.
+    """
+    index = _index(crowded_vault, embedder)
+    index.build()
+    for query in (
+        "how much did the insurance go up",
+        "when do I need to water the young plants",
+        f"what did we agree with {_RARE} about the north wing",
+    ):
+        got = {hit.note_path for hit in index.search(query, k=4)}
+        plain = {hit.note_path for hit in _plain_rrf(index, query, k=4)}
+        assert len(plain - got) <= 1, query
+
+
+def _plain_rrf(index: VaultIndex, query: str, k: int) -> list[SearchHit]:
+    """What unguaranteed reciprocal-rank fusion alone would have returned."""
+    semantic = index.semantic(query, k * 3)
+    keyword = index.grep(query, k * 3)
+    scores, _ = _rrf(semantic, keyword)
+    best: dict[str, SearchHit] = {}
+    for hit in _dedup(semantic) + _dedup(keyword):
+        best.setdefault(hit.note_path, hit)
+    return sorted(best.values(), key=lambda h: -scores[h.note_path])[:k]
 
 
 def test_search_dedups_by_note_path(vault: Path, embedder: Any) -> None:
@@ -166,17 +211,48 @@ def test_search_dedups_by_note_path(vault: Path, embedder: Any) -> None:
     assert len(paths) == len(set(paths))
 
 
-def test_search_backfills_when_dedup_collapses_a_slot(
+# --- ambient slots: coverage, not ranking ----------------------------------
+
+
+def test_ambient_candidates_reserve_slots_for_both_halves(
+    crowded_vault: Path, embedder: Any
+) -> None:
+    # The hook's slots are gate calls already paid for, so they buy coverage
+    # rather than a ranked list: the literal half is represented even when the
+    # vector half would out-fuse it everywhere.
+    index = _index(crowded_vault, embedder)
+    index.build()
+    hits = index.ambient_candidates(
+        f"what did we agree with {_RARE} about the north wing", k=4
+    )
+    assert len(hits) == 4
+    assert "vendors.md" in {hit.note_path for hit in hits}
+    assert any(hit.source in (KEYWORD, BOTH) for hit in hits)
+    assert any(hit.source in (SEMANTIC, BOTH) for hit in hits)
+
+
+def test_ambient_candidates_backfill_when_dedup_collapses_a_slot(
     vault: Path, embedder: Any
 ) -> None:
     # Both halves agree on the same notes here, so the reserved slots collapse
     # on dedup; the freed slots must be spent, not dropped — every one is a
-    # gate call the ambient hook already paid for.
+    # gate call the hook already paid for.
     index = _index(vault, embedder)
     index.build()
-    paths = [hit.note_path for hit in index.search("roof repair budget", k=4)]
+    paths = [
+        hit.note_path for hit in index.ambient_candidates("roof repair budget", k=4)
+    ]
     assert len(paths) == 4
     assert len(paths) == len(set(paths))
+
+
+def test_ambient_candidates_cannot_exceed_the_notes_that_exist(
+    vault: Path, embedder: Any
+) -> None:
+    index = _index(vault, embedder)
+    index.build()
+    paths = [hit.note_path for hit in index.ambient_candidates("roof", k=10)]
+    assert len(paths) == len(set(paths)) == 4
 
 
 def test_search_cannot_exceed_the_notes_that_exist(

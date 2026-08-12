@@ -16,9 +16,10 @@ structurally blind to a note missing from only one of them. Instead all three
 tables move inside a single transaction in :meth:`_index_note`. That
 transaction *is* the sync guarantee: no triggers, no reconciliation pass.
 
-``search`` blends both halves — reserved slots, ordered by reciprocal-rank
-fusion (see :func:`_blend`) — and ``semantic`` and ``grep`` are the narrow verbs
-for when the caller knows which half it wants.
+``search`` fuses both halves by reciprocal-rank fusion; ``semantic`` and
+``grep`` are the narrow verbs for when the caller knows which half it wants.
+``ambient_candidates`` is the recall hook's own selection — same two halves,
+but reserving slots rather than ranking, for the reason given there.
 """
 
 import hashlib
@@ -131,17 +132,13 @@ class VaultIndex:
         reconciled before the query — recall never needs a manual reindex, and
         never serves stale or empty results silently. The sweep is skippable via
         ``auto_refresh`` and rate-limited by ``refresh_min_interval_s``. A
-        missing vault surfaces loudly from :meth:`build`.
-
-        Half the slots are reserved for each half (see :func:`_blend`), so a
-        strong vector query can never shut the literal half out — which is what
-        the ambient recall hook spends its gate calls on."""
+        missing vault surfaces loudly from :meth:`build`."""
         if k <= 0:
             return []
         with self._lock:
             if self._prepare() is None:
                 return []
-            return _blend(
+            return _fuse(
                 self._semantic(query, k * _OVERSAMPLE),
                 self._keyword(query, k * _OVERSAMPLE),
                 k,
@@ -162,6 +159,26 @@ class VaultIndex:
             if self._prepare() is None:
                 return []
             return self._keyword(query, k)
+
+    def ambient_candidates(self, query: str, k: int) -> list[SearchHit]:
+        """The ``k`` candidates the ambient recall hook spends its gate calls on.
+
+        Not :meth:`search`. That verb ranks, because something reads its list in
+        order; this one covers, because every slot is a gate call already paid
+        for and the gate judges each candidate alone. So half the slots are
+        reserved per half (:func:`_reserve`) rather than left to fusion — a
+        strong vector query must not be able to spend all four on meaning and
+        leave the proper-noun case unrepresented."""
+        if k <= 0:
+            return []
+        with self._lock:
+            if self._prepare() is None:
+                return []
+            return _reserve(
+                self._semantic(query, k * _OVERSAMPLE),
+                self._keyword(query, k * _OVERSAMPLE),
+                k,
+            )
 
     def refresh(self) -> int:
         """Re-embed only the notes whose mtime advanced and bytes changed, index
@@ -448,19 +465,56 @@ def _rrf(
     return scores, sources
 
 
-def _blend(
+def _fuse(
     semantic: list[SearchHit], keyword: list[SearchHit], k: int
 ) -> list[SearchHit]:
-    """``k`` notes, half the slots reserved per half, ordered by RRF score.
+    """The ``k`` best notes by RRF score — plus one guarantee.
 
-    Fusion alone is not enough, and the reservation is the correction. RRF ranks
-    by *position*, which discards the one thing BM25 knows: how decisive a match
-    was. A vault of similarly worded notes — a daily-note template, a repeated
-    heading — hands the vector half a dozen plausible neighbours that also carry
-    the query's ordinary words, and they out-fuse the single note that actually
-    holds the rare proper noun. That is the precise case this index exists for,
-    so it cannot be left to fusion: reserving slots makes it impossible for
-    either half to shut the other out, and RRF then orders what survives.
+    RRF ranks by *position*, which discards the one thing BM25 knows: how
+    decisive a match was. A vault of similarly worded notes — a daily-note
+    template, a repeated heading — hands both halves a plateau of plausible
+    near-misses carrying the query's ordinary words, and they out-fuse the
+    single note that actually holds the rare proper noun. Measured on a vault
+    where twenty notes share the target's phrasing, plain RRF drops that note
+    out of the results entirely: the precise case this index exists for.
+
+    So the best literal match keeps a slot when fusion would have dropped it.
+    That is the whole correction — deliberately the smallest one that fixes it.
+    Reserving a *share* of the slots for each half also works, but it spends
+    them whether or not the keyword half earned them, evicting notes both
+    halves agreed on from ordinary conceptual queries. Ranking is what this
+    verb is for; :meth:`VaultIndex.ambient_candidates` is where coverage wins
+    instead."""
+    scores, sources = _rrf(semantic, keyword)
+    best: dict[str, SearchHit] = {}
+    for hit in _dedup(semantic) + _dedup(keyword):
+        best.setdefault(hit.note_path, hit)
+    ranked = [
+        hit._replace(
+            score=scores[hit.note_path], source=_source(sources[hit.note_path])
+        )
+        for hit in sorted(best.values(), key=lambda h: -scores[h.note_path])
+    ]
+    top = _dedup(keyword)[:1]
+    if top and all(hit.note_path != top[0].note_path for hit in ranked[:k]):
+        # Last slot, not first: fusion's ordering is still the better guide for
+        # everything it did rank, and this note is here on one half's word.
+        return ranked[: k - 1] + [
+            hit for hit in ranked if hit.note_path == top[0].note_path
+        ][:1]
+    return ranked[:k]
+
+
+def _reserve(
+    semantic: list[SearchHit], keyword: list[SearchHit], k: int
+) -> list[SearchHit]:
+    """``k`` notes with half the slots reserved for each half, RRF-ordered.
+
+    The ambient hook's policy, and a different objective from :func:`_fuse`:
+    these are gate calls, already paid for, so coverage across both halves beats
+    a finely ordered list. Reserving means a strong vector query cannot take
+    every slot and leave the literal half — the half that catches proper nouns —
+    unrepresented at the gate.
 
     When dedup collapses a reserved slot (both halves found the same note) the
     freed slot is backfilled from whichever half still has candidates, so a
@@ -478,7 +532,7 @@ def _blend(
                 picked.append(hit)
 
     take(_dedup(semantic), max(1, k // 2))  # the meaning half's reserved slots
-    take(_dedup(keyword), k)  # the remaining slots, literal-matches first
+    take(_dedup(keyword), k)  # the remaining slots, literal matches first
     take(_dedup(semantic), k)  # backfill whatever dedup collapsed
     return sorted(
         (

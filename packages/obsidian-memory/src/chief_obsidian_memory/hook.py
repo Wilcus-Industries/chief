@@ -105,10 +105,12 @@ def _fetch_candidates(
     from chief_obsidian_memory.index import VaultIndex
 
     index = VaultIndex(vault, index_home, settings)
-    # search() may build/self-heal the store; serialize so two parallel
-    # firings can't race a concurrent create/rebuild of the same SQLite file.
+    # ambient_candidates(), not search(): the gate judges each candidate alone,
+    # so coverage across both halves of the index beats a ranked list here.
+    # It may build/self-heal the store, so serialize — two parallel firings
+    # must not race a concurrent create/rebuild of the same SQLite file.
     with build_lock:
-        return index.search(query, settings.top_k)
+        return index.ambient_candidates(query, settings.top_k)
 
 
 def _vault(settings: MemorySettings) -> Path | None:
