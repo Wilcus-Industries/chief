@@ -287,11 +287,11 @@ async def test_accepted_hits_land_in_the_hook_block_as_pointers_not_content(
 
 
 async def test_run_judge_truncates_to_the_token_cap(tmp_path: Path) -> None:
-    from chief_obsidian_memory.index import SearchHit
     from chief_obsidian_memory.judge import run_judge
+    from chief_obsidian_memory.retrieval import SearchHit
 
     judge = FakeProvider([text_turn("RELEVANT")])
-    huge = SearchHit("big.md", "H" * 5000, "body", 0.9)
+    huge = SearchHit("big.md", "H" * 5000, "body", 0.9, "sem")
     out = await run_judge(
         _classifier(judge, tmp_path), "transcript", [huge], cap_tokens=10,
         vault=tmp_path,
@@ -301,13 +301,13 @@ async def test_run_judge_truncates_to_the_token_cap(tmp_path: Path) -> None:
 
 
 async def test_irrelevant_candidates_are_dropped(tmp_path: Path) -> None:
-    from chief_obsidian_memory.index import SearchHit
     from chief_obsidian_memory.judge import run_judge
+    from chief_obsidian_memory.retrieval import SearchHit
 
     judge = FakeProvider([text_turn("IRRELEVANT"), text_turn("RELEVANT")])
     hits = [
-        SearchHit("noise.md", "Unrelated", "body", 0.9),
-        SearchHit("roof.md", "Roof repair", "body", 0.8),
+        SearchHit("noise.md", "Unrelated", "body", 0.9, "sem"),
+        SearchHit("roof.md", "Roof repair", "body", 0.8, "kw"),
     ]
     out = await run_judge(
         _classifier(judge, tmp_path), "transcript", hits, cap_tokens=1500,

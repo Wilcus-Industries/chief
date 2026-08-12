@@ -31,11 +31,10 @@ import sqlite3
 import sys
 
 conn = sqlite3.connect(":memory:")
-if not conn.execute(
-    "select count(*) from pragma_compile_options "
-    "where compile_options like 'ENABLE_FTS5'"
-).fetchone()[0]:
-    sys.exit(f"{sys.executable}: sqlite3 built without FTS5")
+try:
+    conn.execute("CREATE VIRTUAL TABLE probe USING fts5(x)")
+except sqlite3.OperationalError as exc:
+    sys.exit(f"{sys.executable}: sqlite3 built without FTS5: {exc}")
 if not hasattr(conn, "enable_load_extension"):
     sys.exit(
         f"{sys.executable}: sqlite3 built without extension loading "

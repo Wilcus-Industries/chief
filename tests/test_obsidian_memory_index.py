@@ -33,8 +33,8 @@ def test_chunk_note_keeps_pre_heading_content_as_leading_chunk() -> None:
 def test_recall_defaults_are_tuned_small() -> None:
     # Tuned for the fast gate: a short transcript window and few candidates keep
     # each firing cheap (see the memory-relevance model default). Four rather
-    # than two because retrieval is hybrid — search reserves half the slots for
-    # literal matches, and two would leave each half a single candidate.
+    # than two because retrieval is hybrid — ambient_candidates reserves half
+    # the slots for literal matches, and two would leave each half one.
     settings = MemorySettings()
     assert settings.window == 10
     assert settings.top_k == 4

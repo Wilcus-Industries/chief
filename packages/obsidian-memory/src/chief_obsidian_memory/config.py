@@ -42,9 +42,9 @@ class MemorySettings:
     ``window`` — transcript messages the relevance gate sees. ``top_k`` —
     candidates pre-fetched per query, and so also the number of gate calls per
     firing; small on purpose now that recall emits pointers rather than note
-    bodies. Four rather than two because retrieval is hybrid — half the slots
-    are reserved for literal matches, so four is the smallest split that lets
-    both halves reach the gate with more than one candidate each.
+    bodies. Four rather than two because retrieval is hybrid — the hook's
+    ``ambient_candidates`` reserves half its slots for literal matches, so four
+    is the smallest split giving each half more than one candidate.
     ``injection_cap_tokens`` — backstop ceiling on the pointer nudge.
     ``include``/``exclude`` — vault-relative path prefixes gating what indexes.
     ``vault_paths`` — the vault root; only the first entry is used (the code

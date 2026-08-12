@@ -30,7 +30,8 @@ from chief_obsidian_memory.config import (
     package_data_dir,
 )
 from chief_obsidian_memory.graph import VaultGraph, related
-from chief_obsidian_memory.index import SearchHit, VaultIndex
+from chief_obsidian_memory.index import VaultIndex
+from chief_obsidian_memory.retrieval import SearchHit
 
 
 def main(argv: list[str] | None = None) -> int:

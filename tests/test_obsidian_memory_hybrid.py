@@ -18,12 +18,12 @@ from typing import Any
 
 import pytest
 from chief_obsidian_memory.config import MemorySettings
-from chief_obsidian_memory.index import (
+from chief_obsidian_memory.index import VaultIndex
+from chief_obsidian_memory.retrieval import (
     BOTH,
     KEYWORD,
     SEMANTIC,
     SearchHit,
-    VaultIndex,
     _dedup,
     _rrf,
 )
@@ -187,6 +187,91 @@ def test_search_costs_plain_fusion_at_most_one_slot(
         got = {hit.note_path for hit in index.search(query, k=4)}
         plain = {hit.note_path for hit in _plain_rrf(index, query, k=4)}
         assert len(plain - got) <= 1, query
+
+
+def test_blending_drops_keyword_hits_that_are_only_noise(
+    crowded_vault: Path, embedder: Any
+) -> None:
+    """A common-word query must not win a guaranteed slot for an arbitrary note.
+
+    FTS5 clamps a zero IDF to 1e-6 rather than 0, so every note holding "the"
+    still comes back with a fractionally positive BM25 score. Testing `> 0`
+    filtered nothing, and `_fuse` then handed one of those notes the guaranteed
+    literal slot on every conceptual query — tagged `[kw]` to a gate that has
+    just been told an exact keyword match is strong evidence on its own.
+    """
+    index = _index(crowded_vault, embedder)
+    index.build()
+    # Every term ubiquitous: "the" is in 181 of the 201 notes, so its IDF is
+    # negative and FTS5 clamps it. There is no literal signal to find here.
+    query = "the"
+
+    # grep still answers honestly: these are the literal matches it has.
+    raw = index.grep(query, k=10)
+    assert raw, "grep should still return its weak literal matches"
+    assert max(hit.score for hit in raw) < 0.01, "expected clamp-noise scores"
+
+    # Blending drops them, so no slot is spent on a note matched by nothing.
+    assert all(hit.source != KEYWORD for hit in index.search(query, k=4))
+    assert all(
+        hit.source != KEYWORD for hit in index.ambient_candidates(query, k=4)
+    )
+
+
+def test_a_malformed_quoted_query_does_not_raise(
+    vault: Path, embedder: Any
+) -> None:
+    """Owner chat text reaches this parser through the ambient hook.
+
+    "Starts and ends with a quote" also describes `"a" OR "` (FTS5 syntax, an
+    unterminated string) and `"foo": "bar"` (a column filter for a column that
+    does not exist). Both used to escape as sqlite3.OperationalError — killing
+    recall for that turn, and an uncaught traceback on the CLI.
+    """
+    index = _index(vault, embedder)
+    index.build()
+    for query in ('"a" OR "', '"foo": "bar"', '"unbalanced', '"a" AND "b" OR "'):
+        index.grep(query, k=3)
+        index.search(query, k=3)
+        index.ambient_candidates(query, k=3)
+    # The balanced single phrase still passes through as a phrase query.
+    assert index.grep('"cracked and need replacing"', k=5)
+
+
+def test_narrow_verbs_and_blends_handle_degenerate_k(
+    vault: Path, embedder: Any
+) -> None:
+    index = _index(vault, embedder)
+    index.build()
+    for k in (0, -1):
+        assert index.search("roof", k) == []
+        assert index.grep("roof", k) == []
+        assert index.semantic("roof", k) == []
+        assert index.ambient_candidates("roof", k) == []
+    # k=1 must not hand the single slot to the literal guarantee and drop the
+    # fusion winner — that would make `search --k 1` a slower `grep --k 1`.
+    top = index.search("water leaking through the ceiling", k=1)
+    assert len(top) == 1
+    assert top[0].note_path == "roof.md"
+
+
+def test_a_corrupt_store_is_rebuilt_rather_than_raising(
+    vault: Path, embedder: Any
+) -> None:
+    """State is one file now, so a corrupt one must not break `reindex` too.
+
+    Before, `executescript` on non-database bytes raised out of every verb
+    including build — leaving the recovery step SKILL.md and INSTALL.md both
+    name as the fix equally broken, with no in-product way back.
+    """
+    index = _index(vault, embedder)
+    index.build()
+    index._open().close()
+    index._db = None
+    index._db_path().write_bytes(b"this is not a database, it is garbage\n")
+
+    hits = index.search("water leaking through the ceiling", k=3)
+    assert hits and hits[0].note_path == "roof.md"
 
 
 def _plain_rrf(index: VaultIndex, query: str, k: int) -> list[SearchHit]:

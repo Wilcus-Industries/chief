@@ -23,34 +23,31 @@ but reserving slots rather than ranking, for the reason given there.
 """
 
 import hashlib
-import re
 import sqlite3
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from chief_obsidian_memory import heal
 from chief_obsidian_memory.chunk import chunk_note, iter_notes
 from chief_obsidian_memory.config import MemorySettings
 from chief_obsidian_memory.embedding import embed, load_model
+from chief_obsidian_memory.retrieval import (
+    KEYWORD,
+    SEMANTIC,
+    SearchHit,
+    _fts_query,
+    _fuse,
+    _reserve,
+    _significant,
+)
 from chief_obsidian_memory.storelock import StoreLock
 
-# Which half of the index produced a hit. Carried through to the relevance gate
-# and the CLI, so a literal match is judged on its own merits rather than as a
-# weak vector neighbour.
-SEMANTIC = "sem"
-KEYWORD = "kw"
-BOTH = "both"
-
-# ponytail: the standard RRF constant; tune only if fusion visibly misranks.
-_RRF_K = 60
-
-# Each modality is asked for this many times ``k`` chunks, so that dedup by
+# Each half is asked for this many times ``k`` chunks, so that dedup by
 # note_path still leaves enough distinct notes to fill ``k`` slots.
 _OVERSAMPLE = 3
 
-_TERM = re.compile(r"\w+")
 
 # meta/chunks/fts only: ``chunks_vec`` needs the model's dimensionality, so it
 # is created by the rebuild path once that is known.
@@ -68,16 +65,6 @@ CREATE INDEX IF NOT EXISTS chunks_by_note ON chunks(note_path);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, heading);
 """
 
-
-class SearchHit(NamedTuple):
-    """One search result: the note it came from, its heading, the chunk text, a
-    score (higher is better), and which half of the index found it."""
-
-    note_path: str
-    heading: str
-    text: str
-    score: float
-    source: str = SEMANTIC
 
 
 class VaultIndex:
@@ -140,13 +127,15 @@ class VaultIndex:
                 return []
             return _fuse(
                 self._semantic(query, k * _OVERSAMPLE),
-                self._keyword(query, k * _OVERSAMPLE),
+                _significant(self._keyword(query, k * _OVERSAMPLE)),
                 k,
             )
 
     def semantic(self, query: str, k: int) -> list[SearchHit]:
         """The meaning half alone: the ``k`` chunks closest to ``query`` by
         cosine distance. Same self-heal and sweep as :meth:`search`."""
+        if k <= 0:
+            return []
         with self._lock:
             if self._prepare() is None:
                 return []
@@ -155,6 +144,8 @@ class VaultIndex:
     def grep(self, query: str, k: int) -> list[SearchHit]:
         """The literal half alone: the ``k`` chunks best matching ``query`` as
         text, by BM25. Same self-heal and sweep as :meth:`search`."""
+        if k <= 0:
+            return []
         with self._lock:
             if self._prepare() is None:
                 return []
@@ -176,7 +167,7 @@ class VaultIndex:
                 return []
             return _reserve(
                 self._semantic(query, k * _OVERSAMPLE),
-                self._keyword(query, k * _OVERSAMPLE),
+                _significant(self._keyword(query, k * _OVERSAMPLE)),
                 k,
             )
 
@@ -229,14 +220,13 @@ class VaultIndex:
             (match, k),
         ).fetchall()
         # BM25 is a cost (more negative is better); negate so every verb in
-        # this module returns "higher is better". A score of exactly 0 means the
-        # chunk matched only terms with no rarity value — every note holding
-        # "the" against an OR-joined sentence. Those are not matches, and
-        # keeping them lets a plateau of them crowd out the one real hit.
+        # this module returns "higher is better". Nothing is filtered here:
+        # `grep` promises literal matches, and on a small vault every term can
+        # be common enough to score as noise (see _significant, which is where
+        # the blended verbs drop those).
         return [
             SearchHit(path, heading, text, -rank, KEYWORD)
             for path, heading, text, rank in rows
-            if rank < 0
         ]
 
     # --- freshness --------------------------------------------------------
@@ -364,20 +354,39 @@ class VaultIndex:
 
     def _open(self) -> sqlite3.Connection:
         if self._db is None:
-            import sqlite_vec
-
-            self._index_home.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self._db_path())
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-            # WAL: the CLI and the daemon hook open the same file from separate
-            # processes (the store flock serializes their writes, not their
-            # reads).
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_SCHEMA)
-            self._db = conn
+            try:
+                self._db = self._connect()
+            except sqlite3.DatabaseError:
+                # Not a database: truncated, half-copied, or corrupted. State is
+                # one file now, so this would otherwise raise out of every verb
+                # *including* build — leaving `reindex`, the recovery step both
+                # SKILL.md and INSTALL.md name, equally broken. Discard and
+                # start clean; the vault is the source of truth.
+                self._discard_store()
+                self._db = self._connect()
         return self._db
+
+    def _connect(self) -> sqlite3.Connection:
+        import sqlite_vec
+
+        self._index_home.mkdir(parents=True, exist_ok=True)
+        # Thread-affine by default, which is safe only because every caller
+        # builds its own VaultIndex in the thread that uses it (the ambient hook
+        # constructs one inside its asyncio.to_thread worker). Reusing an
+        # instance across threads needs check_same_thread=False and a lock.
+        conn = sqlite3.connect(self._db_path())
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        # WAL: the CLI and the daemon hook open the same file from separate
+        # processes (the store flock serializes their writes, not their reads).
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SCHEMA)
+        return conn
+
+    def _discard_store(self) -> None:
+        for path in self._index_home.glob(f"{self._collection_name()}.db*"):
+            path.unlink(missing_ok=True)
 
     def _reset_store(self) -> None:
         """Empty every table and recreate the vector one at the current model's
@@ -394,13 +403,12 @@ class VaultIndex:
                 "CREATE VIRTUAL TABLE chunks_vec USING "
                 f"vec0(embedding float[{dim}] distance_metric=cosine)"
             )
-            conn.executemany(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-                (
-                    ("embed_model", self._settings.embed_model),
-                    ("dim", str(dim)),
-                    ("vault_path", str(self._vault.resolve())),
-                ),
+            # Only the model name is recorded: chunks_vec's own column width
+            # rejects a same-named model whose dimensionality changed, so a
+            # stored `dim` would be a row nothing ever reads.
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('embed_model', ?)",
+                (self._settings.embed_model,),
             )
 
     def _count(self, conn: sqlite3.Connection) -> int:
@@ -418,133 +426,3 @@ class VaultIndex:
     def _collection_name(self) -> str:
         digest = hashlib.sha256(str(self._vault.resolve()).encode()).hexdigest()
         return f"vault_{digest[:16]}"
-
-
-def _fts_query(query: str) -> str:
-    """An FTS5 ``MATCH`` expression for a natural-language query.
-
-    Terms are **OR**-joined rather than FTS5's default AND, so a whole sentence
-    still matches; BM25's rarity weighting then does the selecting — a stopword
-    scores ≈0 while a rare proper noun dominates. That is why this needs no
-    stopword list and no term extractor. Each term is double-quoted so vault
-    punctuation (``-``, ``"``, ``*``) can never become FTS5 syntax and turn a
-    search into a syntax error. A fully quoted input passes straight through as
-    a phrase query, which is how a caller asks for an exact sequence."""
-    stripped = query.strip()
-    if len(stripped) > 1 and stripped.startswith('"') and stripped.endswith('"'):
-        return stripped
-    return " OR ".join(f'"{term}"' for term in _TERM.findall(stripped))
-
-
-def _dedup(hits: list[SearchHit]) -> list[SearchHit]:
-    """One hit per note, keeping its best-ranked chunk. Recall is about notes:
-    two matching headings of one note must not eat two result slots."""
-    best: dict[str, SearchHit] = {}
-    for hit in hits:
-        best.setdefault(hit.note_path, hit)
-    return list(best.values())
-
-
-def _rrf(
-    semantic: list[SearchHit], keyword: list[SearchHit]
-) -> tuple[dict[str, float], dict[str, set[str]]]:
-    """Reciprocal-rank fusion over both halves: ``score = Σ 1/(60 + rank)``.
-
-    Rank-based, so the halves' incomparable scales (cosine similarity vs BM25)
-    never have to be normalized against each other, and a note both halves found
-    outranks one only a single half did. Returns the score and the set of halves
-    that found it, per note."""
-    scores: dict[str, float] = {}
-    sources: dict[str, set[str]] = {}
-    for source, hits in ((SEMANTIC, semantic), (KEYWORD, keyword)):
-        for rank, hit in enumerate(_dedup(hits), start=1):
-            scores[hit.note_path] = scores.get(hit.note_path, 0.0) + 1.0 / (
-                _RRF_K + rank
-            )
-            sources.setdefault(hit.note_path, set()).add(source)
-    return scores, sources
-
-
-def _fuse(
-    semantic: list[SearchHit], keyword: list[SearchHit], k: int
-) -> list[SearchHit]:
-    """The ``k`` best notes by RRF score — plus one guarantee.
-
-    RRF ranks by *position*, which discards the one thing BM25 knows: how
-    decisive a match was. A vault of similarly worded notes — a daily-note
-    template, a repeated heading — hands both halves a plateau of plausible
-    near-misses carrying the query's ordinary words, and they out-fuse the
-    single note that actually holds the rare proper noun. Measured on a vault
-    where twenty notes share the target's phrasing, plain RRF drops that note
-    out of the results entirely: the precise case this index exists for.
-
-    So the best literal match keeps a slot when fusion would have dropped it.
-    That is the whole correction — deliberately the smallest one that fixes it.
-    Reserving a *share* of the slots for each half also works, but it spends
-    them whether or not the keyword half earned them, evicting notes both
-    halves agreed on from ordinary conceptual queries. Ranking is what this
-    verb is for; :meth:`VaultIndex.ambient_candidates` is where coverage wins
-    instead."""
-    scores, sources = _rrf(semantic, keyword)
-    best: dict[str, SearchHit] = {}
-    for hit in _dedup(semantic) + _dedup(keyword):
-        best.setdefault(hit.note_path, hit)
-    ranked = [
-        hit._replace(
-            score=scores[hit.note_path], source=_source(sources[hit.note_path])
-        )
-        for hit in sorted(best.values(), key=lambda h: -scores[h.note_path])
-    ]
-    top = _dedup(keyword)[:1]
-    if top and all(hit.note_path != top[0].note_path for hit in ranked[:k]):
-        # Last slot, not first: fusion's ordering is still the better guide for
-        # everything it did rank, and this note is here on one half's word.
-        return ranked[: k - 1] + [
-            hit for hit in ranked if hit.note_path == top[0].note_path
-        ][:1]
-    return ranked[:k]
-
-
-def _reserve(
-    semantic: list[SearchHit], keyword: list[SearchHit], k: int
-) -> list[SearchHit]:
-    """``k`` notes with half the slots reserved for each half, RRF-ordered.
-
-    The ambient hook's policy, and a different objective from :func:`_fuse`:
-    these are gate calls, already paid for, so coverage across both halves beats
-    a finely ordered list. Reserving means a strong vector query cannot take
-    every slot and leave the literal half — the half that catches proper nouns —
-    unrepresented at the gate.
-
-    When dedup collapses a reserved slot (both halves found the same note) the
-    freed slot is backfilled from whichever half still has candidates, so a
-    caller asking for ``k`` gets ``k`` whenever the vault can supply them."""
-    scores, sources = _rrf(semantic, keyword)
-    picked: list[SearchHit] = []
-    seen: set[str] = set()
-
-    def take(hits: list[SearchHit], upto: int) -> None:
-        for hit in hits:
-            if len(picked) >= upto:
-                return
-            if hit.note_path not in seen:
-                seen.add(hit.note_path)
-                picked.append(hit)
-
-    take(_dedup(semantic), max(1, k // 2))  # the meaning half's reserved slots
-    take(_dedup(keyword), k)  # the remaining slots, literal matches first
-    take(_dedup(semantic), k)  # backfill whatever dedup collapsed
-    return sorted(
-        (
-            hit._replace(
-                score=scores[hit.note_path],
-                source=_source(sources[hit.note_path]),
-            )
-            for hit in picked
-        ),
-        key=lambda hit: -hit.score,
-    )
-
-
-def _source(found_by: set[str]) -> str:
-    return BOTH if len(found_by) > 1 else next(iter(found_by))
