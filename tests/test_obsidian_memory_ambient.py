@@ -217,9 +217,10 @@ async def test_gate_sees_the_transcript_and_exactly_one_candidate_per_call(
     payload = sent[1]["content"]
     assert "we were talking about the garage" in payload
     assert "the roof over there leaks" in payload
-    # Singular: one note per call, and the transcript leads it.
-    assert payload.count("Candidate note:") == 1
-    assert payload.index("Conversation so far:") < payload.index("Candidate note:")
+    # Singular: one note per call, and the transcript leads it. The header also
+    # names which half of the index found the note, for the gate to weigh.
+    assert payload.count("Candidate note (matched by ") == 1
+    assert payload.index("Conversation so far:") < payload.index("Candidate note")
 
 
 async def test_one_gate_call_per_candidate(
@@ -286,11 +287,11 @@ async def test_accepted_hits_land_in_the_hook_block_as_pointers_not_content(
 
 
 async def test_run_judge_truncates_to_the_token_cap(tmp_path: Path) -> None:
-    from chief_obsidian_memory.index import SearchHit
     from chief_obsidian_memory.judge import run_judge
+    from chief_obsidian_memory.retrieval import SearchHit
 
     judge = FakeProvider([text_turn("RELEVANT")])
-    huge = SearchHit("big.md", "H" * 5000, "body", 0.9)
+    huge = SearchHit("big.md", "H" * 5000, "body", 0.9, "sem")
     out = await run_judge(
         _classifier(judge, tmp_path), "transcript", [huge], cap_tokens=10,
         vault=tmp_path,
@@ -300,13 +301,13 @@ async def test_run_judge_truncates_to_the_token_cap(tmp_path: Path) -> None:
 
 
 async def test_irrelevant_candidates_are_dropped(tmp_path: Path) -> None:
-    from chief_obsidian_memory.index import SearchHit
     from chief_obsidian_memory.judge import run_judge
+    from chief_obsidian_memory.retrieval import SearchHit
 
     judge = FakeProvider([text_turn("IRRELEVANT"), text_turn("RELEVANT")])
     hits = [
-        SearchHit("noise.md", "Unrelated", "body", 0.9),
-        SearchHit("roof.md", "Roof repair", "body", 0.8),
+        SearchHit("noise.md", "Unrelated", "body", 0.9, "sem"),
+        SearchHit("roof.md", "Roof repair", "body", 0.8, "kw"),
     ]
     out = await run_judge(
         _classifier(judge, tmp_path), "transcript", hits, cap_tokens=1500,
@@ -322,7 +323,7 @@ async def test_irrelevant_candidates_are_dropped(tmp_path: Path) -> None:
 def test_importing_hook_module_does_not_import_the_vector_stack() -> None:
     code = (
         "import sys, chief_obsidian_memory.hook\n"
-        "leaked = [m for m in ('chromadb', 'model2vec') if m in sys.modules]\n"
+        "leaked = [m for m in ('sqlite_vec', 'model2vec') if m in sys.modules]\n"
         "assert not leaked, leaked\n"
     )
     result = subprocess.run(

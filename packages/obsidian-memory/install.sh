@@ -20,6 +20,42 @@
 # to the repo root.
 set -euo pipefail
 
+# Fail loud, first, if this Python cannot run the vector half of the index.
+# Recall is one SQLite file holding both halves, and the vector half is a
+# loadable extension — but `enable_load_extension` is compiled out of some
+# Python builds, and there is deliberately no runtime fallback. Better to stop
+# here naming the interpreter than to install a package whose every search
+# raises. FTS5 is checked the same way; normally built in, but not always.
+if ! uv run python - <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(":memory:")
+try:
+    conn.execute("CREATE VIRTUAL TABLE probe USING fts5(x)")
+except sqlite3.OperationalError as exc:
+    sys.exit(f"{sys.executable}: sqlite3 built without FTS5: {exc}")
+if not hasattr(conn, "enable_load_extension"):
+    sys.exit(
+        f"{sys.executable}: sqlite3 built without extension loading "
+        "(enable_load_extension) — sqlite-vec cannot load"
+    )
+try:
+    import sqlite_vec
+
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.execute("select vec_version()").fetchone()
+except Exception as exc:
+    sys.exit(f"{sys.executable}: sqlite-vec failed to load: {exc}")
+PY
+then
+  echo "obsidian-memory: aborting — the vector index cannot run on this" >&2
+  echo "Python. Run 'uv sync' if the dependencies are not installed yet;" >&2
+  echo "otherwise use a Python whose sqlite3 supports extension loading." >&2
+  exit 1
+fi
+
 src="packages/obsidian-memory/skills/obsidian-memory"
 dst="skills/obsidian-memory"
 mkdir -p "$dst"
