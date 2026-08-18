@@ -4,18 +4,44 @@ Asking is separated from doing (:mod:`.dedicated`) so the answers can be
 inspected and pinned without a terminal or a machine to change.
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chief.install.account import DEFAULT_USER, grant_reason
+from chief.install.account import DEFAULT_USER
 from chief.install.session import password_conflict
 from chief.install.wizard_io import MIN_PASSWORD_LENGTH, WizardIO
 
 CREATE = "create"
 EXISTING = "existing"
 DECLINED = "declined"
+ACCOUNT_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
-__all__ = ["CREATE", "DECLINED", "EXISTING", "Answers", "ask"]
+__all__ = ["CREATE", "DECLINED", "EXISTING", "Answers", "ask", "grant_reason"]
+
+
+def grant_reason(path: Path, home: Path) -> str | None:
+    """Why this directory may not be granted, or ``None`` if it may.
+
+    The question asked is which of *your* directories chief may reach, and
+    strictly-inside-your-home is that question's own answer — which is also
+    what makes it the whole check. It refuses the home root and ``/``, ``~/..``
+    and any other route out (judged on the *resolved* path, since the grant is
+    a recursive, irreversible ``chgrp``), and every system root: ``chmod -R
+    g+rwX /etc`` hands chief group-write on ``sudoers`` and is root by another
+    name, which the no-escalation promise in docs/SECURITY.md rules out.
+
+    A path that does not exist is refused here rather than left to fail its own
+    step, which aborts the plan after the account and tree steps have landed.
+    """
+    if not path.is_absolute():
+        return f"{path} is not an absolute path"
+    target, root = path.resolve(), home.resolve()
+    if target == root or not target.is_relative_to(root):
+        return f"{path} is not inside {root} — grant a directory of your own"
+    if not target.is_dir():
+        return f"{path} is not an existing directory"
+    return None
 
 
 @dataclass(frozen=True)
@@ -53,6 +79,19 @@ def _password(io: WizardIO, user: str) -> str:
         return password
 
 
+def _name(io: WizardIO) -> str:
+    """The name reaches argv unquoted and is joined onto the home root, where
+    an *absolute* one swallows the join whole: `Path("/Users") / "/etc"` is
+    `/etc`, i.e. `sysadminctl -addUser … -home /etc`."""
+    while True:
+        user = (
+            io.prompt(f"  account name [{DEFAULT_USER}]: ").strip() or DEFAULT_USER
+        )
+        if ACCOUNT_NAME.match(user):
+            return user
+        io.say("  lowercase letters, digits, _ and - only — try again.")
+
+
 def _dirs(io: WizardIO, verb: str, home: Path) -> tuple[Path, ...]:
     raw = io.prompt(
         f"  directories chief may {verb}, space-separated (empty = none): "
@@ -81,9 +120,7 @@ def ask(io: WizardIO, *, home: Path) -> Answers:
     if answer in ("n", "no"):
         io.say("account: declined — chief runs as you, exactly as before.")
         return Answers(DECLINED)
-    user = (
-        io.prompt(f"  account name [{DEFAULT_USER}]: ").strip() or DEFAULT_USER
-    )
+    user = _name(io)
     choice = EXISTING if answer in ("e", "existing") else CREATE
     password = _password(io, user) if choice == CREATE else ""
     io.say("Which of your directories may chief reach? Default is none.")

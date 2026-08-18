@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 
 from chief.install.lifecycle import DEFAULT_LAUNCHER
+from chief.install.posture import ACCOUNT_REPORT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,7 +25,14 @@ def build_parser() -> argparse.ArgumentParser:
     account.add_argument("--non-interactive", action="store_true")
     account.add_argument("--tree", type=Path, default=None)
     account.add_argument(
-        "--report", type=Path, default=None, help="write key=value facts here"
+        # Defaulted, not None: `chief account` is the documented alternative to
+        # re-running install.sh (docs/OPERATIONS.md), and uninstall reads this
+        # file to decide there is an account at all. Written nowhere, the
+        # account it just made is one chief can never remove.
+        "--report",
+        type=Path,
+        default=ACCOUNT_REPORT,
+        help="write key=value facts here",
     )
     service_install = sub.add_parser(
         "service-install", help="install + start the autostart service"

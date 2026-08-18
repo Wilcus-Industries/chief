@@ -23,6 +23,7 @@ from chief.install import updatecheck, wizard_steps
 from chief.install.account import Step, account_plan, default_home
 from chief.install.commands import ensure_config, main
 from chief.install.dedicated import existing_home, setup_account
+from chief.install.dedicated_ask import ask, grant_reason
 from chief.install.lifecycle import uninstall
 from chief.install.posture import ON, UNKNOWN, Posture, chief_account, read_posture
 from chief.install.service import ServiceManager
@@ -856,6 +857,41 @@ def test_granted_directories_are_group_permissions_and_never_the_home_root(
     assert f"sudo chgrp -R chief {home}" not in ran
 
 
+def test_a_grant_that_reaches_past_the_home_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    """`grant_reason` backs a promise made in docs/SECURITY.md, and the grant
+    it gates is a recursive, irreversible chgrp. `~/..` resolves to the home's
+    parent — every account on the box. A typo'd path is refused here rather
+    than failing its step after the account and tree steps have landed."""
+    home = tmp_path / "home" / "owner"
+    (home / "notes").mkdir(parents=True)
+    refused = (
+        home / "..",  # resolves to the parent of every account on the box
+        home,
+        Path("/"),
+        Path("notes"),  # relative
+        home / "nope",  # a typo, whose chgrp would abort the plan mid-flight
+        Path("/etc"),  # group-write on sudoers/shadow is root, not a grant
+    )
+    for path in refused:
+        assert grant_reason(path, home) is not None, path
+    assert grant_reason(home / "notes", home) is None
+
+
+def test_the_account_name_must_be_a_plain_account_name(tmp_path: Path) -> None:
+    """It goes straight into argv and is joined onto the home root, where an
+    absolute name swallows the join whole: `Path("/Users") / "/etc"` is
+    `/etc`, i.e. `sysadminctl -addUser … -home /etc`."""
+    prompts = iter(["e", "../etc", "chief bot", "chiefbot", "", ""])
+    io = WizardIO(
+        prompt=lambda _: next(prompts),
+        prompt_secret=lambda _: "",
+        say=lambda _: None,
+    )
+    assert ask(io, home=tmp_path).user == "chiefbot"
+
+
 def test_the_report_carries_what_install_sh_branches_on(tmp_path: Path) -> None:
     io, _, runner = _answers("c", "", "", "", "y")
     setup = setup_account(
@@ -974,11 +1010,26 @@ def test_the_service_definition_can_be_written_without_starting_it(
     assert runner.calls == []
 
 
+def _account_report(repo_dir: Path, user: str = "nobody") -> None:
+    """The installer's record that *this* install owns an account named `user`.
+
+    `nobody` on purpose: `chief_account` resolves the name through
+    `pwd.getpwnam`, so it must exist — and these tests build real
+    `sudo userdel --remove <user>` steps. They only stay inert because every
+    call site passes a recording executor; `uninstall`'s own default is a live
+    `subprocess.run`. The one account that exists everywhere and belongs to
+    nobody is the only safe name to write here.
+    """
+    (repo_dir / "data").mkdir(parents=True, exist_ok=True)
+    (repo_dir / "data" / "account-setup").write_text(f"mode=create\nuser={user}\n")
+
+
 def test_uninstall_keeps_the_system_account_unless_asked(tmp_path: Path) -> None:
     runner = FakeRunner()
     manager = ServiceManager(
         platform="linux", home=tmp_path, runner=runner, uid=1000
     )
+    _account_report(tmp_path)
     said: list[str] = []
     steps = RecordingRunner()
     uninstall(
@@ -1000,6 +1051,8 @@ def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
     manager = ServiceManager(
         platform="linux", home=tmp_path, runner=runner, uid=1000
     )
+    me = "nobody"
+    _account_report(tmp_path)
     steps = RecordingRunner()
     uninstall(
         service=manager,
@@ -1012,6 +1065,164 @@ def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
         execute=steps,
     )
     assert [" ".join(s.command()) for s in steps.steps] == [
-        "sudo userdel --remove chief",
+        f"sudo userdel --remove {me}",
         "sudo groupdel --force chief",
     ]
+
+
+def test_keep_account_skips_the_question_and_the_steps(tmp_path: Path) -> None:
+    """--keep-account is the non-interactive "no", and had no coverage at all
+    on either side of this change."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    steps = RecordingRunner()
+    code = uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=False,
+        keep_account=True,
+        confirm=lambda _: pytest.fail("--keep-account already answered this"),
+        say=said.append,
+        execute=steps,
+    )
+    assert code == 0
+    assert steps.steps == []
+    assert any("system account kept" in line for line in said)
+
+
+def test_purging_data_warns_that_a_kept_account_becomes_unremovable(
+    tmp_path: Path,
+) -> None:
+    """--purge-data --yes is the scripted teardown, and keeping is the default,
+    so the purge destroys the only record of an account it just kept. Nothing
+    can remove it after that, so the manual command has to be said out loud."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=True,
+        assume_yes=True,
+        say=said.append,
+        execute=RecordingRunner(),
+    )
+    assert any("userdel --remove nobody" in line for line in said)
+
+
+def test_uninstall_never_touches_an_account_this_install_did_not_create(
+    tmp_path: Path,
+) -> None:
+    """A single-user install has no dedicated account, so the question must not
+    be asked — answering it yes would `userdel --remove` whatever pre-existing
+    account happens to be called `chief`."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    said: list[str] = []
+    steps = RecordingRunner()
+    code = uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,  # no data/account-setup: nothing was ever created
+        purge_data=False,
+        assume_yes=False,
+        confirm=lambda _: pytest.fail("must not ask about an absent account"),
+        say=said.append,
+        execute=steps,
+    )
+    assert code == 0
+    assert steps.steps == []
+    assert not any("system account chief removed." in line for line in said)
+
+
+def test_purging_data_does_not_hide_the_account_from_the_same_run(
+    tmp_path: Path,
+) -> None:
+    """--purge-data deletes data/, which is where the account report lives. Read
+    it before the rmtree or the run that was told to remove the account finds
+    no record of one, keeps it, and says it never existed."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    steps = RecordingRunner()
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=True,
+        assume_yes=True,
+        remove_account=True,
+        say=said.append,
+        execute=steps,
+    )
+    assert "sudo userdel --remove nobody" in [
+        " ".join(s.command()) for s in steps.steps
+    ]
+    assert "system account nobody removed." in said
+
+
+def test_uninstall_stops_and_fails_when_a_removal_step_fails(
+    tmp_path: Path,
+) -> None:
+    """groupdel --force after a failed userdel deletes the group out from under
+    an account that still exists, and a scripted uninstall reads exit 0 as
+    success."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    steps = RecordingRunner(fail="userdel")
+    code = uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        remove_account=True,
+        say=lambda _: None,
+        execute=steps,
+    )
+    assert code == 1
+    assert not any("groupdel" in " ".join(s.command()) for s in steps.steps)
+
+
+def test_uninstall_does_not_claim_removal_when_the_steps_fail(
+    tmp_path: Path,
+) -> None:
+    """The return code was discarded, so a failed userdel still reported the
+    account gone — and the owner stops looking."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    me = "nobody"
+    _account_report(tmp_path)
+    said: list[str] = []
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=True,
+        remove_account=True,
+        say=said.append,
+        execute=RecordingRunner(fail="userdel"),
+    )
+    assert f"system account {me} removed." not in said
+    assert any("could not be removed" in line for line in said)
