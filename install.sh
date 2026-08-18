@@ -104,13 +104,19 @@ else
   # tty) or declined, and none of those mean the account an earlier run set up
   # has gone away — but `chief uninstall` reads this file to decide whether
   # there is an account to remove at all, so erasing it strands one.
-  FRESH_REPORT=$(mktemp)
+  # With a template, not bare: BSD mktemp (macOS — the platform this targets)
+  # requires one, and this line is only reached on an interactive run, which
+  # no CI job makes.
+  FRESH_REPORT=$(mktemp "${TMPDIR:-/tmp}/chief-account.XXXXXX")
   uv run python -m chief.install account \
     --tree "$REPO_DIR" --report "$FRESH_REPORT" < /dev/tty
   # -E, not BRE alternation: BSD grep (macOS — the platform this targets) does
   # not understand \(a\|b\), and a silent no-match installs the wrong mode.
   if grep -qE '^mode=(create|existing)$' "$FRESH_REPORT" 2>/dev/null; then
     mv "$FRESH_REPORT" "$ACCOUNT_REPORT"
+    # mktemp makes it 0600 owner-only, and the tree chown already ran, so
+    # without this chief cannot read its own install record.
+    chmod 0644 "$ACCOUNT_REPORT"
     CHIEF_USER=$(sed -n 's/^user=//p' "$ACCOUNT_REPORT")
     CHIEF_HOME=$(sed -n 's/^home=//p' "$ACCOUNT_REPORT")
   else

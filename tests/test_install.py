@@ -880,8 +880,9 @@ def test_a_grant_that_reaches_past_the_home_root_is_refused(
 
 
 def test_the_account_name_must_be_a_plain_account_name(tmp_path: Path) -> None:
-    """It goes straight into argv and into the home path — `..` there makes
-    `useradd --home-dir /Users` on macOS."""
+    """It goes straight into argv and is joined onto the home root, where an
+    absolute name swallows the join whole: `Path("/Users") / "/etc"` is
+    `/etc`, i.e. `sysadminctl -addUser … -home /etc`."""
     prompts = iter(["e", "../etc", "chief bot", "chiefbot", "", ""])
     io = WizardIO(
         prompt=lambda _: next(prompts),
@@ -1067,6 +1068,56 @@ def test_uninstall_removes_the_account_when_asked(tmp_path: Path) -> None:
         f"sudo userdel --remove {me}",
         "sudo groupdel --force chief",
     ]
+
+
+def test_keep_account_skips_the_question_and_the_steps(tmp_path: Path) -> None:
+    """--keep-account is the non-interactive "no", and had no coverage at all
+    on either side of this change."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    steps = RecordingRunner()
+    code = uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=False,
+        assume_yes=False,
+        keep_account=True,
+        confirm=lambda _: pytest.fail("--keep-account already answered this"),
+        say=said.append,
+        execute=steps,
+    )
+    assert code == 0
+    assert steps.steps == []
+    assert any("system account kept" in line for line in said)
+
+
+def test_purging_data_warns_that_a_kept_account_becomes_unremovable(
+    tmp_path: Path,
+) -> None:
+    """--purge-data --yes is the scripted teardown, and keeping is the default,
+    so the purge destroys the only record of an account it just kept. Nothing
+    can remove it after that, so the manual command has to be said out loud."""
+    runner = FakeRunner()
+    manager = ServiceManager(
+        platform="linux", home=tmp_path, runner=runner, uid=1000
+    )
+    _account_report(tmp_path)
+    said: list[str] = []
+    uninstall(
+        service=manager,
+        launcher=tmp_path / "chief",
+        repo_dir=tmp_path,
+        purge_data=True,
+        assume_yes=True,
+        say=said.append,
+        execute=RecordingRunner(),
+    )
+    assert any("userdel --remove nobody" in line for line in said)
 
 
 def test_uninstall_never_touches_an_account_this_install_did_not_create(

@@ -312,10 +312,13 @@ What the boundary buys:
   just closed (`install/account.py`).
 - **The owner picks what chief may reach.** The wizard asks two questions —
   directories to read, directories to write — defaulting to **none**, applied
-  as group permissions. The home directory root is never offered, judged on
-  the *resolved* path so `~/..` cannot smuggle it in, and a directory that does
-  not exist is refused rather than left to fail its own step
-  (`install/dedicated_ask.py`, `grant_reason`).
+  as group permissions. Only directories strictly *inside* the owner's home
+  can be granted — judged on the resolved path, so neither `~/..` nor a
+  symlink out smuggles anything in, and the home root itself, `/`, and every
+  system root are refused along with it (`chmod -R g+rwX /etc` would hand
+  chief group-write on `sudoers`, which is the escalation the bullet above
+  rules out). A directory that does not exist is refused too, rather than left
+  to fail its own step mid-plan (`install/dedicated_ask.py`, `grant_reason`).
 
 ### What the boundary does not cover
 

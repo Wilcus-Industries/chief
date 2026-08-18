@@ -70,6 +70,7 @@ class IMessageAdapter(Adapter):
         # or it deadlocks that thread until the card times out.
         self._resolve_approval = resolve_approval
         self._dedup = RecentDedup()
+        self._guids = RecentDedup()
         self._task: asyncio.Task[None] | None = None
         self._fifo = ThreadFifo(on_message, restart)
         self._stores = [Store(db_path, RowCursor(cursor_path))]
@@ -132,7 +133,9 @@ class IMessageAdapter(Adapter):
         scope = frozenset() if self._dedicated else self._owner_handles
         for store in self._stores:
             rows = await asyncio.to_thread(store.fetch, scope)
-            for rowid, sender, text, from_me, group_chat, in_self, date in rows:
+            for rowid, sender, text, from_me, group_chat, in_self, date, guid in (
+                rows
+            ):
                 store.advance(rowid)
                 if not store.mine and sender in self._self_handles:
                     # Chief's own reply, seen from the owner's side as an
@@ -141,24 +144,17 @@ class IMessageAdapter(Adapter):
                 message = self._map(sender, text, from_me, group_chat, in_self)
                 if message is None:
                     continue
-                # Recorded either way, so a group chat both accounts are in
-                # primes the window from whichever store gets there first (the
-                # cursors are independent, so either order happens). A repeat
-                # across stores is one message counted twice; one inside
-                # chief's own store is a self-DM twin — except in dedicated
-                # mode, where two identical texts really are two messages.
-                # Cost: keyed (thread_key, sender, text) over 5s, so a text
-                # sent to both accounts at once reaches chief once, losing the
-                # owner's-store copy — that path feeds monitors only.
-                prev = self._dedup.see(
-                    (message.thread_key, message.sender, message.text),
-                    date,
-                    store.mine,
-                )
-                if prev is not None and not (
-                    self._dedicated and store.mine and prev[1]
-                ):
+                # A group chat both accounts are in holds every message twice,
+                # once per store, under different rowids. Same message, so
+                # same guid — which the text key cannot tell apart from two
+                # people typing "ok". Cheap in the single-store case: a guid
+                # is only ever read once, so nothing matches.
+                if guid and self._guids.is_duplicate((guid,), date):
                     continue
+                if not self._dedicated and self._dedup.is_duplicate(
+                    (message.thread_key, message.sender, message.text), date
+                ):
+                    continue  # twin rows are a self-DM artefact only
                 if self._resolve_approval is not None and self._resolve_approval(
                     message
                 ):

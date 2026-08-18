@@ -97,6 +97,14 @@ def uninstall(
             "system account kept "
             f"(pass --remove-account to delete {account[0]})."
         )
+        if purge_data:
+            # The purge just took data/account-setup with it, and that is the
+            # only record of the account. Nothing here can remove it after
+            # this, so name the manual commands while they are still useful.
+            say(
+                f"  its record is gone with data/ — remove {account[0]} by "
+                f"hand if you meant to: userdel --remove {account[0]}"
+            )
     else:
         for step in remove_steps(service.platform, account[0], group):
             say(f"  {step.description}")
