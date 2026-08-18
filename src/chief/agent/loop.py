@@ -95,8 +95,13 @@ async def run_turn(
                 result = (
                     f"error: this exact {call.name} call already ran "
                     f"{REPEAT_LIMIT} times this turn with identical arguments "
-                    "— repeating it cannot change the result. Stop, take a "
-                    "different approach, or ask the owner for help."
+                    # "a different approach" used to sit here, which on a
+                    # repeated *denial* authorised the exact workaround the
+                    # gate's denial texts forbid (gate_text.py).
+                    "— repeating it cannot change the result. Stop. If "
+                    "something refused this call, do not look for another way "
+                    "to get the same effect — tell the owner. Otherwise "
+                    "rethink the approach or ask the owner for help."
                 )
             else:
                 result = await tools.dispatch(call)

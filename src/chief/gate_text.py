@@ -2,14 +2,18 @@
 back to the model.
 
 Split from ``gate.py`` (which decides and enforces) so wording changes don't
-push that file past the 200-line cap. The two denial texts are one decision:
-a denial has to tell the model *which* no it hit, since the right next move
-differs.
+push that file past the 200-line cap.
 
-The old single line ("denied by the gate") said only that something refused,
-which reliably produced the wrong next move — denied ``write_file``, the
-model reaches for a ``shell`` heredoc and gets the same effect anyway. Saying
-**stop** is the entire point of these strings.
+The old denial ("denied by the gate") said only that something refused, which
+reliably produced the wrong next move — denied ``write_file``, the model
+reaches for a ``shell`` heredoc and gets the same effect anyway. So both texts
+name the workarounds and forbid them.
+
+They are two texts rather than one because the right next move differs. A card
+decline is a decision the owner can revisit, so it may be retried once they
+say so; a never-list entry can only be changed by the owner editing config, so
+the model must not go looking for another route — including editing that
+config itself, which the self-edit skill otherwise teaches it to do.
 """
 
 import json
@@ -34,30 +38,25 @@ def card_denied(tool_name: str) -> str:
     """The owner's approval card came back a no.
 
     ``Approval.DENY`` also covers the 600s timeout, an unparseable answer, and
-    a card refused because one was already pending on the thread — so this
-    must not claim the owner typed "no", only that no approval arrived. It is
-    still a decision the owner can revisit, so the model is told to surface it
-    rather than to give up on the goal.
+    a card refused because one was already pending — so this must not claim
+    the owner typed "no", only that no approval arrived.
     """
     return (
         f"error: the owner did not approve tool {tool_name!r} — they declined, "
-        "or the card went unanswered. Treat this as a no. Do not retry the "
-        "call, do not re-ask, and do not reach the same effect another way (a "
-        "shell equivalent, a different tool). Stop what you were doing and "
-        "tell the owner what you were about to do and why, so they can decide."
+        "or the card went unanswered. Treat this as a no. Do not retry it on "
+        "your own and do not reach the same effect another way (a shell "
+        "equivalent, a different tool). Stop and tell the owner what you were "
+        "about to do and why; if they then tell you to go ahead, you may."
     )
 
 
 def never_denied(tool_name: str) -> str:
-    """The tool is on the gate's never list.
-
-    Kept distinct from the card text: no owner was asked and no approval can
-    lift it, so "the owner declined" would invite a re-ask that can never
-    succeed.
-    """
+    """The tool is on the gate's never list."""
     return (
-        f"error: tool {tool_name!r} is on the gate's never list — permanently "
-        "denied, and no approval can lift it. Do not retry it and do not reach "
-        "the same effect another way (a shell equivalent, a different tool). "
-        "Stop this line of work and tell the owner what you needed it for."
+        f"error: tool {tool_name!r} is on the gate's never list. No approval "
+        "card can lift that — only the owner can, by changing `gate.never` in "
+        "config.yaml. Do not retry it, do not edit that config yourself to "
+        "lift it, and do not reach the same effect another way (a shell "
+        "equivalent, a different tool). Stop this line of work and tell the "
+        "owner what you needed it for."
     )

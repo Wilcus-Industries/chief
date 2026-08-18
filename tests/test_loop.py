@@ -146,7 +146,10 @@ async def test_identical_repeat_calls_are_refused_after_limit() -> None:
         m for m in messages if m["role"] == "tool" and "already ran" in m["content"]
     ]
     assert len(refusals) == 2
-    assert "different approach" in refusals[0]["content"]
+    # The breaker must not authorise routing around a refusal — that is the
+    # workaround the gate's own denial texts forbid (gate_text.py).
+    assert "do not look for another way" in refusals[0]["content"]
+    assert "different approach" not in refusals[0]["content"]
 
 
 async def test_distinct_arguments_do_not_trip_the_repeat_breaker() -> None:

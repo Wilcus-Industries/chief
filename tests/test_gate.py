@@ -99,10 +99,12 @@ async def test_never_tool_is_denied_without_asking(tmp_path: Path) -> None:
     gated, questions = make_gated(tmp_path, Approval.ONCE)
     result = await gated.dispatch(ToolCall(id="1", name="rm_rf", arguments={}))
     assert result == (
-        "error: tool 'rm_rf' is on the gate's never list — permanently denied, "
-        "and no approval can lift it. Do not retry it and do not reach the same "
-        "effect another way (a shell equivalent, a different tool). Stop this "
-        "line of work and tell the owner what you needed it for."
+        "error: tool 'rm_rf' is on the gate's never list. No approval card can "
+        "lift that — only the owner can, by changing `gate.never` in "
+        "config.yaml. Do not retry it, do not edit that config yourself to "
+        "lift it, and do not reach the same effect another way (a shell "
+        "equivalent, a different tool). Stop this line of work and tell the "
+        "owner what you needed it for."
     )
     assert questions == []
 
@@ -137,11 +139,30 @@ async def test_gray_tool_denied_on_no(tmp_path: Path) -> None:
     result = await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
     assert result == (
         "error: the owner did not approve tool 'gray' — they declined, or the "
-        "card went unanswered. Treat this as a no. Do not retry the call, do "
-        "not re-ask, and do not reach the same effect another way (a shell "
-        "equivalent, a different tool). Stop what you were doing and tell the "
-        "owner what you were about to do and why, so they can decide."
+        "card went unanswered. Treat this as a no. Do not retry it on your "
+        "own and do not reach the same effect another way (a shell "
+        "equivalent, a different tool). Stop and tell the owner what you were "
+        "about to do and why; if they then tell you to go ahead, you may."
     )
+
+
+async def test_a_card_decline_stays_revisitable_but_a_never_list_hit_does_not(
+    tmp_path: Path,
+) -> None:
+    """The two denials must leave different doors open. A declined card is a
+    decision the owner can reverse, so an absolute "never retry" would strand
+    the model after the owner says go ahead. A never-list entry can only be
+    changed by editing config — which `self-edit/SKILL.md` teaches as routine
+    — so that route has to be named and forbidden, or the denial is advisory.
+    """
+    gated, _ = make_gated(tmp_path, Approval.DENY)
+    carded = await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
+    listed = await gated.dispatch(ToolCall(id="2", name="rm_rf", arguments={}))
+
+    assert "if they then tell you to go ahead" in carded
+    assert "config" not in carded  # nothing for the model to go edit
+    assert "do not edit that config yourself" in listed
+    assert "go ahead" not in listed
 
 
 async def test_card_denial_names_the_owner_not_the_never_list(

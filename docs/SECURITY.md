@@ -22,7 +22,7 @@ fourth place that can mint owner trust — treat it accordingly.
 Three sender values matter (`dispatch.py`): `owner`, `system`, and anything else
 (a stranger).
 
-## The gate — `gate.py`
+## The gate — `gate.py` (decides), `gate_text.py` (what it says)
 
 **Gating is by tool name only.** Arguments are never inspected for the decision;
 they are only rendered into announcement and card text. A tool approved once with
@@ -44,6 +44,20 @@ is an approved *anything*.
    continues and the model sees the denial.
 
 `ASK` is never terminal; it always resolves to NEVER or APPROVED.
+
+**Two denial strings, not one** (`gate_text.py`). A never-list hit and a declined
+card both land on NEVER, so the string is the only thing that tells them apart —
+and the right next move differs. Both forbid reaching the same effect another
+way, which is the failure this replaced: a bare "denied" reliably had the model
+retry through `shell` instead. `never_denied` additionally forbids editing
+`gate.never` to lift the denial, since `self-edit/SKILL.md` otherwise teaches
+config edits as routine. `card_denied` does *not* claim the owner typed "no" —
+`Approval.DENY` also covers the 600s timeout, an unparseable answer, and a card
+refused because one was already pending — and it leaves room for a retry the
+owner explicitly authorises afterwards.
+
+These are behavioural, not enforcement: a model that ignores them still hits the
+gate on the next call. The enforcement is the list check above.
 
 ### read_only is a narrow promise
 

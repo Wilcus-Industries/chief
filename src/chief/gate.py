@@ -137,9 +137,7 @@ class GatedTools:
             self._record(call, "unknown_tool")
             return await self._registry.dispatch(call, self._context)
         decision = self._policy.decide(call.name)
-        # A card decline and a never-list hit both land on NEVER but mean
-        # different things to the model, so remember which one denied it.
-        carded = False
+        carded = False  # which NEVER this is; the two denials differ (gate_text)
         if decision is Decision.ASK and call.name in self._read_only():
             decision = Decision.APPROVED
             self._record(call, "read_only")
