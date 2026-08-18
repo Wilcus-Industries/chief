@@ -173,8 +173,10 @@ cp data/config-history/<prev>.yaml config.yaml     # put it back, then restart
 ```
 
 The newest entry is what is live now, so the one to restore is usually the
-second-to-last. The last `KEEP` (20) changes are kept. A config too broken to
-boot never enters the history, which is the point — every entry is known-good.
+second-to-last. The last 20 changes are kept. A config too broken to boot never
+enters the history — every entry is one that *booted*, which is not the same as
+one that was right: the config you most often need to restore *from* is a bad
+one that came up fine (`gate: {approved: ["*"]}` parses and boots).
 
 ## On-disk layout
 

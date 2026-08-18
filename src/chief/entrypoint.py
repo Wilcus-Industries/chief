@@ -41,9 +41,13 @@ def record_config(config_path: Path, data_dir: Path) -> None:
     """Keep a copy of the config this boot came up on (best effort).
 
     Called only once the boot is proven, so the history holds configs that
-    actually work — the previous entry is what a bad config write gets
+    actually came up — the previous entry is what a bad config write gets
     restored from, since git cannot roll back a file it does not track.
-    A failure here must never take down an otherwise healthy boot.
+
+    Swallowed because a full disk must not crash-loop an otherwise healthy
+    box. Note the marker is already cleared by this point and the rollback
+    handler is lexically above, so an escape here would *not* be mistaken for
+    a bad self-edit — it would simply be a crash the supervisor restarts into.
     """
     try:
         written = snapshot(config_path, data_dir / "config-history", datetime.now(UTC))
@@ -51,7 +55,7 @@ def record_config(config_path: Path, data_dir: Path) -> None:
         logger.exception("could not snapshot config.yaml")
         return
     if written is not None:
-        logger.info("config changed since the last boot; kept a copy at %s", written)
+        logger.info("kept a copy of the changed config at %s", written)
 
 
 async def amain() -> None:

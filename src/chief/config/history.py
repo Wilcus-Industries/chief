@@ -18,7 +18,6 @@ content matches the newest one already there, which makes the directory a
 record of every *change* rather than of every restart.
 """
 
-import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -60,7 +59,17 @@ def snapshot(config_path: Path, history_dir: Path, now: datetime) -> Path | None
     # Two *distinct* configs booting inside one second is not a real case;
     # add a counter suffix if it ever becomes one.
     written = history_dir / f"{now.strftime(STAMP_FORMAT)}.yaml"
-    shutil.copyfile(config_path, written)
+    # Write the bytes already read, rather than copying the file again: the
+    # snapshot is then exactly what was compared, and it does not inherit
+    # ``copyfile``'s mode handling — which drops the source's bits, so a
+    # ``chmod 600 config.yaml`` would have yielded a 0644 copy of the handles
+    # the owner had just narrowed.
+    written.write_bytes(current)
+    written.chmod(config_path.stat().st_mode & 0o777)
+    # Skip the file just written: a box that boots with its clock set ahead
+    # leaves a future-stamped entry sorting last forever, and once KEEP of
+    # them exist this loop would otherwise unlink the live snapshot.
     for stale in snapshots(history_dir)[:-KEEP]:
-        stale.unlink()
+        if stale != written:
+            stale.unlink()
     return written

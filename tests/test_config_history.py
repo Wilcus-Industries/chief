@@ -96,11 +96,49 @@ def test_history_is_trimmed_to_the_newest_kept(tmp_path: Path) -> None:
 
 def test_missing_config_snapshots_nothing(tmp_path: Path) -> None:
     """No config.yaml is a real state (a fresh clone, a test rig) and must not
-    litter the history with empty files or raise on the boot path."""
+    litter the history or raise on the boot path."""
     history = tmp_path / "history"
 
     assert snapshot(tmp_path / "config.yaml", history, at(1)) is None
-    assert snapshots(history) == []
+    # Not `snapshots(history) == []` — that is also true of a directory that
+    # was created and left empty, which is the littering this rules out.
+    assert not history.exists()
+
+
+def test_snapshot_does_not_widen_the_config_permissions(tmp_path: Path) -> None:
+    """An owner who reacts to "this file holds my phone number" by narrowing
+    config.yaml must not find a world-readable copy of it in the history."""
+    config = write_config(tmp_path, "imessage:\n  owner_handles: ['+15551234567']\n")
+    config.chmod(0o600)
+    history = tmp_path / "history"
+
+    written = snapshot(config, history, at(1))
+
+    assert written is not None
+    assert written.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_future_stamped_entry_cannot_unlink_the_live_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A box that boots with its clock set ahead leaves entries that sort last
+    forever. Once KEEP of them exist, a trim that did not exempt the file it
+    just wrote would delete the very config that is live."""
+    config = write_config(tmp_path, "live\n")
+    history = tmp_path / "history"
+    history.mkdir()
+    for n in range(KEEP + 2):
+        (history / f"2099-01-01T00-00-{n:02d}Z.yaml").write_text(f"future {n}\n")
+
+    written = snapshot(config, history, at(1))
+
+    assert written is not None
+    assert written.read_text() == "live\n"
+    kept = snapshots(history)
+    assert written in kept
+    # Exempting it costs one entry over the cap in this pathological case,
+    # which is a far better trade than unlinking the config that is live.
+    assert len(kept) == KEEP + 1
 
 
 def test_snapshot_compares_bytes_not_text(tmp_path: Path) -> None:
@@ -152,5 +190,10 @@ def test_snapshots_are_returned_oldest_first(tmp_path: Path) -> None:
     config.write_text("three\n")
     snapshot(config, history, at(3))
 
-    kept = snapshots(history)
-    assert kept[-2].read_text() == "two\n"
+    # The whole list, not just index -2: with three entries a reversed sort
+    # still puts "two" in the middle, so indexing alone would pass either way.
+    assert [path.read_text() for path in snapshots(history)] == [
+        "one\n",
+        "two\n",
+        "three\n",
+    ]
