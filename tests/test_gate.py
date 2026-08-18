@@ -98,7 +98,12 @@ def make_gated(
 async def test_never_tool_is_denied_without_asking(tmp_path: Path) -> None:
     gated, questions = make_gated(tmp_path, Approval.ONCE)
     result = await gated.dispatch(ToolCall(id="1", name="rm_rf", arguments={}))
-    assert result == "error: tool 'rm_rf' denied by the gate"
+    assert result == (
+        "error: tool 'rm_rf' is on the gate's never list — permanently denied, "
+        "and no approval can lift it. Do not retry it and do not reach the same "
+        "effect another way (a shell equivalent, a different tool). Stop this "
+        "line of work and tell the owner what you needed it for."
+    )
     assert questions == []
 
 
@@ -130,7 +135,29 @@ async def test_gray_tool_asks_and_runs_on_yes(tmp_path: Path) -> None:
 async def test_gray_tool_denied_on_no(tmp_path: Path) -> None:
     gated, _ = make_gated(tmp_path, Approval.DENY)
     result = await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
-    assert result == "error: tool 'gray' denied by the gate"
+    assert result == (
+        "error: the owner did not approve tool 'gray' — they declined, or the "
+        "card went unanswered. Treat this as a no. Do not retry the call, do "
+        "not re-ask, and do not reach the same effect another way (a shell "
+        "equivalent, a different tool). Stop what you were doing and tell the "
+        "owner what you were about to do and why, so they can decide."
+    )
+
+
+async def test_card_denial_names_the_owner_not_the_never_list(
+    tmp_path: Path,
+) -> None:
+    """The two denials must read differently: a card decline is a decision the
+    owner can revisit, a never-list hit is not, and an agent told the wrong one
+    either nags about a permanent denial or gives up on a retryable ask."""
+    gated, _ = make_gated(tmp_path, Approval.DENY)
+    carded = await gated.dispatch(ToolCall(id="1", name="gray", arguments={}))
+    listed = await gated.dispatch(ToolCall(id="2", name="rm_rf", arguments={}))
+    assert "owner" in carded and "never list" not in carded
+    assert "never list" in listed and "owner did not approve" not in listed
+    # Both must carry the stop instruction; that is the whole point.
+    for message in (carded, listed):
+        assert "Do not retry" in message or "do not retry" in message
 
 
 async def test_always_answer_runs_and_persists_tool(tmp_path: Path) -> None:

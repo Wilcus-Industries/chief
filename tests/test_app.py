@@ -519,7 +519,7 @@ async def test_denied_card_blocks_the_tool(
         # The model was told the gate denied it.
         denied = provider.calls[1][-1]
         assert denied["role"] == "tool"
-        assert "denied by the gate" in denied["content"]
+        assert "did not approve" in denied["content"]
     finally:
         await shutdown(app, streams)
 
