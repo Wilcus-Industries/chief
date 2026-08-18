@@ -19,14 +19,11 @@ from pathlib import Path
 from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.dispatch import WEB_CHANNEL, Dispatcher
+from chief.gate_text import announce_text, card_denied, never_denied
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import ToolContext, ToolDispatcher
 
 logger = logging.getLogger(__name__)
-
-# Arguments are rendered into the announcement line; a shell heredoc or a
-# whole file body would otherwise flood the owner's channel.
-ANNOUNCE_ARG_LIMIT = 160
 
 
 class Decision(Enum):
@@ -91,15 +88,6 @@ def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskAppr
     return ask
 
 
-def announce_text(call: ToolCall, *, denied: bool = False) -> str:
-    """The one-line "running this now" notice for a non-card tool call."""
-    arguments = json.dumps(call.arguments, default=str)
-    if len(arguments) > ANNOUNCE_ARG_LIMIT:
-        arguments = arguments[:ANNOUNCE_ARG_LIMIT] + "…"
-    suffix = " — denied by the gate" if denied else ""
-    return f"⚙ {call.name} {arguments}{suffix}"
-
-
 def load_approved(path: Path) -> set[str]:
     """Read the persisted "always allow" tool names (empty if absent)."""
     if not path.exists():
@@ -149,18 +137,20 @@ class GatedTools:
             self._record(call, "unknown_tool")
             return await self._registry.dispatch(call, self._context)
         decision = self._policy.decide(call.name)
+        carded = False  # which NEVER this is; the two denials differ (gate_text)
         if decision is Decision.ASK and call.name in self._read_only():
             decision = Decision.APPROVED
             self._record(call, "read_only")
             await self._announce_call(call, denied=False)
         elif decision is Decision.ASK:
             # The card already shows the call; a second line would double it.
+            carded = True
             decision = await self._ask_card(call)
         else:
             self._record(call, f"list:{decision.value}")
             await self._announce_call(call, denied=decision is Decision.NEVER)
         if decision is Decision.NEVER:
-            return f"error: tool '{call.name}' denied by the gate"
+            return card_denied(call.name) if carded else never_denied(call.name)
         return await self._registry.dispatch(call, self._context)
 
     async def _announce_call(self, call: ToolCall, *, denied: bool) -> None:

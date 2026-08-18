@@ -122,7 +122,9 @@ def register_cron_tools(
             # forge the card and wedge the schedule loop once persisted.
             return f"error: {exc}"
         if command and not await _approve_command(context, spec, command):
-            return "schedule not created: the owner declined the command"
+            # Not "the owner declined" — DENY also covers an unanswered card
+            # and an unparseable answer (see gate_text.card_denied).
+            return "schedule not created: the command was not approved"
         resolved = await service.store.resolve_wake_target(
             target_session, context.channel, context.thread_key
         )
