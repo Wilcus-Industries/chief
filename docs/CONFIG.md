@@ -152,8 +152,29 @@ matters because a bare `owner_handles: +15551234567` parses as the integer
   of the model retyping YAML (#185).
 
 **`config.yaml` is gitignored, so the self-edit seatbelt cannot roll back a bad
-config write.** The pre-restart config gate is the only protection. Never
-hand-edit config from a package install; use `config_apply`.
+config write** — git only restores what it tracks, and tracking this file would
+push `owner_handles` to a published repo. The pre-restart config gate stops a
+config that will not *load*; `data/config-history/` is what a config that loads
+but is wrong gets restored from. Never hand-edit config from a package install;
+use `config_apply`.
+
+### Recovering a bad config
+
+`data/config-history/` holds a timestamped copy of every `config.yaml` that
+booted healthy, newest last, written only when the content changed — so the
+directory is a record of changes, not of restarts. Deliberately plain files
+rather than a git repo: `ls` is the history, `diff` is the diff, `cp` is the
+restore.
+
+```
+ls data/config-history/                       # what changed, and when
+diff data/config-history/<prev>.yaml config.yaml   # what this change did
+cp data/config-history/<prev>.yaml config.yaml     # put it back, then restart
+```
+
+The newest entry is what is live now, so the one to restore is usually the
+second-to-last. The last `KEEP` (20) changes are kept. A config too broken to
+boot never enters the history, which is the point — every entry is known-good.
 
 ## On-disk layout
 
@@ -166,6 +187,7 @@ hand-edit config from a package install; use `config_apply`.
 | `audit.jsonl` | every gated tool call |
 | `gate_approved.json` | persisted "always allow" set, minus config-approved |
 | `installed.yaml` | package install registry |
+| `config-history/` | a copy of every `config.yaml` that booted healthy (see above) |
 | `packages/` | clone of `packages_repo`, pulled by `chief-pkg update` |
 | `hooks/<package>/` | per-package hook scratch state |
 | `system.md` | self-edited system prompt override |

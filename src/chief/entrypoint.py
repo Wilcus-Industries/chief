@@ -3,9 +3,11 @@
 import asyncio
 import logging
 import signal
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chief.config.history import snapshot
 from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
@@ -33,6 +35,23 @@ async def report_restart(app: "App", repo_root: Path) -> None:
         await adapter.send(notice.thread_key, notice.text())
     except Exception:
         logger.exception("could not report the restart on %s", notice.channel)
+
+
+def record_config(config_path: Path, data_dir: Path) -> None:
+    """Keep a copy of the config this boot came up on (best effort).
+
+    Called only once the boot is proven, so the history holds configs that
+    actually work — the previous entry is what a bad config write gets
+    restored from, since git cannot roll back a file it does not track.
+    A failure here must never take down an otherwise healthy boot.
+    """
+    try:
+        written = snapshot(config_path, data_dir / "config-history", datetime.now(UTC))
+    except OSError:
+        logger.exception("could not snapshot config.yaml")
+        return
+    if written is not None:
+        logger.info("config changed since the last boot; kept a copy at %s", written)
 
 
 async def amain() -> None:
@@ -71,6 +90,7 @@ async def amain() -> None:
             restart_daemon()
         raise
     clear_marker(repo_root)
+    record_config(repo_root / "config.yaml", config.db_path.parent)
     # The box is up on the new code, so an update that landed is now proven.
     # Only here does the base pin advance; a rollback or an abandoned update
     # leaves HEAD where it was and the pin unmoved.
