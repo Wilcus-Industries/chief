@@ -12,7 +12,8 @@ from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
-from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
+from chief.selfedit.recovery import clear_marker, rollback_if_marked
+from chief.selfedit.restart import restart_daemon
 
 if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
     from chief.daemon import App
@@ -93,10 +94,12 @@ async def amain() -> None:
     except Exception:
         # A failed boot right after a restart undoes it and reboots — the
         # commit via git, the config from its newest snapshot.
-        if rollback_if_marked(repo_root, history):
+        if undone := rollback_if_marked(repo_root, history):
             # The next boot reports the rollback on the requesting thread
-            # instead of a "restart success" that never happened.
-            mark_notice_rolled_back(repo_root)
+            # instead of a "restart success" that never happened — naming
+            # what moved, since a restart changes the commit, the config, or
+            # both, and only the recovery knows which.
+            mark_notice_rolled_back(repo_root, undone)
             restart_daemon()
         raise
     clear_marker(repo_root)

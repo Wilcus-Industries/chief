@@ -10,7 +10,7 @@ import pytest
 from chief.adapters.base import Message
 from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
 from chief.adapters.imessage_send import owner_send_guard
-from chief.selfedit.recovery import RestartBoundary, RestartController
+from chief.selfedit.restart import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
 CHIEF = "chief@example.com"  # chief's own Apple ID handle (dedicated mode)

@@ -18,6 +18,7 @@ content matches the newest one already there, which makes the directory a
 record of every *change* rather than of every restart.
 """
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -31,11 +32,33 @@ STAMP_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
 
 
 def snapshots(history_dir: Path) -> list[Path]:
-    """Every snapshot, oldest first. The last entry is what is live now, so
-    the previous config is the second-to-last."""
+    """Every snapshot, oldest first.
+
+    Name order is write order (see :data:`STAMP_FORMAT`), and only a config
+    that booted is ever written here — so the last entry is the last config
+    known to come up, which is what :func:`restore_newest` puts back.
+    """
     if not history_dir.is_dir():
         return []
     return sorted(history_dir.glob("*.yaml"))
+
+
+def _write_private(path: Path, data: bytes, mode: int) -> None:
+    """Write ``data`` to ``path`` at ``mode``, never wider and never partial.
+
+    Created at 0600 rather than written and chmod'd after: these files hold
+    ``owner_handles``, and the plain write would leave one world-readable at
+    the umask default for the breath in between. Renamed into place because
+    the restore overwrites the live config at the moment the rollback marker
+    is already gone — a crash mid-write there would leave a truncated config
+    and nothing left to undo it with.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    tmp.chmod(mode)
+    os.replace(tmp, path)
 
 
 def restore_newest(
@@ -58,15 +81,18 @@ def restore_newest(
     if not kept:
         return None
     newest = kept[-1]
+    mode = newest.stat().st_mode & 0o777
     if config_path.is_file():
         current = config_path.read_bytes()
         if current == newest.read_bytes():
             return None
+        live = config_path.stat().st_mode & 0o777
         failed_copy.parent.mkdir(parents=True, exist_ok=True)
-        failed_copy.write_bytes(current)
-        failed_copy.chmod(config_path.stat().st_mode & 0o777)
-    config_path.write_bytes(newest.read_bytes())
-    config_path.chmod(newest.stat().st_mode & 0o777)
+        _write_private(failed_copy, current, live)
+        # The narrower of the two: an owner who ran `chmod 600 config.yaml`
+        # must not have it widened again by a snapshot taken before they did.
+        mode &= live
+    _write_private(config_path, newest.read_bytes(), mode)
     return newest
 
 
@@ -96,8 +122,7 @@ def snapshot(config_path: Path, history_dir: Path, now: datetime) -> Path | None
     # ``copyfile``'s mode handling — which drops the source's bits, so a
     # ``chmod 600 config.yaml`` would have yielded a 0644 copy of the handles
     # the owner had just narrowed.
-    written.write_bytes(current)
-    written.chmod(config_path.stat().st_mode & 0o777)
+    _write_private(written, current, config_path.stat().st_mode & 0o777)
     # Skip the file just written: a box that boots with its clock set ahead
     # leaves a future-stamped entry sorting last forever, and once KEEP of
     # them exist this loop would otherwise unlink the live snapshot.

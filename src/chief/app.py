@@ -33,7 +33,7 @@ from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
-from chief.selfedit.recovery import RestartController
+from chief.selfedit.restart import RestartController
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
 from chief.tools import ToolContext, ToolDispatcher, ToolRegistry

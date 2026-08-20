@@ -41,7 +41,7 @@ from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
-from chief.selfedit.recovery import RestartController
+from chief.selfedit.restart import RestartController
 from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app

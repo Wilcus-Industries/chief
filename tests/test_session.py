@@ -9,7 +9,7 @@ import pytest
 from chief.agent.manager import SessionManager
 from chief.persistence.store import MessageStore
 from chief.provider.base import ProviderEvent, ToolSpec
-from chief.selfedit.recovery import RestartController
+from chief.selfedit.restart import RestartController
 from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn, tool_turn

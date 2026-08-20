@@ -151,12 +151,13 @@ matters because a bare `owner_handles: +15551234567` parses as the integer
   and lists work. It exists so `install.sh` scripts set keys byte-exactly instead
   of the model retyping YAML (#185).
 
-**`config.yaml` is gitignored, so the self-edit seatbelt cannot roll back a bad
-config write** — git only restores what it tracks, and tracking this file would
-push `owner_handles` to a published repo. The pre-restart config gate stops a
-config that will not *load*; `data/config-history/` is what a config that loads
-but is wrong gets restored from. Never hand-edit config from a package install;
-use `config_apply`.
+**`config.yaml` is gitignored, so git is not what rolls back a bad config
+write** — git only restores what it tracks, and tracking this file would push
+`owner_handles` to a published repo. `data/config-history/` is the seatbelt
+instead: on a boot that fails after a restart, the newest snapshot is put back
+automatically (see below). The pre-restart config gate still stops a config
+that will not *load*. Never hand-edit config from a package install; use
+`config_apply`.
 
 ### Recovering a bad config
 
@@ -172,11 +173,19 @@ diff data/config-history/<prev>.yaml config.yaml   # what this change did
 cp data/config-history/<prev>.yaml config.yaml     # put it back, then restart
 ```
 
-The newest entry is what is live now, so the one to restore is usually the
-second-to-last. The last 20 changes are kept. A config too broken to boot never
-enters the history — every entry is one that *booted*, which is not the same as
-one that was right: the config you most often need to restore *from* is a bad
-one that came up fine (`gate: {approved: ["*"]}` parses and boots).
+Restoring by hand, the newest entry is usually what is live now, so the one to
+copy back is the second-to-last. The last 20 changes are kept. A config too
+broken to boot never enters the history — every entry is one that *booted*,
+which is not the same as one that was right: the config you most often need to
+restore *from* is a bad one that came up fine (`gate: {approved: ["*"]}` parses
+and boots).
+
+**Automatic restore.** When a restart's boot fails, the recovery puts the
+**newest** snapshot back on its own — newest, not second-to-last, because the
+config that just failed never booted and so never got snapshotted. The config
+it replaces is kept at `.config-failed.yaml` in the repo root (gitignored, same
+handles as `config.yaml`), so a hand edit is never silently discarded, and the
+restart notice on the requesting thread names both.
 
 ## On-disk layout
 
@@ -197,7 +206,8 @@ one that came up fine (`gate: {approved: ["*"]}` parses and boots).
 | `restart_notice.json` | the thread that asked for a restart |
 | `chief.log` | daemon stdout/stderr on macOS / `--no-service` (systemd uses journald) |
 
-Also gitignored at repo root: `.selfedit-pending.json` — the rollback marker.
+Also gitignored at repo root: `.selfedit-pending.json` (the rollback marker) and
+`.config-failed.yaml` (the config a failed boot was rolled back *from*).
 Runtime state that must survive restart and must never be committed.
 
 ### `secrets/` — `secrets/*` ignored, `README.md` tracked

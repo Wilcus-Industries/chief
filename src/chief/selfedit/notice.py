@@ -42,14 +42,16 @@ class RestartNotice:
     thread_key: str
     rationale: str = ""
     rolled_back: bool = False
+    #: What the rollback actually undid, from ``rollback_if_marked``. A
+    #: restart moves the commit, the config, or both, so the report cannot
+    #: assume — it used to claim a previous commit even when none had moved.
+    undone: str = ""
 
     def text(self) -> str:
         """What the fresh daemon says on the requesting thread."""
         if self.rolled_back:
-            return (
-                "⚠️ restart failed — the new code did not boot, so it was "
-                "rolled back. Back up on the previous commit."
-            )
+            what = self.undone or "it was rolled back"
+            return f"⚠️ restart failed — the new code did not boot, so {what}."
         detail = f" ({self.rationale})" if self.rationale else ""
         return f"✅ restart success — back up{detail}"
 
@@ -65,6 +67,7 @@ def write_restart_notice(repo_root: Path, notice: RestartNotice) -> None:
                 "thread_key": notice.thread_key,
                 "rationale": notice.rationale,
                 "rolled_back": notice.rolled_back,
+                "undone": notice.undone,
                 "written_at": time.time(),
             }
         )
@@ -92,6 +95,7 @@ def take_restart_notice(repo_root: Path) -> RestartNotice | None:
                 thread_key=str(data["thread_key"]),
                 rationale=str(data.get("rationale", "")),
                 rolled_back=bool(data.get("rolled_back", False)),
+                undone=str(data.get("undone", "")),
             )
     except Exception:
         # A corrupt notice is dropped, not raised: it must never block a boot.
@@ -100,8 +104,12 @@ def take_restart_notice(repo_root: Path) -> RestartNotice | None:
     return notice
 
 
-def mark_notice_rolled_back(repo_root: Path) -> None:
-    """A failed boot: the pending notice now reports the rollback instead."""
+def mark_notice_rolled_back(repo_root: Path, undone: str = "") -> None:
+    """A failed boot: the pending notice now reports the rollback instead.
+
+    ``undone`` is what the recovery actually put back, carried through so the
+    owner is told which half moved — and where the config that failed went.
+    """
     notice = take_restart_notice(repo_root)
     if notice is None:
         return
@@ -112,5 +120,6 @@ def mark_notice_rolled_back(repo_root: Path) -> None:
             thread_key=notice.thread_key,
             rationale=notice.rationale,
             rolled_back=True,
+            undone=undone,
         ),
     )

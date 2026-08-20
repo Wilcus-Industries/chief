@@ -157,7 +157,9 @@ class SelfEditPipeline:
             await self._git("add", "-A")
             await self._git("commit", "-m", f"self-edit: {rationale}")
         marker = {
-            "rollback_to": base, "rationale": rationale, "committed": committed,
+            "rollback_to": base,
+            "rationale": rationale,
+            "committed": committed,
         }
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
         return committed

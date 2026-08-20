@@ -23,12 +23,8 @@ from chief.selfedit.notice import (
     write_restart_notice,
 )
 from chief.selfedit.pipeline import SelfEditPipeline
-from chief.selfedit.recovery import (
-    MARKER_NAME,
-    RestartController,
-    clear_marker,
-    rollback_if_marked,
-)
+from chief.selfedit.recovery import MARKER_NAME, clear_marker, rollback_if_marked
+from chief.selfedit.restart import RestartController
 from chief.selfedit.tools import register_restart_tool
 from chief.tools import ToolContext, ToolRegistry
 from chief.tools.files import register_file_tools
@@ -452,11 +448,25 @@ def test_rolled_back_notice_reports_the_failure(repo: Path) -> None:
     write_restart_notice(
         repo, RestartNotice(channel="cli", thread_key="cli:t", rationale="risky")
     )
-    mark_notice_rolled_back(repo)
+    mark_notice_rolled_back(repo, "config.yaml is back from 2026-01-01T00-00-00Z")
     notice = take_restart_notice(repo)
     assert notice is not None
     assert notice.rolled_back
     assert notice.text().startswith("⚠️ restart failed")
+    # Names what actually moved: this restart changed no commit, and the old
+    # text claimed one anyway ("back up on the previous commit").
+    assert "config.yaml is back from" in notice.text()
+    assert "previous commit" not in notice.text()
+
+
+def test_a_rollback_with_no_detail_still_reads_as_a_rollback(repo: Path) -> None:
+    write_restart_notice(repo, RestartNotice("cli", "cli:t", "risky"))
+    mark_notice_rolled_back(repo)
+    notice = take_restart_notice(repo)
+    assert notice is not None
+    assert notice.text() == (
+        "⚠️ restart failed — the new code did not boot, so it was rolled back."
+    )
 
 
 def test_unreadable_notice_is_consumed_not_raised(repo: Path) -> None:
@@ -476,10 +486,10 @@ def test_rollback_if_marked_resets_and_reexecs(repo: Path) -> None:
     git(repo, "add", "-A")
     git(repo, "commit", "-m", "self-edit: bad")
     (repo / MARKER_NAME).write_text(json.dumps({"rollback_to": base}))
-    assert rollback_if_marked(repo) is True
+    assert base in rollback_if_marked(repo)
     assert (repo / "greeting.txt").read_text() == "hello\n"
     assert not (repo / MARKER_NAME).exists()
-    assert rollback_if_marked(repo) is False
+    assert rollback_if_marked(repo) == ""
 
 
 async def test_boot_failure_after_selfedit_rolls_back(
