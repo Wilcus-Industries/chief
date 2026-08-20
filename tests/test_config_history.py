@@ -180,8 +180,8 @@ def test_record_config_writes_under_the_data_dir(tmp_path: Path) -> None:
 
 
 def test_snapshots_are_returned_oldest_first(tmp_path: Path) -> None:
-    """Recovery reads this list, so the order is the contract: the previous
-    config is the second-to-last entry."""
+    """Order is the contract: name order is write order, so the last entry is
+    the last config that booted — which is what the recovery restores."""
     config = write_config(tmp_path, "one\n")
     history = tmp_path / "history"
     snapshot(config, history, at(1))

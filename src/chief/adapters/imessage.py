@@ -32,7 +32,7 @@ from chief.adapters.imessage_send import (
     run_jxa_subprocess,
 )
 from chief.adapters.imessage_store import RecentDedup
-from chief.selfedit.recovery import RestartBoundary
+from chief.selfedit.restart import RestartBoundary
 
 logger = logging.getLogger(__name__)
 

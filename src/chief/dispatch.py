@@ -31,7 +31,7 @@ from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
 from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
 from chief.provider.base import ProviderError, ToolCall
-from chief.selfedit.recovery import RestartBoundary
+from chief.selfedit.restart import RestartBoundary
 from chief.strangers import StrangerLog
 
 

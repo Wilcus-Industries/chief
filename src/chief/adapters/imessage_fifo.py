@@ -11,7 +11,7 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from chief.adapters.base import Message
-from chief.selfedit.recovery import RestartBoundary
+from chief.selfedit.restart import RestartBoundary
 
 logger = logging.getLogger(__name__)
 

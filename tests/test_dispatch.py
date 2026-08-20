@@ -16,7 +16,7 @@ from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.policy import RICH, StreamPolicy
 from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
-from chief.selfedit.recovery import RestartController
+from chief.selfedit.restart import RestartController
 from chief.strangers import StrangerLog
 from chief.tools import Tool, ToolRegistry
 

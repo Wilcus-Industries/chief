@@ -2,7 +2,7 @@
 it before exec.
 
 Kept apart from the session so the turn path stays focused on assembling and
-running turns. ``chief.selfedit.recovery.RestartController`` is the production
+running turns. ``chief.selfedit.restart.RestartController`` is the production
 implementation; ``_NullGate`` is the no-op used by tests and non-daemon runs.
 """
 

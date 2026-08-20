@@ -12,7 +12,8 @@ from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
-from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
+from chief.selfedit.recovery import clear_marker, rollback_if_marked
+from chief.selfedit.restart import restart_daemon
 
 if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
     from chief.daemon import App
@@ -64,6 +65,10 @@ async def amain() -> None:
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     repo_root = Path.cwd()
+    # Where the rollback looks for the last config that booted. Rebound below
+    # once the real config is loaded; the default covers a boot that dies
+    # before that, when db_path is unknown anyway.
+    history = repo_root / "data" / "config-history"
     try:
         # Imported inside the seatbelt: a self-edit that breaks chief.app's
         # import (yet somehow passes the done-check) still rolls back instead
@@ -77,6 +82,7 @@ async def amain() -> None:
         for step in migrate_instance(repo_root):
             logger.info("update migration: %s", step)
         config = load_config()
+        history = config.db_path.parent / "config-history"
         # One daemon per data dir: a stray second instance would double-poll
         # chat.db and answer every iMessage twice. Held for the whole process.
         _lock = acquire_instance_lock(config.db_path.parent / "chief.lock")
@@ -86,11 +92,14 @@ async def amain() -> None:
         logger.error("another chief instance is already running — refusing to start")
         raise SystemExit(1) from None
     except Exception:
-        # A failed boot right after a self-edit rolls back and re-execs.
-        if rollback_if_marked(repo_root):
+        # A failed boot right after a restart undoes it and reboots — the
+        # commit via git, the config from its newest snapshot.
+        if undone := rollback_if_marked(repo_root, history):
             # The next boot reports the rollback on the requesting thread
-            # instead of a "restart success" that never happened.
-            mark_notice_rolled_back(repo_root)
+            # instead of a "restart success" that never happened — naming
+            # what moved, since a restart changes the commit, the config, or
+            # both, and only the recovery knows which.
+            mark_notice_rolled_back(repo_root, undone)
             restart_daemon()
         raise
     clear_marker(repo_root)
