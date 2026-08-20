@@ -17,6 +17,8 @@ dist/
 /data/
 # Self-edit rollback marker — runtime state, survives restart, never committed.
 /.selfedit-pending.json
+# The config a failed boot was rolled back from — holds owner_handles, like config.yaml.
+/.config-failed.yaml
 # Secrets — keep dir structure, never the real secret files
 /secrets/*
 !/secrets/README.md
