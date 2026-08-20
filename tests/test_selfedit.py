@@ -120,8 +120,12 @@ async def test_noop_restart_is_allowed(repo: Path, tmp_path: Path) -> None:
     result = await pipeline.restart("just reload")
     assert "restarting" in result
     assert restart.called
-    assert not (repo / MARKER_NAME).exists()
     assert "self-edit" not in git(repo, "log", "--oneline")
+    # A marker is written even with nothing committed: this restart can still
+    # have changed the gitignored config, and leaving none meant a failed boot
+    # afterwards had no recovery for anything at all.
+    marker = json.loads((repo / MARKER_NAME).read_text())
+    assert marker["committed"] is False
 
 
 async def test_bad_config_aborts_restart_and_keeps_edits(

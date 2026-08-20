@@ -64,6 +64,10 @@ async def amain() -> None:
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     repo_root = Path.cwd()
+    # Where the rollback looks for the last config that booted. Rebound below
+    # once the real config is loaded; the default covers a boot that dies
+    # before that, when db_path is unknown anyway.
+    history = repo_root / "data" / "config-history"
     try:
         # Imported inside the seatbelt: a self-edit that breaks chief.app's
         # import (yet somehow passes the done-check) still rolls back instead
@@ -77,6 +81,7 @@ async def amain() -> None:
         for step in migrate_instance(repo_root):
             logger.info("update migration: %s", step)
         config = load_config()
+        history = config.db_path.parent / "config-history"
         # One daemon per data dir: a stray second instance would double-poll
         # chat.db and answer every iMessage twice. Held for the whole process.
         _lock = acquire_instance_lock(config.db_path.parent / "chief.lock")
@@ -86,8 +91,9 @@ async def amain() -> None:
         logger.error("another chief instance is already running — refusing to start")
         raise SystemExit(1) from None
     except Exception:
-        # A failed boot right after a self-edit rolls back and re-execs.
-        if rollback_if_marked(repo_root):
+        # A failed boot right after a restart undoes it and reboots — the
+        # commit via git, the config from its newest snapshot.
+        if rollback_if_marked(repo_root, history):
             # The next boot reports the rollback on the requesting thread
             # instead of a "restart success" that never happened.
             mark_notice_rolled_back(repo_root)

@@ -38,6 +38,38 @@ def snapshots(history_dir: Path) -> list[Path]:
     return sorted(history_dir.glob("*.yaml"))
 
 
+def restore_newest(
+    history_dir: Path, config_path: Path, failed_copy: Path
+) -> Path | None:
+    """Put the newest snapshot back, keeping the config it replaced.
+
+    The boot-failure undo for a config change, since git cannot roll back a
+    file it does not track. The **newest** entry is right here, not the
+    second-to-last: a config that failed to boot never got snapshotted, so
+    the last entry is still the last one that came up.
+
+    The config being replaced is saved to ``failed_copy`` first — it may hold
+    an edit the owner still wants, and a failed boot is not a reason to
+    discard it silently. Returns the snapshot restored, or ``None`` when
+    there is no history or the config already matches it (nothing to undo,
+    and the caller must not reboot into an unchanged state).
+    """
+    kept = snapshots(history_dir)
+    if not kept:
+        return None
+    newest = kept[-1]
+    if config_path.is_file():
+        current = config_path.read_bytes()
+        if current == newest.read_bytes():
+            return None
+        failed_copy.parent.mkdir(parents=True, exist_ok=True)
+        failed_copy.write_bytes(current)
+        failed_copy.chmod(config_path.stat().st_mode & 0o777)
+    config_path.write_bytes(newest.read_bytes())
+    config_path.chmod(newest.stat().st_mode & 0o777)
+    return newest
+
+
 def snapshot(config_path: Path, history_dir: Path, now: datetime) -> Path | None:
     """Copy ``config_path`` into the history, unless it is already the newest.
 

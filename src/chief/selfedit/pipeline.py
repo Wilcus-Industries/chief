@@ -4,9 +4,10 @@ The agent edits its working tree freely with the file tools; nothing is live
 until ``restart``: dirty-tree file-list confirmation, the full done-check,
 then a live ``config.yaml`` load (fixture configs alone would let a bad real
 value boot-loop launchd). Only on all green does it commit, write the
-rollback marker, and reboot into the new code (a boot failure rolls back —
-``recovery.py``). On red the edits are **kept** and the failure returned so
-the agent fixes forward. Restarts serialize behind a lock.
+rollback marker (always — a config-only restart still needs an undo), and
+reboot into the new code (a boot failure rolls back — ``recovery.py``). On red
+the edits are **kept** and the failure returned so the agent fixes forward.
+Restarts serialize behind a lock.
 
 Subprocess plumbing (checks, git, argv-only — no shell) lives in
 ``gitops.py``.
@@ -146,16 +147,20 @@ class SelfEditPipeline:
         """Commit tracked working-tree changes and drop a rollback marker.
 
         Returns whether anything was committed. Gitignored writes (``data``,
-        ``secrets``, ``config.yaml``, off-repo) never enter the commit, so they
-        are unversioned — the rollback marker only rewinds repo files (#198).
+        ``secrets``, ``config.yaml``, off-repo) never enter the commit, so git
+        cannot rewind them (#198) — hence the recorded config-history path,
+        and the marker being written **even when nothing was committed**: a
+        config-only restart used to leave none, so it had no recovery at all.
         """
-        if not await self._dirty_files():
-            return False
-        await self._git("add", "-A")
-        await self._git("commit", "-m", f"self-edit: {rationale}")
-        marker = {"rollback_to": base, "rationale": rationale}
+        committed = bool(await self._dirty_files())
+        if committed:
+            await self._git("add", "-A")
+            await self._git("commit", "-m", f"self-edit: {rationale}")
+        marker = {
+            "rollback_to": base, "rationale": rationale, "committed": committed,
+        }
         (self._root / MARKER_NAME).write_text(json.dumps(marker))
-        return True
+        return committed
 
     async def revert_edits(self) -> str:
         """Discard uncommitted changes to tracked repo files (back to HEAD).

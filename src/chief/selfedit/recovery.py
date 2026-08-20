@@ -1,8 +1,10 @@
 """Boot-side half of the self-edit seatbelt.
 
 The pipeline leaves a marker file before restarting. If the new code boots,
-the marker is cleared (healthcheck passed). If boot raises, the repo is
-reset to the recorded commit and the daemon re-execs into the old code.
+the marker is cleared (healthcheck passed). If boot raises, whatever the
+restart changed is undone and the daemon restarts into the old state — the
+repo resets to the recorded commit, and the config is put back from its
+newest history snapshot, which git cannot do because config.yaml is ignored.
 """
 
 import asyncio
@@ -15,11 +17,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from chief.config.history import restore_newest
 from chief.selfedit.notice import RestartNotice, write_restart_notice
 
 logger = logging.getLogger(__name__)
 
 MARKER_NAME = ".selfedit-pending.json"
+
+#: The config a failed boot was rolled back *from*, kept beside the repo so a
+#: hand edit is never silently discarded by the recovery.
+FAILED_CONFIG_NAME = ".config-failed.yaml"
 
 # How long to let in-flight turns commit before restarting anyway. A stuck
 # turn must not wedge the restart forever; a self-edit already merged.
@@ -120,21 +127,57 @@ def clear_marker(repo_root: Path) -> None:
         marker.unlink()
 
 
-def rollback_if_marked(repo_root: Path) -> bool:
-    """After a failed boot: reset to the pre-edit commit if one is recorded.
+def rollback_if_marked(
+    repo_root: Path,
+    config_history: Path | None = None,
+    run: Callable[[list[str]], object] | None = None,
+) -> bool:
+    """After a failed boot: undo whatever the restart changed.
 
-    Returns True when a rollback happened (caller should re-exec).
+    Two halves, because a restart changes two things the seatbelt covers
+    differently. Committed repo files rewind with ``git reset --hard``. The
+    config does not — it is gitignored, so git steps straight past it, and a
+    config-only restart commits nothing at all, which is why it used to leave
+    no marker and so had no boot-failure recovery for anything. Its undo is
+    the newest config-history snapshot.
+
+    Returns True only when something was actually undone. A marker with
+    nothing left to undo must return False: rebooting into an identical tree
+    and an identical config reproduces the same failed boot forever.
+
+    ``config_history`` comes from the caller rather than the marker: the boot
+    that writes the marker and the boot that reads it resolve the data dir the
+    same way, so recording it would only let the two drift.
+
+    ``run`` is the git runner, injected by tests so they need no real repo.
     """
     marker = repo_root / MARKER_NAME
     if not marker.exists():
         return False
-    target = str(json.loads(marker.read_text())["rollback_to"])
+    record = json.loads(marker.read_text())
     marker.unlink()
-    logger.error("boot failed after self-edit; rolling back to %s", target)
-    subprocess.run(
-        ["git", "reset", "--hard", target], cwd=repo_root, check=True
-    )
-    return True
+    undone = False
+    # ``committed`` is absent from a marker written by the previous version,
+    # and those were only ever written when a commit had been made.
+    if record.get("committed", True) and record.get("rollback_to"):
+        target = str(record["rollback_to"])
+        logger.error("boot failed after self-edit; rolling back to %s", target)
+        argv = ["git", "reset", "--hard", target]
+        if run is None:
+            subprocess.run(argv, cwd=repo_root, check=True)
+        else:
+            run(argv)
+        undone = True
+    if config_history is not None:
+        restored = restore_newest(
+            config_history, repo_root / "config.yaml", repo_root / FAILED_CONFIG_NAME
+        )
+        if restored is not None:
+            logger.error("boot failed; put the config back from %s", restored)
+            undone = True
+    if not undone:
+        logger.error("boot failed, but nothing was left to undo; not restarting")
+    return undone
 
 
 def restart_daemon() -> None:
