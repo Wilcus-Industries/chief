@@ -15,8 +15,12 @@ Two deliberate shapes here:
   costs a line, so the gate now protects the *signal* — nudges the agent keeps
   trusting — rather than a token budget.
 
-The candidates are already ranked by vector similarity upstream, so this does
-no re-ranking: the gate only removes, and search order survives.
+The candidates are already ranked upstream, so this does no re-ranking: the
+gate only removes, and search order survives. Each one is labelled with the
+half of the index that found it — meaning, exact keyword, or both — because
+those are different kinds of evidence. A literal hit on a rare project name is
+strong on its own; the same note reached by vector similarity alone is a much
+weaker signal, and the gate should not have to guess which it is looking at.
 """
 
 import asyncio
@@ -31,6 +35,14 @@ if TYPE_CHECKING:
 # Seeded into the classifiers dir by the package install; editable by the owner.
 CLASSIFIER_NAME = "memory-relevance"
 RELEVANT = "RELEVANT"
+
+# How the candidate reached the gate, in words the prompt can reason about.
+# Keyed by the source tags index.py stamps onto a hit.
+_MATCHED_BY = {
+    "sem": "meaning",
+    "kw": "exact keyword",
+    "both": "meaning and exact keyword",
+}
 
 _NUDGE_HEADER = (
     "Possibly relevant notes in the owner's Obsidian vault. These are pointers, "
@@ -89,7 +101,8 @@ def _payload(transcript: str, hit: "SearchHit") -> str:
     transcript prefix, so the provider can cache it across the concurrent calls.
     """
     return (
-        f"{transcript}\n\nCandidate note:\n"
+        f"{transcript}\n\nCandidate note (matched by "
+        f"{_MATCHED_BY.get(hit.source, hit.source)}):\n"
         f"{hit.note_path} :: {hit.heading}\n{hit.text}"
     )
 

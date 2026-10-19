@@ -44,7 +44,7 @@ dev = [
     "playwright>=1.40",
     # The obsidian-memory package's code ships as an editable subpackage so its
     # judge is importable in-process, its `chief-memory` CLI runs, and its real
-    # model2vec + chromadb path is exercised by the test suite (#207).
+    # model2vec + sqlite-vec path is exercised by the test suite (#207).
     "chief-obsidian-memory",
 ]
 
@@ -82,7 +82,7 @@ ignore_missing_imports = true
 # The obsidian-memory heavy deps ship no usable type stubs.
 [[tool.mypy.overrides]]
 module = [
-    "chromadb.*",
+    "sqlite_vec.*",
     "model2vec.*",
     "obsidiantools.*",
     "networkx.*",

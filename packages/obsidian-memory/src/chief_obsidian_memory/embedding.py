@@ -20,5 +20,6 @@ def load_model(name: str) -> Any:
 
 
 def embed(model: Any, texts: list[str]) -> list[list[float]]:
-    """Embed ``texts`` into plain float lists chromadb accepts."""
+    """Embed ``texts`` into plain float lists, ready to serialize into the
+    vector table."""
     return [vector.tolist() for vector in model.encode(texts)]

@@ -16,8 +16,9 @@ vault itself — the owner's notes are theirs.
    fine — it just won't load in production.
 4. Delete the installed skill dir `skills/obsidian-memory/`.
 5. Optionally delete the persistent index at `data/hooks/obsidian-memory/` to
-   reclaim disk. The **vault is never touched** — do not delete the owner's
-   notes.
+   reclaim disk — it is one SQLite file (plus its WAL sidecars) per vault, and
+   it rebuilds itself from the notes on the first search after a reinstall. The
+   **vault is never touched** — do not delete the owner's notes.
 6. Delete this `UNINSTALL.md` (`packages/obsidian-memory/UNINSTALL.md`) — its
    absence signals the uninstall completed.
 7. `restart` to bring the change live.

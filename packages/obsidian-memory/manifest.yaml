@@ -1,5 +1,5 @@
 name: obsidian-memory
-description: Semantic + wikilink memory over an Obsidian vault, with owner-gated ambient recall.
+description: Hybrid (keyword + semantic) and wikilink memory over an Obsidian vault, with owner-gated ambient recall.
 dependencies: []
 mcp_servers: {}
 skills:
@@ -8,7 +8,7 @@ config_keys:
   - obsidian_memory
 secrets: []
 python_deps:
-  - chromadb
+  - sqlite-vec
   - model2vec
   - obsidiantools
   - networkx

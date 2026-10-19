@@ -31,15 +31,16 @@ class IndexedNote:
     content_hash: str
 
 
-def indexed_meta(collection: Any) -> dict[str, IndexedNote]:
+def indexed_meta(conn: Any) -> dict[str, IndexedNote]:
     """note_path -> its indexed mtime + content hash, one entry per note.
 
-    A note has one metadata row per chunk, all carrying the same mtime and
-    hash; collapsing on note_path leaves one record each."""
-    got = collection.get(include=["metadatas"])
+    A note has one row per chunk, all carrying the same mtime and hash;
+    ``DISTINCT`` collapses them to one record each."""
     return {
-        m["note_path"]: IndexedNote(mtime=m["mtime"], content_hash=m["content_hash"])
-        for m in got["metadatas"] or []
+        note_path: IndexedNote(mtime=mtime, content_hash=digest)
+        for note_path, mtime, digest in conn.execute(
+            "SELECT DISTINCT note_path, mtime, content_hash FROM chunks"
+        )
     }
 
 

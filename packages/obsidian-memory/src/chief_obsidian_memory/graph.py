@@ -3,8 +3,8 @@
 obsidiantools parses the ``[[wikilinks]]`` into a networkx graph whose nodes are
 note stems; this wraps it in an undirected graph keyed by vault-relative note
 paths (the same currency the index and CLI use) and filtered to in-scope notes.
-``related`` widens a semantic search with graph neighbours, surfacing linked
-notes a pure vector query would miss. obsidiantools/networkx import lazily.
+``related`` widens a hybrid search with graph neighbours, surfacing linked
+notes no query would rank on its own. obsidiantools/networkx import lazily.
 """
 
 from pathlib import Path
@@ -72,11 +72,11 @@ class VaultGraph:
 def related(
     index: VaultIndex, graph: VaultGraph, query: str, k: int, hops: int = 1
 ) -> list[str]:
-    """Semantic hits for ``query`` widened by their wikilink neighbours.
+    """Search hits for ``query`` widened by their wikilink neighbours.
 
-    Order is semantic hits first (closest first), then each hit's graph
-    neighbours within ``hops``, de-duplicated — so a linked note that no vector
-    query would rank still surfaces."""
+    Order is the hybrid search's hits first (best first), then each hit's graph
+    neighbours within ``hops``, de-duplicated — so a linked note that neither
+    half of the index would rank still surfaces."""
     ordered: list[str] = []
     seen: set[str] = set()
 

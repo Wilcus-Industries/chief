@@ -62,15 +62,18 @@ def test_search_reembeds_a_note_that_drifted_out_of_band(
     assert any(h.note_path == "tomatoes.md" and h.heading == "Blight" for h in hits)
 
 
-def test_dropped_collection_auto_rebuilds_on_search(
+def test_dropped_store_auto_rebuilds_on_search(
     vault: Path, embedder: Any
 ) -> None:
     index = _index(vault, embedder)
     index.build()
-    # A missing/corrupt collection at open must trigger a full rebuild, never a
-    # silently empty index.
-    index._client_().delete_collection(index._collection_name())
-    index._collection = None
+    # A missing/corrupt store at open must trigger a full rebuild, never a
+    # silently empty index. Delete the SQLite file and its WAL sidecars out
+    # from under the index, as a stray `rm` or a wiped data dir would.
+    index._open().close()
+    index._db = None
+    for path in index._index_home.glob(f"{index._collection_name()}.db*"):
+        path.unlink()
     hits = index.search("water leaking through the ceiling", k=3)
     assert hits and hits[0].note_path == "roof.md"
 

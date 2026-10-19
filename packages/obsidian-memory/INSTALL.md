@@ -1,10 +1,10 @@
 # Installing obsidian-memory
 
 Gives chief a long-term memory backed by an **Obsidian vault**: heading-chunked
-notes embedded into a persistent vector index (model2vec + chromadb) for
-semantic recall, a wikilink graph for "related notes", and an **owner-gated
-ambient recall hook** that quietly surfaces relevant notes every few owner
-turns. The package code already ships in core (the `chief_obsidian_memory`
+notes indexed into a single persistent SQLite store that holds both halves of
+retrieval — FTS5 keyword search and model2vec vectors via sqlite-vec — a
+wikilink graph for "related notes", and an **owner-gated ambient recall hook**
+that quietly surfaces relevant notes every few owner turns. The package code already ships in core (the `chief_obsidian_memory`
 subpackage under `packages/obsidian-memory/src/`); this install pulls in its
 Python dependencies, configures the vault, and turns the hook on.
 
@@ -12,14 +12,19 @@ Python dependencies, configures the vault, and turns the hook on.
 
 State these to the owner and get an explicit yes; do not install silently.
 
-- **Heavy dependencies.** This adds `chromadb`, `model2vec`, `obsidiantools`
-  and `networkx` (a few hundred MB, and a ~30MB embedding model downloaded on
-  first index). They enter the project as dependencies of the shipped
-  subpackage. The owner accepts this.
+- **Dependencies.** This adds `sqlite-vec`, `model2vec`, `obsidiantools` and
+  `networkx` (and a ~30MB embedding model downloaded on first index). They enter
+  the project as dependencies of the shipped subpackage. The owner accepts this.
+- **One requirement that can fail.** The vector half is a loadable SQLite
+  extension, and some Python builds are compiled without extension support.
+  `install.sh` checks this first and aborts loudly, naming the interpreter,
+  rather than installing something whose every search would raise. There is no
+  fallback: if it aborts, use a different Python.
 - **Owner-only by construction.** Ambient recall reads the owner's private
   vault, so the hook injects **nothing** on a non-owner turn (a monitor/cron
   `system` wake, a stranger). This is code-enforced, not policy.
-- **The index lives outside the vault** (under `data/hooks/obsidian-memory/`),
+- **The index lives outside the vault** (one `.db` file under
+  `data/hooks/obsidian-memory/index/`),
   so indexing never writes into the notes. Recall is read-only unless the owner
   grants writable paths (below); capability follows that config.
 
@@ -61,7 +66,7 @@ and config (steps 7–8), then build the first index and verify (steps 9–10).
    - Ensure `pyproject.toml` depends on `chief-obsidian-memory` (it ships as an
      editable path source under `[tool.uv.sources]`). If it is only in the dev
      group, add it to `[project.dependencies]` so production runs load it.
-   - Run `uv sync` with the `shell` tool to install the vector stack.
+   - Run `uv sync` with the `shell` tool to install the index stack.
 8. **Write the config, deterministically.** Run
    `VAULT_PATH="<abs vault path>" WRITABLE_PATHS="<comma-sep dirs or empty>"
    GATE_MODEL="<model from step 6, or omit for the default>"
@@ -70,8 +75,11 @@ and config (steps 7–8), then build the first index and verify (steps 9–10).
    `chief.config_apply`, seeds the `memory-relevance` classifier definition
    into `classifiers/` (never overwriting an existing one) with its `model:`
    pinned to `GATE_MODEL`, and records the install in `data/installed.yaml` via
-   `chief.registry_apply`. Tune `obsidian_memory.ambient_n` (recall cadence),
-   `.top_k` (candidates fetched, and so gate calls per firing),
+   `chief.registry_apply`. It aborts before any of that if this Python cannot
+   load `sqlite-vec` (see the trade-offs above). Tune
+   `obsidian_memory.ambient_n` (recall cadence), `.top_k` (candidates fetched,
+   and so gate calls per firing — half the slots are reserved for literal
+   matches, so keep it even and at least 4),
    `.window` (transcript messages the gate sees), `.include`/`.exclude`, and
    `.injection_cap_tokens` with
    `uv run python -m chief.config_apply obsidian_memory.<key>=<value>` if the
@@ -87,10 +95,13 @@ and config (steps 7–8), then build the first index and verify (steps 9–10).
    Then build the first index and confirm recall:
    - `uv run chief-memory reindex --vault "<abs vault path>"` — seeds the index
      and reports the chunk count. (The first run downloads the embedding model.)
-     A one-time step: from here on every `search` sweeps first, so new, edited,
+     A one-time step: from here on every search sweeps first, so new, edited,
      and deleted notes are picked up automatically — `reindex` is recovery-only.
    - `uv run chief-memory search "<something in a note>" --vault "<path>"` —
-     confirm the right note path comes back.
+     confirm the right note path comes back, tagged `[sem]`/`[kw]`/`[both]`.
+   - `uv run chief-memory grep "<a rare proper noun in the vault>" --vault
+     "<path>"` — confirm the literal half. This is the case semantic-only
+     recall used to miss, so it is worth checking explicitly.
    - `uv run chief-memory related "<topic>" --vault "<path>"` and
      `uv run chief-memory links "<note>" --vault "<path>"` — confirm the
      wikilink neighbourhood.
