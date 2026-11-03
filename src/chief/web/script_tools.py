@@ -111,9 +111,10 @@ function onFrame(e){
   else if (f.type === "approval") addApproval(f.thread, f.question);
   else if (f.type === "approval_resolved") resolveApproval(f.thread);
   else if (f.type === "delta"){
-    if (!live) live = addMsg("chief", ""); live.textContent += f.text;
+    if (!live){ live = addMsg("chief", ""); liveText = ""; }
+    liveText += f.text; setMarkdown(live, liveText);  /* re-parse: marks span deltas */
   } else if (f.type === "final"){
-    if (live){ live.textContent = f.text; live = null; }
+    if (live){ setMarkdown(live, f.text); live = null; }
     else addMsg("chief", f.text);
     bumpThread(f.thread, f.text); reloadHistory(f.thread);
   }
