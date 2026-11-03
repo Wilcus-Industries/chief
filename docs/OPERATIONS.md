@@ -140,6 +140,15 @@ macOS uses a launchd agent (`com.chief.daemon`, plist in `~/Library/LaunchAgents
 Linux uses a systemd user unit (`chief.service` in `~/.config/systemd/user`).
 Both set an explicit `PATH` so the service can reach `uv`.
 
+On macOS the plist runs the launcher as `/bin/bash <launcher> run`, not via its
+`#!/usr/bin/env bash` shebang. Reading Messages' `chat.db` needs **Full Disk
+Access**, which macOS attributes to the job's first binary. Grant it once to
+`/bin/bash` (System Settings → Privacy & Security → Full Disk Access, ⌘⇧G).
+Apple's bash keeps its path and signature across updates; Homebrew's bash (or
+`uv`) gets a new Cellar path on every `brew upgrade` and silently loses the
+grant at the next restart, leaving every iMessage poll failing with `unable to
+open database file`.
+
 launchd uses `KeepAlive={"SuccessfulExit": False}` — restart on crash, but let
 `chief stop` actually stop it. Linux additionally attempts `loginctl enable-linger`
 best-effort; a failure only warns (it autostarts at login, but not before you log
