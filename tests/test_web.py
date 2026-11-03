@@ -22,6 +22,7 @@ from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
+from chief.web.styles import STYLES
 
 from .fakes import FakeProvider
 
@@ -743,6 +744,14 @@ async def test_policy_panel_and_route_wired_into_the_page(web: WebParts) -> None
     assert 'id="policy"' in (await client.get("/")).text
     js = (await client.get("/app.js")).text
     assert "/policy" in js and "loadPolicy" in js and "savePolicy" in js
+
+
+def test_sidebar_cannot_be_stretched_by_a_long_snippet() -> None:
+    # A flex item defaults to min-width:auto, so one long nowrap snippet (a
+    # tool call's args) widened the sidebar to thousands of px instead of
+    # ellipsizing. min-width:0 pins it to its flex-basis.
+    rule = STYLES.split("#buffers{", 1)[1].split("}", 1)[0]
+    assert "min-width:0" in rule.replace(" ", "")
 
 
 async def test_assets_are_served(web: WebParts) -> None:
