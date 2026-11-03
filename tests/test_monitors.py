@@ -1026,6 +1026,23 @@ async def test_no_match_and_out_of_scope_send_nothing(engine: AsyncEngine) -> No
     assert bodies == [] and wake.messages == []
 
 
+async def test_owner_handle_in_a_group_is_not_screened(engine: AsyncEngine) -> None:
+    bus = EventBus()
+    client, bodies = typesafe_stub(ts_reply(0.99))
+    wake = WakeSink()
+    classifier = Classifier(FakeProvider([]), ClassifierRegistry(REPO / "classifiers"),
+                            "judge-model", typesafe=client)
+    service = MonitorService(
+        make_session_factory(engine), bus, wake, classifier,
+        Screen(classifier), owner_handles=("+15551112222",),
+    )
+    await add(service, CODE_PREDICATE)
+    await bus.publish(Event(type="message.inbound", channel="cli", payload={
+        "thread_key": "chat123", "sender": "+15551112222", "text": "urgent: hi"}))
+    assert bodies == [], "the owner's words never go to the screen"
+    assert "urgent: hi" in wake.messages[0].text
+
+
 async def test_bad_regex_monitor_does_not_silence_its_siblings(
     engine: AsyncEngine,
 ) -> None:

@@ -124,7 +124,8 @@ async def _build_agent_core(
         strangers=StrangerLog(factory), restart=restart,
         channel_defaults=config.stream_channel_defaults,
     )
-    monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen)
+    monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen,
+                              config.imessage_owner_handles)
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
         run_command=guarded_runner(shell_service, shell_guards),

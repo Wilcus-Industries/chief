@@ -47,12 +47,13 @@ class MonitorService:
         wake: WakeAgent,
         classifier: Classifier,
         screen: Screen | None = None,
+        owner_handles: tuple[str, ...] = (),
     ) -> None:
         self._factory = factory
         self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._classifier = classifier
-        self._gate = MonitorGate(classifier, screen)
+        self._gate = MonitorGate(classifier, screen, owner_handles)
         bus.subscribe(self._on_event)
 
     async def create(
