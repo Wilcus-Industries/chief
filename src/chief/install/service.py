@@ -10,6 +10,8 @@ agents get a minimal PATH, so the plist pins one that reaches ``uv``.
 import logging
 import os
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +36,7 @@ class ServiceManager:
     home: Path
     runner: Runner = default_runner
     uid: int = field(default_factory=os.getuid)
+    sleep: Callable[[float], None] = time.sleep
 
     def __post_init__(self) -> None:
         if self.platform not in ("darwin", "linux"):
@@ -96,9 +99,7 @@ class ServiceManager:
                     launcher=launcher, repo_dir=repo_dir, path_env=path_env
                 )
             )
-            self._checked(
-                ["launchctl", "bootstrap", f"gui/{self.uid}", str(self.plist_path)]
-            )
+            self._bootstrap_after_bootout()
             self.runner(["launchctl", "kickstart", self._domain_target])
         else:
             self.definition_path.write_text(
@@ -146,13 +147,9 @@ class ServiceManager:
             self._checked(["systemctl", "--user", "stop", SYSTEMD_UNIT_NAME])
 
     def restart(self) -> None:
-        """Restart in place — never stop() then start().
-
-        On darwin ``kickstart -k`` SIGKILLs and relaunches atomically. A
-        bootout first is what breaks: the graceful drain leaves an orphan
-        half-holding the label, the follow-up bootstrap fails, and the daemon
-        stays down while the caller sees a clean return.
-        """
+        """Restart in place — never stop() then start(). On darwin ``kickstart
+        -k`` relaunches atomically; a bootout first races the drain (see
+        ``_bootstrap_after_bootout``) and leaves the daemon down."""
         if self.platform == "darwin":
             killed = self.runner(
                 ["launchctl", "kickstart", "-k", self._domain_target]
@@ -177,6 +174,20 @@ class ServiceManager:
             return "running" if "state = running" in result.stdout else "loaded"
         result = self.runner(["systemctl", "--user", "is-active", SYSTEMD_UNIT_NAME])
         return result.stdout.strip() or "unknown"
+
+    def _bootstrap_after_bootout(self, attempts: int = 20) -> None:
+        """``bootout`` returns while the old job drains, and a bootstrap then
+        fails ``5: Input/output error``: wait for the label to go, then retry."""
+        for _ in range(attempts):
+            if self.runner(["launchctl", "print", self._domain_target]).returncode:
+                break
+            self.sleep(0.5)
+        argv = ["launchctl", "bootstrap", f"gui/{self.uid}", str(self.plist_path)]
+        for _ in range(attempts - 1):
+            if self.runner(argv).returncode == 0:
+                return
+            self.sleep(0.5)
+        self._checked(argv)
 
     def _checked(self, argv: list[str]) -> None:
         result = self.runner(argv)
