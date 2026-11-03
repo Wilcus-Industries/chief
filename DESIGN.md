@@ -98,6 +98,10 @@ its first call.
   label — case/whitespace tolerant, retrying twice more before raising. The model
   resolves frontmatter → the `default_classifier` role → the default model. There is
   **no** agent-facing tool: it is an internal seam core services (e.g. monitors) call.
+  With a TypeSafe key, `classify` asks TypeSafe (typed Choice, raw httpx — not the
+  Provider seam) first and drops to the model turn on any failure. The same client
+  backs the core **injection screen** on monitor events and external tool results
+  (docs/SECURITY.md).
 - **Owner commands.** A tiny core slash-command set (/tasks, /cancel, /model, …) is
   parsed before agent dispatch on every adapter — a deterministic escape hatch when a
   session is wedged or burning money. /skill-name invokes a skill directly; natural

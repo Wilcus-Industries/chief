@@ -53,6 +53,12 @@ template line.
 | `socket_path` | `socket_path` | `Path` | `data/chief.sock` | `CHIEF_SOCKET_PATH` |
 | `max_concurrent_sessions` | same | `int` | `4` | `CHIEF_MAX_CONCURRENT_SESSIONS` |
 | *(secret file)* | `openrouter_api_key` | `str` | `""` | `OPENROUTER_API_KEY` |
+| *(secret file)* | `typesafe_api_key` | `str` | `""` | `TYPESAFE_API_KEY` |
+| `typesafe.base_url` | `typesafe_base_url` | `str` | `https://api.typesafe.ai/v1` | — |
+| `typesafe.model` | `typesafe_model` | `str` | `jev-latest` | — |
+| `typesafe.screen_threshold` | `typesafe_screen_threshold` | `float` in `(0, 1]` | `0.5` | — |
+| `typesafe.usd_per_mtok` | `typesafe_usd_per_mtok` | `float` | `0.042` | — |
+| `typesafe.timeout_s` | `typesafe_timeout_s` | `float` | `10.0` | — |
 | `gate.never` | `gate_never` | `tuple` | `()` | — |
 | `gate.approved` | `gate_approved` | `tuple` | `()` | — |
 | `gate.announce` | `gate_announce` | `bool` | `True` | — |
@@ -91,8 +97,10 @@ Notes on specific keys:
 
 - **`models` is merged, not replaced** — `dict(Config().models) | raw_models`.
 - **`temperature` is popped out of the `models` block**, not a sibling key.
-- **Secrets never come from YAML.** `openrouter_api_key` and `web_password` read
-  env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
+- **Secrets never come from YAML.** `openrouter_api_key`, `typesafe_api_key`,
+  and `web_password` read env first, then `secrets/<name>`. No TypeSafe key is
+  first-class: classifiers use their model turn and the injection screen runs
+  on `models.screen_fallback` (else `default_classifier`). Empty `web_password` means the web UI fails
   closed and no listener is built.
 - **`provider_backends.<n>.kind`** is `openai` (default; any OpenAI-compatible
   `base_url`) or `anthropic` (native Messages API; `base_url` defaults to
@@ -209,7 +217,8 @@ Runtime state that must survive restart and must never be committed.
 ### `secrets/` — `secrets/*` ignored, `README.md` tracked
 
 One file per secret, no extension, `chmod 0600` by the wizard. Core files:
-`openrouter_api_key`, `web_password`. Package secrets land here too.
+`openrouter_api_key`, `web_password`, optional `typesafe_api_key`. Package
+secrets land here too.
 `provider_backends[*].api_key_secret` resolves relative to this directory.
 
 ### Tracked directories

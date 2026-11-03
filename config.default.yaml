@@ -10,8 +10,10 @@
 
 # Model roles. Core ships exactly one — the agent invents further roles via
 # self-config. Two optional roles are honored when present, never required:
-# `downgrade` (used when the budget is exhausted) and `cheap-judgment`
-# (monitor model-predicates).
+# `downgrade` (used when the budget is exhausted), `cheap-judgment`
+# (monitor model-predicates), `default_classifier`, and `screen_fallback` (the
+# injection screen's model when TypeSafe has no key or fails — e.g. `haiku`
+# aliased onto the anthropic backend below).
 models:
   default: qwen/qwen3-coder
   # Sampling temperature for every LLM call (agent, monitors, compaction).
@@ -41,6 +43,16 @@ provider_base_url: https://openrouter.ai/api/v1
 #   provider_aliases:
 #     haiku: {backend: anthropic, model: claude-haiku-5-5}
 #     opus: {backend: proxy, model: claude-opus-4-8}
+
+# TypeSafe (System One): classifier backend and the core prompt-injection
+# screen on monitor events and shell / mcp_* / spawn_agent results. The key is
+# secrets/typesafe_api_key (or env TYPESAFE_API_KEY); without one the screen
+# runs on models.screen_fallback. docs/SECURITY.md "Injection screen".
+# typesafe:
+#   screen_threshold: 0.5   # Noul score at or above this flags
+#   timeout_s: 10
+#   model: jev-latest
+#   usd_per_mtok: 0.042     # input tokens; output is free
 
 db_path: data/chief.db
 socket_path: data/chief.sock

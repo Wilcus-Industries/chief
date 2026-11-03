@@ -101,6 +101,31 @@ def key_step(
         io.say(f"  {error} — check the key and try again.")
 
 
+def typesafe_step(
+    secrets_dir: Path, io: WizardIO, *, interactive: bool, env: Mapping[str, str]
+) -> str:
+    """Optional TypeSafe key: the classifier backend and main injection screen.
+
+    Skipping is first-class — the screen then runs on ``models.screen_fallback``
+    — but say so, because that fallback is the weaker of the two.
+    """
+    if (secrets_dir / "typesafe_api_key").exists() or env.get("TYPESAFE_API_KEY"):
+        io.say("injection screen: TypeSafe key found — keeping it.")
+        return "kept"
+    key = env.get("CHIEF_TYPESAFE_KEY", "").strip()
+    if not key and interactive:
+        io.say("Optional: a TypeSafe key (https://typesafe.ai) screens inbound "
+               "messages and tool output for prompt injection.")
+        key = io.prompt_secret("  TypeSafe API key (empty to skip): ").strip()
+    if not key:
+        io.say("injection screen: no TypeSafe key — screening falls back to the "
+               "models.screen_fallback model (weaker).")
+        return "skipped"
+    write_secret(secrets_dir, "typesafe_api_key", key)
+    io.say("injection screen: TypeSafe key saved.")
+    return "set"
+
+
 def budget_step(
     config_path: Path, io: WizardIO, *, interactive: bool, env: Mapping[str, str]
 ) -> str:

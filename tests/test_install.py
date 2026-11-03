@@ -83,7 +83,7 @@ def make_io(
     return (
         WizardIO(
             prompt=lambda _: next(prompts),
-            prompt_secret=lambda _: next(hidden),
+            prompt_secret=lambda _: next(hidden, ""),
             say=said.append,
         ),
         said,
@@ -243,6 +243,38 @@ def test_wizard_rejected_key_retries(tmp_path: Path) -> None:
     assert result.model_auth == "set"
     assert (tmp_path / "secrets" / "openrouter_api_key").read_text() == "good\n"
     assert any("rejected" in line for line in said)
+
+
+def test_wizard_typesafe_key_is_optional(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(CONFIG)
+    secrets = tmp_path / "secrets"
+    io, said = make_io(answers=["", ""], secrets=["pw12345678", "pw12345678",
+                                                   "sk-or", "ts-key"])
+    result = run_wizard(secrets_dir=secrets, config_path=config, io=io,
+                        interactive=True, env={}, validate=lambda key: None)
+    assert result.screen == "set"
+    assert (secrets / "typesafe_api_key").read_text() == "ts-key\n"
+    rerun, _ = make_io(answers=[""])  # the budget cap is still unset
+    again = run_wizard(secrets_dir=secrets, config_path=config, io=rerun,
+                       interactive=True, env={}, validate=lambda key: None)
+    assert again.screen == "kept"
+
+
+def test_wizard_skipped_typesafe_says_the_fallback(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(CONFIG)
+    io, said = make_io()
+    result = run_wizard(secrets_dir=tmp_path / "secrets", config_path=config,
+                        io=io, interactive=False,
+                        env={"CHIEF_OPENROUTER_KEY": "sk"}, validate=lambda k: None)
+    assert result.screen == "skipped"
+    assert any("screen_fallback" in line for line in said)
+    headless, _ = make_io()
+    result = run_wizard(secrets_dir=tmp_path / "s2", config_path=config,
+                        io=headless, interactive=False,
+                        env={"CHIEF_TYPESAFE_KEY": "ts-env"}, validate=lambda k: None)
+    assert (tmp_path / "s2" / "typesafe_api_key").read_text() == "ts-env\n"
 
 
 def test_service_definitions_wrap_the_launcher(tmp_path: Path) -> None:

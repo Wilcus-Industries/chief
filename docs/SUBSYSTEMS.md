@@ -153,13 +153,20 @@ in `_on_event` **before** `_matches`, so an out-of-scope event never reaches the
 model. The pattern form takes none. That is a prompt-injection boundary, not an
 optimization: see `docs/SECURITY.md`.
 
-Evaluation in `_matches`:
+Evaluation in `MonitorGate.evaluate` (`monitors/gate.py`), once per event over
+every in-scope monitor:
 
 - `code` reads **exactly one** payload field (default `text`) and runs
-  `re.search(pattern, value, re.I)`.
-- `classifier` serializes the whole payload, prepends the instruction for the
-  sugar form, and fires iff the returned label equals `fire_label`.
-- Unknown kind logs a warning and returns `False`.
+  `re.search(pattern, value, re.I)` — locally, no request.
+- If any `code` matched or any `classifier` is in scope, the payload goes to the
+  injection screen in **one** call carrying a `judge_<id>` Choice per
+  classifier monitor (its definition prompt plus the instruction). When
+  TypeSafe did not answer the judges, each falls back to its own model turn
+  (payload with the instruction prepended for the sugar form). A monitor fires
+  iff its label equals `fire_label`; one judge raising skips only that monitor.
+- Unknown kind never fires.
+- A flagged or unscreenable event fires **withheld** (`_fire_withheld`: sender
+  and thread only). See SECURITY.md "Injection screen".
 
 **`MATCHABLE_FIELDS` is `("text", "sender", "thread_key")`** and is validated at
 create time. A field outside that set would match `""` forever and never fire
@@ -220,15 +227,20 @@ replace it with a plain `SafeLoader`.
 
 ### Invocation
 
-`classify(name, text)`:
+`classify(name, text, *, model=None, typesafe=True)`:
 
 1. Resolve the definition; unknown name raises `ClassifierError`.
-2. Model precedence: `ClassifierDef.model` > `models.default_classifier` >
+2. **TypeSafe first** when `typesafe_api_key` is set (and `typesafe=True`): one
+   Choice question — prompt as instructions, labels as the options, text as
+   state. A typed pick, no parse. Any `TypeSafeError` (including an undeclared
+   pick) logs a warning and falls through to the model turn below.
+3. Model precedence: the `model` argument (the screen passes
+   `models.screen_fallback`) > `ClassifierDef.model` > `models.default_classifier` >
    `default_model`. The role map lets every classifier run on a cheap small model
    without touching the main agent model.
-3. System prompt = body + an instruction to respond with exactly one label.
-4. Two messages, `tools=[]` — a single flat completion, no tool loop.
-5. **Retry up to 3 attempts**; exhausting them raises `ClassifierError`.
+4. System prompt = body + an instruction to respond with exactly one label.
+5. Two messages, `tools=[]` — a single flat completion, no tool loop.
+6. **Retry up to 3 attempts**; exhausting them raises `ClassifierError`.
 
 `_match_label` does two passes, both case- and whitespace-tolerant: exact
 equality, then a **prefix** match over labels sorted longest-first so a short
@@ -243,12 +255,16 @@ YAML, mapping frontmatter, non-empty `name` / `description`, `labels` a non-empt
 list of non-empty strings, non-empty body. The first three early-return; the rest
 accumulate.
 
-### The shipped classifier
+### The shipped classifiers
 
 `classifiers/wake-judge.md` — labels `[YES, NO]`, no model pin. Its prompt expects
-the user message to hold an instruction followed by an event payload, which is
-exactly the shape `_matches` constructs and the hardcoded target of the
-`instruction` sugar.
+an instruction plus an event payload, the shape `MonitorGate` builds, and is the
+hardcoded target of the `instruction` sugar.
+
+`classifiers/injection-screen.md` — labels `[INJECTION, CLEAN]`. Its body is the
+TypeSafe Noul instruction *and* the fallback model's prompt, so the two screens
+ask the same question. Deleting it makes every screen "unavailable" (monitor
+wakes withheld, tool results bannered) — loud, not silent.
 
 ## Subagents — `src/chief/subagents.py`
 
