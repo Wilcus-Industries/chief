@@ -126,6 +126,33 @@ def test_provider_backend_key_resolves_secret_then_env(
     assert reloaded.provider_backends["proxy"].api_key == "from-env"
 
 
+def test_provider_backend_sampling_options_default_and_parse(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "provider_backends:\n"
+        "  plain: {base_url: http://a/v1}\n"
+        "  anthropic:\n"
+        "    base_url: https://api.anthropic.com/v1\n"
+        "    send_temperature: false\n"
+        "    reasoning_effort: medium\n"
+    )
+    config = load_config(tmp_path / "config.yaml")
+    plain = config.provider_backends["plain"]
+    assert (plain.send_temperature, plain.reasoning_effort) == (True, None)
+    anthropic = config.provider_backends["anthropic"]
+    assert (anthropic.send_temperature, anthropic.reasoning_effort) == (
+        False,
+        "medium",
+    )
+
+
+def test_provider_backend_rejects_unknown_reasoning_effort(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "provider_backends:\n  a: {base_url: http://a/v1, reasoning_effort: max}\n"
+    )
+    with pytest.raises(ConfigError, match="reasoning_effort"):
+        load_config(tmp_path / "config.yaml")
+
+
 def test_owner_handles_bare_numeric_scalar_raises_clear_error(
     tmp_path: Path,
 ) -> None:

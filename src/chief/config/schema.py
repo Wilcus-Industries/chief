@@ -32,10 +32,14 @@ class BackendSpec:
     ``api_key`` is resolved AT LOAD from ``api_key_env`` (an env var name) then
     ``api_key_secret`` (a filename under ``secrets/``) — mirroring how
     ``openrouter_api_key`` resolves. No inline keys ever live in the yaml.
+    ``send_temperature: false`` omits ``temperature`` (models that reject it);
+    ``reasoning_effort`` (low/medium/high) is sent on every request when set.
     """
 
     base_url: str
     api_key: str
+    send_temperature: bool = True
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)

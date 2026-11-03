@@ -32,11 +32,18 @@ provider_base_url: https://openrouter.ai/api/v1
 # agent's switch_model tool; any unlisted model uses the default backend. To
 # drive a Claude SUBSCRIPTION via OAuth (a local proxy) for chosen models,
 # install the `anthropic-oauth` package — it fills these in and documents the
-# ToS / dead-budget-cap caveats. Example:
+# ToS / dead-budget-cap caveats. A backend may also set `send_temperature:
+# false` (newer Claude models reject any temperature) and `reasoning_effort:
+# low|medium|high`. Example — the Anthropic API direct, pay-per-token (its
+# turns report no dollar cost, so budget.cap_usd does not count them):
 #   provider_backends:
-#     proxy: {base_url: http://127.0.0.1:8000/v1, api_key_secret: proxy_api_key}
+#     anthropic:
+#       base_url: https://api.anthropic.com/v1
+#       api_key_secret: anthropic_api_key
+#       send_temperature: false
+#       reasoning_effort: medium
 #   provider_aliases:
-#     opus: {backend: proxy, model: claude-opus-4-8}
+#     sonnet: {backend: anthropic, model: claude-sonnet-5-5}
 
 db_path: data/chief.db
 socket_path: data/chief.sock

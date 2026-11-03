@@ -286,3 +286,32 @@ async def test_request_payload_carries_tools_auth_and_usage() -> None:
     assert payload["stream"] is True
     assert payload["usage"] == {"include": True}
     assert payload["tools"][0]["function"]["name"] == "echo"
+
+
+async def _payload_from(**provider_kwargs: Any) -> dict[str, Any]:
+    requests: list[httpx.Request] = []
+    handler_provider = make_provider([delta_chunk({"content": "ok"})], requests)
+    provider = OpenRouterProvider(
+        "k", client=handler_provider._client, **provider_kwargs
+    )
+    async for _ in provider.stream(model="m", messages=[], tools=[]):
+        pass
+    payload: dict[str, Any] = json.loads(requests[0].content)
+    return payload
+
+
+async def test_payload_sends_temperature_and_no_effort_by_default() -> None:
+    payload = await _payload_from()
+    assert payload["temperature"] == 0.0
+    assert "reasoning_effort" not in payload
+
+
+async def test_temperature_none_omits_it_for_models_that_reject_it() -> None:
+    # Newer Claude models 400 on any `temperature` ("deprecated for this model").
+    payload = await _payload_from(temperature=None)
+    assert "temperature" not in payload
+
+
+async def test_reasoning_effort_is_sent_when_set() -> None:
+    payload = await _payload_from(reasoning_effort="medium")
+    assert payload["reasoning_effort"] == "medium"

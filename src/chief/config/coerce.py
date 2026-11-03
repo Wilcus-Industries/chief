@@ -15,6 +15,7 @@ from chief.policy import DEFAULT_CHANNEL_DEFAULTS, StreamPolicy
 
 AUTONOMY_VALUES = ("off", "clean-only", "full")
 IMESSAGE_MODES = ("self", "dedicated")
+REASONING_EFFORTS = ("low", "medium", "high")
 
 
 def read_secret(path: Path) -> str:
@@ -90,9 +91,27 @@ def imessage_mode(value: Any) -> str:
 
 def backends(raw: dict[str, Any]) -> dict[str, BackendSpec]:
     return {
-        name: BackendSpec(base_url=str(spec["base_url"]), api_key=_backend_key(spec))
+        name: BackendSpec(
+            base_url=str(spec["base_url"]),
+            api_key=_backend_key(spec),
+            send_temperature=bool(spec.get("send_temperature", True)),
+            reasoning_effort=_reasoning_effort(name, spec.get("reasoning_effort")),
+        )
         for name, spec in raw.items()
     }
+
+
+def _reasoning_effort(backend: str, value: Any) -> str | None:
+    """Refuse an unknown effort at boot rather than 400 on every turn."""
+    if value is None:
+        return None
+    parsed = str(value).strip()
+    if parsed not in REASONING_EFFORTS:
+        raise ConfigError(
+            f"provider_backends.{backend}.reasoning_effort must be "
+            f"{', '.join(REASONING_EFFORTS)} — got {parsed!r}"
+        )
+    return parsed
 
 
 def _backend_key(spec: dict[str, Any]) -> str:

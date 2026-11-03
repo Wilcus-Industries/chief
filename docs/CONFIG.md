@@ -91,6 +91,10 @@ Notes on specific keys:
 
 - **`models` is merged, not replaced** — `dict(Config().models) | raw_models`.
 - **`temperature` is popped out of the `models` block**, not a sibling key.
+- **`provider_backends.<n>` sampling options:** `send_temperature: false`
+  omits `temperature` for that backend (newer Claude models 400 on it);
+  `reasoning_effort` (`low`/`medium`/`high`, else a boot-time `ConfigError`) is
+  sent on every request to it. Both default to today's behavior.
 - **Secrets never come from YAML.** `openrouter_api_key` and `web_password` read
   env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
   closed and no listener is built.

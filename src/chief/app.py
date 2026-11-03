@@ -32,6 +32,7 @@ from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
+from chief.provider.build import build_provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
@@ -47,7 +48,6 @@ from chief.wiring import (
     build_gate,
     build_mcp,
     build_persistence,
-    build_provider,
 )
 
 logger = logging.getLogger(__name__)

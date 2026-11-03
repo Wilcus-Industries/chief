@@ -17,11 +17,12 @@ from chief.config import AliasSpec, BackendSpec, Config
 from chief.mcpclient.manager import ServerConfig
 from chief.policy import RICH, StreamPolicy
 from chief.provider.base import Completion, ToolCall
+from chief.provider.build import build_provider
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
 from chief.tools import ToolRegistry
 from chief.tools.shell.service import GUARD_REFUSED_EXIT_CODE
-from chief.wiring import build_mcp, build_provider
+from chief.wiring import build_mcp
 
 from .fakes import FakeProvider, text_turn
 
@@ -109,6 +110,39 @@ def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
     )
     with pytest.raises(ValueError, match="opus.*typo"):
         build_provider(config)
+
+
+def test_build_provider_applies_per_backend_sampling_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: dict[str, dict[str, Any]] = {}
+
+    def capture(api_key: str, **kwargs: Any) -> OpenRouterProvider:
+        built[kwargs["base_url"]] = kwargs
+        return OpenRouterProvider(api_key, **kwargs)
+
+    monkeypatch.setattr("chief.provider.build.OpenRouterProvider", capture)
+    config = Config(
+        temperature=0.3,
+        provider_backends={
+            "anthropic": BackendSpec(
+                base_url="https://api.anthropic.com/v1",
+                api_key="x",
+                send_temperature=False,
+                reasoning_effort="medium",
+            )
+        },
+        provider_aliases={
+            "sonnet": AliasSpec(backend="anthropic", model="claude-sonnet-5-5")
+        },
+    )
+    build_provider(config)
+    anthropic = built["https://api.anthropic.com/v1"]
+    assert anthropic["temperature"] is None
+    assert anthropic["reasoning_effort"] == "medium"
+    default = built[config.provider_base_url]
+    assert default["temperature"] == 0.3
+    assert default.get("reasoning_effort") is None
 
 
 def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
