@@ -60,10 +60,18 @@ def systemd_unit(*, launcher: Path, repo_dir: Path, path_env: str) -> str:
     )
 
 
+#: The launchd job's first binary. macOS attributes Full Disk Access (which
+#: reading Messages' chat.db needs) to it, so it must be one whose grant
+#: survives upgrades: Apple's /bin/bash keeps its path and signature, while a
+#: Homebrew bash or uv gets a new Cellar path on every `brew upgrade` and
+#: silently loses the grant at the next restart.
+LAUNCHD_SHELL = "/bin/bash"
+
+
 def launchd_plist(*, launcher: Path, repo_dir: Path, path_env: str) -> str:
     payload = {
         "Label": LAUNCHD_LABEL,
-        "ProgramArguments": [str(launcher), "run"],
+        "ProgramArguments": [LAUNCHD_SHELL, str(launcher), "run"],
         "WorkingDirectory": str(repo_dir),
         "EnvironmentVariables": {"PATH": path_env},
         "RunAtLoad": True,

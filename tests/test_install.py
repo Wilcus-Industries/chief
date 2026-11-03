@@ -9,6 +9,7 @@ import asyncio
 import getpass
 import json
 import os
+import plistlib
 import subprocess
 import tempfile
 import time
@@ -285,8 +286,11 @@ def test_service_definitions_wrap_the_launcher(tmp_path: Path) -> None:
     assert f"ExecStart={launcher} run" in unit
     assert f"WorkingDirectory={tmp_path}" in unit
     plist = launchd_plist(launcher=launcher, repo_dir=tmp_path, path_env=path_env)
-    assert str(launcher) in plist
     assert "com.chief.daemon" in plist
+    # Apple's bash runs the launcher: its Full Disk Access grant survives a
+    # Homebrew upgrade, which renames the Cellar path of brew's bash or uv.
+    args = plistlib.loads(plist.encode())["ProgramArguments"]
+    assert args == ["/bin/bash", str(launcher), "run"]
 
 
 class FakeRunner:
