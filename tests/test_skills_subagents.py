@@ -143,6 +143,26 @@ async def test_filtered_tools_hides_and_blocks(tmp_path: Path) -> None:
     assert blocked == "error: tool 'hidden' not allowed for this agent"
 
 
+async def test_spawn_agent_screens_sub_session_tool_results(tmp_path: Path) -> None:
+    call = ToolCall(id="c1", name="echo", arguments={"text": "notes"})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("summary")]
+    )
+    screened: list[str] = []
+
+    async def post_tool(tool_call: ToolCall, result: str) -> str:
+        screened.append(tool_call.name)
+        return f"[screened] {result}"
+
+    registry = echo_registry()
+    register_spawn_tool(registry, make_agents(tmp_path), provider, "m",
+                        post_tool=post_tool)
+    await registry.dispatch(ToolCall(
+        id="1", name="spawn_agent", arguments={"name": "researcher", "task": "t"}))
+    assert screened == ["echo"]
+    assert provider.calls[1][-1]["content"].startswith("[screened]")
+
+
 async def test_spawn_agent_runs_a_sub_session(tmp_path: Path) -> None:
     call = ToolCall(id="c1", name="echo", arguments={"text": "notes"})
     provider = FakeProvider(

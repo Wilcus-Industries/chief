@@ -153,13 +153,14 @@ def stream_channel_defaults(raw: Any) -> dict[str, StreamPolicy]:
     return out
 
 
-def ratio(raw: Any) -> float:
-    """Coerce ``compaction.ratio`` and clamp it to ``(0, 1]``.
+def ratio(raw: Any, key: str = "compaction.ratio") -> float:
+    """Coerce a ratio key and clamp it to ``(0, 1]``.
 
-    ``0`` (or negative) would fire compaction every turn; ``>1`` would silently
-    disable threshold compaction — both foot-guns, so reject at boot instead.
+    For ``compaction.ratio``, ``0`` would fire compaction every turn and ``>1``
+    silently disable it; for ``typesafe.screen_threshold``, ``0`` flags
+    everything and ``>1`` nothing — foot-guns, so reject at boot instead.
     """
     parsed = float(raw)
     if not 0 < parsed <= 1:
-        raise ConfigError(f"compaction.ratio must be in (0, 1], got {parsed}")
+        raise ConfigError(f"{key} must be in (0, 1], got {parsed}")
     return parsed

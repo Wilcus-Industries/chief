@@ -12,6 +12,7 @@ as package-registered tools; this is only the always-on core set.
 from collections.abc import Sequence
 from pathlib import Path
 
+from chief.agent.loop import PostTool
 from chief.agent.manager import SessionManager
 from chief.agent.model_tools import register_switch_model_tool
 from chief.agent.session_tools import register_session_tools
@@ -48,6 +49,7 @@ def register_native_tools(
     shell_guards: Sequence[ShellGuard] = (),
     model_aliases: frozenset[str] = frozenset(),
     ask: AskApproval | None = None,
+    post_tool: PostTool | None = None,
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
@@ -57,7 +59,7 @@ def register_native_tools(
     ``model_aliases`` are the configured ``provider_aliases`` keys that
     ``switch_model`` validates against; ``ask`` is the approval-card path the
     ``schedule`` tool raises for command schedules (without it, creating one is
-    refused).
+    refused); ``post_tool`` screens subagent tool results.
     """
     register_session_tools(registry, manager)
     register_switch_model_tool(registry, manager, model_aliases=model_aliases)
@@ -68,5 +70,6 @@ def register_native_tools(
     register_restart_tool(registry, selfedit_pipeline)
     register_skill_tools(registry, skills)
     register_spawn_tool(
-        registry, AgentRegistry(agents_dir), provider, default_model, budget
+        registry, AgentRegistry(agents_dir), provider, default_model, budget,
+        post_tool=post_tool,
     )

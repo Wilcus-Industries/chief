@@ -48,6 +48,9 @@ def _isolate_installed_packages(
     monkeypatch.setattr(
         "chief.hooks.boot.INSTALLED_REGISTRY", empty / "installed.yaml"
     )
+    # Same reason: a box with a real TypeSafe key must not screen test traffic
+    # over the network.
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
 
 
 @pytest.fixture

@@ -59,6 +59,31 @@ def test_env_overrides_yaml(
     assert config.openrouter_api_key == "sk-env"
 
 
+def test_typesafe_key_resolves_secret_then_env_and_block_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "typesafe_api_key").write_text("ts-secret\n")
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.typesafe_api_key == "ts-secret"
+    assert config.typesafe_screen_threshold == 0.5
+    assert config.typesafe_model == "jev-latest"
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-env")
+    assert load_config(tmp_path / "missing.yaml").typesafe_api_key == "ts-env"
+
+
+def test_typesafe_block_overrides_and_threshold_is_clamped(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("typesafe:\n  screen_threshold: 0.7\n  timeout_s: 4\n")
+    config = load_config(path)
+    assert config.typesafe_screen_threshold == 0.7
+    assert config.typesafe_timeout_s == 4.0
+    path.write_text("typesafe:\n  screen_threshold: 0\n")
+    with pytest.raises(ConfigError, match="typesafe.screen_threshold"):
+        load_config(path)
+
+
 def test_provider_base_url_defaults_to_openrouter(tmp_path: Path) -> None:
     config = load_config(tmp_path / "missing.yaml")
     assert config.provider_base_url == "https://openrouter.ai/api/v1"

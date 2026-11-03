@@ -377,6 +377,8 @@ async def test_agent_creates_a_monitor_and_it_fires(
         [
             [Completion(text="", tool_calls=(create,))],
             text_turn("watching for urgent messages"),
+            # No TypeSafe key: the injection screen's fallback turn, passing.
+            text_turn("CLEAN"),
             text_turn("monitor woke me, on it"),
         ]
     )

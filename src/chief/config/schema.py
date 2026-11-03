@@ -61,6 +61,14 @@ class Config:
     socket_path: Path = Path("data/chief.sock")
     max_concurrent_sessions: int = 4
     openrouter_api_key: str = ""
+    # TypeSafe (System One): classifier backend + the core injection screen.
+    # No key = the screen runs on models.screen_fallback (docs/SECURITY.md).
+    typesafe_api_key: str = ""
+    typesafe_base_url: str = "https://api.typesafe.ai/v1"
+    typesafe_model: str = "jev-latest"
+    typesafe_screen_threshold: float = 0.5
+    typesafe_usd_per_mtok: float = 0.042
+    typesafe_timeout_s: float = 10.0
     # The OpenAI-compatible endpoint the provider streams from. Defaults to
     # OpenRouter; override to a local proxy (e.g. claude-code-openai-server,
     # which serves a Claude subscription in bare mode) to drive Anthropic via

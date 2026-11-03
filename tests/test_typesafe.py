@@ -71,7 +71,9 @@ async def test_records_input_token_cost_under_spend_key() -> None:
     await make_client(handler, spend).ask(
         {"text": "x"}, {"injection": noul("q")}, spend_key="screen:monitor"
     )
-    assert spend.rows == [("screen:monitor", pytest.approx(0.042))]
+    [(key, cost)] = spend.rows
+    assert key == "screen:monitor"
+    assert cost == pytest.approx(0.042)
 
 
 @pytest.mark.parametrize("status", [400, 422, 429, 500])

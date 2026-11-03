@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
+from chief.agent.loop import PostTool
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.audit import AuditLog
@@ -70,6 +71,7 @@ class Core:
     dispatcher: Dispatcher
     monitors: MonitorService
     cron: CronService
+    post_tool: PostTool | None = None
 
 
 @dataclass
