@@ -194,6 +194,20 @@ async def test_send_while_a_card_is_pending_answers_it(web: WebParts) -> None:
     assert HANDLED == []
 
 
+async def test_slash_command_send_says_command_and_never_injects(
+    web: WebParts,
+) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "/model", "interrupt": True}
+    )
+    assert response.text == "command"
+    await asyncio.sleep(0)
+    assert INJECTED == []
+    assert [m.text for m in HANDLED] == ["/model"]
+
+
 async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
     client, *_ = web
     await login(client)

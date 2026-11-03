@@ -23,7 +23,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Adapter, Inject, Message
 from chief.adapters.imessage_cursor import RowCursor, Store
 from chief.adapters.imessage_fifo import ThreadFifo
 from chief.adapters.imessage_send import (
@@ -55,7 +55,7 @@ class IMessageAdapter(Adapter):
         run_jxa: RunJxa = run_jxa_subprocess,
         restart: RestartBoundary | None = None,
         resolve_approval: Callable[[Message], bool] | None = None,
-        inject: Callable[[Message, Callable[[Message], None]], bool] | None = None,
+        inject: Inject | None = None,
         dedicated: bool = False,
         owner_db_path: Path | None = None,
         self_handles: tuple[str, ...] = (),

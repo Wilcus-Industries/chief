@@ -5,7 +5,9 @@ command routing plus the turn's own observer-streaming callbacks); the pure
 policy frame logic already lives in chief.policy. Splitting scatters one turn.
 
 Inbound order: approval answers are consumed first (a turn blocked on an
-approval card would deadlock behind the session lock otherwise), strangers
+approval card would deadlock behind the session lock otherwise); an owner
+message sent as an interrupt is offered to the thread's running turn
+(``try_inject``) instead of queuing behind it; strangers
 are logged and published to the bus but never run a turn, owner messages go on
 the event bus and run a turn. ``system`` senders (monitor/cron wakes) run a
 turn but are never published — that would let monitors trigger themselves.
@@ -13,8 +15,10 @@ turn but are never published — that would let monitors trigger themselves.
 Every completed turn emits one coarse ``tick`` to the observer hub so the
 cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
 snippet); web turns also stream their own ``delta``/``final`` through the web
-adapter, so the dispatcher skips only the rich ``final`` for them. A client
-*tapped into* a non-web thread also gets that turn's inbound/final and — as the
+adapter, so the dispatcher skips only the rich ``final`` for them. Every turn's
+``inbound`` streams to its watchers when the turn begins (and an injected
+message's when the loop takes it). A client *tapped into* a non-web thread
+also gets that turn's final and — as the
 thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
 the row override or channel default) — its delta / tool-tick / inline
 tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
@@ -22,10 +26,9 @@ approval card the gate's ``approval_asker`` raises (#267).
 """
 
 import logging
-from collections.abc import Callable
 from typing import Protocol
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Adapter, Message, Requeue
 from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
@@ -100,9 +103,7 @@ class Dispatcher:
             return False
         return self._approvals.resolve(message.thread_key, message.text)
 
-    def try_inject(
-        self, message: Message, requeue: Callable[[Message], None]
-    ) -> bool:
+    def try_inject(self, message: Message, requeue: Requeue) -> bool:
         """Offer an owner message to its thread's in-flight turn instead of
         queuing it behind; True means the turn took it (or will hand it back
         through ``requeue`` if it finishes first — the caller's normal queue
@@ -192,6 +193,12 @@ class Dispatcher:
             if non_web and (frame := delta_frame(policy, tk, text)):
                 self.tapped(tk, frame)
 
+        async def on_interim(text: str) -> None:
+            # An answer an injected message overtook still reaches the owner.
+            await adapter.send(tk, text)
+            if non_web:
+                self.tapped(tk, {"type": "final", "thread": tk, "text": text})
+
         async def on_tool(call: ToolCall) -> None:
             # Web turns get tool ticks too — the WebAdapter never emits them.
             if frame := tool_frame(policy, tk, name=call.name, call_id=call.id):
@@ -205,7 +212,7 @@ class Dispatcher:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
-                on_begin=on_begin,
+                on_begin=on_begin, on_interim=on_interim,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

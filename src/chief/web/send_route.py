@@ -3,8 +3,9 @@
 Split out of ``app.py`` to keep that file under the length cap. The reply body
 names what became of the message, so the client knows when its pending bubble
 resolves: ``queued`` and ``injected`` both stream an ``inbound`` frame once the
-agent actually takes the text; ``answered`` (it resolved an approval card)
-never does, so the client settles that one itself.
+agent actually takes the text; ``answered`` (it resolved an approval card) and
+``command`` (a slash command, answered without the text joining a turn
+verbatim) never do, so the client settles those itself.
 """
 
 import asyncio
@@ -15,17 +16,14 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 
-from chief.adapters.base import Message
+from chief.adapters.base import Inject, Message
 from chief.adapters.socket import HandleMessage
 from chief.approvals import ApprovalBroker
 from chief.persistence.store import MessageStore
 
 # An iMessage group's thread_key is an opaque 32-char hex chat id; a 1:1 key is
-# a phone/email handle. Groups have no core send path (see the send route).
+# a phone/email handle. Groups have no core send path (imsg only).
 _GROUP_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
-
-# Dispatcher.try_inject: offer to the thread's running turn, else False.
-Inject = Callable[[Message, Callable[[Message], None]], bool]
 
 
 def build_send_route(
@@ -67,6 +65,9 @@ def build_send_route(
         def queue(queued: Message) -> None:
             loop.create_task(handle(queued))
 
+        if text.startswith("/"):
+            queue(message)
+            return PlainTextResponse("command", status_code=202)
         if body.get("interrupt") is True and inject(message, queue):
             return PlainTextResponse("injected", status_code=202)
         queue(message)

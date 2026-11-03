@@ -50,5 +50,19 @@ process.stdout.write(JSON.stringify({hit, miss, left: list.map((p) => p.text)}))
     assert out == {"hit": True, "miss": False, "left": ["b", "a"]}
 
 
+def test_reconcile_settles_only_entries_history_shows() -> None:
+    """Two identical sends both saw one prior "ok"; history now has two, so
+    exactly the older one landed."""
+    out = run(
+        PENDING_SCRIPT
+        + """
+const list = [{text: "ok", seen: 1}, {text: "ok", seen: 1}, {text: "new", seen: 0}];
+reconcilePending(list, ["ok", "hello", "ok"]);
+process.stdout.write(JSON.stringify(list.map((p) => p.text)));
+"""
+    )
+    assert out == ["ok", "new"]
+
+
 def test_page_has_the_pending_container() -> None:
     assert '<div id="queued"></div>' in CHAT_PAGE

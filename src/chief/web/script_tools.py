@@ -92,6 +92,9 @@ async function reloadHistory(tk){
     rows.forEach((r) =>
       r.role === "tool" ? addTool(r.call_id, r.name) : addMsg(r.role, r.text));
   }
+  reconcilePending(pending[tk] || [],
+    (rows || []).filter((r) => r.role === "owner").map((r) => r.text));
+  renderPending();
   log.scrollTop = log.scrollHeight;
 }
 
@@ -127,7 +130,9 @@ function onFrame(e){
   } else if (f.type === "final"){
     /* no history re-render here: it raced the next queued turn's frames and
        wiped messages not yet persisted; reconnect + switch still re-sync */
-    if (live){ setMarkdown(live, f.text); live = null; }
+    /* keep the streamed text: with tool frames off, one bubble holds several
+       model calls and the final carries only the last */
+    if (live){ setMarkdown(live, liveText || f.text); live = null; }
     else addMsg("chief", f.text);
     bumpThread(f.thread, f.text);
   }

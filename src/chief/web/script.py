@@ -69,6 +69,7 @@ function setStatus(tk){
 
 async function switchTo(tk){
   state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
+  resolveApproval(tk);  /* drop another thread's card hint; subscribe replays */
   renderPending(); await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
 }

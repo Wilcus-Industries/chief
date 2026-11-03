@@ -13,6 +13,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
+from chief.adapters.base import Inject
 from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
@@ -26,7 +27,7 @@ from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
-from chief.web.send_route import Inject, build_send_route
+from chief.web.send_route import build_send_route
 from chief.web.status_routes import build_status_routes
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript, tool_call_response

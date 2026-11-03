@@ -2,6 +2,7 @@
 transcript at the next tool boundary instead of queuing behind the turn."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 from chief.adapters.base import Message
@@ -12,10 +13,11 @@ from chief.bus import Event, EventBus
 from chief.dispatch import Dispatcher
 from chief.hub import ObserverHub
 from chief.persistence.store import MessageStore
-from chief.provider.base import ProviderEvent, ToolSpec
+from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
 from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn, tool_turn
+from .test_dispatch import RecordingAdapter, _WebAdapter
 
 WAIT_SPEC = ToolSpec(
     name="wait", description="Block until released.",
@@ -42,16 +44,29 @@ class Gate:
         return registry
 
 
+class FailingProvider(FakeProvider):
+    """Parks at the gate like FakeProvider, then the model call fails."""
+
+    async def stream(
+        self, *, model: str, messages: list[dict[str, Any]], tools: list[ToolSpec]
+    ) -> AsyncIterator[ProviderEvent]:
+        self.calls.append([dict(m) for m in messages])
+        self.entered.set()
+        assert self.gate is not None
+        await self.gate.wait()
+        raise ProviderError("proxy down")
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+
 def manager_for(
-    script: list[list[ProviderEvent]], store: MessageStore, registry: ToolRegistry
-) -> tuple[FakeProvider, SessionManager]:
-    provider = FakeProvider(script)
-    manager = SessionManager(
-        provider=provider, tools_factory=lambda thread, channel: registry,
+    provider: FakeProvider, store: MessageStore, registry: ToolRegistry | None = None
+) -> SessionManager:
+    tools = registry or ToolRegistry()
+    return SessionManager(
+        provider=provider, tools_factory=lambda thread, channel: tools,
         store=store, default_model="m", system_prompt="s", max_concurrent=4,
         soul_reader=lambda: "",
     )
-    return provider, manager
 
 
 async def noop_delta(text: str) -> None:
@@ -65,6 +80,14 @@ def item(text: str, log: list[str]) -> Injected:
     return Injected(text, consumed, lambda: log.append(f"leftover:{text}"))
 
 
+def open_inbox(*texts: str) -> tuple[Inbox, list[str]]:
+    inbox, log = Inbox(), list[str]()
+    inbox.open()
+    for text in texts:
+        inbox.offer(item(text, log))
+    return inbox, log
+
+
 # ---- inbox ----
 
 
@@ -75,14 +98,31 @@ async def test_closed_inbox_refuses_offers() -> None:
 
 
 async def test_inbox_take_drains_in_order_and_close_requeues_the_rest() -> None:
-    inbox, log = Inbox(), list[str]()
-    inbox.open()
-    assert inbox.offer(item("a", log)) and inbox.offer(item("b", log))
+    inbox, log = open_inbox("a", "b")
+    assert inbox.pending()
     assert await inbox.take() == ["a", "b"]
+    assert not inbox.pending()
     inbox.offer(item("c", log))
     inbox.close()
     assert log == ["consumed:a", "consumed:b", "leftover:c"]
     assert inbox.offer(item("d", log)) is False
+
+
+async def test_a_raising_consume_hook_leaves_the_rest_for_close() -> None:
+    inbox, log = Inbox(), list[str]()
+    inbox.open()
+
+    async def boom() -> None:
+        raise RuntimeError("hook failed")
+
+    inbox.offer(Injected("bad", boom, lambda: log.append("leftover:bad")))
+    inbox.offer(item("good", log))
+    try:
+        await inbox.take()
+    except RuntimeError:
+        pass
+    inbox.close()
+    assert log == ["leftover:good"]
 
 
 # ---- loop ----
@@ -92,13 +132,7 @@ async def test_loop_appends_injected_text_before_the_next_model_call() -> None:
     gate = Gate()
     gate.release.set()
     provider = FakeProvider([tool_turn("wait", {}), text_turn("saw it")])
-    pending = ["stop, do X instead"]
-
-    async def take() -> list[str]:
-        out = list(pending)
-        pending.clear()
-        return out
-
+    inbox, _ = open_inbox("stop, do X instead")
     committed: list[dict[str, Any]] = []
 
     async def commit(message: dict[str, Any]) -> None:
@@ -107,7 +141,7 @@ async def test_loop_appends_injected_text_before_the_next_model_call() -> None:
     messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
     result = await run_turn(
         provider=provider, model="m", messages=messages, tools=gate.registry(),
-        on_delta=noop_delta, on_commit=commit, take_injected=take,
+        on_delta=noop_delta, on_commit=commit, injections=inbox,
     )
     assert result.text == "saw it"
     injected = {"role": "user", "content": "stop, do X instead"}
@@ -119,14 +153,54 @@ async def test_loop_appends_injected_text_before_the_next_model_call() -> None:
     assert injected in committed
 
 
+async def test_a_text_answer_overtaken_by_an_injection_goes_out_then_continues() -> (
+    None
+):
+    """The owner spoke before the answer reached them: deliver the answer as
+    an interim reply and answer the new text in the same turn, in order."""
+    provider = FakeProvider([text_turn("first answer"), text_turn("second answer")])
+    inbox, log = open_inbox("one more thing")
+    interim: list[str] = []
+
+    async def on_interim(text: str) -> None:
+        interim.append(text)
+
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    result = await run_turn(
+        provider=provider, model="m", messages=messages, tools=ToolRegistry(),
+        on_delta=noop_delta, injections=inbox, on_interim=on_interim,
+    )
+    assert interim == ["first answer"]
+    assert result.text == "second answer"
+    assert provider.calls[1][-1] == {"role": "user", "content": "one more thing"}
+    assert log == ["consumed:one more thing"]
+
+
+async def test_the_last_iteration_leaves_injections_for_requeue() -> None:
+    """At the iteration cap the model can't see the text: don't take it (and
+    announce it as seen) — leave it for the inbox's close to hand back."""
+    gate = Gate()
+    gate.release.set()
+    provider = FakeProvider([tool_turn("wait", {})])
+    inbox, log = open_inbox("too late")
+    result = await run_turn(
+        provider=provider, model="m", messages=[{"role": "user", "content": "go"}],
+        tools=gate.registry(), on_delta=noop_delta, injections=inbox,
+        max_iterations=1,
+    )
+    assert "iteration limit" in result.text
+    assert inbox.pending()
+    inbox.close()
+    assert log == ["leftover:too late"]
+
+
 # ---- session ----
 
 
 async def test_session_injects_into_a_running_turn(store: MessageStore) -> None:
     gate = Gate()
-    provider, manager = manager_for(
-        [tool_turn("wait", {}), text_turn("ok, switching")], store, gate.registry()
-    )
+    provider = FakeProvider([tool_turn("wait", {}), text_turn("ok, switching")])
+    manager = manager_for(provider, store, gate.registry())
     session = await manager.get_or_create("cli:t", "cli")
     log: list[str] = []
     assert session.inject(item("early", log)) is False  # idle: caller queues
@@ -142,29 +216,29 @@ async def test_session_injects_into_a_running_turn(store: MessageStore) -> None:
     assert {"role": "user", "content": "change course"} in stored
 
 
-async def test_session_requeues_an_injection_the_turn_never_reached(
+async def test_session_requeues_an_injection_when_the_turn_fails(
     store: MessageStore,
 ) -> None:
-    """A text-only turn has no tool boundary: the offer is handed back, not lost."""
-    provider, manager = manager_for([text_turn("done")], store, ToolRegistry())
+    provider = FailingProvider([])
     provider.gate = asyncio.Event()
-    session = await manager.get_or_create("cli:t", "cli")
+    session = await manager_for(provider, store).get_or_create("cli:t", "cli")
     log: list[str] = []
     turn = asyncio.create_task(session.run_turn("start", noop_delta))
-    await asyncio.sleep(0.01)
-    assert session.inject(item("late", log)) is True
+    await provider.entered.wait()
+    assert session.inject(item("still there?", log)) is True
     provider.gate.set()
-    await turn
-    assert log == ["leftover:late"]
+    try:
+        await turn
+    except ProviderError:
+        pass
+    assert log == ["leftover:still there?"]
 
 
 async def test_on_begin_fires_once_the_turn_holds_the_lock(
     store: MessageStore,
 ) -> None:
-    provider, manager = manager_for(
-        [text_turn("one"), text_turn("two")], store, ToolRegistry()
-    )
-    session = await manager.get_or_create("cli:t", "cli")
+    provider = FakeProvider([text_turn("one"), text_turn("two")])
+    session = await manager_for(provider, store).get_or_create("cli:t", "cli")
     began: list[str] = []
 
     def begin(label: str) -> Any:
@@ -189,7 +263,7 @@ def owner(text: str, sender: str = "owner", channel: str = "cli") -> Message:
 async def test_try_inject_refuses_strangers_commands_and_unknown_threads(
     store: MessageStore,
 ) -> None:
-    _, manager = manager_for([], store, ToolRegistry())
+    manager = manager_for(FakeProvider([]), store)
     dispatcher = Dispatcher(manager)
     requeued: list[Message] = []
     assert dispatcher.try_inject(owner("hi"), requeued.append) is False  # no session
@@ -204,9 +278,7 @@ async def test_injected_message_streams_inbound_and_publishes_on_consume(
     store: MessageStore,
 ) -> None:
     gate = Gate()
-    _, manager = manager_for(
-        [tool_turn("wait", {}), text_turn("noted")], store, gate.registry()
-    )
+    provider = FakeProvider([tool_turn("wait", {}), text_turn("noted")])
     hub, bus = ObserverHub(), EventBus()
     seen: list[Event] = []
 
@@ -214,9 +286,9 @@ async def test_injected_message_streams_inbound_and_publishes_on_consume(
         seen.append(event)
 
     bus.subscribe(record)
-    dispatcher = Dispatcher(manager, hub=hub, bus=bus)
-    from .test_dispatch import RecordingAdapter
-
+    dispatcher = Dispatcher(
+        manager_for(provider, store, gate.registry()), hub=hub, bus=bus
+    )
     dispatcher.register(RecordingAdapter())
     queue = hub.listen("cli:t")
     turn = asyncio.create_task(dispatcher.handle(owner("start")))
@@ -236,17 +308,33 @@ async def test_injected_message_streams_inbound_and_publishes_on_consume(
     assert requeued == []
 
 
+async def test_an_overtaken_answer_is_sent_before_the_final(
+    store: MessageStore,
+) -> None:
+    provider = FakeProvider([text_turn("answer one"), text_turn("answer two")])
+    provider.gate = asyncio.Event()
+    dispatcher = Dispatcher(manager_for(provider, store))
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    turn = asyncio.create_task(dispatcher.handle(owner("start")))
+    await provider.entered.wait()
+    requeued: list[Message] = []
+    assert dispatcher.try_inject(owner("wait, also"), requeued.append) is True
+    provider.gate.set()
+    await turn
+    assert adapter.sent == [("cli:t", "answer one"), ("cli:t", "answer two")]
+    assert requeued == []
+
+
 async def test_leftover_injection_is_requeued_through_the_callback(
     store: MessageStore,
 ) -> None:
-    provider, manager = manager_for([text_turn("done")], store, ToolRegistry())
+    provider = FailingProvider([])
     provider.gate = asyncio.Event()
-    dispatcher = Dispatcher(manager)
-    from .test_dispatch import RecordingAdapter
-
+    dispatcher = Dispatcher(manager_for(provider, store))
     dispatcher.register(RecordingAdapter())
     turn = asyncio.create_task(dispatcher.handle(owner("start")))
-    await asyncio.sleep(0.01)
+    await provider.entered.wait()
     requeued: list[Message] = []
     late = owner("late")
     assert dispatcher.try_inject(late, requeued.append) is True
@@ -261,11 +349,9 @@ async def test_web_turn_streams_its_inbound_when_the_turn_begins(
     """The web client renders an owner message from this frame, so a message
     queued behind a running turn appears when its turn starts — not wiped by
     a re-render before it was ever persisted."""
-    _, manager = manager_for([text_turn("hey")], store, ToolRegistry())
     hub = ObserverHub()
+    manager = manager_for(FakeProvider([text_turn("hey")]), store)
     dispatcher = Dispatcher(manager, hub=hub)
-    from .test_dispatch import _WebAdapter
-
     dispatcher.register(_WebAdapter())
     queue = hub.listen("web:main")
     await dispatcher.handle(
