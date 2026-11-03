@@ -5,8 +5,11 @@ real daemon round-trip with only the model call swapped out.
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Callable
 from typing import Any
+
+import httpx
 
 from chief.provider.base import (
     Completion,
@@ -15,6 +18,7 @@ from chief.provider.base import (
     ToolCall,
     ToolSpec,
 )
+from chief.typesafe import TypeSafeClient
 
 
 class FakeProvider:
@@ -69,3 +73,29 @@ def tool_turn(
 def _split(text: str) -> list[str]:
     mid = max(1, len(text) // 2)
     return [text[:mid], text[mid:]] if len(text) > 1 else [text]
+
+
+
+TypeSafeReply = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | int]
+
+
+def typesafe_stub(
+    reply: TypeSafeReply,
+) -> tuple[TypeSafeClient, list[dict[str, Any]]]:
+    """A real :class:`TypeSafeClient` over ``httpx.MockTransport`` — not a
+    second fake. ``reply(state, questions)`` returns the raw ``answers`` JSON,
+    or an int HTTP status to fail with. Returns the client and the request
+    bodies it sent."""
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        answers = reply(body["state"], body["questions"])
+        if isinstance(answers, int):
+            return httpx.Response(answers, text="stub failure")
+        return httpx.Response(200, json={
+            "answers": answers, "usage": {"input_tokens": 10, "output_tokens": 1}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return TypeSafeClient("ts-test", client=client), bodies

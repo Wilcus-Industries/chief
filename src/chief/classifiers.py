@@ -2,8 +2,9 @@
 
 A definition is a markdown file in the classifiers dir (YAML frontmatter: name,
 description, labels, optional model; body: the classification prompt).
-``classify`` runs a small model turn and returns exactly one declared label,
-tolerant of case and surrounding whitespace, retrying twice more before raising
+``classify`` asks TypeSafe for a typed Choice when a key is configured, else
+(or on its failure) runs a small model turn, matching one declared label
+tolerant of case and whitespace, retrying twice more before raising
 ``ClassifierError``. It is internal + self-edit only — there is no agent-facing
 tool. Monitors and other core services call it directly.
 """
@@ -16,17 +17,14 @@ from pathlib import Path
 import yaml
 
 from chief.provider.base import Completion, Provider
+from chief.typesafe import Asker, TypeSafeError, choice
 
 logger = logging.getLogger(__name__)
 
 
 class _LabelSafeLoader(yaml.SafeLoader):  # type: ignore[misc]
-    """SafeLoader that leaves YAML 1.1 booleans (YES/NO/ON/OFF) as strings.
-
-    Labels are written unquoted (``labels: [YES, NO]``); the stock resolver
-    would coerce YES/NO into Python bools, so we drop the bool resolver down to
-    just true/false and keep the label text intact.
-    """
+    """SafeLoader that keeps unquoted YAML 1.1 booleans (``labels: [YES, NO]``)
+    as label strings: the bool resolver is cut down to true/false only."""
 
 
 _LabelSafeLoader.yaml_implicit_resolvers = {
@@ -85,17 +83,31 @@ class Classifier:
     """Runs a named classifier definition against text, returning one label."""
 
     def __init__(
-        self, provider: Provider, registry: ClassifierRegistry, default_model: str
+        self, provider: Provider, registry: ClassifierRegistry, default_model: str,
+        *, typesafe: Asker | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._default_model = default_model
+        self.typesafe = typesafe
 
-    async def classify(self, name: str, text: str) -> str:
+    async def classify(
+        self, name: str, text: str, *, model: str | None = None,
+        typesafe: bool = True,
+    ) -> str:
+        """One declared label. TypeSafe answers first when configured (a typed
+        Choice — no free-text parse); on its failure, or with ``typesafe=False``,
+        a model turn on ``model`` (else the definition's, else the default)."""
         definition = self._registry.get(name)
         if definition is None:
             raise ClassifierError(f"no classifier named '{name}'")
-        model = definition.model or self._default_model
+        if typesafe and self.typesafe is not None:
+            try:
+                return await _typesafe_label(self.typesafe, definition, text)
+            except TypeSafeError as exc:
+                logger.warning("classifier %s: TypeSafe failed (%s); LLM path",
+                               name, exc)
+        model = model or definition.model or self._default_model
         system = (
             f"{definition.prompt}\n\nRespond with exactly one of these labels "
             "and nothing else:\n" + "\n".join(definition.labels)
@@ -118,6 +130,19 @@ class Classifier:
 
     def definition(self, name: str) -> ClassifierDef | None:
         return self._registry.get(name)
+
+
+async def _typesafe_label(
+    client: Asker, definition: ClassifierDef, text: str
+) -> str:
+    answers = await client.ask(
+        {"text": text}, {"label": choice(definition.prompt, definition.labels)},
+        spend_key=f"classifier:{definition.name}",
+    )
+    label = _match_label(answers["label"].choice or "", definition.labels)
+    if label is None:
+        raise TypeSafeError(f"undeclared label for '{definition.name}'")
+    return label
 
 
 def _match_label(reply: str, labels: tuple[str, ...]) -> str | None:
