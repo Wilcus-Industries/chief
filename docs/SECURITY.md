@@ -239,9 +239,9 @@ WARN→EXHAUSTED edges, not every turn.
 
 Two real limits worth knowing:
 
-- **An OAuth-proxy backend reports no dollar cost, so `budget_cap_usd` is inert
-  against it.** Zero cost means spend never accrues and the cap never trips. The
-  budget only constrains metered (OpenRouter) traffic.
+- **An OAuth-proxy or direct Anthropic API backend reports no dollar cost, so
+  `budget_cap_usd` is inert against it.** Zero cost means spend never accrues and
+  the cap never trips. The budget only constrains metered (OpenRouter) traffic.
 - The check is per-turn, never mid-turn. One turn with a long tool loop can
   overshoot the cap arbitrarily; enforcement re-evaluates only at the next turn.
 

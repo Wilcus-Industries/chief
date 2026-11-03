@@ -94,7 +94,11 @@ Notes on specific keys:
 - **`provider_backends.<n>` sampling options:** `send_temperature: false`
   omits `temperature` for that backend (newer Claude models 400 on it);
   `reasoning_effort` (`low`/`medium`/`high`, else a boot-time `ConfigError`) is
-  sent on every request to it. Both default to today's behavior.
+  sent on every request to it. Both default to today's behavior. A direct
+  Anthropic API backend needs no proxy: `base_url: https://api.anthropic.com/v1`,
+  `api_key_secret: anthropic_api_key` (`secrets/anthropic_api_key`). It is
+  pay-per-token and reports no dollar cost, so `budget.cap_usd` does not count
+  its turns.
 - **Secrets never come from YAML.** `openrouter_api_key` and `web_password` read
   env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
   closed and no listener is built.

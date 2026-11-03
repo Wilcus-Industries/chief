@@ -102,7 +102,8 @@ through the adapter named on the `Message` that started it.
   (the one-time crossover run at boot). Judgment lives in the `self-update`
   skill, not in a tool; the restart seatbelt is reused unchanged.
 - **Boot wiring** — `src/chief/app.py` (`build_app`, the table of contents) with
-  infrastructure phases in `src/chief/wiring.py`. The entrypoint
+  infrastructure phases in `src/chief/wiring.py` (provider construction:
+  `src/chief/provider/build.py`). The entrypoint
   (`src/chief/entrypoint.py`) takes a single-instance `flock` before `build_app`
   so a stray second daemon can't double-poll `chat.db` and double-answer.
 

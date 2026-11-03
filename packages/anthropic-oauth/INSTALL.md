@@ -21,8 +21,8 @@ State these to the owner and get an explicit yes; do not install silently.
 - **Budget cap goes inert for proxied turns.** `budget.cap_usd` gates spend by
   reading the dollar cost the provider reports. The proxy reports no cost, so
   spend on aliased models is unmetered — only OpenRouter turns count against
-  the cap. The real limiter on the subscription is its own rate limits, which
-  surface as provider errors.
+  the cap (same for a direct Anthropic API backend). The real limiter on the
+  subscription is its own rate limits, which surface as provider errors.
 - **The proxy must run in BARE MODEL mode.** Non-bare, the proxy bridges tool
   calls to Claude's *own* Read/Edit/Bash and collides with chief's toolset.
   Chief must drive its own tools; the model stays a plain text+tool-call
