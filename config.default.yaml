@@ -51,6 +51,7 @@ provider_base_url: https://openrouter.ai/api/v1
 # typesafe:
 #   screen_threshold: 0.5   # Noul score at or above this flags
 #   timeout_s: 10
+#   screen_tools: [shell, spawn_agent, "mcp_*"]   # tool-name globs screened
 #   model: jev-latest
 #   usd_per_mtok: 0.042     # input tokens; output is free
 

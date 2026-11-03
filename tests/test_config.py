@@ -79,6 +79,9 @@ def test_typesafe_block_overrides_and_threshold_is_clamped(tmp_path: Path) -> No
     config = load_config(path)
     assert config.typesafe_screen_threshold == 0.7
     assert config.typesafe_timeout_s == 4.0
+    assert config.typesafe_screen_tools == ("shell", "spawn_agent", "mcp_*")
+    path.write_text("typesafe:\n  screen_tools: ['mcp_google-workspace_*']\n")
+    assert load_config(path).typesafe_screen_tools == ("mcp_google-workspace_*",)
     path.write_text("typesafe:\n  screen_threshold: 0\n")
     with pytest.raises(ConfigError, match="typesafe.screen_threshold"):
         load_config(path)

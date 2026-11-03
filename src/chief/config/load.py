@@ -107,6 +107,9 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         ),
         typesafe_usd_per_mtok=float(typesafe.get("usd_per_mtok", 0.042)),
         typesafe_timeout_s=float(typesafe.get("timeout_s", 10.0)),
+        typesafe_screen_tools=tuple(
+            str(p) for p in typesafe.get("screen_tools", Config().typesafe_screen_tools)
+        ),
         provider_base_url=str(
             _env_or(raw, "provider_base_url", "https://openrouter.ai/api/v1")
         ),

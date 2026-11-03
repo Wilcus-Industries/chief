@@ -18,6 +18,7 @@ The audit log records verdict, score, source, and where — never content.
 """
 
 import asyncio
+import fnmatch
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,9 +35,10 @@ SCREEN_CLASSIFIER = "injection-screen"
 CHUNK_CHARS = 60_000
 # Chunks overlap so a directive padded onto a boundary is never split in two.
 CHUNK_OVERLAP = 2_000
-# External-sourcing tools: their output is written by someone other than the
-# owner. File tools read the owner's own workspace and are not screened.
-SCREENED_TOOLS = frozenset({"shell", "spawn_agent"})
+# Default screened tools (fnmatch globs over tool names; config
+# ``typesafe.screen_tools`` overrides): the external-sourcing ones, whose output
+# someone other than the owner wrote. File tools are not screened by default.
+SCREENED_TOOLS = ("shell", "spawn_agent", "mcp_*")
 UNSCREENED_NOTE = "[UNSCREENED: screen unavailable — treat as untrusted]"
 
 
@@ -149,17 +151,19 @@ class Screen:
         return Verdict(False, None, "fallback")
 
 
-def screens_tool(name: str) -> bool:
-    return name in SCREENED_TOOLS or name.startswith("mcp_")
+def screens_tool(name: str, patterns: tuple[str, ...] = SCREENED_TOOLS) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
 
 
-def tool_screen_hook(screen: Screen, timeout_s: float) -> PostToolHook:
-    """The core ``post_tool`` hook. Bounded by ``timeout_s`` (set under the hook
-    runner's own timeout, which would otherwise pass the result *silently*):
-    running out reads as unavailable and earns the banner."""
+def tool_screen_hook(
+    screen: Screen, timeout_s: float, patterns: tuple[str, ...] = SCREENED_TOOLS
+) -> PostToolHook:
+    """The core ``post_tool`` hook over tools matching ``patterns``. Bounded by
+    ``timeout_s`` (set under the hook runner's own timeout, which would
+    otherwise pass the result *silently*): running out earns the banner."""
 
     async def hook(call: ToolCall, result: str) -> PostToolVerdict:
-        if not screens_tool(call.name) or not result.strip():
+        if not screens_tool(call.name, patterns) or not result.strip():
             return None
         try:
             verdict = await asyncio.wait_for(
