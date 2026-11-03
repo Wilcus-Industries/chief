@@ -201,7 +201,10 @@ Inbound untrusted content is scored before the agent reads it: **monitor event
 payloads** and the results of **external-sourcing tools** — `shell`, every
 `mcp_*` tool, and `spawn_agent` (subagent turns get the same seam on their own
 tool results). File tools (`read_file`, `grep`, `edit_file`, `write_file`) read
-the owner's workspace and are not screened.
+the owner's workspace and are not screened. Neither are the owner's own words:
+a direct owner message never reaches a monitor at all, and in a group chat — where
+the owner's sender stays the raw handle — an event whose sender is one of
+`imessage.owner_handles` fires without going to the screen.
 
 Order of resort, one `Screen` for both entry points:
 

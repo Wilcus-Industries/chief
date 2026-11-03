@@ -24,15 +24,22 @@ logger = logging.getLogger(__name__)
 class MonitorGate:
     """Which monitors fire on an event, and the screen's verdict on it."""
 
-    def __init__(self, classifier: Classifier, screen: Screen | None) -> None:
+    def __init__(
+        self, classifier: Classifier, screen: Screen | None,
+        owner_handles: tuple[str, ...] = (),
+    ) -> None:
         self._classifier = classifier
         self._screen = screen
+        # The owner's own words skip the screen. They reach monitors under the
+        # raw handle only in group chats (a group sender never maps to
+        # "owner"; docs/SECURITY.md), and the owner is not an injection risk.
+        self._owner = frozenset(h.lower() for h in owner_handles)
 
     async def evaluate(
         self, monitors: list[MonitorRow], payload: dict[str, Any]
     ) -> tuple[list[MonitorRow], Verdict | None]:
-        """``(fired monitors, verdict)``; verdict is ``None`` without a screen
-        or when nothing could fire (so nothing was sent anywhere)."""
+        """``(fired monitors, verdict)``; verdict is ``None`` without a screen,
+        for the owner's own messages, or when nothing could fire."""
         text = json.dumps(payload)
         fired = [m for m in monitors if _code_match(m, payload)]
         judged = [m for m in monitors if m.predicate.get("kind") == "classifier"]
@@ -40,7 +47,8 @@ class MonitorGate:
             return [], None
         verdict: Verdict | None = None
         answers: dict[str, Answer] = {}
-        if self._screen is not None:
+        from_owner = str(payload.get("sender", "")).lower() in self._owner
+        if self._screen is not None and not from_owner:
             extra = {
                 f"judge_{m.id}": q for m in judged if (q := self._question(m))
             }
