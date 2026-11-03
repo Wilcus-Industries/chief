@@ -53,8 +53,9 @@ comes as packages. Linux gets the same core, just without the macOS defaults.
 The agent loop is ours, built on a provider seam:
 
 - **LLM provider adapter** — one common interface (chat + tool calls + streaming);
-  OpenRouter is the first implementation. OpenAI, Anthropic, Google, Groq, etc. port
-  in later. All model calls, including cheap judgments, go through it.
+  OpenRouter (any OpenAI-compatible endpoint) and the native Anthropic Messages API
+  are the implementations today, chosen per backend; Google, Groq, etc. port in
+  later. All chat model calls, including cheap judgments, go through it.
 - **Tool loop + streaming** — model call → tool dispatch → results → loop until done;
   deltas stream out to the session's adapter.
 - **Session persistence/resume** — conversation state survives daemon restart.
@@ -97,6 +98,10 @@ its first call.
   label — case/whitespace tolerant, retrying twice more before raising. The model
   resolves frontmatter → the `default_classifier` role → the default model. There is
   **no** agent-facing tool: it is an internal seam core services (e.g. monitors) call.
+  With a TypeSafe key, `classify` asks TypeSafe (typed Choice, raw httpx — not the
+  Provider seam) first and drops to the model turn on any failure. The same client
+  backs the core **injection screen** on monitor events and external tool results
+  (docs/SECURITY.md).
 - **Owner commands.** A tiny core slash-command set (/tasks, /cancel, /model, …) is
   parsed before agent dispatch on every adapter — a deterministic escape hatch when a
   session is wedged or burning money. /skill-name invokes a skill directly; natural

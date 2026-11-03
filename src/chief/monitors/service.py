@@ -4,11 +4,11 @@ Predicates come in two kinds: ``code`` (a cheap regex over one event payload
 field) and ``classifier`` (a named categorical-label classifier, which must be
 scoped — see predicate.py). The tool's three forms are ``pattern`` (code),
 ``instruction`` (sugar for the wake-judge classifier), and ``classifier``.
+Matching and the injection screen live in gate.py; flagged wakes are withheld.
 """
 
 import json
 import logging
-import re
 import secrets
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -18,10 +18,12 @@ from sqlalchemy import select
 from chief.adapters.base import Message
 from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierDef
+from chief.monitors.gate import MonitorGate, withheld_body
 from chief.monitors.predicate import in_scope, is_unscoped_classifier
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
 from chief.persistence.store import MessageStore
+from chief.screen import Screen
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +46,13 @@ class MonitorService:
         bus: EventBus,
         wake: WakeAgent,
         classifier: Classifier,
+        screen: Screen | None = None,
     ) -> None:
         self._factory = factory
         self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._classifier = classifier
+        self._gate = MonitorGate(classifier, screen)
         bus.subscribe(self._on_event)
 
     async def create(
@@ -145,55 +149,48 @@ class MonitorService:
         # them would double-wake. Strangers are the intended trigger.
         if event.payload.get("sender") == "owner":
             return
-        for monitor in await self.list_monitors():
-            if monitor.watch_channel != event.channel:
-                continue
-            # Before _matches: an out-of-scope event never reaches a model.
-            if not in_scope(monitor.predicate, event.payload):
-                continue
-            # One monitor's classifier raising must not abort the sibling loop.
+        # Scope before the gate: an out-of-scope event never reaches a model.
+        monitors = [
+            m for m in await self.list_monitors()
+            if m.watch_channel == event.channel and in_scope(m.predicate, event.payload)
+        ]
+        try:
+            fired, verdict = await self._gate.evaluate(monitors, event.payload)
+        except Exception:
+            logger.exception("monitor gate errored on %s", event.type)
+            return
+        for monitor in fired:  # one wake raising must not drop its siblings
             try:
-                if await self._matches(monitor, event):
+                if verdict is not None and verdict.withhold:
+                    await self._fire_withheld(monitor, event, verdict.reason())
+                else:
                     await self._fire(monitor, event)
             except Exception:
                 logger.exception("monitor %s errored", monitor.id)
-
-    async def _matches(self, monitor: MonitorRow, event: Event) -> bool:
-        predicate: dict[str, Any] = dict(monitor.predicate)
-        if predicate.get("kind") == "code":
-            field = str(predicate.get("field", "text"))
-            value = str(event.payload.get(field, ""))
-            return re.search(str(predicate["pattern"]), value, re.I) is not None
-        if predicate.get("kind") == "classifier":
-            text = json.dumps(event.payload)
-            instruction = predicate.get("instruction")
-            if instruction is not None:
-                text = f"{instruction}\n\nEvent:\n{text}"
-            label = await self._classifier.classify(
-                str(predicate["classifier"]), text
-            )
-            return label == str(predicate["fire_label"])
-        logger.warning("monitor %s has unknown predicate kind", monitor.id)
-        return False
 
     async def _fire(self, monitor: MonitorRow, event: Event) -> None:
         logger.info("monitor %s fired on %s", monitor.id, event.type)
         # sender="system" takes the owner path in dispatch.handle, so someone
         # else's words enter the turn as trusted-origin text — frame them (#285).
+        await self._send(monitor, f"event: {json.dumps(event.payload)}")
+
+    async def _fire_withheld(
+        self, monitor: MonitorRow, event: Event, reason: str
+    ) -> None:
+        """Flagged, or unscreenable: wake with who and where only."""
+        logger.warning("monitor %s fired but withheld: %s", monitor.id, reason)
+        await self._send(monitor, withheld_body(event.payload, reason))
+
+    async def _send(self, monitor: MonitorRow, body: str) -> None:
         nonce = secrets.token_hex(3)
         text = (
             f"[monitor #{monitor.id} fired: {monitor.description}]\n"
-            f"{UNTRUSTED_OPEN.format(n=nonce)}\n"
-            f"event: {json.dumps(event.payload)}\n"
+            f"{UNTRUSTED_OPEN.format(n=nonce)}\n{body}\n"
             f"{UNTRUSTED_CLOSE.format(n=nonce)}"
         )
         # sender="system": runs a turn but is never re-published to the bus,
         # so a monitor can't trigger itself.
-        await self._wake(
-            Message(
-                channel=monitor.wake_channel,
-                sender="system",
-                thread_key=monitor.wake_thread,
-                text=text,
-            )
-        )
+        await self._wake(Message(
+            channel=monitor.wake_channel, sender="system",
+            thread_key=monitor.wake_thread, text=text,
+        ))

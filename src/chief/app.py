@@ -27,6 +27,7 @@ from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools, approval_asker
 from chief.hooks.boot import build_hooks
+from chief.hooks.posttool import tool_screener
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
 from chief.persistence.db import SessionFactory
@@ -75,7 +76,7 @@ async def _build_agent_core(
     bus = EventBus()
     hub = ObserverHub()
     registry = ToolRegistry()
-    hooks, classifier = build_hooks(config, provider, budget)
+    hooks, classifier, screen = build_hooks(config, provider, budget, gate.audit)
 
     def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
         context = ToolContext(thread_key=thread_key, channel=channel)
@@ -123,14 +124,15 @@ async def _build_agent_core(
         strangers=StrangerLog(factory), restart=restart,
         channel_defaults=config.stream_channel_defaults,
     )
-    monitors = MonitorService(factory, bus, dispatcher.handle, classifier)
+    monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen)
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
         run_command=guarded_runner(shell_service, shell_guards),
     )
-    return Core(
-        budget, bus, hub, registry, restart, manager, dispatcher, monitors, cron
-    )
+    # Subagent turns get the same post_tool seam (core injection screen first).
+    post_tool = tool_screener(hooks, config.hooks_timeout_seconds, logger)
+    return Core(budget, bus, hub, registry, restart, manager, dispatcher,
+                monitors, cron, post_tool)
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -159,16 +161,12 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         manager=core.manager,
         monitor_service=core.monitors,
         cron_service=core.cron,
-        selfedit_pipeline=selfedit_pipeline,
-        skills=skills,
-        shell_service=shell_service,
-        provider=provider,
-        agents_dir=config.agents_dir,
-        default_model=config.default_model,
-        budget=core.budget,
-        root=Path.cwd(),
-        shell_guards=shell_guards,
-        model_aliases=model_aliases,
+        selfedit_pipeline=selfedit_pipeline, skills=skills,
+        shell_service=shell_service, provider=provider,
+        agents_dir=config.agents_dir, default_model=config.default_model,
+        budget=core.budget, root=Path.cwd(),
+        shell_guards=shell_guards, model_aliases=model_aliases,
+        post_tool=core.post_tool,
         ask=approval_asker(core.dispatcher, gate.approvals),
     )
     await ensure_update_schedule(core.cron, config)

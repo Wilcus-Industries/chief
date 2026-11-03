@@ -88,11 +88,27 @@ def imessage_mode(value: Any) -> str:
     return parsed
 
 
+# Backend wire kinds and the base_url each defaults to (None = required).
+BACKEND_KINDS = {"openai": None, "anthropic": "https://api.anthropic.com/v1"}
+
+
 def backends(raw: dict[str, Any]) -> dict[str, BackendSpec]:
-    return {
-        name: BackendSpec(base_url=str(spec["base_url"]), api_key=_backend_key(spec))
-        for name, spec in raw.items()
-    }
+    """Coerce ``provider_backends``; an unknown kind or missing URL fails boot."""
+    out: dict[str, BackendSpec] = {}
+    for name, spec in raw.items():
+        kind = str(spec.get("kind", "openai"))
+        if kind not in BACKEND_KINDS:
+            raise ConfigError(
+                f"provider_backends.{name}.kind must be one of "
+                f"{', '.join(BACKEND_KINDS)} — got {kind!r}"
+            )
+        base_url = spec.get("base_url") or BACKEND_KINDS[kind]
+        if not base_url:
+            raise ConfigError(f"provider_backends.{name} needs a base_url")
+        out[name] = BackendSpec(
+            base_url=str(base_url), api_key=_backend_key(spec), kind=kind
+        )
+    return out
 
 
 def _backend_key(spec: dict[str, Any]) -> str:
@@ -137,13 +153,14 @@ def stream_channel_defaults(raw: Any) -> dict[str, StreamPolicy]:
     return out
 
 
-def ratio(raw: Any) -> float:
-    """Coerce ``compaction.ratio`` and clamp it to ``(0, 1]``.
+def ratio(raw: Any, key: str = "compaction.ratio") -> float:
+    """Coerce a ratio key and clamp it to ``(0, 1]``.
 
-    ``0`` (or negative) would fire compaction every turn; ``>1`` would silently
-    disable threshold compaction — both foot-guns, so reject at boot instead.
+    For ``compaction.ratio``, ``0`` would fire compaction every turn and ``>1``
+    silently disable it; for ``typesafe.screen_threshold``, ``0`` flags
+    everything and ``>1`` nothing — foot-guns, so reject at boot instead.
     """
     parsed = float(raw)
     if not 0 < parsed <= 1:
-        raise ConfigError(f"compaction.ratio must be in (0, 1], got {parsed}")
+        raise ConfigError(f"{key} must be in (0, 1], got {parsed}")
     return parsed

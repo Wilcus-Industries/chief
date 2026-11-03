@@ -10,8 +10,10 @@
 
 # Model roles. Core ships exactly one — the agent invents further roles via
 # self-config. Two optional roles are honored when present, never required:
-# `downgrade` (used when the budget is exhausted) and `cheap-judgment`
-# (monitor model-predicates).
+# `downgrade` (used when the budget is exhausted), `cheap-judgment`
+# (monitor model-predicates), `default_classifier`, and `screen_fallback` (the
+# injection screen's model when TypeSafe has no key or fails — e.g. `haiku`
+# aliased onto the anthropic backend below).
 models:
   default: qwen/qwen3-coder
   # Sampling temperature for every LLM call (agent, monitors, compaction).
@@ -25,18 +27,32 @@ models:
 provider_base_url: https://openrouter.ai/api/v1
 
 # Per-model routing (optional; empty = one backend, the default above). Name
-# extra backends under `provider_backends` (each an OpenAI-compat base_url plus
-# a key resolved from `api_key_env` then a `secrets/<api_key_secret>` file —
-# never an inline key), then map typed names to (backend, real model) under
-# `provider_aliases`. A thread routes to an alias with `/model <alias>` or the
-# agent's switch_model tool; any unlisted model uses the default backend. To
-# drive a Claude SUBSCRIPTION via OAuth (a local proxy) for chosen models,
-# install the `anthropic-oauth` package — it fills these in and documents the
-# ToS / dead-budget-cap caveats. Example:
+# extra backends under `provider_backends` (each a wire `kind` — `openai`, the
+# default, for any OpenAI-compat base_url; `anthropic` for the native Messages
+# API, base_url optional — plus a key resolved from `api_key_env` then a
+# `secrets/<api_key_secret>` file — never an inline key), then map typed names
+# to (backend, real model) under `provider_aliases`. A thread routes to an alias
+# with `/model <alias>` or the agent's switch_model tool; any unlisted model uses
+# the default backend. The anthropic kind prices calls from a built-in table so
+# the budget cap stays live. To drive a Claude SUBSCRIPTION via OAuth (a local
+# proxy) instead, install the `anthropic-oauth` package — it fills these in and
+# documents the ToS / dead-budget-cap caveats. Example:
 #   provider_backends:
+#     anthropic: {kind: anthropic, api_key_secret: anthropic_api_key}
 #     proxy: {base_url: http://127.0.0.1:8000/v1, api_key_secret: proxy_api_key}
 #   provider_aliases:
+#     haiku: {backend: anthropic, model: claude-haiku-5-5}
 #     opus: {backend: proxy, model: claude-opus-4-8}
+
+# TypeSafe (System One): classifier backend and the core prompt-injection
+# screen on monitor events and shell / mcp_* / spawn_agent results. The key is
+# secrets/typesafe_api_key (or env TYPESAFE_API_KEY); without one the screen
+# runs on models.screen_fallback. docs/SECURITY.md "Injection screen".
+# typesafe:
+#   screen_threshold: 0.5   # Noul score at or above this flags
+#   timeout_s: 10
+#   model: jev-latest
+#   usd_per_mtok: 0.042     # input tokens; output is free
 
 db_path: data/chief.db
 socket_path: data/chief.sock

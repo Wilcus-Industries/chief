@@ -1,4 +1,4 @@
-"""The first-run wizard: owner password, OpenRouter key, budget cap, updates.
+"""The first-run wizard: password, OpenRouter + TypeSafe keys, budget, updates.
 
 Idempotent on re-runs — existing state is kept, never destroyed. Secrets are
 one file each under ``secrets/`` (the same files ``chief.config`` reads); the
@@ -41,6 +41,7 @@ class WizardResult:
 
     password: str
     model_auth: str
+    screen: str
     budget: str
     auto_update: str
 
@@ -54,15 +55,18 @@ def run_wizard(
     env: Mapping[str, str],
     validate: KeyValidator = validate_openrouter_key,
 ) -> WizardResult:
-    """Run the four steps; headless installs drive them via env vars
-    (CHIEF_OWNER_PASSWORD, CHIEF_OPENROUTER_KEY, CHIEF_BUDGET_CAP,
-    CHIEF_UPDATE_SCHEDULE)."""
+    """Run the five steps; headless installs drive them via env vars
+    (CHIEF_OWNER_PASSWORD, CHIEF_OPENROUTER_KEY, CHIEF_TYPESAFE_KEY,
+    CHIEF_BUDGET_CAP, CHIEF_UPDATE_SCHEDULE)."""
     return WizardResult(
         password=wizard_steps.password_step(
             secrets_dir, io, interactive=interactive, env=env
         ),
         model_auth=wizard_steps.key_step(
             secrets_dir, io, interactive=interactive, env=env, validate=validate
+        ),
+        screen=wizard_steps.typesafe_step(
+            secrets_dir, io, interactive=interactive, env=env
         ),
         budget=wizard_steps.budget_step(
             config_path, io, interactive=interactive, env=env

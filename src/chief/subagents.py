@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from chief.agent.loop import run_turn
+from chief.agent.loop import PostTool, run_turn
 from chief.budget import Budget
 from chief.provider.base import Provider, ToolCall, ToolSpec
 from chief.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
@@ -98,8 +98,13 @@ def register_spawn_tool(
     provider: Provider,
     default_model: str,
     budget: Budget | None = None,
+    post_tool: PostTool | None = None,
 ) -> None:
-    """Expose spawn_agent; sub-sessions reuse the shared registry, filtered."""
+    """Expose spawn_agent; sub-sessions reuse the shared registry, filtered.
+
+    ``post_tool`` screens the sub-session's own tool results (the core
+    injection screen), so a subagent reads fetched content no less guarded
+    than the parent session does."""
 
     async def spawn_agent(name: str, task: str) -> str:
         definition = agents.get(name)
@@ -119,6 +124,7 @@ def register_spawn_tool(
             ],
             tools=FilteredTools(registry, definition.tools),
             on_delta=drop_delta,
+            post_tool=post_tool,
         )
         if budget is not None:
             await budget.record(f"subagent:{name}", result.usage.cost)

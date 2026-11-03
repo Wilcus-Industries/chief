@@ -4,6 +4,7 @@ only the LLM provider swapped (PRD #183 testing seam)."""
 import asyncio
 import json
 import logging
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
 from chief.mcpclient.manager import ServerConfig
 from chief.policy import RICH, StreamPolicy
+from chief.provider.anthropic import AnthropicProvider
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
@@ -98,6 +100,24 @@ def test_build_provider_assembles_a_router_when_backends_configured() -> None:
         provider_aliases={"opus": AliasSpec(backend="proxy", model="claude-opus-4-8")},
     )
     assert isinstance(build_provider(config), RouterProvider)
+
+
+def test_build_provider_builds_an_anthropic_backend_by_kind() -> None:
+    config = Config(
+        provider_backends={
+            "anthropic": BackendSpec(
+                base_url="https://api.anthropic.com/v1", api_key="k", kind="anthropic"
+            )
+        },
+        provider_aliases={
+            "haiku": AliasSpec(backend="anthropic", model="claude-haiku-5-5")
+        },
+    )
+    provider = build_provider(config)
+    assert isinstance(provider, RouterProvider)
+    routed, real_model = provider._route("haiku")
+    assert isinstance(routed, AnthropicProvider)
+    assert real_model == "claude-haiku-5-5"
 
 
 def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
@@ -357,6 +377,8 @@ async def test_agent_creates_a_monitor_and_it_fires(
         [
             [Completion(text="", tool_calls=(create,))],
             text_turn("watching for urgent messages"),
+            # No TypeSafe key: the injection screen's fallback turn, passing.
+            text_turn("CLEAN"),
             text_turn("monitor woke me, on it"),
         ]
     )
@@ -640,7 +662,13 @@ async def test_web_send_drives_the_real_cross_channel_dispatch_path(
     # dispatcher → session turn → the thread's registered origin adapter, and
     # the outbound reply mirrors to the web hub. Only the model (FakeProvider)
     # and the device transport (the capturing adapter's send) are faked.
-    config = make_config(tmp_path, sock_path, web_password="hunter2")
+    # An ephemeral port, so the test never collides with a live daemon on 8130.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    config = make_config(
+        tmp_path, sock_path, web_password="hunter2", web_port=free_port
+    )
     app, streams = await boot(config, FakeProvider([text_turn("on my way")]))
     device = _CapturingAdapter("imessage")
     app.dispatcher.register(device)

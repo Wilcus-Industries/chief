@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
+from chief.agent.loop import PostTool
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.audit import AuditLog
@@ -38,9 +39,7 @@ from chief.persistence.db import (
     make_session_factory,
 )
 from chief.persistence.store import MessageStore
-from chief.provider.base import Provider
-from chief.provider.openrouter import OpenRouterProvider
-from chief.provider.router import RouterProvider
+from chief.provider.factory import build_provider as build_provider
 from chief.selfedit.recovery import RestartController
 from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
@@ -72,6 +71,7 @@ class Core:
     dispatcher: Dispatcher
     monitors: MonitorService
     cron: CronService
+    post_tool: PostTool | None = None
 
 
 @dataclass
@@ -82,38 +82,6 @@ class Adapters:
     imessage: IMessageAdapter | None
     web_adapter: WebAdapter
     web_server: WebServer | None
-
-
-def build_provider(config: Config) -> Provider:
-    """The LLM provider: a RouterProvider over named backends when any are
-    configured, else the single legacy OpenRouter/default backend.
-
-    Every backend is an OpenAI-compatible ``OpenRouterProvider`` with its own
-    base_url + key. Fails LOUD at boot (not on the first turn) if an alias names
-    a backend that was never assembled.
-    """
-    backends: dict[str, Provider] = {
-        name: OpenRouterProvider(
-            spec.api_key, temperature=config.temperature, base_url=spec.base_url
-        )
-        for name, spec in config.provider_backends.items()
-    }
-    default = backends.get("default") or OpenRouterProvider(
-        config.openrouter_api_key,
-        temperature=config.temperature,
-        base_url=config.provider_base_url,
-    )
-    if not config.provider_backends and not config.provider_aliases:
-        return default
-    backends.setdefault("default", default)
-    aliases: dict[str, tuple[str, str]] = {}
-    for name, alias in config.provider_aliases.items():
-        if alias.backend not in backends:
-            raise ValueError(
-                f"provider alias '{name}' names unknown backend '{alias.backend}'"
-            )
-        aliases[name] = (alias.backend, alias.model)
-    return RouterProvider(default=default, backends=backends, aliases=aliases)
 
 
 async def build_persistence(

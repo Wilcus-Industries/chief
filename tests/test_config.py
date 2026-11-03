@@ -59,6 +59,31 @@ def test_env_overrides_yaml(
     assert config.openrouter_api_key == "sk-env"
 
 
+def test_typesafe_key_resolves_secret_then_env_and_block_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "typesafe_api_key").write_text("ts-secret\n")
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.typesafe_api_key == "ts-secret"
+    assert config.typesafe_screen_threshold == 0.5
+    assert config.typesafe_model == "jev-latest"
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-env")
+    assert load_config(tmp_path / "missing.yaml").typesafe_api_key == "ts-env"
+
+
+def test_typesafe_block_overrides_and_threshold_is_clamped(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("typesafe:\n  screen_threshold: 0.7\n  timeout_s: 4\n")
+    config = load_config(path)
+    assert config.typesafe_screen_threshold == 0.7
+    assert config.typesafe_timeout_s == 4.0
+    path.write_text("typesafe:\n  screen_threshold: 0\n")
+    with pytest.raises(ConfigError, match="typesafe.screen_threshold"):
+        load_config(path)
+
+
 def test_provider_base_url_defaults_to_openrouter(tmp_path: Path) -> None:
     config = load_config(tmp_path / "missing.yaml")
     assert config.provider_base_url == "https://openrouter.ai/api/v1"
@@ -124,6 +149,43 @@ def test_provider_backend_key_resolves_secret_then_env(
     monkeypatch.setenv("PROXY_KEY", "from-env")
     reloaded = load_config(tmp_path / "config.yaml")
     assert reloaded.provider_backends["proxy"].api_key == "from-env"
+
+
+def test_anthropic_backend_kind_defaults_its_base_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    (tmp_path / "config.yaml").write_text(
+        "provider_backends:\n"
+        "  anthropic:\n"
+        "    kind: anthropic\n"
+        "    api_key_env: ANTHROPIC_API_KEY\n"
+    )
+    backend = load_config(tmp_path / "config.yaml").provider_backends["anthropic"]
+    assert backend.kind == "anthropic"
+    assert backend.base_url == "https://api.anthropic.com/v1"
+    assert backend.api_key == "sk-ant"
+
+
+def test_backend_kind_defaults_to_openai(tmp_path: Path) -> None:
+    _write_routing_config(tmp_path / "config.yaml")
+    backend = load_config(tmp_path / "config.yaml").provider_backends["proxy"]
+    assert backend.kind == "openai"
+
+
+def test_unknown_backend_kind_fails_boot(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text(
+        "provider_backends:\n  x: {kind: gemini, base_url: http://h}\n"
+    )
+    with pytest.raises(ConfigError, match="kind.*gemini"):
+        load_config(tmp_path / "config.yaml")
+
+
+def test_openai_backend_without_base_url_fails_boot(tmp_path: Path) -> None:
+    (tmp_path / "config.yaml").write_text("provider_backends:\n  x: {}\n")
+    with pytest.raises(ConfigError, match="base_url"):
+        load_config(tmp_path / "config.yaml")
 
 
 def test_owner_handles_bare_numeric_scalar_raises_clear_error(

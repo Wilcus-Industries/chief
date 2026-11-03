@@ -57,7 +57,8 @@ Read the script before you run it. The URL above is the whole thing.
 
 You need an OpenRouter API key to chat
 (<https://openrouter.ai/settings/keys>). The first-run wizard asks for it, plus
-a web password and a monthly spend cap.
+a web password, a monthly spend cap, and an optional TypeSafe key for the
+prompt-injection screen.
 
 The one-liner installs prerequisites (Homebrew on macOS, apt on Linux), clones
 Chief to `~/.local/share/chief` at the latest tagged release, runs the wizard,

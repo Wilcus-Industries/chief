@@ -71,6 +71,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     compaction = raw.get("compaction") or {}
     update = raw.get("update") or {}
     stream = raw.get("stream") or {}
+    typesafe = raw.get("typesafe") or {}
     imessage_mode = coerce.imessage_mode(imessage.get("mode", "self"))
     self_handles = coerce.as_handles(imessage.get("self_handles"))
     owner_db_path = (
@@ -96,6 +97,16 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         openrouter_api_key=os.environ.get(
             "OPENROUTER_API_KEY", coerce.read_secret(Path("secrets/openrouter_api_key"))
         ),
+        typesafe_api_key=os.environ.get(
+            "TYPESAFE_API_KEY", coerce.read_secret(Path("secrets/typesafe_api_key"))
+        ),
+        typesafe_base_url=str(typesafe.get("base_url", Config().typesafe_base_url)),
+        typesafe_model=str(typesafe.get("model", "jev-latest")),
+        typesafe_screen_threshold=coerce.ratio(
+            typesafe.get("screen_threshold", 0.5), "typesafe.screen_threshold"
+        ),
+        typesafe_usd_per_mtok=float(typesafe.get("usd_per_mtok", 0.042)),
+        typesafe_timeout_s=float(typesafe.get("timeout_s", 10.0)),
         provider_base_url=str(
             _env_or(raw, "provider_base_url", "https://openrouter.ai/api/v1")
         ),

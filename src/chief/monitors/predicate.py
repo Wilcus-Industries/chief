@@ -4,6 +4,7 @@ Kept separate from the tool dispatch so ``tools.py`` stays about actions and
 this stays about the pattern/instruction/classifier shapes and their validation.
 """
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -98,6 +99,10 @@ def build_predicate(
                 "error: scope only applies to the instruction and classifier "
                 "forms; a pattern matches a contact with field=sender"
             )
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            return f"error: pattern is not a valid regex ({exc})"
         return {"kind": "code", "field": field or "text", "pattern": pattern}
     if classifier is not None:
         definition = classifier_def(classifier)

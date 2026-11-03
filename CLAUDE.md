@@ -14,8 +14,8 @@ this. Only add a rule here when it differs from, or isn't covered by, the global
 Core runs natively on this machine — no containers, no migrations (the schema is
 created at boot). Fresh-machine setup is the one-liner (`bootstrap.sh` →
 `install.sh`, README.md); from a clone, `./install.sh` does prereqs, scaffold,
-deps, the first-run wizard (web password, OpenRouter key, monthly budget cap,
-auto-update schedule), the dedicated-account offer, the `chief` launcher, and
+deps, the first-run wizard (web password, OpenRouter key, optional TypeSafe key
+for the injection screen, monthly budget cap, auto-update schedule), the dedicated-account offer, the `chief` launcher, and
 the autostart service (`--no-service` / `--no-launch` / `--non-interactive` /
 `--single-user` for automation; re-runs are idempotent). By default chief gets
 its **own system user** and its own Apple ID (`imessage.mode: dedicated`, which

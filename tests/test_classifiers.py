@@ -19,7 +19,7 @@ from chief.classifiers import (
     validate,
 )
 
-from .fakes import FakeProvider, text_turn
+from .fakes import FakeProvider, text_turn, typesafe_stub
 
 WAKE_JUDGE = """---
 name: wake-judge
@@ -115,6 +115,50 @@ async def test_model_resolution_falls_back_to_default(tmp_path: Path) -> None:
     classifier = Classifier(provider, registry, "default/model")
     assert await classifier.classify("wake-judge", "x") == "NO"
     assert provider.models[0] == "default/model"
+
+
+async def test_typesafe_choice_answers_without_a_model_call(tmp_path: Path) -> None:
+    registry = make_classifiers(tmp_path, **{"wake-judge": WAKE_JUDGE})
+    client, bodies = typesafe_stub(
+        lambda state, qs: {"label": {"type": "choice", "choice": "YES"}})
+    provider = FakeProvider([])
+    classifier = Classifier(provider, registry, "m", typesafe=client)
+    assert await classifier.classify("wake-judge", "the text") == "YES"
+    assert provider.models == []
+    question = bodies[0]["questions"]["label"]
+    assert question["type"] == "choice"
+    assert set(question["criteria"]) == {"YES", "NO"}
+    assert question["instructions"].startswith("Decide whether the instruction")
+    assert bodies[0]["state"] == {"text": "the text"}
+
+
+async def test_typesafe_failure_falls_back_to_model(tmp_path: Path) -> None:
+    registry = make_classifiers(tmp_path, **{"wake-judge": WAKE_JUDGE})
+    client, _ = typesafe_stub(lambda state, qs: 429)
+    provider = FakeProvider([text_turn("NO")])
+    classifier = Classifier(provider, registry, "m", typesafe=client)
+    assert await classifier.classify("wake-judge", "x") == "NO"
+    assert provider.models == ["m"]
+
+
+async def test_typesafe_undeclared_label_falls_back(tmp_path: Path) -> None:
+    registry = make_classifiers(tmp_path, **{"wake-judge": WAKE_JUDGE})
+    client, _ = typesafe_stub(
+        lambda state, qs: {"label": {"type": "choice", "choice": "MAYBE"}})
+    provider = FakeProvider([text_turn("YES")])
+    classifier = Classifier(provider, registry, "m", typesafe=client)
+    assert await classifier.classify("wake-judge", "x") == "YES"
+
+
+async def test_typesafe_skipped_and_model_overridden(tmp_path: Path) -> None:
+    registry = make_classifiers(tmp_path, fancy=WITH_MODEL)
+    client, bodies = typesafe_stub(lambda state, qs: 500)
+    provider = FakeProvider([text_turn("B")])
+    classifier = Classifier(provider, registry, "m", typesafe=client)
+    label = await classifier.classify("fancy", "x", model="haiku", typesafe=False)
+    assert label == "B"
+    assert bodies == []
+    assert provider.models == ["haiku"]
 
 
 def test_match_label_prefers_longest_prefix() -> None:

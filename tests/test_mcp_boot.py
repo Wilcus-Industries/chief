@@ -128,6 +128,9 @@ async def test_declared_env_reaches_the_child_and_post_tool_screens_the_result(
     provider = FakeProvider(
         [
             tool_turn("mcp_testsrv_env_var", {"name": "MCP_TEST_SECRET"}),
+            # No TypeSafe key in tests: the core injection screen falls back
+            # to a classifier turn on the same provider, and passes it.
+            text_turn("CLEAN"),
             text_turn("done"),
         ]
     )
@@ -135,11 +138,12 @@ async def test_declared_env_reaches_the_child_and_post_tool_screens_the_result(
     try:
         send_frame(streams, "hi")
         await read_finals(streams, 1)
+        assert provider.calls[1][-1]["content"] == "s3cr3t", "screened first"
         # One equality, two proofs: `s3cr3t` came back from os.environ inside
         # the real child process (so the configured env reached it), and the
         # fixture package's registered post_tool hook annotated the payload
         # before the model ever saw it.
-        assert provider.calls[1][-1]["content"] == (
+        assert provider.calls[2][-1]["content"] == (
             '<hook source="mcpfixture">\nscreened mcp_testsrv_env_var\n</hook>'
             "\n\ns3cr3t"
         )
