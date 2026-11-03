@@ -27,15 +27,18 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class BackendSpec:
-    """A named provider backend: an OpenAI-compatible endpoint plus its key.
+    """A named provider backend: an endpoint, its wire ``kind``, and its key.
 
-    ``api_key`` is resolved AT LOAD from ``api_key_env`` (an env var name) then
-    ``api_key_secret`` (a filename under ``secrets/``) — mirroring how
-    ``openrouter_api_key`` resolves. No inline keys ever live in the yaml.
+    ``kind`` is ``openai`` (any OpenAI-compatible endpoint: OpenRouter, a local
+    proxy) or ``anthropic`` (the native Messages API; ``base_url`` defaults to
+    Anthropic's). ``api_key`` is resolved AT LOAD from ``api_key_env`` (an env
+    var name) then ``api_key_secret`` (a filename under ``secrets/``) — mirroring
+    how ``openrouter_api_key`` resolves. No inline keys ever live in the yaml.
     """
 
     base_url: str
     api_key: str
+    kind: str = "openai"
 
 
 @dataclass(frozen=True)

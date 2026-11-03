@@ -94,6 +94,12 @@ Notes on specific keys:
 - **Secrets never come from YAML.** `openrouter_api_key` and `web_password` read
   env first, then `secrets/<name>`. Empty `web_password` means the web UI fails
   closed and no listener is built.
+- **`provider_backends.<n>.kind`** is `openai` (default; any OpenAI-compatible
+  `base_url`) or `anthropic` (native Messages API; `base_url` defaults to
+  `https://api.anthropic.com/v1`). Any other kind, or an `openai` backend with no
+  `base_url`, fails boot. The anthropic backend prices calls from a built-in
+  per-model table (`chief.provider.anthropic_wire.PRICES`); an unlisted model
+  costs 0, which leaves the budget cap blind to it.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
 - **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,

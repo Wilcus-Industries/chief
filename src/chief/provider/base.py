@@ -7,6 +7,7 @@ OpenAI-style wire format (``role``/``content``/``tool_calls``/``tool_call_id``
 dicts) — that dict shape is part of this seam's contract.
 """
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -73,6 +74,17 @@ class Completion:
 
 
 ProviderEvent = TextDelta | Completion
+
+
+def parse_arguments(raw: str) -> dict[str, Any]:
+    """Parse streamed tool-argument JSON; surface malformed output to the tool layer."""
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"_unparsed_arguments": raw}
+    if not isinstance(parsed, dict):
+        return {"_unparsed_arguments": raw}
+    return parsed
 
 
 class Provider(Protocol):
