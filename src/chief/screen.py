@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 SCREEN_CLASSIFIER = "injection-screen"
 CHUNK_CHARS = 60_000
+# Chunks overlap so a directive padded onto a boundary is never split in two.
+CHUNK_OVERLAP = 2_000
 # External-sourcing tools: their output is written by someone other than the
 # owner. File tools read the owner's own workspace and are not screened.
 SCREENED_TOOLS = frozenset({"shell", "spawn_agent"})
@@ -84,8 +86,13 @@ class Screen:
         self, text: str, *, spend_key: str,
         extra: dict[str, dict[str, Any]] | None = None,
     ) -> Verdict:
-        chunks = [text[i:i + CHUNK_CHARS] for i in range(0, len(text), CHUNK_CHARS)]
-        definition = self.classifier.definition(SCREEN_CLASSIFIER)
+        step = CHUNK_CHARS - CHUNK_OVERLAP
+        chunks = [text[i:i + CHUNK_CHARS] for i in range(0, len(text), step)]
+        try:
+            definition = self.classifier.definition(SCREEN_CLASSIFIER)
+        except Exception:
+            logger.exception("screen: classifier definitions unreadable")
+            definition = None
         if definition is None:
             logger.error("screen: no '%s' classifier definition", SCREEN_CLASSIFIER)
             verdict = UNAVAILABLE
@@ -93,9 +100,12 @@ class Screen:
             verdict = await self._typesafe(
                 chunks or [""], definition.prompt, spend_key, extra or {}
             ) or await self._fallback(chunks)
-        if self._audit is not None:
-            self._audit.record("screen", where=spend_key, flagged=verdict.flagged,
-                               score=verdict.score, source=verdict.source)
+        try:
+            if self._audit is not None:
+                self._audit.record("screen", where=spend_key, flagged=verdict.flagged,
+                                   score=verdict.score, source=verdict.source)
+        except Exception:
+            logger.exception("screen: audit write failed")
         return verdict
 
     async def _typesafe(
@@ -113,11 +123,14 @@ class Screen:
                     questions |= extra
                 got = await client.ask({"content": chunk}, questions,
                                        spend_key=spend_key)
-                score = max(score, got["injection"].noul or 0.0)
+                injection = got["injection"]
+                if injection.type != "noul" or injection.noul is None:
+                    raise TypeSafeError(f"injection answer not a noul: {injection}")
+                score = max(score, injection.noul)
                 if index == 0:
                     answers = {k: v for k, v in got.items() if k != "injection"}
-        except TypeSafeError as exc:
-            logger.warning("screen: TypeSafe failed (%s); falling back", exc)
+        except Exception as exc:  # any failure on this path means: fall back
+            logger.warning("screen: TypeSafe failed (%r); falling back", exc)
             return None
         return Verdict(score >= self._threshold, score, "typesafe", answers)
 
@@ -156,6 +169,11 @@ def tool_screen_hook(screen: Screen, timeout_s: float) -> PostToolHook:
         except TimeoutError:
             logger.warning("screen: %s result timed out after %ss",
                            call.name, timeout_s)
+            verdict = UNAVAILABLE
+        except Exception:
+            # The hook runner would drop a raise and pass the result silently;
+            # turn every failure into the loud banner instead.
+            logger.exception("screen: %s result could not be screened", call.name)
             verdict = UNAVAILABLE
         if verdict.flagged:
             return Veto(

@@ -135,6 +135,48 @@ async def test_tool_hook_passes_clean_and_banners_unavailable() -> None:
     assert verdict == Annotate(UNSCREENED_NOTE)
 
 
+async def test_tool_hook_any_raise_banners_instead_of_passing_silently() -> None:
+    screen = make_screen()
+
+    async def broken(text: str, **kwargs: Any) -> Any:
+        raise OSError("disk gone")
+
+    screen.check = broken  # type: ignore[method-assign]
+    verdict = await tool_screen_hook(screen, 5.0)(call("shell"), "ok")
+    assert verdict == Annotate(UNSCREENED_NOTE)
+
+
+async def test_malformed_injection_answer_falls_back_not_clean() -> None:
+    bad_answers: list[Any] = [
+        {"type": "choice", "choice": "NO"},
+        {"type": "noul", "noul": float("nan")},
+        {"type": "noul", "noul": 7},
+        {"type": "noul"},
+    ]
+    for bad in bad_answers:
+        def reply(state: dict[str, Any], qs: dict[str, Any],
+                  bad: Any = bad) -> dict[str, Any]:
+            return {"injection": bad}
+
+        client, _ = typesafe_stub(reply)
+        provider = FakeProvider([text_turn("INJECTION")])
+        verdict = await make_screen(provider, typesafe=client).check(
+            "x", spend_key="k")
+        assert verdict.source == "fallback", bad
+        assert verdict.flagged
+
+
+async def test_spend_record_failure_keeps_the_verdict() -> None:
+    class Broken:
+        async def record(self, thread_key: str, cost: float) -> None:
+            raise RuntimeError("database is locked")
+
+    client, _ = typesafe_stub(scored(0.91))
+    client._budget = Broken()
+    verdict = await make_screen(typesafe=client).check("x", spend_key="k")
+    assert (verdict.source, verdict.flagged) == ("typesafe", True)
+
+
 async def test_tool_hook_timeout_banners_instead_of_passing_silently() -> None:
     screen = make_screen()
 

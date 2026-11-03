@@ -37,10 +37,13 @@ def build_hooks(
     model second) and is registered as the core ``post_tool`` hook.
     """
     hooks = HookRegistry()
+    screen_budget = config.hooks_timeout_seconds * SCREEN_TIMEOUT_SHARE
+    # A stalled TypeSafe must fail inside the tool screen's budget, leaving
+    # the fallback time to run, rather than eat the whole budget itself.
     typesafe = TypeSafeClient(
         config.typesafe_api_key, budget=budget, base_url=config.typesafe_base_url,
         model=config.typesafe_model, usd_per_mtok=config.typesafe_usd_per_mtok,
-        timeout_s=config.typesafe_timeout_s,
+        timeout_s=min(config.typesafe_timeout_s, screen_budget / 2),
     ) if config.typesafe_api_key else None
     classifier_model = config.models.get("default_classifier", config.default_model)
     classifier = Classifier(
@@ -66,6 +69,5 @@ def build_hooks(
     )
     # Core registers under a package name like anyone else; accessors sort by it.
     hooks.register_session_start("core", session_start_notice(Path.cwd()))
-    hooks.register_post_tool("core", tool_screen_hook(
-        screen, config.hooks_timeout_seconds * SCREEN_TIMEOUT_SHARE))
+    hooks.register_post_tool("core", tool_screen_hook(screen, screen_budget))
     return hooks, classifier, screen

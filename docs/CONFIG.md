@@ -107,7 +107,8 @@ Notes on specific keys:
   `https://api.anthropic.com/v1`). Any other kind, or an `openai` backend with no
   `base_url`, fails boot. The anthropic backend prices calls from a built-in
   per-model table (`chief.provider.anthropic_wire.PRICES`); an unlisted model
-  costs 0, which leaves the budget cap blind to it.
+  is budgeted at the table's top rate (with a one-time warning), never 0. It
+  sends no `temperature` — newer Claude models fix their own sampling.
 - **`gate.approved` accepts `"*"`** to approve every tool; `gate.never` still wins.
 - **`imessage.enabled` also requires `sys.platform == "darwin"`.**
 - **`imessage.mode` picks which Apple ID chief speaks as** — `self` (default,

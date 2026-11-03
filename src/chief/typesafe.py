@@ -12,10 +12,13 @@ so callers fall back rather than guess. Cost is input-token priced and recorded
 on the shared budget under the caller's spend key.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai/v1"
 DEFAULT_MODEL = "jev-latest"
@@ -118,11 +121,17 @@ class TypeSafeClient:
             answers = {
                 name: _answer(payload["answers"][name]) for name in questions
             }
-        except (ValueError, KeyError, TypeError) as exc:
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise TypeSafeError(f"TypeSafe malformed reply: {exc!r}") from exc
-        tokens = int((payload.get("usage") or {}).get("input_tokens") or 0)
-        if self._budget is not None:
-            await self._budget.record(spend_key, tokens * self._usd_per_mtok / 1e6)
+        # Bookkeeping must never discard a valid verdict.
+        try:
+            tokens = int((payload.get("usage") or {}).get("input_tokens") or 0)
+            if self._budget is not None:
+                await self._budget.record(
+                    spend_key, tokens * self._usd_per_mtok / 1e6
+                )
+        except Exception:
+            logger.warning("TypeSafe: could not record spend", exc_info=True)
         return answers
 
 
@@ -131,8 +140,12 @@ def _answer(raw: dict[str, Any]) -> Answer:
     score = raw.get("noul")
     picked = raw.get("choice")
     confidence = raw.get("confidence")
-    if kind == "noul" and score is None:
-        raise KeyError("noul answer without a score")
+    if kind == "noul" and not (
+        isinstance(score, int | float) and 0.0 <= float(score) <= 1.0
+    ):
+        # Also rejects NaN (every comparison is False): a missing or junk
+        # score must never read as 0.0 — clean.
+        raise ValueError(f"noul answer without a 0-1 score: {score!r}")
     if kind == "choice" and picked is None:
         raise KeyError("choice answer without a pick")
     return Answer(

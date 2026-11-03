@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from chief.provider.anthropic import AnthropicProvider
-from chief.provider.anthropic_wire import to_anthropic_request
+from chief.provider.anthropic_wire import EMPTY_TURN, PRICES, to_anthropic_request
 from chief.provider.base import Completion, ProviderError, TextDelta, ToolCall, ToolSpec
 
 
@@ -87,10 +87,21 @@ async def test_streams_text_and_prices_known_model() -> None:
     assert final.usage.cost == pytest.approx(12.0)  # $2 in + $10 out
 
 
-async def test_unknown_model_costs_zero() -> None:
-    provider = make_provider(text_events("x"))
+async def test_unknown_model_is_budgeted_at_the_top_rate() -> None:
+    provider = make_provider(
+        text_events("x", input_tokens=1_000_000, output_tokens=0))
     final = (await collect(provider, model="claude-future-9"))[-1]
-    assert final.usage.cost == 0.0
+    assert final.usage.cost == pytest.approx(max(PRICES.values())[0])
+
+
+def test_wire_never_sends_empty_assistant_content() -> None:
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None},
+        {"role": "user", "content": "again"},
+    ]
+    body = to_anthropic_request("m", messages, [], max_tokens=10)
+    assert body["messages"][1] == {"role": "assistant", "content": EMPTY_TURN}
 
 
 async def test_sends_auth_headers_and_streaming_body() -> None:

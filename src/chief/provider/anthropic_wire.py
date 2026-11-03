@@ -8,13 +8,17 @@ into one user turn of ``tool_result`` blocks (Anthropic requires every result
 of a parallel round in a single user message).
 """
 
+import logging
 from typing import Any
 
 from chief.provider.base import ToolSpec, parse_arguments
 
+logger = logging.getLogger(__name__)
+
 # USD per million (input, output) tokens. The Messages API reports tokens, not
 # dollars, so without this the budget cap would be inert on this backend. An
-# unlisted model costs 0 — the same caveat a zero-cost proxy carries.
+# unlisted model (a dated snapshot, a future release) is a per-token key
+# spending real money, so it is priced at the table's top rate, never 0.
 PRICES: dict[str, tuple[float, float]] = {
     "claude-fable-5-1": (10.0, 50.0),
     "claude-opus-5-5": (4.0, 20.0),
@@ -24,9 +28,22 @@ PRICES: dict[str, tuple[float, float]] = {
 }
 
 
+# Sent in place of an empty assistant turn: the Messages API rejects empty
+# content, and one empty reply would otherwise 400 every later turn.
+EMPTY_TURN = "(no reply)"
+_warned: set[str] = set()
+
+
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Dollar cost of one call by the price table; 0 for an unlisted model."""
-    price_in, price_out = PRICES.get(model, (0.0, 0.0))
+    """Dollar cost of one call; an unlisted model is charged the top rate."""
+    price = PRICES.get(model)
+    if price is None:
+        price = max(PRICES.values())
+        if model not in _warned:
+            _warned.add(model)
+            logger.warning("anthropic: no price for %s; budgeting at the top "
+                           "rate %s/%s per MTok", model, *price)
+    price_in, price_out = price
     return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
 
 
@@ -71,7 +88,8 @@ def _turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif message["role"] == "assistant" and message.get("tool_calls"):
             turns.append({"role": "assistant", "content": _assistant_blocks(message)})
         else:
-            turns.append({"role": message["role"], "content": message.get("content")})
+            content = message.get("content") or EMPTY_TURN
+            turns.append({"role": message["role"], "content": content})
     return turns
 
 
@@ -99,7 +117,6 @@ def _assistant_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return blocks
-
 
 
 def _parse_input(arguments: Any) -> dict[str, Any]:
