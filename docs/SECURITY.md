@@ -198,9 +198,10 @@ thing that helps, and it applies to every fire, not just groups.
 ## Injection screen — the code-enforced gate (`screen.py`, `monitors/gate.py`)
 
 Inbound untrusted content is scored before the agent reads it: **monitor event
-payloads** and the results of **external-sourcing tools** — `shell`, every
-`mcp_*` tool, and `spawn_agent` (subagent turns get the same seam on their own
-tool results). File tools (`read_file`, `grep`, `edit_file`, `write_file`) read
+payloads** and the results of **external-sourcing tools** — by default `shell`,
+every `mcp_*` tool, and `spawn_agent` (subagent turns get the same seam on their
+own tool results); `typesafe.screen_tools` (fnmatch globs) narrows or widens
+that, and a tool it leaves out reaches the model unscreened and unmarked. File tools (`read_file`, `grep`, `edit_file`, `write_file`) read
 the owner's workspace and are not screened. Neither are the owner's own words:
 a direct owner message never reaches a monitor at all, and in a group chat — where
 the owner's sender stays the raw handle — an event whose sender is one of

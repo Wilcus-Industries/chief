@@ -69,5 +69,6 @@ def build_hooks(
     )
     # Core registers under a package name like anyone else; accessors sort by it.
     hooks.register_session_start("core", session_start_notice(Path.cwd()))
-    hooks.register_post_tool("core", tool_screen_hook(screen, screen_budget))
+    hooks.register_post_tool("core", tool_screen_hook(
+        screen, screen_budget, config.typesafe_screen_tools))
     return hooks, classifier, screen

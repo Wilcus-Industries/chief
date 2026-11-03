@@ -59,6 +59,7 @@ template line.
 | `typesafe.screen_threshold` | `typesafe_screen_threshold` | `float` in `(0, 1]` | `0.5` | — |
 | `typesafe.usd_per_mtok` | `typesafe_usd_per_mtok` | `float` | `0.042` | — |
 | `typesafe.timeout_s` | `typesafe_timeout_s` | `float` | `10.0` | — |
+| `typesafe.screen_tools` | `typesafe_screen_tools` | `tuple[str]` (fnmatch globs) | `[shell, spawn_agent, "mcp_*"]` | — |
 | `gate.never` | `gate_never` | `tuple` | `()` | — |
 | `gate.approved` | `gate_approved` | `tuple` | `()` | — |
 | `gate.announce` | `gate_announce` | `bool` | `True` | — |

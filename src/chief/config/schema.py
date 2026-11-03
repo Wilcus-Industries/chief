@@ -69,6 +69,8 @@ class Config:
     typesafe_screen_threshold: float = 0.5
     typesafe_usd_per_mtok: float = 0.042
     typesafe_timeout_s: float = 10.0
+    # Tool-name globs the core tool screen covers (chief.screen.SCREENED_TOOLS).
+    typesafe_screen_tools: tuple[str, ...] = ("shell", "spawn_agent", "mcp_*")
     # The OpenAI-compatible endpoint the provider streams from. Defaults to
     # OpenRouter; override to a local proxy (e.g. claude-code-openai-server,
     # which serves a Claude subscription in bare mode) to drive Anthropic via
