@@ -15,6 +15,7 @@ import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -992,6 +993,58 @@ def test_an_unreadable_encryption_probe_still_flags_a_doomed_auto_login() -> Non
     unknown = Posture("chief", UNKNOWN, "chief", "present")
     assert any("macOS ignores it" in p for p in unknown.problems())
     assert unknown.problems() == Posture("chief", ON, "chief", "present").problems()
+
+
+class ScriptedRunner:
+    """Per-command return codes in order; the last one repeats."""
+
+    def __init__(self, codes: dict[str, list[int]]) -> None:
+        self.calls: list[str] = []
+        self._codes = codes
+
+    def __call__(self, argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+        joined = " ".join(argv)
+        self.calls.append(joined)
+        for key, codes in self._codes.items():
+            if key in joined:
+                code = codes.pop(0) if len(codes) > 1 else codes[0]
+                return subprocess.CompletedProcess(list(argv), code, "", "err 5")
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
+
+
+def darwin(tmp_path: Path, runner: Any) -> ServiceManager:
+    return ServiceManager(platform="darwin", home=tmp_path, runner=runner,
+                          uid=501, sleep=lambda seconds: None)
+
+
+def test_darwin_reinstall_waits_for_bootout_before_bootstrapping(
+    tmp_path: Path,
+) -> None:
+    """`bootout` returns while the old job drains; bootstrapping in that window
+    fails with 5: Input/output error and leaves chief down (seen for real)."""
+    runner = ScriptedRunner({"launchctl print": [0, 0, 113]})
+    darwin(tmp_path, runner).install(repo_dir=tmp_path, launcher=tmp_path / "c")
+    prints = [i for i, c in enumerate(runner.calls) if "launchctl print" in c]
+    boot = next(i for i, c in enumerate(runner.calls) if "bootstrap" in c)
+    assert len(prints) == 3 and boot > prints[-1]
+    assert "kickstart" in runner.calls[-1]
+
+
+def test_darwin_reinstall_retries_a_transient_bootstrap_failure(
+    tmp_path: Path,
+) -> None:
+    runner = ScriptedRunner({"launchctl print": [113], "bootstrap": [5, 5, 0]})
+    darwin(tmp_path, runner).install(repo_dir=tmp_path, launcher=tmp_path / "c")
+    assert sum("bootstrap" in c for c in runner.calls) == 3
+    assert "kickstart" in runner.calls[-1]
+
+
+def test_darwin_reinstall_still_fails_loud_when_bootstrap_never_works(
+    tmp_path: Path,
+) -> None:
+    runner = ScriptedRunner({"launchctl print": [113], "bootstrap": [5]})
+    with pytest.raises(RuntimeError, match="bootstrap"):
+        darwin(tmp_path, runner).install(repo_dir=tmp_path, launcher=tmp_path / "c")
 
 
 def test_the_service_definition_can_be_written_without_starting_it(
