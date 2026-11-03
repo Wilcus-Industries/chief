@@ -37,6 +37,10 @@ PostTool = Callable[[ToolCall, str], Awaitable[str]]
 # depends on this landing in the store as it happens (#261).
 OnCommit = Callable[[dict[str, Any]], Awaitable[None]]
 
+# Drains owner messages injected mid-turn (chief.agent.inbox); called at each
+# tool boundary so the next model call already sees them.
+TakeInjected = Callable[[], Awaitable[list[str]]]
+
 # Backstop against a model that never stops calling tools; generous because
 # real multi-step work legitimately chains many calls.
 MAX_ITERATIONS = 25
@@ -72,6 +76,7 @@ async def run_turn(
     on_commit: OnCommit | None = None,
     on_tool: OnTool | None = None,
     on_tool_result: OnToolResult | None = None,
+    take_injected: TakeInjected | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls."""
@@ -113,6 +118,12 @@ async def run_turn(
                 await on_commit(tool_message)
             if on_tool_result is not None:
                 await on_tool_result(call, result)
+        if take_injected is not None:
+            for text in await take_injected():
+                user_message = {"role": "user", "content": text}
+                messages.append(user_message)
+                if on_commit is not None:
+                    await on_commit(user_message)
     return TurnResult(
         text="error: turn exceeded the tool-call iteration limit", usage=usage
     )

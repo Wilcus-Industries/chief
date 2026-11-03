@@ -59,6 +59,7 @@ CHAT_PAGE = """<!doctype html>
       <button id="pol-reset" type="button" hidden>reset to default</button>
     </div>
     <div id="log"></div>
+    <div id="queued"></div>
     <div id="readonly" hidden>group thread &mdash; view only; send with imsg.</div>
     <form id="f" autocomplete="off">
       <span class="sigil" id="sigil">owner&gt;</span>

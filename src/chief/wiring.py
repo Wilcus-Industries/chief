@@ -164,8 +164,7 @@ def build_adapters(
     config: Config, core: Core, store: MessageStore, commands: CommandSet,
     approvals: ApprovalBroker,
 ) -> Adapters:
-    """Register the socket, darwin-gated iMessage, and web adapters; build the
-    optional password-gated web server."""
+    """Register socket, darwin-gated iMessage and web adapters, plus the web server."""
     dispatcher = core.dispatcher
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
     dispatcher.register(socket_adapter)
@@ -181,8 +180,8 @@ def build_adapters(
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
             restart=core.restart, dedicated=config.imessage_dedicated,
-            # Consume approvals at poll stage, ahead of the thread FIFO worker.
-            resolve_approval=dispatcher.resolve_approval,
+            # Poll stage, ahead of the FIFO worker: card answers, mid-turn owner texts.
+            resolve_approval=dispatcher.resolve_approval, inject=dispatcher.try_inject,
         )
         dispatcher.register(imessage_adapter)
 
@@ -193,7 +192,8 @@ def build_adapters(
     if config.web_password:
         web_app = build_web_app(
             Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
-            dispatcher.handle, core.monitors, store, commands.palette, core.manager,
-            approvals, config.stream_channel_defaults, config.imessage_owner_handles)
+            dispatcher.handle, dispatcher.try_inject, core.monitors, store,
+            commands.palette, core.manager, approvals, config.stream_channel_defaults,
+            config.imessage_owner_handles)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

@@ -55,6 +55,7 @@ class IMessageAdapter(Adapter):
         run_jxa: RunJxa = run_jxa_subprocess,
         restart: RestartBoundary | None = None,
         resolve_approval: Callable[[Message], bool] | None = None,
+        inject: Callable[[Message, Callable[[Message], None]], bool] | None = None,
         dedicated: bool = False,
         owner_db_path: Path | None = None,
         self_handles: tuple[str, ...] = (),
@@ -69,6 +70,9 @@ class IMessageAdapter(Adapter):
         # its worker awaiting the answer, so the answer must bypass the worker
         # or it deadlocks that thread until the card times out.
         self._resolve_approval = resolve_approval
+        # Same bypass for texting's interrupt-by-default: an owner text landing
+        # mid-turn goes to that turn, its leftover back through the FIFO.
+        self._inject = inject
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
         self._fifo = ThreadFifo(on_message, restart)
@@ -149,6 +153,8 @@ class IMessageAdapter(Adapter):
                     message
                 ):
                     continue  # answered a pending card — bypass the FIFO worker
+                if self._inject is not None and self._inject(message, self._fifo.put):
+                    continue  # taken by the thread's running turn
                 self._fifo.put(message)
 
     async def drain(self) -> None:

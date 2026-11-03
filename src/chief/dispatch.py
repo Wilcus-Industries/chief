@@ -22,9 +22,11 @@ approval card the gate's ``approval_asker`` raises (#267).
 """
 
 import logging
+from collections.abc import Callable
 from typing import Protocol
 
 from chief.adapters.base import Adapter, Message
+from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
@@ -98,6 +100,32 @@ class Dispatcher:
             return False
         return self._approvals.resolve(message.thread_key, message.text)
 
+    def try_inject(
+        self, message: Message, requeue: Callable[[Message], None]
+    ) -> bool:
+        """Offer an owner message to its thread's in-flight turn instead of
+        queuing it behind; True means the turn took it (or will hand it back
+        through ``requeue`` if it finishes first — the caller's normal queue
+        path, e.g. the iMessage FIFO). False: no turn running, a stranger, or
+        a slash command (those always route through :meth:`handle`).
+
+        The agent sees it at the turn's next tool boundary, where it streams
+        as an ``inbound`` frame and is published to the bus like any owner
+        message."""
+        if message.sender != OWNER or message.text.startswith("/"):
+            return False
+        session = self._manager.peek(message.thread_key)
+        if session is None:
+            return False
+
+        async def consumed() -> None:
+            self._inbound(message)
+            await self._publish(message)
+
+        return session.inject(
+            Injected(message.text, consumed, lambda: requeue(message))
+        )
+
     async def handle(self, message: Message, *, fire_restart: bool = True) -> None:
         """Run one turn for an inbound message and send the reply back.
 
@@ -150,11 +178,14 @@ class Dispatcher:
         tk = message.thread_key
         override = await self._manager.stream_policy(tk)
         policy = resolve(message.channel, override, self._channel_defaults)
-        # Web turns stream their own inbound/delta (adapter + JS); for every
-        # other channel tapped() re-checks the live subscription at emit time.
+        # Web turns stream their own delta (adapter); for every other channel
+        # tapped() re-checks the live subscription at emit time.
         non_web = message.channel != WEB_CHANNEL
-        if non_web:
-            self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
+
+        async def on_begin() -> None:
+            # Every channel, web included: the client renders the owner's text
+            # from this frame once the turn starts, not optimistically at send.
+            self._inbound(message)
 
         async def on_delta(text: str) -> None:
             await adapter.send_delta(tk, text)
@@ -174,6 +205,7 @@ class Dispatcher:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
+                on_begin=on_begin,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
@@ -198,6 +230,10 @@ class Dispatcher:
     ) -> None:
         await adapter.send(message.thread_key, text)
         self._turn_end(message, text)
+
+    def _inbound(self, message: Message) -> None:
+        tk = message.thread_key
+        self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
     def tapped(self, thread_key: str, frame: dict[str, object]) -> None:
         """Deliver a rich frame only if a client is tapped into the thread."""

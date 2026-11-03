@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -26,10 +27,18 @@ from chief.web.auth import Auth
 from .fakes import FakeProvider
 
 HANDLED: list[Message] = []
+# Messages offered mid-turn; INJECT_TAKES decides whether the "turn" takes them.
+INJECTED: list[Message] = []
+INJECT_TAKES = [True]
 
 
 async def handle(message: Message) -> None:
     HANDLED.append(message)
+
+
+def inject(message: Message, requeue: Callable[[Message], None]) -> bool:
+    INJECTED.append(message)
+    return INJECT_TAKES[0]
 
 
 async def _no_wake(message: Message) -> None:
@@ -54,6 +63,8 @@ WebParts = tuple[
 @pytest.fixture
 def web(engine: AsyncEngine) -> WebParts:
     HANDLED.clear()
+    INJECTED.clear()
+    INJECT_TAKES[0] = True
     hub = ObserverHub()
     adapter = WebAdapter(hub)
     factory = make_session_factory(engine)
@@ -74,7 +85,8 @@ def web(engine: AsyncEngine) -> WebParts:
     )
     approvals = ApprovalBroker()
     app = build_web_app(
-        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
+        Auth("hunter2"), adapter, hub, handle, inject, monitors, store, _palette,
+        manager,
         approvals, DEFAULT_CHANNEL_DEFAULTS, ("+15550009999",),
     )
     client = httpx.AsyncClient(
@@ -128,6 +140,58 @@ async def test_send_dispatches_an_owner_message(web: WebParts) -> None:
     assert message.sender == "owner"
     assert message.thread_key == "web:main"
     assert message.text == "hi"
+
+
+async def test_plain_send_queues_and_never_injects(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post("/send", json={"thread": "web:main", "text": "hi"})
+    assert response.text == "queued"
+    await asyncio.sleep(0)
+    assert INJECTED == []
+    assert [m.text for m in HANDLED] == ["hi"]
+
+
+async def test_interrupt_send_offers_the_message_to_the_running_turn(
+    web: WebParts,
+) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "stop", "interrupt": True}
+    )
+    assert response.status_code == 202
+    assert response.text == "injected"
+    await asyncio.sleep(0)
+    assert [m.text for m in INJECTED] == ["stop"]
+    assert HANDLED == []  # the running turn took it — no second turn
+
+
+async def test_interrupt_send_on_an_idle_thread_runs_a_normal_turn(
+    web: WebParts,
+) -> None:
+    INJECT_TAKES[0] = False
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "hi", "interrupt": True}
+    )
+    assert response.text == "queued"
+    await asyncio.sleep(0)
+    assert [m.text for m in HANDLED] == ["hi"]
+
+
+async def test_send_while_a_card_is_pending_answers_it(web: WebParts) -> None:
+    """The reply says so, so the client can drop its pending bubble — that
+    message will never start a turn or stream an inbound frame."""
+    client, _, _, _, _, _, approvals = web
+    card = asyncio.create_task(approvals.ask("web:main", "ok?", _noop_send))
+    await asyncio.sleep(0)
+    await login(client)
+    response = await client.post("/send", json={"thread": "web:main", "text": "yes"})
+    assert response.text == "answered"
+    assert await card is Approval.ONCE
+    assert HANDLED == []
 
 
 async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:

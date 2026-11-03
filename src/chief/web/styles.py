@@ -135,6 +135,11 @@ body{
 .approval-btns button:hover{background:var(--bg2);}
 .approval-btns button:disabled{opacity:.5; cursor:default;}
 .empty{color:var(--faint); padding:1.3rem;}
+/* sent, not yet taken by a turn (script_send.py) */
+#queued{padding:0 1.3rem; max-height:30vh; overflow-y:auto;}
+#queued:empty{display:none;}
+.msg.pending{opacity:.55; margin-bottom:.5rem;}
+.ptag{margin-left:.6rem; font-size:11px; color:var(--faint);}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
 /* prompt line */
