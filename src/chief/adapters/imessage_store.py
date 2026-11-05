@@ -35,7 +35,8 @@ POLL_QUERY = (
     "MAX(CASE WHEN (chat.style IS NOT NULL AND chat.style != 45) "
     "OR chat.room_name IS NOT NULL THEN chat.chat_identifier END) AS group_chat, "
     "MAX(CASE WHEN self_chat.mid IS NOT NULL THEN 1 ELSE 0 END) AS in_self, "
-    "message.attributedBody AS body, message.date AS date "
+    "message.attributedBody AS body, message.date AS date, "
+    "message.guid AS guid "
     "FROM message JOIN handle ON message.handle_id = handle.ROWID "
     "LEFT JOIN chat_message_join ON chat_message_join.message_id = message.ROWID "
     "LEFT JOIN chat ON chat.ROWID = chat_message_join.chat_id "
@@ -70,6 +71,13 @@ class RecentDedup:
     the same text (owner types it again minutes on) from being swallowed. State
     is in-memory: a fresh boot re-primes from the store cursor, never replaying
     an already-delivered twin.
+
+    Also used, keyed on ``guid`` alone, for the other duplicate: one message
+    present in both stores. That one is exact rather than heuristic — the two
+    copies *are* the same message, so they carry the same guid, where self-DM
+    twins carry different ones. Read skew between the stores cannot defeat it
+    either: the window is measured on the row's own date, which is identical
+    in both.
     """
 
     def __init__(self, window_ns: int = DEDUP_WINDOW_NS) -> None:
@@ -121,7 +129,7 @@ def text_of(text: object, body: object) -> str:
 
 
 #: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date).
-PolledRow = tuple[int, str, str, int, str | None, int, int]
+PolledRow = tuple[int, str, str, int, str | None, int, int, str]
 
 
 def fetch_rows(
@@ -143,6 +151,7 @@ def fetch_rows(
             (
                 int(r[0]), str(r[1]), text_of(r[2], r[6]), int(r[3]),
                 None if r[4] is None else str(r[4]), int(r[5]), int(r[7]),
+                str(r[8] or ""),
             )
             for r in cur.fetchall()
         ]

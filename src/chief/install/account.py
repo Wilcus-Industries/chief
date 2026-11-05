@@ -30,7 +30,6 @@ __all__ = [
     "Step",
     "account_plan",
     "default_home",
-    "grant_reason",
     "grant_steps",
 ]
 
@@ -94,15 +93,6 @@ def _git_steps(tree: Path, user: str, email: str) -> tuple[Step, ...]:
             ("git", "config", "--global", "--add", "safe.directory", str(tree)),
         ),
     )
-
-
-def grant_reason(path: Path, home: Path) -> str | None:
-    """Why this directory may not be granted, or ``None`` if it may."""
-    if not path.is_absolute():
-        return f"{path} is not an absolute path"
-    if path in (home, Path("/")):
-        return f"{path} is a home or filesystem root — grant a subdirectory"
-    return None
 
 
 def grant_steps(

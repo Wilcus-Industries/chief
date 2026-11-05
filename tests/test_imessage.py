@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -31,7 +32,7 @@ CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
 CREATE TABLE message (
     ROWID INTEGER PRIMARY KEY, handle_id INTEGER, text TEXT,
     is_from_me INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0,
-    attributedBody BLOB, date INTEGER DEFAULT 0
+    attributedBody BLOB, date INTEGER DEFAULT 0, guid TEXT
 );
 CREATE TABLE chat (
     ROWID INTEGER PRIMARY KEY, style INTEGER, room_name TEXT,
@@ -60,6 +61,7 @@ class FakeStore:
         chat: str | None = None,
         body: bytes | None = None,
         date: int = 0,
+        guid: str | None = None,
     ) -> None:
         """Insert one message, optionally in a direct chat (``chat`` =
         the chat_identifier) or a group. ``chat`` models the self-chat
@@ -67,7 +69,9 @@ class FakeStore:
         room, so repeated calls land in one group thread. ``body`` sets
         attributedBody — how modern macOS stores the owner's own sends, with
         ``text`` left empty. ``date`` is the row's ns timestamp, used for
-        twin dedup."""
+        twin dedup. ``guid`` defaults to a fresh one per row, as macOS does
+        even for self-DM twins; pass the same value into two stores to model
+        the one message both accounts received."""
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 "SELECT ROWID FROM handle WHERE id = ?", (sender,)
@@ -81,9 +85,12 @@ class FakeStore:
             )
             msg_id = conn.execute(
                 "INSERT INTO message (handle_id, text, is_from_me, "
-                "associated_message_type, attributedBody, date) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (handle_id, text or None, from_me, tapback, body, date),
+                "associated_message_type, attributedBody, date, guid) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    handle_id, text or None, from_me, tapback, body, date,
+                    guid or f"{self.path.name}-{uuid4()}",
+                ),
             ).lastrowid
             chat_id: int | None = None
             if group and chat is None:
@@ -641,6 +648,75 @@ async def test_chiefs_own_reply_in_the_owners_store_never_polls_back(
     await adapter.poll_once()
     await adapter.drain()
     assert [m.text for m in harness.delivered] == ["a friend texts the owner"]
+
+
+async def test_a_group_both_accounts_are_in_is_delivered_once(
+    tmp_path: Path,
+) -> None:
+    """Adding chief to a family group is the natural thing to do with a chief
+    that has its own contact card — and then every message in it exists in
+    BOTH stores under different rowids, one guid. Dedicated mode switches the
+    twin dedup off wholesale, which is right for chief's own store (no self-DM
+    twins there) but hands the owner's store a second delivery of every group
+    message: two stranger rows, two monitor runs, two classifier calls."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100, guid="g-dinner"
+    )
+    harness.owner_store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100, guid="g-dinner"
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["dinner at 7"]
+
+
+async def test_a_group_delivers_once_whichever_store_sees_it_first(
+    tmp_path: Path,
+) -> None:
+    """The two stores keep independent cursors and two Messages processes write
+    them independently, so the owner's copy can land a tick ahead of chief's.
+    Suppressing only on the chief-first order leaves the other order double-
+    delivering — and read skew cannot defeat the guid key, because the window
+    is measured on the row's own date, identical in both stores."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    harness.owner_store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100, guid="g-dinner"
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()  # owner's store gets there first
+    await adapter.drain()
+    harness.store.add_message(
+        "+15557776666", "dinner at 7", group=True, date=100, guid="g-dinner"
+    )
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["dinner at 7"]
+
+
+async def test_a_genuine_repeat_in_a_shared_group_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    """The cost of keying cross-store dedup on the text instead: someone says
+    "ok" twice in a group both accounts are in, and the second one is a real
+    message that main delivered. Distinct guids, so it survives."""
+    harness = Harness(tmp_path)
+    harness.dedicated = True
+    harness.owner_store = FakeStore(tmp_path / "owner.db")
+    for n, when in ((1, 100), (2, 2_000_000_100)):  # 2s apart
+        for store in (harness.store, harness.owner_store):
+            store.add_message(
+                "+15557776666", "ok", group=True, date=when, guid=f"g-ok-{n}"
+            )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["ok", "ok"]
 
 
 async def test_each_store_keeps_its_own_cursor(tmp_path: Path) -> None:
