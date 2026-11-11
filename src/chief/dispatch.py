@@ -179,6 +179,14 @@ class Dispatcher:
         if fire_restart and self._restart is not None:
             await self._restart.fire_if_requested()
 
+    async def replay(self, message: Message) -> None:
+        """Run a turn a restart killed (``chief.selfedit.resume``). Its message
+        was already approval-checked, published and command-routed before it
+        was held, so only the turn itself runs again."""
+        await self._run_turn(message)
+        if self._restart is not None:
+            await self._restart.fire_if_requested()
+
     async def _answer_command(self, message: Message, answer: str) -> None:
         """A slash command's answer: never stored, not a turn. The origin
         channel replies as before — except web, whose client gets only a

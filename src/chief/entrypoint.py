@@ -14,6 +14,7 @@ from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
+from chief.selfedit.resume import resume_interrupted
 
 if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
     from chief.daemon import App
@@ -87,6 +88,10 @@ async def amain() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
+    # Every model/screen request logs a line at INFO — noise that buries the
+    # daemon's own log. Their warnings and errors still come through.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     repo_root = Path.cwd()
     try:
         # Imported inside the seatbelt: a self-edit that breaks chief.app's
@@ -126,6 +131,10 @@ async def amain() -> None:
         logger.info("now running %s", version)
     await report_restart(app, repo_root)
     await deliver_subagent_notices(app, config.db_path.parent)
+    # Held on to until shutdown: the turns the last process died holding.
+    resuming = resume_interrupted(
+        app.dispatcher, app.restart.take_interrupted() if app.restart else []
+    )
     logger.info("chief up — socket at %s", config.socket_path)
 
     stop = asyncio.Event()
@@ -133,6 +142,10 @@ async def amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+    # A resumed turn still running is cut off like any other; its in-flight
+    # record survives the cancel, so the next boot picks it up again.
+    for task in resuming:
+        task.cancel()
     await app.stop()
     logger.info("chief stopped")
 

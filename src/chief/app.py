@@ -35,6 +35,7 @@ from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.policy import owner_audience
 from chief.provider.base import Provider
+from chief.selfedit.inflight import InflightLog
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
@@ -90,7 +91,8 @@ async def _build_agent_core(
             announce=announce if config.gate_announce and not subagent else None,
         )
 
-    restart = RestartController(repo_root=Path.cwd())
+    inflight = InflightLog(config.db_path.parent)
+    restart = RestartController(repo_root=Path.cwd(), inflight=inflight)
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
@@ -179,5 +181,5 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         web_adapter=adapters.web_adapter, web_server=adapters.web_server,
         mcp_manager=mcp_manager, mcp_configs=mcp_configs,
         imessage_adapter=adapters.imessage, shell_service=shell_service,
-        peers=peers,
+        peers=peers, restart=core.restart,
     )

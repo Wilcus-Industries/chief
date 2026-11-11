@@ -280,6 +280,15 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    where the reply is still unsent. `enter_turn` holds new turns while
    `fire_if_requested` waits on idle, bounded by `DRAIN_TIMEOUT_SECONDS`, then
    `os.execv`. See [ARCHITECTURE.md](./ARCHITECTURE.md#self-edit-the-restart-pipeline).
+   Nothing the exec (or any other death) kills is lost: `Session.run_turn`
+   records each turn in `data/inflight_turns.json` (`selfedit/inflight.py`)
+   *before* it queues, flags it `started` once its user message is stored, and
+   drops it when the turn returns or raises. A cancel keeps the record — in a
+   turn, that means the daemon is going down. The next boot
+   (`selfedit/resume.py`) replays each never-started message verbatim through
+   `Dispatcher.replay` (no second publish or command pass), and wakes each
+   cut-off thread once with `RESUME_NOTE`. Records older than an hour are
+   dropped rather than answered late.
 3. **Approval answers must be consumed before enqueue** on any channel with a
    serialized per-thread worker — otherwise the answer queues behind the very
    turn it would unblock. This is a fixed deadlock, not an accident.

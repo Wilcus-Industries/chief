@@ -18,7 +18,7 @@ from chief.agent.inbox import Inbox, Injected, OnInterim
 from chief.agent.loop import OnTool, OnToolResult, TurnResult, run_turn
 from chief.agent.model_call import OnDelta
 from chief.agent.prompt import read_soul
-from chief.agent.restart_gate import RestartGate, _NullGate
+from chief.agent.restart_gate import RestartGate, TurnTicket, _NullGate
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
 from chief.hooks import (
@@ -118,7 +118,37 @@ class Session:
         it defaults to the owner. The per-thread lock is taken before the
         global semaphore so queued turns on one busy thread can't starve every
         concurrency slot.
+
+        The turn is recorded in flight before it queues (``track``) and
+        dropped when it returns or raises; a cancel (the daemon going down)
+        leaves it for the next boot to replay or wake.
         """
+        ticket = self._gate.track(
+            self.thread_key, self._origin_channel or "", sender, user_text
+        )
+        try:
+            result = await self._queued_turn(
+                ticket, user_text, on_delta, sender, on_tool, on_tool_result,
+                on_begin, on_interim, on_reasoning,
+            )
+        except Exception:
+            ticket.done()
+            raise
+        ticket.done()
+        return result
+
+    async def _queued_turn(
+        self,
+        ticket: TurnTicket,
+        user_text: str,
+        on_delta: OnDelta,
+        sender: str,
+        on_tool: OnTool | None,
+        on_tool_result: OnToolResult | None,
+        on_begin: Callable[[], Awaitable[None]] | None,
+        on_interim: OnInterim | None,
+        on_reasoning: OnDelta | None,
+    ) -> TurnResult:
         async with self._lock:
             async with self._semaphore:
                 # Held new turns wait here while a restart drains; active ones
@@ -133,7 +163,7 @@ class Session:
                         await on_begin()
                     return await self._one_turn(
                         user_text, on_delta, sender, on_tool, on_tool_result,
-                        on_interim, on_reasoning,
+                        on_interim, on_reasoning, ticket,
                     )
                 finally:
                     try:
@@ -150,6 +180,7 @@ class Session:
         on_tool_result: OnToolResult | None = None,
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
+        ticket: TurnTicket | None = None,
     ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
@@ -166,6 +197,8 @@ class Session:
         # of nothing (#261's pending tool-call state depends on this).
         user_message = {"role": "user", "content": user_text}
         await self._store.append(self.thread_key, [user_message])
+        if ticket is not None:
+            ticket.started()
         transcript = [
             {"role": "system", "content": system},
             *self._messages,
