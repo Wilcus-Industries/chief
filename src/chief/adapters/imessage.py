@@ -20,12 +20,12 @@ as owner input.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 
 from chief.adapters.base import Adapter, Inject, Message
 from chief.adapters.imessage_cursor import RowCursor, Store
-from chief.adapters.imessage_fifo import ThreadFifo
+from chief.adapters.imessage_fifo import HandleTicketed, ThreadFifo, Track
 from chief.adapters.imessage_send import (
     SEND_TEXT_SCRIPT,
     RunJxa,
@@ -46,7 +46,7 @@ class IMessageAdapter(Adapter):
 
     def __init__(
         self,
-        on_message: Callable[[Message], Awaitable[None]],
+        on_message: HandleTicketed,
         *,
         db_path: Path,
         cursor_path: Path,
@@ -59,6 +59,7 @@ class IMessageAdapter(Adapter):
         dedicated: bool = False,
         owner_db_path: Path | None = None,
         self_handles: tuple[str, ...] = (),
+        track: Track | None = None,
     ) -> None:
         self._on_message = on_message
         self._owner_handles = frozenset(owner_handles)
@@ -75,7 +76,7 @@ class IMessageAdapter(Adapter):
         self._inject = inject
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
-        self._fifo = ThreadFifo(on_message, restart)
+        self._fifo = ThreadFifo(on_message, restart, track)
         self._stores = [Store(db_path, RowCursor(cursor_path))]
         if owner_db_path is not None and owner_db_path != db_path:
             self._stores.append(

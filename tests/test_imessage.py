@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from chief.adapters.base import Message
+from chief.adapters.base import Message, Requeue
 from chief.adapters.imessage import BOT_PREFIX, IMessageAdapter
 from chief.adapters.imessage_send import owner_send_guard
+from chief.agent.restart_gate import NullTicket, TurnTicket
 from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
@@ -124,7 +125,7 @@ class Harness:
         self.resolve_approval: Callable[[Message], bool] | None = None
         # Optional poll-stage mid-turn injector (dispatcher.try_inject).
         self.inject: (
-            Callable[[Message, Callable[[Message], None]], bool] | None
+            Callable[[Message, Requeue], bool] | None
         ) = None
         # imessage.mode = dedicated: chief on its own Apple ID, so the four
         # self-DM compensations are off.
@@ -134,7 +135,7 @@ class Harness:
         self.self_handles: tuple[str, ...] = ()
 
     def adapter(self) -> IMessageAdapter:
-        async def on_message(message: Message) -> None:
+        async def on_message(message: Message, ticket: TurnTicket) -> None:
             self.delivered.append(message)
             if self.on_deliver is not None:
                 await self.on_deliver(message)
@@ -535,12 +536,12 @@ async def test_owner_text_mid_turn_injects_ahead_of_the_busy_worker(
     harness = Harness(tmp_path)
     release = asyncio.Event()
     offered: list[str] = []
-    requeue: list[Callable[[Message], None]] = []
+    requeue: list[Requeue] = []
 
     async def on_deliver(message: Message) -> None:
         await release.wait()  # the first turn is still running
 
-    def inject(message: Message, back: Callable[[Message], None]) -> bool:
+    def inject(message: Message, back: Requeue) -> bool:
         if message.text == "start":
             return False  # idle thread: no turn to take it, runs normally
         offered.append(message.text)
@@ -561,7 +562,7 @@ async def test_owner_text_mid_turn_injects_ahead_of_the_busy_worker(
     leftover = Message(
         channel="imessage", sender="owner", thread_key=OWNER, text="actually wait"
     )
-    requeue[0](leftover)  # the turn ended before a tool boundary
+    requeue[0](leftover, NullTicket())  # the turn ended before a tool boundary
     await adapter.drain()
     assert [m.text for m in harness.delivered] == ["start", "actually wait"]
     await adapter.stop()

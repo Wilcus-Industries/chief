@@ -27,6 +27,10 @@ the row override or channel default) — its delta / tool-tick / inline
 tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
 approval card the gate's ``approval_asker`` raises (#267).
 
+Every owner/system message is recorded in flight (``chief.selfedit.inflight``)
+from ``handle`` (or the caller's enqueue) until it is answered, so a process
+death can't lose it; ``replay`` and ``hold`` serve the next boot's resume.
+
 Non-owner output rule (PRD #308): a turn in a thread whose surface reaches a
 non-owner (``audience`` says no) is *quiet* — no deltas, final text, notice,
 error or command reply reaches that adapter, whoever triggered the turn (a
@@ -35,12 +39,14 @@ fire, so the cockpit (always the owner) sees the turn. And only an owner's
 message ever answers an approval card.
 """
 
+import asyncio
 import logging
 from typing import Protocol
 
 from chief.adapters.base import Adapter, Message, Requeue
 from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
+from chief.agent.restart_gate import NullTicket, TurnTicket
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
@@ -56,6 +62,14 @@ from chief.policy import (
 from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
+
+
+class Tracker(Protocol):
+    """The in-flight record (``chief.selfedit.inflight.InflightLog``)."""
+
+    def track(
+        self, thread_key: str, channel: str, sender: str, text: str
+    ) -> TurnTicket: ...
 
 
 class CommandRunner(Protocol):
@@ -86,6 +100,7 @@ class Dispatcher:
         restart: RestartBoundary | None = None,
         channel_defaults: dict[str, StreamPolicy] | None = None,
         audience: Audience | None = None,
+        inflight: Tracker | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
@@ -97,6 +112,9 @@ class Dispatcher:
         self._audience: Audience = audience or (lambda _channel, _thread: True)
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
+        self._inflight = inflight
+        # Threads the boot is resuming: new messages wait behind the replay.
+        self._held: dict[str, asyncio.Event] = {}
 
     def set_commands(self, commands: CommandRunner) -> None:
         """Attach the slash-command set (built after the dispatcher exists)."""
@@ -109,6 +127,27 @@ class Dispatcher:
     def adapter(self, channel: str) -> Adapter:
         """The adapter serving a channel (KeyError on unknown = wiring bug)."""
         return self._adapters[channel]
+
+    def track(self, message: Message) -> TurnTicket:
+        """Record a message the moment chief holds it (see
+        ``chief.selfedit.inflight``), so a death before it is answered can't
+        lose it. Only owner and system messages: a stranger's never runs a
+        turn, so it is never replayed as one either."""
+        if self._inflight is None or message.sender not in (OWNER, SYSTEM):
+            return NullTicket()
+        return self._inflight.track(
+            message.thread_key, message.channel, message.sender, message.text
+        )
+
+    def hold(self, threads: list[str]) -> None:
+        """Queue new messages on these threads behind their boot resume
+        (``chief.selfedit.resume``) until ``release``."""
+        for thread in threads:
+            self._held.setdefault(thread, asyncio.Event())
+
+    def release(self, thread_key: str) -> None:
+        if (resumed := self._held.pop(thread_key, None)) is not None:
+            resumed.set()
 
     def resolve_approval(self, message: Message) -> bool:
         """Consume a message as an approval answer if a card is pending on its
@@ -138,26 +177,71 @@ class Dispatcher:
         message."""
         if message.sender != OWNER or message.text.startswith("/"):
             return False
+        if message.thread_key in self._held:
+            return False  # queue behind the boot's replays, never overtake them
         session = self._manager.peek(message.thread_key)
         if session is None:
             return False
+        # Waiting in the inbox it is in no transcript yet: recorded until the
+        # loop takes it, or handed back with the message to the caller's queue
+        # (a cancelled turn hands it back too, so the record must go along).
+        ticket = self.track(message)
 
         async def consumed() -> None:
+            ticket.done()  # in the transcript; the turn's own record covers it
             self._inbound(message)
             await self._publish(message)
 
-        return session.inject(
-            Injected(message.text, consumed, lambda: requeue(message))
-        )
+        def leftover() -> None:
+            requeue(message, ticket)  # the queue path now owns the record
 
-    async def handle(self, message: Message, *, fire_restart: bool = True) -> None:
+        if session.inject(Injected(message.text, consumed, leftover)):
+            return True
+        ticket.done()
+        return False
+
+    async def handle(
+        self, message: Message, *, fire_restart: bool = True,
+        ticket: TurnTicket | None = None,
+    ) -> None:
         """Run one turn for an inbound message and send the reply back.
 
         A self-edit turn requests a restart mid-turn; the execv fires here,
         *after* the reply is sent, so it's never lost. ``fire_restart=False``
         defers that to the caller (imessage, which must persist its inbound
-        cursor first — else the row re-polls and chief answers twice)."""
+        cursor first — else the row re-polls and chief answers twice).
+
+        ``ticket`` is the message's in-flight record when the caller made it
+        (the iMessage FIFO, at enqueue); otherwise it is recorded here. Every
+        outcome but a cancel (the daemon going down) ends it."""
+        ticket = ticket or self.track(message)
+        try:
+            await self._route(message, ticket)
+        except Exception:
+            ticket.done()
+            raise
+        if fire_restart and self._restart is not None:
+            await self._restart.fire_if_requested()
+
+    async def replay(self, message: Message, ticket: TurnTicket) -> None:
+        """Run a message a death killed (``chief.selfedit.resume``). It was
+        approval-checked and published before it was recorded, so neither
+        runs again; the command stage does (a queued ``/clear`` is recorded
+        before it reaches it). Only ever as the owner or system: nothing else
+        is recorded, but a record is a file."""
+        if message.sender not in (OWNER, SYSTEM):
+            logger.warning("not resuming a %r turn on %s", message.sender,
+                           message.thread_key)
+            ticket.done()
+            return
+        if (routed := await self._command(message, ticket)) is not None:
+            await self._ended(*routed)
+        if self._restart is not None:
+            await self._restart.fire_if_requested()
+
+    async def _route(self, message: Message, ticket: TurnTicket) -> None:
         if self.resolve_approval(message):
+            ticket.done()
             return
         if message.sender not in (OWNER, SYSTEM):
             if self._strangers is not None:
@@ -165,19 +249,45 @@ class Dispatcher:
             # Published (never dispatched) so monitors can implement notify
             # policy — e.g. an iMessage whitelist tier — as agent policy.
             await self._publish(message)
+            ticket.done()
             return
-        if self._commands is not None:
-            outcome = await self._commands.run(message)
-            if isinstance(outcome, str):
-                await self._answer_command(message, outcome)
-                return
-            if isinstance(outcome, Message):
-                message = outcome
+        if (resuming := self._held.get(message.thread_key)) is not None:
+            await resuming.wait()
+        if (routed := await self._command(message, ticket)) is None:
+            return
+        message, ticket = routed
         if message.sender == OWNER:
             await self._publish(message)
-        await self._run_turn(message)
-        if fire_restart and self._restart is not None:
-            await self._restart.fire_if_requested()
+        await self._ended(message, ticket)
+
+    async def _command(
+        self, message: Message, ticket: TurnTicket
+    ) -> tuple[Message, TurnTicket] | None:
+        """The slash-command stage: None when a command answered (its record
+        ended), else the turn to run — a skill rewrite swaps in a fresh record,
+        so a replay runs the rewritten turn, not the command again."""
+        if self._commands is None:
+            return message, ticket
+        outcome = await self._commands.run(message)
+        if isinstance(outcome, str):
+            await self._answer_command(message, outcome)
+            ticket.done()
+            return None
+        if isinstance(outcome, Message):
+            rewritten = self.track(outcome)
+            ticket.done()
+            return outcome, rewritten
+        return message, ticket
+
+    async def _ended(self, message: Message, ticket: TurnTicket) -> None:
+        """Run the turn, then end its record: after the reply is sent, so a
+        death mid-send still wakes the thread."""
+        try:
+            await self._run_turn(message, ticket)
+        except Exception:
+            ticket.done()
+            raise
+        ticket.done()
 
     async def _answer_command(self, message: Message, answer: str) -> None:
         """A slash command's answer: never stored, not a turn. The origin
@@ -210,7 +320,7 @@ class Dispatcher:
             )
         )
 
-    async def _run_turn(self, message: Message) -> None:
+    async def _run_turn(self, message: Message, ticket: TurnTicket) -> None:
         adapter = self.adapter(message.channel)
         session = await self._manager.get_or_create(
             message.thread_key, message.channel
@@ -262,7 +372,7 @@ class Dispatcher:
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
                 on_begin=on_begin, on_interim=on_interim,
-                on_reasoning=on_reasoning,
+                on_reasoning=on_reasoning, ticket=ticket,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

@@ -2,14 +2,13 @@
 
 import asyncio
 import json
-from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from chief.adapters.base import Message
+from chief.adapters.base import Message, Requeue
 from chief.agent.manager import SessionManager
 from chief.approvals import Approval, ApprovalBroker
 from chief.bus import EventBus
@@ -38,7 +37,7 @@ async def handle(message: Message) -> None:
     HANDLED.append(message)
 
 
-def inject(message: Message, requeue: Callable[[Message], None]) -> bool:
+def inject(message: Message, requeue: Requeue) -> bool:
     INJECTED.append(message)
     return INJECT_TAKES[0]
 

@@ -35,6 +35,7 @@ from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.policy import owner_audience
 from chief.provider.base import Provider
+from chief.selfedit.inflight import InflightLog
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
@@ -91,6 +92,7 @@ async def _build_agent_core(
         )
 
     restart = RestartController(repo_root=Path.cwd())
+    inflight = InflightLog(config.db_path.parent)
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
@@ -111,6 +113,7 @@ async def _build_agent_core(
         manager, bus=bus, hub=hub, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
         channel_defaults=config.stream_channel_defaults, audience=audience,
+        inflight=inflight,
     )
     pointer = card_pointer(dispatcher, primary_target(config))
     ask = approval_asker(dispatcher, gate.approvals, audience, pointer)
@@ -123,7 +126,7 @@ async def _build_agent_core(
     # Subagent turns get the same post_tool seam (core injection screen first).
     post_tool = tool_screener(hooks, config.hooks_timeout_seconds, logger)
     return Core(budget, bus, hub, registry, restart, manager, dispatcher,
-                monitors, cron, post_tool, ask, tools_factory)
+                monitors, cron, post_tool, ask, tools_factory, inflight)
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -179,5 +182,5 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         web_adapter=adapters.web_adapter, web_server=adapters.web_server,
         mcp_manager=mcp_manager, mcp_configs=mcp_configs,
         imessage_adapter=adapters.imessage, shell_service=shell_service,
-        peers=peers,
+        peers=peers, inflight=core.inflight,
     )

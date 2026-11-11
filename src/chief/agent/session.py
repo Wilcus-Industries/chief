@@ -18,7 +18,7 @@ from chief.agent.inbox import Inbox, Injected, OnInterim
 from chief.agent.loop import OnTool, OnToolResult, TurnResult, run_turn
 from chief.agent.model_call import OnDelta
 from chief.agent.prompt import read_soul
-from chief.agent.restart_gate import RestartGate, _NullGate
+from chief.agent.restart_gate import RestartGate, TurnTicket, _NullGate
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
 from chief.hooks import (
@@ -104,6 +104,7 @@ class Session:
         on_begin: Callable[[], Awaitable[None]] | None = None,
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
+        ticket: TurnTicket | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
@@ -118,6 +119,9 @@ class Session:
         it defaults to the owner. The per-thread lock is taken before the
         global semaphore so queued turns on one busy thread can't starve every
         concurrency slot.
+
+        ``ticket`` is the message's in-flight record; the caller owns it (and
+        ends it), the session only marks it started once the text is stored.
         """
         async with self._lock:
             async with self._semaphore:
@@ -133,7 +137,7 @@ class Session:
                         await on_begin()
                     return await self._one_turn(
                         user_text, on_delta, sender, on_tool, on_tool_result,
-                        on_interim, on_reasoning,
+                        on_interim, on_reasoning, ticket,
                     )
                 finally:
                     try:
@@ -150,6 +154,7 @@ class Session:
         on_tool_result: OnToolResult | None = None,
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
+        ticket: TurnTicket | None = None,
     ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
@@ -166,6 +171,8 @@ class Session:
         # of nothing (#261's pending tool-call state depends on this).
         user_message = {"role": "user", "content": user_text}
         await self._store.append(self.thread_key, [user_message])
+        if ticket is not None:
+            ticket.started()  # a cut-off turn is now woken, not replayed
         transcript = [
             {"role": "system", "content": system},
             *self._messages,

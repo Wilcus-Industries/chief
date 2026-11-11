@@ -280,6 +280,24 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    where the reply is still unsent. `enter_turn` holds new turns while
    `fire_if_requested` waits on idle, bounded by `DRAIN_TIMEOUT_SECONDS`, then
    `os.execv`. See [ARCHITECTURE.md](./ARCHITECTURE.md#self-edit-the-restart-pipeline).
+   Owner/system messages the exec (or a crash, or `chief stop`) kills are
+   recorded in `data/inflight_turns.json` (`selfedit/inflight.py`) by whoever
+   first holds them: the iMessage FIFO at enqueue (the cursor is already
+   saved), `Dispatcher.handle` at entry, `try_inject` while a message waits in
+   a running turn's inbox (an inbox leftover hands its record to the requeue
+   path). A record is flagged `started` once its user message is stored and
+   ends once the reply is sent, or on failure; a cancel keeps it. The next
+   boot (`selfedit/resume.py`) holds each affected thread on the dispatcher
+   before any adapter starts (a held thread takes no injections either),
+   replays each never-started message verbatim
+   through `Dispatcher.replay` (owner/system only, commands run, no second
+   publish), and wakes each cut-off thread once with `RESUME_NOTE`.
+   Records stay on disk until their resume ends them; one that dies again is
+   given up on once it had started, and any older than an hour since it arrived is dropped. Not
+   covered: a message lost before chief records it (an iMessage row between
+   cursor save and enqueue, a web request before `handle` runs), peer
+   messages (`PeerRouter.deliver` injections and wakes), and a
+   reply whose send the exec cuts short (the thread is woken instead).
 3. **Approval answers must be consumed before enqueue** on any channel with a
    serialized per-thread worker — otherwise the answer queues behind the very
    turn it would unblock. This is a fixed deadlock, not an accident.

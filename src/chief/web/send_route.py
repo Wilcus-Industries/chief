@@ -18,6 +18,7 @@ from starlette.routing import Route
 
 from chief.adapters.base import Inject, Message
 from chief.adapters.socket import HandleMessage
+from chief.agent.restart_gate import TurnTicket
 from chief.approvals import ApprovalBroker
 from chief.persistence.store import MessageStore
 
@@ -62,8 +63,16 @@ def build_send_route(
         )
         loop = asyncio.get_running_loop()
 
-        def queue(queued: Message) -> None:
-            loop.create_task(handle(queued))
+        async def run(queued: Message, ticket: TurnTicket | None) -> None:
+            # A record handed back from a running turn's inbox ends only once
+            # this task runs, and handle re-records the message in the same
+            # step; a task cancelled before it runs leaves it for the next boot.
+            if ticket is not None:
+                ticket.done()
+            await handle(queued)
+
+        def queue(queued: Message, ticket: TurnTicket | None = None) -> None:
+            loop.create_task(run(queued, ticket))
 
         if text.startswith("/"):
             queue(message)

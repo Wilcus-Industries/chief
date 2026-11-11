@@ -32,3 +32,24 @@ class _NullGate:
     def leave_turn(self) -> None: ...
 
     async def fire_if_requested(self) -> None: ...
+
+
+class TurnTicket(Protocol):
+    """One message's entry in the durable in-flight record
+    (``chief.selfedit.inflight``), held by whoever owns the message from the
+    moment it reaches chief: ``started`` once its user message is in the
+    transcript, ``done`` once it is answered (or failed, or was never a turn).
+    A message whose ticket isn't done when the process dies is replayed or
+    woken by the next boot."""
+
+    def started(self) -> None: ...
+
+    def done(self) -> None: ...
+
+
+class NullTicket:
+    """The ticket where nothing is recorded (tests, strangers, no log)."""
+
+    def started(self) -> None: ...
+
+    def done(self) -> None: ...
