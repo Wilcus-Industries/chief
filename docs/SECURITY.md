@@ -44,6 +44,12 @@ pointer — "approval pending in thread X — answer in the web cockpit" — goe
 owner's primary surface (`cron/updates.primary_target`: the iMessage self-chat,
 else `web:main`). The pointer is best effort; a send failure is logged.
 
+**Every direct `adapter.send` outside the dispatcher checks the audience too.**
+The post-reboot restart notice (`entrypoint.report_restart`) goes to the
+requesting thread only when it is an owner thread; a restart asked for from a
+non-owner thread is reported on the primary surface instead, naming the thread —
+its text carries a model-authored rationale.
+
 ## The gate — `gate.py` (decides), `gate_text.py` (what it says)
 
 **Gating is by tool name only.** Arguments are never inspected for the decision;

@@ -25,15 +25,24 @@ async def report_restart(app: "App", repo_root: Path) -> None:
     """Tell the thread that asked for the restart that chief is back.
 
     Runs once the adapters are serving, so the owner does not have to poke
-    the thread to find out whether the daemon returned. Best effort: a
+    the thread to find out whether the daemon returned. A thread whose surface
+    reaches a non-owner never gets it (PRD #308: nothing auto-sends there);
+    the owner's primary surface does, naming the thread. Best effort: a
     missing channel or a dead adapter must not take the fresh boot down.
     """
+    from chief.cron.updates import primary_target  # inside the boot seatbelt
+    from chief.policy import owner_audience
+
     notice = take_restart_notice(repo_root)
     if notice is None:
         return
+    channel, thread, text = notice.channel, notice.thread_key, notice.text()
+    handles = app.config.imessage_owner_handles
+    if not owner_audience(channel, thread, owner_handles=handles):
+        channel, thread = primary_target(app.config)
+        text = f"{text} [asked in thread {notice.thread_key}]"
     try:
-        adapter = app.dispatcher.adapter(notice.channel)
-        await adapter.send(notice.thread_key, notice.text())
+        await app.dispatcher.adapter(channel).send(thread, text)
     except Exception:
         logger.exception("could not report the restart on %s", notice.channel)
 

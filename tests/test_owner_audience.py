@@ -17,6 +17,8 @@ import httpx
 
 from chief.adapters.base import Message
 from chief.app import App, build_app
+from chief.entrypoint import report_restart
+from chief.selfedit.notice import RestartNotice, write_restart_notice
 
 from .fakes import CapturingAdapter, FakeProvider, text_turn, tool_turn
 from .test_app import boot, make_config, shutdown
@@ -205,3 +207,21 @@ async def test_owner_thread_output_is_unchanged(
         await app.dispatcher.handle(wake(OWNER_HANDLE))
         assert device.sent == [(OWNER_HANDLE, "morning")]
         assert device.deltas
+
+
+async def test_restart_notice_for_a_stranger_thread_goes_to_the_owner_instead(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # A restart asked for from a turn in a stranger's thread must not text the
+    # stranger "restart success (<model-authored rationale>)" after the reboot.
+    async with running(tmp_path, sock_path, FakeProvider([])) as (app, device, web):
+        write_restart_notice(tmp_path, RestartNotice("imessage", STRANGER, "fix x"))
+        await report_restart(app, tmp_path)
+        assert device.sent == []
+        [(thread, text)] = web.sent
+        assert thread == "web:main"
+        assert text.startswith("✅ restart success — back up (fix x)")
+        assert STRANGER in text
+        write_restart_notice(tmp_path, RestartNotice("imessage", OWNER_HANDLE))
+        await report_restart(app, tmp_path)
+        assert device.sent == [(OWNER_HANDLE, "✅ restart success — back up")]
