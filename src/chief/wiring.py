@@ -24,7 +24,7 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
-from chief.gate import GatePolicy, load_approved, save_approved
+from chief.gate import AskApproval, GatePolicy, load_approved, save_approved
 from chief.hub import ObserverHub
 from chief.mcpclient.manager import (
     McpManager,
@@ -72,6 +72,7 @@ class Core:
     monitors: MonitorService
     cron: CronService
     post_tool: PostTool | None = None
+    ask: AskApproval | None = None
 
 
 @dataclass

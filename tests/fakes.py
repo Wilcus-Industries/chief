@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from chief.adapters.base import Adapter
 from chief.provider.base import (
     Completion,
     ProviderEvent,
@@ -74,6 +75,25 @@ def _split(text: str) -> list[str]:
     mid = max(1, len(text) // 2)
     return [text[:mid], text[mid:]] if len(text) > 1 else [text]
 
+
+class CapturingAdapter(Adapter):
+    """A registered origin adapter that captures its outbound sends and
+    deltas — the fake device transport at the edge (#277). Everything upstream
+    of ``send`` (web route, dispatcher, session turn) is the real wiring."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.sent: list[tuple[str, str]] = []
+        self.deltas: list[tuple[str, str]] = []
+
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def send(self, thread_key: str, text: str) -> None:
+        self.sent.append((thread_key, text))
+
+    async def send_delta(self, thread_key: str, text: str) -> None:
+        self.deltas.append((thread_key, text))
 
 
 TypeSafeReply = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | int]

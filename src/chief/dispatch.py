@@ -19,6 +19,13 @@ thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
 the row override or channel default) — its delta / tool-tick / inline
 tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
 approval card the gate's ``approval_asker`` raises (#267).
+
+Non-owner output rule (PRD #308): a turn in a thread whose surface reaches a
+non-owner (``audience`` says no) is *quiet* — no deltas, final text, notice,
+error or command reply reaches that adapter, whoever triggered the turn (a
+peer, monitor, cron, or the owner typing from the web). The hub frames still
+fire, so the cockpit (always the owner) sees the turn. And only an owner's
+message ever answers an approval card.
 """
 
 import logging
@@ -29,7 +36,14 @@ from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
-from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
+from chief.policy import (
+    Audience,
+    StreamPolicy,
+    delta_frame,
+    resolve,
+    result_frame,
+    tool_frame,
+)
 from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
@@ -62,6 +76,7 @@ class Dispatcher:
         strangers: StrangerLog | None = None,
         restart: RestartBoundary | None = None,
         channel_defaults: dict[str, StreamPolicy] | None = None,
+        audience: Audience | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
@@ -70,6 +85,7 @@ class Dispatcher:
         self._strangers = strangers
         self._restart = restart
         self._channel_defaults = channel_defaults or {}
+        self._audience: Audience = audience or (lambda _channel, _thread: True)
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
 
@@ -93,8 +109,11 @@ class Dispatcher:
         (iMessage) calls this in its poll/route stage, *before* enqueuing the
         row — so the owner's answer bypasses the head-of-line-blocked turn it
         must unblock instead of queuing behind it (that queue-behind is the
-        approval deadlock)."""
-        if self._approvals is None:
+        approval deadlock).
+
+        Only the owner answers: a stranger's "yes" on a thread with a pending
+        card (theirs, or a group's) is never consumed as an approval."""
+        if self._approvals is None or message.sender != OWNER:
             return False
         return self._approvals.resolve(message.thread_key, message.text)
 
@@ -117,7 +136,7 @@ class Dispatcher:
         if self._commands is not None:
             outcome = await self._commands.run(message)
             if isinstance(outcome, str):
-                await self.adapter(message.channel).send(message.thread_key, outcome)
+                await self._command_reply(message, outcome)
                 return
             if isinstance(outcome, Message):
                 message = outcome
@@ -126,6 +145,13 @@ class Dispatcher:
         await self._run_turn(message)
         if fire_restart and self._restart is not None:
             await self._restart.fire_if_requested()
+
+    async def _command_reply(self, message: Message, text: str) -> None:
+        tk = message.thread_key
+        if self._audience(message.channel, tk):
+            await self.adapter(message.channel).send(tk, text)
+        else:  # quiet thread: the answer shows only in the cockpit
+            self.tapped(tk, {"type": "final", "thread": tk, "text": text})
 
     async def _publish(self, message: Message) -> None:
         if self._bus is None:
@@ -148,6 +174,8 @@ class Dispatcher:
             message.thread_key, message.channel
         )
         tk = message.thread_key
+        # Absolute: ignores the sender, so owner-from-web is quiet here too.
+        quiet = not self._audience(message.channel, tk)
         override = await self._manager.stream_policy(tk)
         policy = resolve(message.channel, override, self._channel_defaults)
         # Web turns stream their own inbound/delta (adapter + JS); for every
@@ -157,7 +185,8 @@ class Dispatcher:
             self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
         async def on_delta(text: str) -> None:
-            await adapter.send_delta(tk, text)
+            if not quiet:
+                await adapter.send_delta(tk, text)
             if non_web and (frame := delta_frame(policy, tk, text)):
                 self.tapped(tk, frame)
 
@@ -179,24 +208,27 @@ class Dispatcher:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
             logger.exception("turn failed for thread %s", tk)
-            await self._reply(adapter, message, f"error: {exc}")
+            await self._reply(adapter, message, f"error: {exc}", quiet)
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
             logger.exception("turn failed for thread %s", tk)
             await self._reply(
-                adapter, message, "error: something went wrong running that turn"
+                adapter, message,
+                "error: something went wrong running that turn", quiet,
             )
             return
-        await adapter.send(tk, result.text)
-        if result.notice:
-            await adapter.send(tk, result.notice)
+        if not quiet:
+            await adapter.send(tk, result.text)
+            if result.notice:
+                await adapter.send(tk, result.notice)
         self._turn_end(message, result.text)
 
     async def _reply(
-        self, adapter: Adapter, message: Message, text: str
+        self, adapter: Adapter, message: Message, text: str, quiet: bool
     ) -> None:
-        await adapter.send(message.thread_key, text)
+        if not quiet:
+            await adapter.send(message.thread_key, text)
         self._turn_end(message, text)
 
     def tapped(self, thread_key: str, frame: dict[str, object]) -> None:

@@ -15,6 +15,8 @@ Two pieces with different lifecycles:
 
 from pathlib import Path
 
+from chief.persistence.store import MessageStore
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are chief, a personal agent running as a daemon on your owner's "
     "always-on machine. Be direct and concise. Use your tools when a task "
@@ -45,6 +47,15 @@ def system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
         if text:
             return text
     return DEFAULT_SYSTEM_PROMPT
+
+
+async def boot_prompt(store: MessageStore, extras: str) -> str:
+    """The boot-time base prompt: the base text plus ``extras`` (skill and
+    shell lines), with the onboarding suffix while no session exists yet."""
+    prompt = system_prompt() + extras
+    if not await store.has_sessions():
+        prompt += ONBOARDING_SUFFIX
+    return prompt
 
 
 def read_soul(soul_path: Path = SOUL_PATH) -> str:

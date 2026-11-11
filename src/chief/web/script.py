@@ -96,8 +96,9 @@ el("f").onsubmit = async (e) => {
   const text = input.value.trim(); if (!text || input.disabled) return;
   const s = state.sessions.find((x) => x.thread === state.current);
   if (s && s.send_guard &&
-      !confirm(`This reply goes to ${label(state.current)} on ${s.channel} — `
-        + `not you. Send it?`)) return;
+      !confirm(`This thread reaches ${label(state.current)} on ${s.channel} — `
+        + `not you. Chief's reply stays here in the cockpit; nothing is sent `
+        + `to them unless chief uses a gated tool. Send it?`)) return;
   addMsg("owner", text); input.value = ""; hidePop();
   await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
     body: JSON.stringify({thread: state.current, text})});

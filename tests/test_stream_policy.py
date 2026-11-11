@@ -12,6 +12,7 @@ from chief.policy import (
     RICH,
     StreamPolicy,
     guard_audience,
+    owner_audience,
     resolve,
 )
 
@@ -54,9 +55,29 @@ def test_guard_audience_unknown_external_channel_override_still_wins() -> None:
     assert _guard("signal", "+15551234567", off) is False
 
 
+def test_owner_audience_internal_surfaces_and_owner_handles_only() -> None:
+    assert owner_audience("web", "web:x", _OWNER) is True
+    assert owner_audience("cli", "cli:t", _OWNER) is True
+    assert owner_audience("imessage", "15550009999", _OWNER) is True
+    assert owner_audience("imessage", "+15551234567", _OWNER) is False
+    assert owner_audience("imessage", "0" * 32, _OWNER) is False  # a group
+    # Fails closed: an unknown channel is not an owner surface.
+    assert owner_audience("signal", "+15550009999x", _OWNER) is False
+
+
 def test_from_dict_fills_missing_from_field_defaults() -> None:
     p = StreamPolicy.from_dict({"deltas": True})
     assert p == StreamPolicy(deltas=True, tools=False, results="off", send_guard=False)
+
+
+def test_owner_audience_internal_surfaces_and_owner_handles_only() -> None:
+    assert owner_audience("web", "web:x", _OWNER) is True
+    assert owner_audience("cli", "cli:t", _OWNER) is True
+    assert owner_audience("imessage", "15550009999", _OWNER) is True
+    assert owner_audience("imessage", "+15551234567", _OWNER) is False
+    assert owner_audience("imessage", "0" * 32, _OWNER) is False  # a group
+    # Fails closed: an unknown channel is not an owner surface.
+    assert owner_audience("signal", "+15550009999x", _OWNER) is False
 
 
 def test_from_dict_fills_missing_from_base() -> None:
