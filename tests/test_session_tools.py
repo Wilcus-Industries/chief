@@ -11,7 +11,9 @@ from chief.tools import ToolContext, ToolRegistry
 from .fakes import FakeProvider
 
 
-def make_registry(store: MessageStore) -> tuple[ToolRegistry, SessionManager]:
+def make_registry(
+    store: MessageStore, owner_handles: tuple[str, ...] = ()
+) -> tuple[ToolRegistry, SessionManager]:
     manager = SessionManager(
         provider=FakeProvider([]),
         tools_factory=lambda thread, channel: ToolRegistry(),
@@ -21,7 +23,7 @@ def make_registry(store: MessageStore) -> tuple[ToolRegistry, SessionManager]:
         max_concurrent=4,
     )
     registry = ToolRegistry()
-    register_session_tools(registry, manager)
+    register_session_tools(registry, manager, owner_handles=owner_handles)
     return registry, manager
 
 
@@ -40,6 +42,23 @@ async def test_list_reports_known_threads(
     result = await registry.dispatch(call("list"), context=CTX)
     assert "imessage:+1" in result
     assert "imessage" in result
+
+
+async def test_list_tags_threads_that_reach_only_the_owner(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """A session that must reach the owner (the forward-to-owner rule in the
+    messaging skill) finds the owner's iMessage thread by this tag; a
+    stranger's 1:1 on the same channel stays untagged."""
+    await store.ensure_session("+15550001", "imessage")
+    await store.ensure_session("+15559999", "imessage")
+    await store.ensure_session("web:main", "web")
+    registry, _ = make_registry(store, owner_handles=("+15550001",))
+    lines = (await registry.dispatch(call("list"), context=CTX)).splitlines()
+    by_thread = {line.split()[1]: line for line in lines}
+    assert "(owner)" in by_thread["+15550001"]
+    assert "(owner)" in by_thread["web:main"]
+    assert "(owner)" not in by_thread["+15559999"]
 
 
 async def test_list_when_empty(engine: AsyncEngine, store: MessageStore) -> None:

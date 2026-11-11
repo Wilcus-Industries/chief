@@ -157,6 +157,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         shell_service=shell_service, agents_dir=config.agents_dir,
         root=Path.cwd(), shell_guards=shell_guards, model_aliases=model_aliases,
         ask=core.ask, router=peers.router, pool=peers.pool,
+        owner_handles=config.imessage_owner_handles,
     )
     await ensure_update_schedule(core.cron, config)
     commands = CommandSet(

@@ -1,6 +1,6 @@
 ---
 name: messaging
-description: Message other sessions (send_msg) and run subagents in the background (spawn_agent) — delegate, relay across channels, ask and answer.
+description: Message other sessions (send_msg) and run subagents in the background (spawn_agent) — delegate, relay across channels, reach the owner from a thread that isn't theirs, ask and answer.
 ---
 
 # Talking to other sessions and subagents
@@ -34,6 +34,27 @@ message id at once; it never waits for an answer.
 "thanks", no "got it" acknowledgements — every message wakes the receiver and
 costs a turn. If you see "WARNING: You've been sending a lot of messages", stop
 unless the exchange is genuinely still needed.
+
+## Reaching the owner from another session
+
+The owner talks to one continuous agent: their own iMessage thread. When your
+thread doesn't reach their phone (a scheduled run, a web or cli thread, a
+monitor wake) and they need to know something, don't text them any other way.
+Forward it through that thread, so what they read and what they reply to sit
+in one transcript.
+
+1. Pick the target from `session action=list`, among threads tagged
+   `(owner)`: their `[imessage]` thread if one exists, else `web:main`.
+2. If the target is your own thread, just reply — you already reach them.
+3. Send `send_msg(to=<target>, text="forward to the owner: <message>")`. Write
+   the message as it should reach them; add any context the forwarding thread
+   needs below it.
+
+**Receiving a forward.** You are the owner's thread and a session asks you to
+forward something: tell the owner, in your reply, plainly saying where it
+came from if that matters to them. When they answer about it, pass the answer
+back with `send_msg(to=<that session>, text=…, reply_to=<its message id>)` —
+the session that asked is in the message header.
 
 ## Non-owner threads
 
