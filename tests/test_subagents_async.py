@@ -9,6 +9,7 @@ script can address its subagent.
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,9 +17,11 @@ from typing import Any
 
 import pytest
 
+from chief.agent.subagent_notices import take_notices, write_notices
 from chief.agent.subagent_pool import SubagentPool
 from chief.app import App, build_app
 from chief.entrypoint import deliver_subagent_notices
+from chief.selfedit.recovery import RestartController
 
 from .fakes import CapturingAdapter, FakeProvider, text_turn, tool_turn
 from .test_app import boot, make_config, shutdown
@@ -432,3 +435,34 @@ async def test_a_subagent_cannot_act_as_its_parent_through_native_tools(
         result = tool_results(sub_calls(provider)[1])[-1]
         assert result == "error: switch_model needs a session context"
         assert await app.store.model_override("cli:a") is None
+
+
+async def test_pre_restart_hooks_run_before_the_exec_and_cannot_block_it() -> None:
+    order: list[str] = []
+    controller = RestartController(lambda: order.append("exec"))
+
+    def broken() -> None:
+        raise RuntimeError("disk full")
+
+    controller.add_pre_restart(broken)
+    controller.add_pre_restart(lambda: order.append("hook"))
+    controller.request()
+    await controller.fire_if_requested()
+    assert order == ["hook", "exec"]
+
+
+def test_stale_or_corrupt_notices_are_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = {"parent_key": "cli:a", "parent_channel": "cli", "text": "t"}
+    write_notices(tmp_path, [entry])
+    assert take_notices(tmp_path) == [entry]
+    write_notices(tmp_path, [entry])
+    real = time.time()
+    monkeypatch.setattr("chief.agent.subagent_notices.time.time", lambda: real + 3600)
+    assert take_notices(tmp_path) == []
+    (tmp_path / "subagent_notices.json").write_text("{not json")
+    assert take_notices(tmp_path) == []
+    assert not (tmp_path / "subagent_notices.json").exists()
+    write_notices(tmp_path, [])  # nothing live: no file at all
+    assert not (tmp_path / "subagent_notices.json").exists()
