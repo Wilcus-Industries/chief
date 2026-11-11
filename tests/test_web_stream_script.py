@@ -31,5 +31,21 @@ def test_near_bottom_tolerates_a_few_pixels_of_slack() -> None:
     )
 
 
+def test_a_final_completes_a_reply_joined_mid_stream() -> None:
+    # switched in (or reconnected) mid-reply: only the tail streamed here
+    assert call('finalText("lo world", "hello world")') == "hello world"
+
+
+def test_a_final_keeps_a_bubble_spanning_several_model_calls() -> None:
+    # tool frames off: one bubble holds every call; the final carries the last
+    assert call('finalText("first. second", "second")') == "first. second"
+    assert call('finalText("", "only")') == "only"
+
+
+def test_client_rows_past_a_shrunken_transcript_are_dropped() -> None:
+    rows = "[{anchor: 0}, {anchor: 3}, {anchor: 9}]"
+    assert call(f"liveEphemeral({rows}, 3)") == [{"anchor": 0}, {"anchor": 3}]
+
+
 def test_page_has_the_jump_to_latest_button() -> None:
     assert 'id="jump"' in CHAT_PAGE

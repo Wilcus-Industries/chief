@@ -73,8 +73,9 @@ function renderPending(){
   });
 }
 
+/* stored owner rows only: reconcilePending compares against stored history */
 function ownerRows(text){
-  return [...log.querySelectorAll(".msg.owner")]
+  return [...log.querySelectorAll(".msg.owner:not(.eph)")]
     .filter((d) => d.lastChild.textContent === text).length;
 }
 
@@ -95,7 +96,7 @@ async function send(interrupt){
   /* a slash command is answered at once and never stored: show it now (its
      answer can beat this request's reply) as a client-only row */
   const cmd = text.startsWith("/") ? addEph("owner", text) : null;
-  if (cmd) cmdWait[tk] = (cmdWait[tk] || 0) + 1;
+  if (cmd) (sentCmds[tk] ||= []).push(cmd);
   const item = cmd ? null
     : {text, mode: interrupt ? "injected" : "queued", seen: ownerRows(text)};
   if (item){ (pending[tk] ||= []).push(item); renderPending(); }
@@ -112,7 +113,10 @@ async function send(interrupt){
   } else {
     const q = pending[tk] || [], i = q.indexOf(item);
     if (i >= 0) q.splice(i, 1);
-    if (cmd && outcome !== "command") cmdWait[tk]--;  /* no answer coming */
+    if (cmd && outcome !== "command"){             /* no answer coming */
+      const w = sentCmds[tk] || [], j = w.indexOf(cmd);
+      if (j >= 0) w.splice(j, 1);
+    }
     /* a card answer: shown, but never streamed back or stored */
     if (outcome && !cmd && tk === state.current) addEph("owner", text);
     if (!outcome){                              /* failed: keep the draft */

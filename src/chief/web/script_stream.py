@@ -23,12 +23,25 @@ function groupLabel(tools){
 function nearBottom(box){
   return box.scrollHeight - box.scrollTop - box.clientHeight < 48;
 }
+
+/* a bubble's text at its final: what streamed, unless the final extends it —
+   a reply joined mid-stream (buffer switch, SSE reconnect) holds only its tail.
+   With tool frames off one bubble spans several model calls; the final is then
+   only the last call, so the streamed text is kept. */
+function finalText(streamed, final){
+  const joinedLate = final.length > streamed.length && final.endsWith(streamed);
+  return !streamed || joinedLate ? final : streamed;
+}
+
+/* client-only rows still placeable: anchored past the stored rows means the
+   transcript shrank (/clear, compaction), and they belonged to what it lost */
+const liveEphemeral = (list, stored) => list.filter((e) => e.anchor <= stored);
 """
 
 STREAM_SCRIPT = STREAM_PURE_SCRIPT + """
 let es = null, wasDown = false, liveThink = null, pinned = true;
 const ephemeral = {};  /* thread -> [{anchor, role, text, node}] never stored */
-const cmdWait = {};    /* thread -> slash-command answers still to arrive */
+const sentCmds = {};   /* thread -> this tab's command rows awaiting answers */
 
 log.addEventListener("scroll", () => {
   pinned = nearBottom(log); if (pinned) el("jump").hidden = true;
@@ -62,7 +75,8 @@ function dropEph(tk, e){
 }
 function placeEphemeral(tk){
   const base = storedRows();
-  (ephemeral[tk] || []).forEach((e) => {
+  ephemeral[tk] = liveEphemeral(ephemeral[tk] || [], base.length);
+  ephemeral[tk].forEach((e) => {
     e.node = ephNode(e);
     const ref = base[e.anchor]; if (ref) log.insertBefore(e.node, ref);
   });
@@ -120,13 +134,13 @@ function onFrame(e){
   const f = JSON.parse(e.data);
   if (f.type === "tick"){ bumpThread(f.thread, f.preview); return; }
   if (f.thread !== state.current) return;   /* rich frame racing a buffer switch */
+  if (f.type === "command"){ onCommand(f); return; }  /* beside a turn, not in it */
   /* any frame but more thinking ends the thinking block; inbound/tool/thinking
      close the streaming bubble, so later text lands below them as history has it */
   if (f.type !== "thinking") liveThink = null;
   if (["inbound", "tool", "thinking", "delta"].includes(f.type)) working(true);
-  if (f.type === "inbound"){
-    live = null; cmdWait[f.thread] = 0; onInbound(f.thread, f.text);
-  } else if (f.type === "tool"){ live = null; addTool(f.call_id, f.name); }
+  if (f.type === "inbound"){ live = null; onInbound(f.thread, f.text); }
+  else if (f.type === "tool"){ live = null; addTool(f.call_id, f.name); }
   else if (f.type === "thinking"){
     live = null; if (!liveThink) liveThink = addThinking("");
     liveThink.textContent += f.text;
@@ -141,14 +155,19 @@ function onFrame(e){
 }
 
 function onFinal(f){
-  /* a slash command's answer is not a turn: show it, but it is never stored */
-  if (!live && cmdWait[f.thread] > 0){
-    cmdWait[f.thread]--; addEph("chief", f.text); return;
-  }
-  /* keep the streamed text: with tool frames off, one bubble holds several
-     model calls and the final carries only the last */
-  if (live){ setMarkdown(live, liveText || f.text); live = null; }
+  if (live){ setMarkdown(live, finalText(liveText, f.text)); live = null; }
   else addMsg("chief", f.text);
   working(false); bumpThread(f.thread, f.text);
+}
+
+/* a slash command's answer: never stored, so the command and its answer are
+   client-only rows. Idle, the thread re-renders first — /clear and /compact
+   rewrite what is stored. A command sent from elsewhere arrives the same way. */
+async function onCommand(f){
+  const tk = f.thread, mine = (sentCmds[tk] || []).shift();
+  if (mine) dropEph(tk, mine);
+  if (!live && el("working").hidden) await reloadHistory(tk, true);
+  if (tk !== state.current) return;
+  addEph("owner", f.command); addEph("chief", f.text); follow();
 }
 """

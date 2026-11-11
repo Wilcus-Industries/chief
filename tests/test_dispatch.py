@@ -343,6 +343,44 @@ async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
     assert adapter.sent == [("cli:t", "done")]  # origin channel still delivered
 
 
+class _StubCommands:
+    async def run(self, message: Message) -> str | Message | None:
+        return "answer" if message.text.startswith("/") else None
+
+
+async def test_web_command_answer_is_a_command_frame_not_a_final(
+    store: MessageStore,
+) -> None:
+    """A web client must never mistake a command's answer for the reply a turn
+    is streaming, so web gets a dedicated ``command`` frame (no ``final``)."""
+    hub = ObserverHub()
+    dispatcher = Dispatcher(make_manager(FakeProvider([]), store), hub=hub)
+    dispatcher.set_commands(_StubCommands())
+    queue = hub.listen("web:main")
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="/help")
+    )
+    assert _drain(queue) == [
+        {"type": "command", "thread": "web:main", "command": "/help", "text": "answer"}
+    ]
+
+
+async def test_tapped_client_sees_another_channels_command_answer(
+    store: MessageStore,
+) -> None:
+    hub = ObserverHub()
+    dispatcher = Dispatcher(make_manager(FakeProvider([]), store), hub=hub)
+    dispatcher.set_commands(_StubCommands())
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("/help"))
+    assert adapter.sent == [("cli:t", "answer")]  # origin channel unchanged
+    assert _drain(queue) == [
+        {"type": "command", "thread": "cli:t", "command": "/help", "text": "answer"}
+    ]
+
+
 def _tool_manager(store: MessageStore) -> SessionManager:
     registry = _read_file_registry()
     return SessionManager(

@@ -205,17 +205,23 @@ source attribute — contributed text may be attacker-influenced.
 
 `run_turn` loops up to `MAX_ITERATIONS`:
 
-1. `_stream_once` iterates `provider.stream(...)`; each `TextDelta` is awaited
-   straight out to the adapter. The terminal `Completion` is captured; a stream
-   ending without one raises.
-2. Appends the assistant message.
-3. **No tool calls → return `TurnResult`.** The only success exit.
+1. `stream_once` (`agent/model_call.py`) iterates `provider.stream(...)` over
+   `for_model(messages)`; each `TextDelta` is awaited straight out to the
+   adapter, each `ReasoningDelta` to `on_reasoning`. The terminal `Completion`
+   is captured; a stream ending without one raises.
+2. Appends the assistant message — with its `reasoning`, display-only, when
+   the model sent any.
+3. **No tool calls, and no owner message injected mid-turn waiting → return
+   `TurnResult`.** The only success exit. With one waiting, the text answer
+   goes out via `on_interim` and the loop continues on the injected text.
 4. Per `ToolCall`: the key is `(name, canonical-json args)`. Seen more than
    `REPEAT_LIMIT` times *this turn* → refused with a course-correcting error
    string instead of running. Otherwise `tools.dispatch(call)`, then the
    `post_tool` hooks screen the result — annotate or veto — before step 5
    appends it. The repeat-limit refusal is not screened.
-5. Appends the tool result.
+5. Appends the tool result, then any owner messages injected since
+   (`Dispatcher.try_inject` — a web interrupt, or an iMessage text taken at
+   its poll stage while the thread's turn runs) as user messages.
 6. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry

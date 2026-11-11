@@ -17,7 +17,10 @@ cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
 snippet); web turns also stream their own ``delta``/``final`` through the web
 adapter, so the dispatcher skips only the rich ``final`` for them. Every turn's
 ``inbound`` streams to its watchers when the turn begins (and an injected
-message's when the loop takes it). A client *tapped into* a non-web thread
+message's when the loop takes it). A slash command's answer is a ``command``
+frame to its watchers on every channel — for web *instead of* a ``final``, so
+the client never mistakes it for a streaming reply. A client *tapped into* a
+non-web thread
 also gets that turn's final and — as the
 thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
 the row override or channel default) — its delta / tool-tick / inline
@@ -153,7 +156,7 @@ class Dispatcher:
         if self._commands is not None:
             outcome = await self._commands.run(message)
             if isinstance(outcome, str):
-                await self.adapter(message.channel).send(message.thread_key, outcome)
+                await self._answer_command(message, outcome)
                 return
             if isinstance(outcome, Message):
                 message = outcome
@@ -162,6 +165,20 @@ class Dispatcher:
         await self._run_turn(message)
         if fire_restart and self._restart is not None:
             await self._restart.fire_if_requested()
+
+    async def _answer_command(self, message: Message, answer: str) -> None:
+        """A slash command's answer: never stored, not a turn. The origin
+        channel replies as before — except web, whose client gets only a
+        ``command`` frame (carrying the command too), so it is never mistaken
+        for the reply a running turn is streaming. A client tapped into any
+        other thread gets the same frame."""
+        tk = message.thread_key
+        if message.channel != WEB_CHANNEL:
+            await self.adapter(message.channel).send(tk, answer)
+        self.tapped(
+            tk, {"type": "command", "thread": tk, "command": message.text,
+                 "text": answer},
+        )
 
     async def _publish(self, message: Message) -> None:
         if self._bus is None:
