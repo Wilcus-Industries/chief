@@ -1,11 +1,12 @@
 """The web UI client, served at /app.js. Buffers, readline completion; send
-and its pending list live in script_send.py, the SSE stream client and tool
-rows in script_tools.py, the markdown renderer in script_markdown.py
-(concatenated)."""
+and its pending list live in script_send.py, the SSE stream client in
+script_stream.py, activity groups + approval cards in script_tools.py, the
+markdown renderer in script_markdown.py (concatenated)."""
 
 from chief.web.script_markdown import MARKDOWN_SCRIPT
 from chief.web.script_policy import POLICY_SCRIPT
 from chief.web.script_send import SEND_SCRIPT
+from chief.web.script_stream import STREAM_SCRIPT
 from chief.web.script_tools import TOOL_SCRIPT
 
 SCRIPT = """
@@ -82,15 +83,17 @@ async function switchTo(tk){
   if (!input.disabled) input.focus();
 }
 
+function dropEmpty(){ const e = log.querySelector(".empty"); if (e) e.remove(); }
+
 function addMsg(role, text, who){
-  const empty = log.querySelector(".empty"); if (empty) empty.remove();
+  dropEmpty();
   const d = document.createElement("div"); d.className = "msg " + role;
   /* only chief's replies are markdown; owner/peer text stays literal */
   const body = role === "chief" ? document.createElement("div") : span(null, text);
   if (role === "chief"){ body.className = "md"; setMarkdown(body, text); }
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
-  log.scrollTop = log.scrollHeight; return body;
+  follow(); return body;
 }
 
 async function loadSessions(){
@@ -177,4 +180,4 @@ async function posture(){
   const poll = () => { monitors(); posture(); };
   poll(); setInterval(poll, 10000);
 })();
-""" + SEND_SCRIPT + POLICY_SCRIPT + TOOL_SCRIPT + MARKDOWN_SCRIPT
+""" + SEND_SCRIPT + POLICY_SCRIPT + STREAM_SCRIPT + TOOL_SCRIPT + MARKDOWN_SCRIPT

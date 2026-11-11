@@ -4,39 +4,23 @@ The parser is pure (text -> ``{tag, children}`` tree), so it is exercised
 without a DOM. Skipped where node is not installed.
 """
 
-import json
-import shutil
-import subprocess
 from typing import Any
-
-import pytest
 
 from chief.web.script import SCRIPT
 from chief.web.script_markdown import MARKDOWN_SCRIPT
 
-NODE = shutil.which("node")
-# Bound at import: a fake subprocess.run from another test file can outlive its
-# test in a full-suite run, and this must reach the real node.
-_RUN = subprocess.run
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
+from .node_js import needs_node, run_js
+
+pytestmark = needs_node
 
 
 def parse(text: str) -> list[Any]:
-    assert NODE is not None
     program = (
         MARKDOWN_SCRIPT
         + "\nconst input = require('fs').readFileSync(0, 'utf8');"
         + "\nprocess.stdout.write(JSON.stringify(mdBlocks(input)));"
     )
-    done = _RUN(
-        [NODE, "-e", program],
-        input=text,
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=30,
-    )
-    result: list[Any] = json.loads(done.stdout)
+    result: list[Any] = run_js(program, stdin=text)
     return result
 
 

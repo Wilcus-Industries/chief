@@ -1,11 +1,14 @@
-"""The web UI stylesheet, served at /app.css. A gruvbox terminal console."""
+"""The web UI stylesheet, served at /app.css. A gruvbox terminal console.
+Transcript rules live in styles_chat.py (concatenated)."""
+
+from chief.web.styles_chat import CHAT_STYLES
 
 STYLES = """
 :root{
   --bg0:#1d2021; --bg1:#282828; --bg2:#3c3836; --bg3:#504945;
   --fg:#ebdbb2; --dim:#a89984; --faint:#7c6f64;
   --orange:#fe8019; --yellow:#d79921; --aqua:#8ec07c;
-  --blue:#83a598; --red:#fb4934;
+  --blue:#83a598; --red:#fb4934; --purple:#d3869b;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -90,57 +93,6 @@ body{
 /* transcript pane */
 #pane{flex:1; display:flex; flex-direction:column; min-height:0; position:relative;}
 #log{flex:1; overflow-y:auto; padding:1.1rem 1.3rem;}
-.msg{max-width:74ch; margin:0 0 1rem; white-space:pre-wrap; word-break:break-word;}
-.msg .who{display:block; font-size:11px; letter-spacing:.1em;
-  text-transform:uppercase; margin-bottom:.15rem;}
-.msg.owner .who{color:var(--orange);}
-.msg.chief .who{color:var(--aqua);}
-.msg.peer .who{color:var(--yellow);}
-.msg.owner .who::before{content:"owner\\2009>\\2009";}
-.msg.chief .who::before{content:"chief\\2009>\\2009";}
-.msg.peer .who::after{content:"\\2009>\\2009";}
-/* chief replies rendered as markdown (script_markdown.py) */
-.md{white-space:normal;}
-.md > :first-child{margin-top:0;} .md > :last-child{margin-bottom:0;}
-.md p, .md ul, .md ol, .md pre, .md blockquote, .md table{margin:.45rem 0;}
-.md h1, .md h2, .md h3, .md h4, .md h5, .md h6{margin:.8rem 0 .35rem;
-  font-size:1em; color:var(--yellow);}
-.md h1, .md h2{color:var(--orange);}
-.md ul, .md ol{padding-left:3.5ch;}
-.md code{background:var(--bg1); color:var(--aqua); padding:0 .25rem; border-radius:2px;}
-.md pre{background:var(--bg1); border:1px solid var(--bg2); border-radius:2px;
-  padding:.5rem .7rem; overflow-x:auto; white-space:pre;}
-.md pre code{background:none; padding:0; color:var(--fg);}
-.md blockquote{border-left:2px solid var(--bg3); padding-left:.8rem; color:var(--dim);}
-.md hr{border:none; border-top:1px solid var(--bg2);}
-.md a{color:var(--blue);}
-.md table{display:block; overflow-x:auto; border-collapse:collapse;}
-.md th, .md td{border:1px solid var(--bg2); padding:.15rem .6rem; text-align:left;}
-.md th{color:var(--yellow);}
-.md del{color:var(--faint);}
-.msg.tool{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
-  color:var(--dim); font-size:12px;}
-.msg.tool .who{display:inline; margin:0; text-transform:none; color:var(--blue);}
-.toolload{font:inherit; font-size:11px; padding:.1rem .5rem; background:transparent;
-  color:var(--aqua); border:1px solid var(--bg3); border-radius:2px; cursor:pointer;}
-.toolload:hover{background:var(--bg2);}
-.toolbody{flex:1 0 100%; white-space:pre-wrap; word-break:break-word;
-  color:var(--fg); margin-top:.2rem;}
-.msg.approval{border:1px solid var(--yellow); border-radius:3px;
-  padding:.6rem .8rem; background:var(--bg1);}
-.msg.approval .who{color:var(--yellow);}
-.approval-btns{display:flex; gap:.5rem; margin-top:.5rem;}
-.approval-btns button{font:inherit; font-size:12px; padding:.25rem .7rem;
-  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
-  border-radius:2px; cursor:pointer;}
-.approval-btns button:hover{background:var(--bg2);}
-.approval-btns button:disabled{opacity:.5; cursor:default;}
-.empty{color:var(--faint); padding:1.3rem;}
-/* sent, not yet taken by a turn (script_send.py) */
-#queued{padding:0 1.3rem; max-height:30vh; overflow-y:auto;}
-#queued:empty{display:none;}
-.msg.pending{opacity:.55; margin-bottom:.5rem;}
-.ptag{margin-left:.6rem; font-size:11px; color:var(--faint);}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
 /* prompt line */
@@ -172,4 +124,4 @@ body{
 /* focus + motion */
 :focus-visible{outline:2px solid var(--blue); outline-offset:1px;}
 @media (max-width:640px){#buffers{flex-basis:150px}}
-"""
+""" + CHAT_STYLES

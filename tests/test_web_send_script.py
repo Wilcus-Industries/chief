@@ -3,38 +3,23 @@
 Skipped where node is not installed.
 """
 
-import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 from chief.web.pages import CHAT_PAGE
 from chief.web.script import SCRIPT
 from chief.web.script_send import KEYS_SCRIPT, PENDING_SCRIPT
 
-NODE = shutil.which("node")
-# Bound at import: a fake subprocess.run from another test file can outlive its
-# test in a full-suite run, and this must reach the real node.
-_RUN = subprocess.run
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not installed")
+from .node_js import check_js, needs_node
+from .node_js import run_js as run
 
-
-def run(program: str) -> Any:
-    assert NODE is not None
-    done = _RUN(
-        [NODE, "-e", program], capture_output=True, text=True, check=True, timeout=30
-    )
-    return json.loads(done.stdout)
+pytestmark = needs_node
 
 
 def test_the_served_script_parses(tmp_path: Path) -> None:
-    assert NODE is not None
     path = tmp_path / "app.js"
     path.write_text(SCRIPT)
-    _RUN([NODE, "--check", str(path)], check=True, timeout=30)
+    check_js(str(path))
 
 
 def test_settle_drops_the_oldest_match_only() -> None:

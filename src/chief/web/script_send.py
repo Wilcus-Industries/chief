@@ -90,8 +90,13 @@ async function send(interrupt){
   if (s && s.send_guard &&
       !confirm(`This reply goes to ${label(tk)} on ${s.channel} — not you. Send it?`))
     return;
-  const item = {text, mode: interrupt ? "injected" : "queued", seen: ownerRows(text)};
-  (pending[tk] ||= []).push(item); renderPending();
+  /* a slash command is answered at once and never stored: show it now (its
+     answer can beat this request's reply) as a client-only row */
+  const cmd = text.startsWith("/") ? addEph("owner", text) : null;
+  if (cmd) cmdWait[tk] = (cmdWait[tk] || 0) + 1;
+  const item = cmd ? null
+    : {text, mode: interrupt ? "injected" : "queued", seen: ownerRows(text)};
+  if (item){ (pending[tk] ||= []).push(item); renderPending(); }
   input.value = ""; fitInput(); hidePop();
   let outcome = null, reason = "network error";
   try {
@@ -100,14 +105,16 @@ async function send(interrupt){
       body: JSON.stringify({thread: tk, text, interrupt})});
     if (r.ok) outcome = await r.text(); else reason = await r.text();
   } catch (err) { /* network down: treated like a refusal below */ }
-  if (outcome === "injected" || outcome === "queued"){
+  if (item && (outcome === "injected" || outcome === "queued")){
     item.mode = outcome;           /* an idle thread turns an interrupt into a turn */
   } else {
     const q = pending[tk] || [], i = q.indexOf(item);
     if (i >= 0) q.splice(i, 1);
-    /* a card answer or a command: shown, but never streamed back verbatim */
-    if (outcome && tk === state.current) addMsg("owner", text);
+    if (cmd && outcome !== "command") cmdWait[tk]--;  /* no answer coming */
+    /* a card answer: shown, but never streamed back or stored */
+    if (outcome && !cmd && tk === state.current) addEph("owner", text);
     if (!outcome){                              /* failed: keep the draft */
+      if (cmd) dropEph(tk, cmd);
       if (!input.value){ input.value = text; fitInput(); }
       notice("not sent \\u2014 " + (reason || "server error"), "bad");
     }
