@@ -5,14 +5,15 @@ whatever ``config.mcp_servers`` declares at boot.
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
-from chief.mcpclient.manager import McpManager, ServerConfig
+from chief.mcpclient.manager import McpManager, ServerConfig, server_config_from_entry
 from chief.provider.base import ToolCall
-from chief.tools import ToolRegistry
+from chief.tools import ToolContext, ToolRegistry
 
 SERVER_SCRIPT = """
 import os
@@ -235,3 +236,76 @@ async def test_timeout_longer_than_default_connects_once_ready(
         assert any(s.name == "mcp_slowsrv_ping" for s in registry.specs())
     finally:
         await manager.stop()
+
+
+# Echoes back the request's ``_meta`` so a test can see exactly what a server
+# is told about the calling chief session.
+META_SERVER_SCRIPT = """
+import json
+
+from mcp.server.fastmcp import Context, FastMCP
+
+mcp = FastMCP("metasrv")
+
+
+@mcp.tool()
+def whoami(ctx: Context) -> str:
+    \"\"\"Return the chief keys of this call's _meta.\"\"\"
+    meta = ctx.request_context.meta
+    extra = (meta.model_extra if meta is not None else None) or {}
+    return json.dumps({k: v for k, v in extra.items() if k.startswith("chief/")})
+
+
+mcp.run()
+"""
+
+
+def write_meta_server(tmp_path: Path) -> tuple[str, ...]:
+    script = tmp_path / "meta_server.py"
+    script.write_text(META_SERVER_SCRIPT)
+    return (sys.executable, str(script))
+
+
+async def _whoami(tmp_path: Path, session_context: bool) -> dict[str, str]:
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    try:
+        await manager.connect(
+            ServerConfig(
+                name="metasrv",
+                command=write_meta_server(tmp_path),
+                session_context=session_context,
+            )
+        )
+        result = await registry.dispatch(
+            ToolCall(id="1", name="mcp_metasrv_whoami", arguments={}),
+            ToolContext(thread_key="+15551234567", channel="imessage"),
+        )
+        return dict(json.loads(result))
+    finally:
+        await manager.stop()
+
+
+async def test_opted_in_server_learns_the_calling_session(tmp_path: Path) -> None:
+    # A server that keeps per-session state (e.g. one browser tab per chief
+    # session) needs to know which session is calling.
+    assert await _whoami(tmp_path, session_context=True) == {
+        "chief/thread": "+15551234567",
+        "chief/channel": "imessage",
+    }
+
+
+async def test_server_not_opted_in_is_told_nothing(tmp_path: Path) -> None:
+    # Thread keys are often phone numbers: never sent to a server that did not
+    # ask for them in config.yaml.
+    assert await _whoami(tmp_path, session_context=False) == {}
+
+
+def test_session_context_is_parsed_from_config_and_off_by_default() -> None:
+    on = server_config_from_entry("a", {"command": ["x"], "session_context": True})
+    off = server_config_from_entry("b", {"command": ["x"]})
+    junk = server_config_from_entry("c", {"command": ["x"], "session_context": "yes"})
+    assert on is not None and on.session_context is True
+    assert off is not None and off.session_context is False
+    # Only a real boolean opts in; anything else stays off (fail closed).
+    assert junk is not None and junk.session_context is False
