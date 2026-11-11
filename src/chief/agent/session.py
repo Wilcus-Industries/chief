@@ -75,6 +75,7 @@ class Session:
         self._hooks_timeout_seconds = hooks_timeout_seconds
         self._session_started = False
         self._inbox: list[str] = []
+        self._in_turn = False  # lock held by run_turn, not compact/wipe
 
     @property
     def busy(self) -> bool:
@@ -84,11 +85,12 @@ class Session:
 
     def deliver(self, text: str) -> bool:
         """Queue ``text`` for the in-flight turn, which appends it at its next
-        tool step. Accepted (True) only while a turn holds the lock: an idle
-        session needs a fresh turn instead, which is the caller's to start.
-        The check and append are synchronous, so on the single event loop they
-        can't interleave with the lock's release."""
-        if not self._lock.locked():
+        tool step. Accepted (True) only while ``run_turn`` holds the lock — not
+        ``compact`` or a wipe, which hold it with nothing to drain: otherwise
+        the caller starts a fresh turn (it queues behind the lock). The check
+        and append are synchronous, so on the single event loop they can't
+        interleave with the turn's end."""
+        if not self._in_turn:
             return False
         self._inbox.append(text)
         return True
@@ -124,19 +126,24 @@ class Session:
         concurrency slot.
         """
         async with self._lock:
-            async with self._semaphore:
-                # Held new turns wait here while a restart drains; active ones
-                # are tracked so the restart waits for this turn to commit. The
-                # restart itself fires at the outermost boundary (dispatcher /
-                # imessage poll) once the reply — and the inbound cursor — are
-                # durable too, never here where the reply is still un-sent.
-                await self._gate.enter_turn()
-                try:
-                    return await self._one_turn(
-                        user_text, on_delta, sender, on_tool, on_tool_result
-                    )
-                finally:
-                    self._gate.leave_turn()
+            self._in_turn = True
+            try:
+                async with self._semaphore:
+                    # Held new turns wait here while a restart drains; active
+                    # ones are tracked so the restart waits for this turn to
+                    # commit. The restart itself fires at the outermost
+                    # boundary (dispatcher / imessage poll) once the reply —
+                    # and the inbound cursor — are durable too, never here
+                    # where the reply is still un-sent.
+                    await self._gate.enter_turn()
+                    try:
+                        return await self._one_turn(
+                            user_text, on_delta, sender, on_tool, on_tool_result
+                        )
+                    finally:
+                        self._gate.leave_turn()
+            finally:
+                self._in_turn = False
 
     async def _one_turn(
         self,

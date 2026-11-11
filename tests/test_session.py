@@ -410,6 +410,19 @@ async def test_deliver_refuses_an_idle_session(store: MessageStore) -> None:
     assert session.take_inbox() == []
 
 
+async def test_deliver_refuses_a_lock_held_by_compact_or_wipe(
+    store: MessageStore,
+) -> None:
+    # compact() and a wipe hold the lock with no turn to drain the inbox: a
+    # message accepted then would sit until some unrelated turn (or be lost
+    # with the wiped session). The caller must wake a turn instead.
+    manager = make_manager(FakeProvider([]), store)
+    session = await manager.get_or_create("cli:t", "cli")
+    async with session.lock:
+        assert session.deliver("hello") is False
+    assert session.take_inbox() == []
+
+
 async def test_deliver_mid_turn_lands_at_the_next_tool_step(
     store: MessageStore,
 ) -> None:
