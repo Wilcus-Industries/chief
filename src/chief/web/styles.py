@@ -37,6 +37,7 @@ body{
 #main{flex:1; display:flex; min-height:0;}
 #buffers{
   flex:0 0 220px; display:flex; flex-direction:column; min-height:0;
+  min-width:0; /* else a long nowrap snippet stretches it past 220px */
   background:var(--bg1); border-right:1px solid var(--bg2);
 }
 .panel-label{padding:.6rem .9rem .4rem; font-size:11px; letter-spacing:.14em;
