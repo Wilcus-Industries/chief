@@ -1,12 +1,13 @@
 """Session manager: one Session per thread, N turns concurrent overall."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 from chief.agent.compaction import Compactor
 from chief.agent.restart_gate import RestartGate
 from chief.agent.session import Session
+from chief.agent.wipe import StoreWipe, wipe_thread
 from chief.budget import Budget
 from chief.hooks import HookRegistry
 from chief.persistence.store import MessageStore
@@ -52,6 +53,7 @@ class SessionManager:
         self._hooks_timeout_seconds = hooks_timeout_seconds
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
+        self._on_wipe: Callable[[str], None] | None = None
 
     async def get_or_create(self, thread_key: str, channel: str) -> Session:
         """Return the live session for a thread, resuming history from disk."""
@@ -168,32 +170,23 @@ class SessionManager:
         session = await self.get_or_create(thread_key, channel)
         return await session.compact()
 
+    def set_on_wipe(self, callback: Callable[[str], None]) -> None:
+        """Called with the thread key after each successful clear/delete (the
+        subagent pool cancels that thread's orphaned subagents). Late-bound:
+        the pool is built after the manager."""
+        self._on_wipe = callback
+
     async def clear(self, thread_key: str) -> bool:
-        """Wipe a thread's transcript (keep the row) and drop its cached session
-        — dropping the cache is the point, a DB wipe alone is cosmetic while a
-        loaded ``Session`` still holds the old history. Mid-turn: see :meth:`_wipe`."""
+        """Wipe a thread's transcript (keep the row); mid-turn refuses — see
+        :func:`chief.agent.wipe.wipe_thread`."""
         return await self._wipe(thread_key, self._store.clear)
 
     async def delete(self, thread_key: str) -> bool:
-        """Delete a thread entirely and drop its cached live session (mid-turn
-        handling: see :meth:`_wipe`)."""
+        """Delete a thread entirely; mid-turn refuses (see ``wipe_thread``)."""
         return await self._wipe(thread_key, self._store.delete_session)
 
-    async def _wipe(
-        self, thread_key: str, op: Callable[[str], Awaitable[None]]
-    ) -> bool:
-        """Run a store wipe under the session lock — the single guard for every
-        caller (``session`` tool, ``/prune``, web cockpit). Refuses (``False``,
-        no write) when a cached session is mid-turn: its in-flight tail would
-        commit orphan rows over the wipe. Holding the lock across the wipe shuts
-        the delete/clear TOCTOU a plain ``is_busy`` pre-check leaves open."""
-        session = self._sessions.get(thread_key)
-        if session is None:
-            await op(thread_key)
-            return True
-        if session.busy:  # sync check; the lock grab below runs before any await
-            return False
-        async with session.lock:
-            await op(thread_key)
-        self._sessions.pop(thread_key, None)
-        return True
+    async def _wipe(self, thread_key: str, op: StoreWipe) -> bool:
+        wiped = await wipe_thread(self._sessions, thread_key, op)
+        if wiped and self._on_wipe is not None:
+            self._on_wipe(thread_key)
+        return wiped

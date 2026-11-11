@@ -33,7 +33,7 @@ async def running(
 ) -> AsyncIterator[tuple[App, CapturingAdapter, CapturingAdapter]]:
     config = make_config(
         tmp_path, sock_path, imessage_owner_handles=(OWNER_HANDLE,),
-        gate_approved=("send_msg", "read_file"), **overrides,
+        gate_approved=("send_msg", "read_file", "spawn_agent"), **overrides,
     )
     app, streams = await boot(config, provider)
     device = CapturingAdapter("imessage")

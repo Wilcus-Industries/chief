@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chief.agent.subagent_notices import take_notices
 from chief.config.history import snapshot
 from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
@@ -35,6 +36,20 @@ async def report_restart(app: "App", repo_root: Path) -> None:
         await adapter.send(notice.thread_key, notice.text())
     except Exception:
         logger.exception("could not report the restart on %s", notice.channel)
+
+
+async def deliver_subagent_notices(app: "App", data_dir: Path) -> None:
+    """Tell each parent whose subagent died with the old process (PRD #308).
+
+    Each notice reaches the parent like any peer message — injected or waking
+    it — so the parent decides whether to respawn. Never raises: a bad notice
+    file must not take the fresh boot down."""
+    if app.peers is None:
+        return
+    for notice in take_notices(data_dir):
+        app.peers.router.deliver(
+            notice["parent_key"], notice["parent_channel"], notice["text"]
+        )
 
 
 def record_config(config_path: Path, data_dir: Path) -> None:
@@ -101,6 +116,7 @@ async def amain() -> None:
     if (version := resolve_pending(repo_root)) is not None:
         logger.info("now running %s", version)
     await report_restart(app, repo_root)
+    await deliver_subagent_notices(app, config.db_path.parent)
     logger.info("chief up — socket at %s", config.socket_path)
 
     stop = asyncio.Event()

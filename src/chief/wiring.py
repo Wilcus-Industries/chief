@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
+from chief.agent.compaction import Compactor
 from chief.agent.loop import PostTool
 from chief.agent.manager import SessionManager
+from chief.agent.windows import WindowResolver
 from chief.approvals import ApprovalBroker
 from chief.audit import AuditLog
 from chief.budget import Budget
@@ -39,9 +41,10 @@ from chief.persistence.db import (
     make_session_factory,
 )
 from chief.persistence.store import MessageStore
+from chief.provider.base import Provider
 from chief.provider.factory import build_provider as build_provider
 from chief.selfedit.recovery import RestartController
-from chief.tools import ToolRegistry
+from chief.tools import ToolDispatcher, ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth, load_or_create_secret
@@ -73,6 +76,8 @@ class Core:
     cron: CronService
     post_tool: PostTool | None = None
     ask: AskApproval | None = None
+    # Builds a thread's gated tools; the subagent pool reuses it per run.
+    tools_factory: Callable[..., ToolDispatcher] | None = None
 
 
 @dataclass
@@ -93,6 +98,21 @@ async def build_persistence(
     await init_schema(engine)
     factory = make_session_factory(engine)
     return engine, factory, MessageStore(factory)
+
+
+def build_compactor(config: Config, provider: Provider) -> Compactor:
+    """Context compaction, sized to each thread's current model window."""
+    resolver = WindowResolver(
+        windows=config.compaction_windows,
+        default_window=config.compaction_default_window,
+        aliases=config.provider_aliases.keys(),
+        base_url=config.provider_base_url,
+        api_key=config.openrouter_api_key,
+    )
+    return Compactor(
+        provider, config.default_model, resolver,
+        ratio=config.compaction_ratio, keep_recent=config.compaction_keep_recent,
+    )
 
 
 def build_gate(config: Config) -> Gate:

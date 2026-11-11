@@ -65,6 +65,14 @@ class RestartController:
         self._admitting.set()  # open until a restart is requested
         self._idle = asyncio.Event()
         self._idle.set()  # set whenever no turn is active
+        self._pre_restart: list[Callable[[], None]] = []
+
+    def add_pre_restart(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` in the breath before the exec — after the drain,
+        alongside the restart notice (the subagent pool records its live runs
+        so each parent hears they died). A raising hook is logged, never
+        allowed to stop the restart."""
+        self._pre_restart.append(callback)
 
     def request(self, notice: RestartNotice | None = None) -> None:
         """Mark a restart due and stop admitting new turns (pipeline side).
@@ -107,6 +115,11 @@ class RestartController:
                 self._drain_timeout,
                 self._active,
             )
+        for hook in self._pre_restart:
+            try:
+                hook()
+            except Exception:
+                logger.exception("pre-restart hook failed")
         if self._notice is not None:
             write_restart_notice(self._repo_root, self._notice)
         self._restart()

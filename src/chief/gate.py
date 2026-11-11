@@ -152,6 +152,8 @@ class GatedTools:
         return {spec.name for spec in self._registry.specs() if spec.read_only}
 
     def _record(self, call: ToolCall, outcome: str) -> None:
+        # A subagent's calls carry its parent's thread plus its own run id.
+        extra = {"subagent": self._context.subagent} if self._context.subagent else {}
         self._audit.record(
             "tool_call",
             tool=call.name,
@@ -159,4 +161,5 @@ class GatedTools:
             outcome=outcome,
             thread=self._context.thread_key,
             channel=self._context.channel,
+            **extra,
         )

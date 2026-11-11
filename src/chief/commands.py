@@ -9,11 +9,13 @@ from dataclasses import replace
 
 from chief.adapters.base import Message
 from chief.agent.manager import SessionManager
+from chief.agent.subagent_pool import SubagentPool
 from chief.cron.service import CronService
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.provider.model_names import UnknownModelError, validate_model_name
 from chief.skills import SkillLibrary
+from chief.subagents import describe_all
 
 CommandHandler = Callable[[str, Message], Awaitable[str]]
 
@@ -29,6 +31,7 @@ class CommandSet:
         store: MessageStore,
         skills: SkillLibrary | None = None,
         model_aliases: frozenset[str] = frozenset(),
+        pool: SubagentPool | None = None,
     ) -> None:
         self._manager = manager
         self._monitors = monitors
@@ -36,6 +39,7 @@ class CommandSet:
         self._store = store
         self._skills = skills
         self._model_aliases = model_aliases
+        self._pool = pool
         self._commands: dict[str, CommandHandler] = {
             "help": self._help,
             "monitors": self._list_monitors,
@@ -45,6 +49,9 @@ class CommandSet:
             "prune": self._prune,
             "compact": self._compact,
         }
+        if pool is not None:
+            self._commands["tasks"] = self._tasks
+            self._commands["cancel"] = self._cancel
 
     def register(self, name: str, handler: CommandHandler) -> None:
         self._commands[name] = handler
@@ -98,6 +105,16 @@ class CommandSet:
         if not rows:
             return "no schedules"
         return "\n".join(f"#{r.id} [{r.spec}] {r.description}" for r in rows)
+
+    async def _tasks(self, args: str, message: Message) -> str:
+        """Every running subagent, across all parents."""
+        return describe_all(self._pool.live()) if self._pool else "no subagents"
+
+    async def _cancel(self, args: str, message: Message) -> str:
+        """Kill one subagent by id; its parent is told it was cancelled."""
+        if self._pool is None or not await self._pool.cancel(args, by="owner"):
+            return f"no running subagent {args}"
+        return f"cancelled {args}"
 
     async def _clear(self, args: str, message: Message) -> str:
         """Wipe THIS thread's transcript and reset its live session."""
