@@ -258,3 +258,16 @@ async def test_stored_reasoning_never_reaches_the_model() -> None:
     for sent in provider.calls:
         assert all("reasoning" not in m for m in sent)
     assert messages[1]["reasoning"] == "old thoughts"  # the transcript keeps it
+
+
+async def test_stop_ends_the_turn_after_the_tool_batch_without_a_model_call() -> None:
+    call = ToolCall(id="c1", name="echo", arguments={"text": "hi"})
+    provider = FakeProvider([[Completion(text="wrapping up", tool_calls=(call,))]])
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    result = await run_turn(
+        provider=provider, model="m", messages=messages, tools=echo_registry(),
+        on_delta=DeltaSink(), stop=lambda: True,
+    )
+    assert result.text == "wrapping up"
+    assert len(provider.calls) == 1
+    assert messages[-1]["role"] == "tool"

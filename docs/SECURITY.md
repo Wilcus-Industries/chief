@@ -22,6 +22,34 @@ fourth place that can mint owner trust — treat it accordingly.
 Three sender values matter (`dispatch.py`): `owner`, `system`, and anything else
 (a stranger).
 
+## The non-owner output rule — `policy.owner_audience` (PRD #308)
+
+Who *triggers* a turn and who *hears* it are separate questions. A thread's
+audience is the owner only when `owner_audience(channel, thread, owner_handles)`
+says so: `web`/`cli` always, an iMessage (or any) thread only when its key is an
+owner handle (the owner's 1:1 / self-chat). Everything else — a stranger's 1:1, a
+group, an unknown package channel — is a non-owner audience, and **nothing is
+auto-sent there, whoever triggered the turn**: a peer message, a monitor or cron
+wake, or the owner typing into that thread from the web cockpit. The dispatcher
+runs such a turn *quiet*: no deltas, final text, notice, error reply or command
+answer reaches the adapter; the hub frames still fire, so the cockpit (always the
+owner) sees everything. Tool announcements are skipped there too
+(`gate_surface.channel_announcer`). Reaching a non-owner always takes a
+deliberate, gated tool call. The web cockpit's send-guard confirm still fires on
+such a thread, now to say the reply stays in the cockpit.
+
+**Cards in a non-owner thread** (`gate_surface.approval_asker`) render only in the
+cockpit (the hub tap, replayed by `/events` to a late watcher), and a one-line
+pointer — "approval pending in thread X — answer in the web cockpit" — goes to the
+owner's primary surface (`cron/updates.primary_target`: the iMessage self-chat,
+else `web:main`). The pointer is best effort; a send failure is logged.
+
+**Every direct `adapter.send` outside the dispatcher checks the audience too.**
+The post-reboot restart notice (`entrypoint.report_restart`) goes to the
+requesting thread only when it is an owner thread; a restart asked for from a
+non-owner thread is reported on the primary surface instead, naming the thread —
+its text carries a model-authored rationale.
+
 ## The gate — `gate.py` (decides), `gate_text.py` (what it says)
 
 **Gating is by tool name only.** Arguments are never inspected for the decision;
@@ -116,6 +144,16 @@ Fail-closed, four ways:
 `ALWAYS_ANSWERS` is checked **before** `YES_ANSWERS` so "always" wins rather than
 matching as a plain yes. That ordering is load-bearing.
 
+**Only the owner answers a card.** `Dispatcher.resolve_approval` returns False
+unless `message.sender == "owner"`, on every path (dispatcher and the iMessage poll
+stage), so a stranger's "yes" in their own thread — or a group's — never approves
+anything. The cockpit `/approve` resolves the broker directly.
+
+**Subagent cards** key on and render on the *parent's* thread (the run's
+`ToolContext` is the parent's, plus `subagent=<id>`), following the rule above when
+the parent thread is non-owner. Known limit: one pending card per thread, so a
+subagent card and a parent card open at once means the second is denied unsent.
+
 **Careful with `resolve`:** it returns `True` only when it actually consumed the
 message — and `True` means *no turn runs*. Make it over-match and owner messages
 get silently swallowed. It checks `future.done()` so a second answer to an
@@ -187,7 +225,7 @@ documented, accepted exception, not a bug. For 1:1 senders the rule closes the
 path completely: an unknown sender can never reach a classifier, because the
 owner cannot name a contact they do not know.
 
-`_fire` wraps the payload in `UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers, each
+`_fire` wraps the payload in `policy.UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers, each
 carrying a per-fire nonce so a sender can't type the close marker into their own
 message and land the rest of their text outside the frame. It does this
 because the wake dispatches as `sender="system"` and so takes the owner path in
@@ -200,7 +238,9 @@ thing that helps, and it applies to every fire, not just groups.
 Inbound untrusted content is scored before the agent reads it: **monitor event
 payloads** and the results of **external-sourcing tools** — by default `shell`,
 every `mcp_*` tool, and `spawn_agent` (subagent turns get the same seam on their
-own tool results); `typesafe.screen_tools` (fnmatch globs) narrows or widens
+own tool results; an *async* subagent's result arrives as a peer message, not a
+`spawn_agent` result, so that glob now covers only the spawn ack and the
+`wait=true` result — the content was already screened once, inside the subagent); `typesafe.screen_tools` (fnmatch globs) narrows or widens
 that, and a tool it leaves out reaches the model unscreened and unmarked. File tools (`read_file`, `grep`, `edit_file`, `write_file`) read
 the owner's workspace and are not screened. Neither are the owner's own words:
 a direct owner message never reaches a monitor at all, and in a group chat — where
@@ -231,6 +271,35 @@ What leaves the box: monitor payloads and screened tool output go to TypeSafe
 (owner-accepted). The audit log gets a `screen` row per check — where, verdict,
 score, source — **never content**. The screen sits in front of, not instead of,
 the scope rule and the untrusted frame above; all three stay.
+
+## Peer messages and subagents — `peers/`, `agent/subagent_*.py`
+
+A peer message carries **no authority**: the receiver keeps exactly the authority
+its own session has, the header (`[message m-… from session X]`) only names the
+sender, and the turn it triggers is gated like any other turn of that session.
+Peer messages are **not re-screened** — untrusted content is screened where it
+first enters a session (monitor payloads, `shell`/`mcp_*` results, a subagent's
+own tool results), so a message is at most a relay of already-screened text.
+
+**Framing, so a sender can't forge another.** Every message closes with
+`[end message m-…]`, its own id — minted after the sender wrote its text, so a
+body can't fake its end and append a header claiming another session. A message
+from a thread whose surface reaches a non-owner (whose turns may carry injected
+text) also has its body wrapped in the same nonce frame as a monitor wake
+(`policy.frame_untrusted`). The `send_msg` description, in every session's
+toolset, tells the receiver only that header/close pair bounds a message.
+
+Scope is code-enforced in `PeerRouter`: no self-sends; a target must be a known
+`thread_key`; a `sub:` target must be a live run *of the sender*; a subagent may
+message only its parent. Every `send_msg` writes a `peer_message` audit line
+(`id`, `sender`, `to`, `reply_to` — never the text).
+
+**Subagent tool calls are gated.** They go through `GatedTools` like any session's
+(NEVER/APPROVED lists, cards, audit with a `subagent` field), never announced —
+approving the spawn can't stand in for authorizing every call of a long detached
+run. `send_msg` is always allowed to a subagent whatever its definition's
+allowlist; `spawn_agent`, `restart` and `revert_edits` never are. `finish` never reaches the gate (it only ends
+the run).
 
 ## Audit — `audit.py`
 
@@ -407,7 +476,8 @@ own reply for input.
    Lock contention → refuse to boot.
 2. **`never` beats everything**, including `"*"`.
 3. **Nothing a stranger sends ever runs a turn**, and **stranger content is never
-   persisted**.
+   persisted**. **Nothing is auto-sent to a non-owner audience** — whoever
+   triggered the turn — and **only the owner answers an approval card**.
 4. **Nothing is auto-approved except tools explicitly marked `read_only=True`.**
 5. **A hallucinated tool name never raises a card and never persists an "always".**
 6. **Every executed or denied call produces exactly one audit line.**
@@ -428,4 +498,5 @@ own reply for input.
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,
-`test_auth.py`, `test_dispatch.py`.
+`test_auth.py`, `test_dispatch.py`, `test_owner_audience.py`, `test_peers.py`,
+`test_subagents_async.py`.

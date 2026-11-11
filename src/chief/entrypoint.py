@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chief.agent.subagent_notices import take_notices
 from chief.config.history import snapshot
 from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
@@ -24,17 +25,40 @@ async def report_restart(app: "App", repo_root: Path) -> None:
     """Tell the thread that asked for the restart that chief is back.
 
     Runs once the adapters are serving, so the owner does not have to poke
-    the thread to find out whether the daemon returned. Best effort: a
+    the thread to find out whether the daemon returned. A thread whose surface
+    reaches a non-owner never gets it (PRD #308: nothing auto-sends there);
+    the owner's primary surface does, naming the thread. Best effort: a
     missing channel or a dead adapter must not take the fresh boot down.
     """
+    from chief.cron.updates import primary_target  # inside the boot seatbelt
+    from chief.policy import owner_audience
+
     notice = take_restart_notice(repo_root)
     if notice is None:
         return
+    channel, thread, text = notice.channel, notice.thread_key, notice.text()
+    handles = app.config.imessage_owner_handles
+    if not owner_audience(channel, thread, owner_handles=handles):
+        channel, thread = primary_target(app.config)
+        text = f"{text} [asked in thread {notice.thread_key}]"
     try:
-        adapter = app.dispatcher.adapter(notice.channel)
-        await adapter.send(notice.thread_key, notice.text())
+        await app.dispatcher.adapter(channel).send(thread, text)
     except Exception:
         logger.exception("could not report the restart on %s", notice.channel)
+
+
+async def deliver_subagent_notices(app: "App", data_dir: Path) -> None:
+    """Tell each parent whose subagent died with the old process (PRD #308).
+
+    Each notice reaches the parent like any peer message — injected or waking
+    it — so the parent decides whether to respawn. Never raises: a bad notice
+    file must not take the fresh boot down."""
+    if app.peers is None:
+        return
+    for notice in take_notices(data_dir):
+        app.peers.router.deliver(
+            notice["parent_key"], notice["parent_channel"], notice["text"]
+        )
 
 
 def record_config(config_path: Path, data_dir: Path) -> None:
@@ -101,6 +125,7 @@ async def amain() -> None:
     if (version := resolve_pending(repo_root)) is not None:
         logger.info("now running %s", version)
     await report_restart(app, repo_root)
+    await deliver_subagent_notices(app, config.db_path.parent)
     logger.info("chief up — socket at %s", config.socket_path)
 
     stop = asyncio.Event()

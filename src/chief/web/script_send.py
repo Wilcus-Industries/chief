@@ -91,7 +91,9 @@ async function send(interrupt){
   const tk = state.current;
   const s = state.sessions.find((x) => x.thread === tk);
   if (s && s.send_guard &&
-      !confirm(`This reply goes to ${label(tk)} on ${s.channel} — not you. Send it?`))
+      !confirm(`This thread reaches ${label(tk)} on ${s.channel} — not you. `
+        + `Chief's reply stays here in the cockpit; nothing is sent to them `
+        + `unless chief uses a gated tool. Send it?`))
     return;
   /* a slash command is answered at once and never stored: show it now (its
      answer can beat this request's reply) as a client-only row */

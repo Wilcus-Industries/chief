@@ -10,14 +10,11 @@ from chief.adapters.base import Message
 from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
 from chief.monitors.gate import withheld_body
-from chief.monitors.service import (
-    UNTRUSTED_CLOSE,
-    UNTRUSTED_OPEN,
-    MonitorService,
-)
+from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
+from chief.policy import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 from chief.provider.base import ToolCall
 from chief.screen import Screen
 from chief.tools import ToolContext, ToolRegistry

@@ -26,6 +26,13 @@ thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
 the row override or channel default) — its delta / tool-tick / inline
 tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
 approval card the gate's ``approval_asker`` raises (#267).
+
+Non-owner output rule (PRD #308): a turn in a thread whose surface reaches a
+non-owner (``audience`` says no) is *quiet* — no deltas, final text, notice,
+error or command reply reaches that adapter, whoever triggered the turn (a
+peer, monitor, cron, or the owner typing from the web). The hub frames still
+fire, so the cockpit (always the owner) sees the turn. And only an owner's
+message ever answers an approval card.
 """
 
 import logging
@@ -38,6 +45,7 @@ from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
 from chief.policy import (
+    Audience,
     StreamPolicy,
     delta_frame,
     resolve,
@@ -77,6 +85,7 @@ class Dispatcher:
         strangers: StrangerLog | None = None,
         restart: RestartBoundary | None = None,
         channel_defaults: dict[str, StreamPolicy] | None = None,
+        audience: Audience | None = None,
     ) -> None:
         self._manager = manager
         self._bus = bus
@@ -85,6 +94,7 @@ class Dispatcher:
         self._strangers = strangers
         self._restart = restart
         self._channel_defaults = channel_defaults or {}
+        self._audience: Audience = audience or (lambda _channel, _thread: True)
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
 
@@ -108,8 +118,11 @@ class Dispatcher:
         (iMessage) calls this in its poll/route stage, *before* enqueuing the
         row — so the owner's answer bypasses the head-of-line-blocked turn it
         must unblock instead of queuing behind it (that queue-behind is the
-        approval deadlock)."""
-        if self._approvals is None:
+        approval deadlock).
+
+        Only the owner answers: a stranger's "yes" on a thread with a pending
+        card (theirs, or a group's) is never consumed as an approval."""
+        if self._approvals is None or message.sender != OWNER:
             return False
         return self._approvals.resolve(message.thread_key, message.text)
 
@@ -170,10 +183,12 @@ class Dispatcher:
         """A slash command's answer: never stored, not a turn. The origin
         channel replies as before — except web, whose client gets only a
         ``command`` frame (carrying the command too), so it is never mistaken
-        for the reply a running turn is streaming. A client tapped into any
+        for the reply a running turn is streaming — and a quiet (non-owner)
+        thread, where it shows only in the cockpit. A client tapped into any
         other thread gets the same frame."""
         tk = message.thread_key
-        if message.channel != WEB_CHANNEL:
+        owner_surface = self._audience(message.channel, tk)
+        if message.channel != WEB_CHANNEL and owner_surface:
             await self.adapter(message.channel).send(tk, answer)
         self.tapped(
             tk, {"type": "command", "thread": tk, "command": message.text,
@@ -201,6 +216,8 @@ class Dispatcher:
             message.thread_key, message.channel
         )
         tk = message.thread_key
+        # Absolute: ignores the sender, so owner-from-web is quiet here too.
+        quiet = not self._audience(message.channel, tk)
         override = await self._manager.stream_policy(tk)
         policy = resolve(message.channel, override, self._channel_defaults)
         # Web turns stream their own delta (adapter); for every other channel
@@ -213,13 +230,16 @@ class Dispatcher:
             self._inbound(message)
 
         async def on_delta(text: str) -> None:
-            await adapter.send_delta(tk, text)
+            if not quiet:
+                await adapter.send_delta(tk, text)
             if non_web and (frame := delta_frame(policy, tk, text)):
                 self.tapped(tk, frame)
 
         async def on_interim(text: str) -> None:
-            # An answer an injected message overtook still reaches the owner.
-            await adapter.send(tk, text)
+            # An answer an injected message overtook still reaches the owner
+            # (the cockpit only, on a quiet thread).
+            if not quiet:
+                await adapter.send(tk, text)
             if non_web:
                 self.tapped(tk, {"type": "final", "thread": tk, "text": text})
 
@@ -248,24 +268,27 @@ class Dispatcher:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
             logger.exception("turn failed for thread %s", tk)
-            await self._reply(adapter, message, f"error: {exc}")
+            await self._reply(adapter, message, f"error: {exc}", quiet)
             return
         except Exception:
             # Any other failure may carry internals — keep the generic text.
             logger.exception("turn failed for thread %s", tk)
             await self._reply(
-                adapter, message, "error: something went wrong running that turn"
+                adapter, message,
+                "error: something went wrong running that turn", quiet,
             )
             return
-        await adapter.send(tk, result.text)
-        if result.notice:
-            await adapter.send(tk, result.notice)
+        if not quiet:
+            await adapter.send(tk, result.text)
+            if result.notice:
+                await adapter.send(tk, result.notice)
         self._turn_end(message, result.text)
 
     async def _reply(
-        self, adapter: Adapter, message: Message, text: str
+        self, adapter: Adapter, message: Message, text: str, quiet: bool
     ) -> None:
-        await adapter.send(message.thread_key, text)
+        if not quiet:
+            await adapter.send(message.thread_key, text)
         self._turn_end(message, text)
 
     def _inbound(self, message: Message) -> None:

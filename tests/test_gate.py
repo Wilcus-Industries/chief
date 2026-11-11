@@ -13,10 +13,10 @@ from chief.gate import (
     Decision,
     GatedTools,
     GatePolicy,
-    approval_asker,
     load_approved,
     save_approved,
 )
+from chief.gate_surface import approval_asker
 from chief.hub import ObserverHub
 from chief.persistence.store import MessageStore
 from chief.provider.base import ToolCall, ToolSpec

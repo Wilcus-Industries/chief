@@ -164,3 +164,13 @@ def ratio(raw: Any, key: str = "compaction.ratio") -> float:
     if not 0 < parsed <= 1:
         raise ConfigError(f"{key} must be in (0, 1], got {parsed}")
     return parsed
+
+
+def positive_int(raw: Any, key: str) -> int:
+    """Coerce a count/seconds key that must be a positive integer.
+
+    ``0`` would mean "no subagent may run" or "warn on every message" — never
+    what a typo meant — and a float or string is refused rather than truncated."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ConfigError(f"{key} must be a positive integer, got {raw!r}")
+    return raw

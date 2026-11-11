@@ -9,34 +9,37 @@ deterministic fake (the one scripted fake CI allows, PRD #183).
 """
 
 import logging
+from functools import partial
 from pathlib import Path
 
 from chief.adapters.imessage_send import owner_send_guard
-from chief.agent.compaction import Compactor
 from chief.agent.manager import SessionManager
-from chief.agent.prompt import ONBOARDING_SUFFIX, system_prompt
-from chief.agent.windows import WindowResolver
+from chief.agent.prompt import boot_prompt
 from chief.budget import Budget
 from chief.bus import EventBus
 from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
-from chief.cron.updates import ensure_update_schedule
+from chief.cron.updates import ensure_update_schedule, primary_target
 from chief.daemon import App
 from chief.dispatch import Dispatcher
-from chief.gate import GatedTools, approval_asker
+from chief.gate import GatedTools
+from chief.gate_surface import approval_asker, card_pointer, channel_announcer
 from chief.hooks.boot import build_hooks
 from chief.hooks.posttool import tool_screener
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
+from chief.peers.wiring import build_peers
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
+from chief.policy import owner_audience
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
 from chief.strangers import StrangerLog
+from chief.subagents import SubagentScope
 from chief.tools import ToolContext, ToolDispatcher, ToolRegistry
 from chief.tools.native import register_native_tools
 from chief.tools.shell.prompt import shell_prompt_line
@@ -45,6 +48,7 @@ from chief.wiring import (
     Core,
     Gate,
     build_adapters,
+    build_compactor,
     build_gate,
     build_mcp,
     build_persistence,
@@ -54,13 +58,6 @@ from chief.wiring import (
 logger = logging.getLogger(__name__)
 
 __all__ = ["App", "build_app"]
-
-
-async def _build_prompt(store: MessageStore, skills: SkillLibrary) -> str:
-    prompt = system_prompt() + skills.prompt_lines() + shell_prompt_line()
-    if not await store.has_sessions():
-        prompt += ONBOARDING_SUFFIX
-    return prompt
 
 
 async def _build_agent_core(
@@ -78,43 +75,34 @@ async def _build_agent_core(
     registry = ToolRegistry()
     hooks, classifier, screen = build_hooks(config, provider, budget, gate.audit)
 
-    def tools_factory(thread_key: str, channel: str) -> ToolDispatcher:
-        context = ToolContext(thread_key=thread_key, channel=channel)
+    audience = partial(owner_audience, owner_handles=config.imessage_owner_handles)
 
-        async def announce(ctx: ToolContext, text: str) -> None:
-            await dispatcher.adapter(ctx.channel).send(ctx.thread_key, text)
-
+    def tools_factory(
+        thread_key: str, channel: str, subagent: str | None = None
+    ) -> ToolDispatcher:
+        # A subagent's calls are gated on its parent's thread, unannounced.
+        context = ToolContext(thread_key, channel, subagent)
+        announce = channel_announcer(dispatcher, audience)
         return GatedTools(
-            registry=registry, policy=gate.policy, audit=gate.audit,
-            context=context, ask=approval_asker(dispatcher, gate.approvals),
-            on_always=gate.allow_always,
-            announce=announce if config.gate_announce else None,
+            registry=SubagentScope(registry) if subagent else registry,
+            policy=gate.policy, audit=gate.audit,
+            context=context, ask=ask, on_always=gate.allow_always,
+            announce=announce if config.gate_announce and not subagent else None,
         )
 
     restart = RestartController(repo_root=Path.cwd())
-    window_resolver = WindowResolver(
-        windows=config.compaction_windows,
-        default_window=config.compaction_default_window,
-        aliases=config.provider_aliases.keys(),
-        base_url=config.provider_base_url,
-        api_key=config.openrouter_api_key,
-    )
     manager = SessionManager(
         provider=provider,
         tools_factory=tools_factory,
         store=store,
         default_model=config.default_model,
-        system_prompt=await _build_prompt(store, skills),
+        system_prompt=await boot_prompt(
+            store, skills.prompt_lines() + shell_prompt_line()
+        ),
         max_concurrent=config.max_concurrent_sessions,
         budget=budget,
         downgrade_model=config.models.get("downgrade"),
-        compactor=Compactor(
-            provider,
-            config.default_model,
-            window_resolver,
-            ratio=config.compaction_ratio,
-            keep_recent=config.compaction_keep_recent,
-        ),
+        compactor=build_compactor(config, provider),
         restart_gate=restart,
         hooks=hooks,
         hooks_timeout_seconds=config.hooks_timeout_seconds,
@@ -122,8 +110,10 @@ async def _build_agent_core(
     dispatcher = Dispatcher(
         manager, bus=bus, hub=hub, approvals=gate.approvals,
         strangers=StrangerLog(factory), restart=restart,
-        channel_defaults=config.stream_channel_defaults,
+        channel_defaults=config.stream_channel_defaults, audience=audience,
     )
+    pointer = card_pointer(dispatcher, primary_target(config))
+    ask = approval_asker(dispatcher, gate.approvals, audience, pointer)
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen,
                               config.imessage_owner_handles)
     cron = CronService(
@@ -133,7 +123,7 @@ async def _build_agent_core(
     # Subagent turns get the same post_tool seam (core injection screen first).
     post_tool = tool_screener(hooks, config.hooks_timeout_seconds, logger)
     return Core(budget, bus, hub, registry, restart, manager, dispatcher,
-                monitors, cron, post_tool)
+                monitors, cron, post_tool, ask, tools_factory)
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -154,6 +144,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         config, provider, store, factory, gate, skills, shell_service, shell_guards
     )
 
+    peers = build_peers(core, config, store, gate.audit, provider)
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
     # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
     model_aliases = frozenset(config.provider_aliases)
@@ -163,36 +154,25 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         monitor_service=core.monitors,
         cron_service=core.cron,
         selfedit_pipeline=selfedit_pipeline, skills=skills,
-        shell_service=shell_service, provider=provider,
-        agents_dir=config.agents_dir, default_model=config.default_model,
-        budget=core.budget, root=Path.cwd(),
-        shell_guards=shell_guards, model_aliases=model_aliases,
-        post_tool=core.post_tool,
-        ask=approval_asker(core.dispatcher, gate.approvals),
+        shell_service=shell_service, agents_dir=config.agents_dir,
+        root=Path.cwd(), shell_guards=shell_guards, model_aliases=model_aliases,
+        ask=core.ask, router=peers.router, pool=peers.pool,
     )
     await ensure_update_schedule(core.cron, config)
     commands = CommandSet(
         core.manager, core.monitors, core.cron, store, skills=skills,
-        model_aliases=model_aliases,
+        model_aliases=model_aliases, pool=peers.pool,
     )
     core.dispatcher.set_commands(commands)
     mcp_manager, mcp_configs = build_mcp(config, core.registry)
     adapters = build_adapters(config, core, store, commands, gate.approvals)
 
     return App(
-        config=config,
-        engine=engine,
-        store=store,
-        dispatcher=core.dispatcher,
-        socket_adapter=adapters.socket,
-        monitor_service=core.monitors,
-        cron_service=core.cron,
-        bus=core.bus,
-        hub=core.hub,
-        web_adapter=adapters.web_adapter,
-        web_server=adapters.web_server,
-        mcp_manager=mcp_manager,
-        mcp_configs=mcp_configs,
-        imessage_adapter=adapters.imessage,
-        shell_service=shell_service,
+        config=config, engine=engine, store=store, dispatcher=core.dispatcher,
+        socket_adapter=adapters.socket, monitor_service=core.monitors,
+        cron_service=core.cron, bus=core.bus, hub=core.hub,
+        web_adapter=adapters.web_adapter, web_server=adapters.web_server,
+        mcp_manager=mcp_manager, mcp_configs=mcp_configs,
+        imessage_adapter=adapters.imessage, shell_service=shell_service,
+        peers=peers,
     )

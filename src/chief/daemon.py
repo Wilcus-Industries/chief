@@ -14,6 +14,7 @@ from chief.dispatch import Dispatcher
 from chief.hub import ObserverHub
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
+from chief.peers.wiring import Peers
 from chief.persistence.store import MessageStore
 from chief.tools.shell.service import ShellService
 from chief.web.adapter import WebAdapter
@@ -41,6 +42,7 @@ class App:
     mcp_configs: tuple[ServerConfig, ...]
     imessage_adapter: IMessageAdapter | None
     shell_service: ShellService
+    peers: Peers | None = None
 
     async def start(self) -> None:
         # Fail closed on monitors written before the scoping rule (#285).
@@ -69,6 +71,8 @@ class App:
         if self.web_server is not None:
             await self.web_server.stop()
         await self.cron_service.stop()
+        if self.peers is not None:
+            await self.peers.aclose()
         if self.imessage_adapter is not None:
             await self.imessage_adapter.stop()
         await self.web_adapter.stop()

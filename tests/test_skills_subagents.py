@@ -1,11 +1,21 @@
 """Skills (SKILL.md, progressive disclosure, /skill invocation) and subagents."""
 
+import asyncio
 from pathlib import Path
 
 from chief.adapters.base import Message
+from chief.agent.loop import PostTool
+from chief.agent.subagent_drive import RunDeps
+from chief.agent.subagent_pool import SubagentPool
+from chief.audit import AuditLog
 from chief.provider.base import Completion, ToolCall, ToolSpec
 from chief.skills import SkillLibrary, register_skill_tools
-from chief.subagents import AgentRegistry, FilteredTools, register_spawn_tool
+from chief.subagents import (
+    AgentRegistry,
+    FilteredTools,
+    SubagentScope,
+    register_spawn_tool,
+)
 from chief.tools import Tool, ToolContext, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
@@ -143,6 +153,69 @@ async def test_filtered_tools_hides_and_blocks(tmp_path: Path) -> None:
     assert blocked == "error: tool 'hidden' not allowed for this agent"
 
 
+def spawn_registry(
+    tmp_path: Path, provider: FakeProvider, post_tool: PostTool | None = None
+) -> ToolRegistry:
+    """A registry with spawn_agent over a real pool whose runs get the echo
+    tools (ungated here; the gated path is covered in test_subagents_async)."""
+    registry = echo_registry()
+    deps = RunDeps(provider, "default-model", asyncio.Semaphore(2),
+                   post_tool=post_tool)
+    pool = SubagentPool(
+        deps, lambda parent, channel, run: registry,
+        lambda to, channel, text: None, AuditLog(tmp_path / "audit.jsonl"), 60.0,
+    )
+    register_spawn_tool(registry, make_agents(tmp_path), pool)
+    return registry
+
+
+CONTEXT = ToolContext("cli:parent", "cli")
+
+
+async def test_filtered_tools_always_lets_a_subagent_reach_its_parent() -> None:
+    registry = echo_registry()
+    registry.register(
+        Tool(ToolSpec(name="send_msg", description=".", parameters={}), _ok)
+    )
+    filtered = FilteredTools(registry, ("echo",), subagent=True)
+    assert [s.name for s in filtered.specs()] == ["echo", "send_msg"]
+    assert [s.name for s in FilteredTools(registry, ("echo",)).specs()] == ["echo"]
+
+
+async def _ok() -> str:
+    return "ok"
+
+
+async def test_a_subagent_can_never_restart_or_revert_the_daemon() -> None:
+    # A detached run has no turn boundary to fire the restart at: request()
+    # would close turn admission and nothing would ever exec — a wedge.
+    registry = echo_registry()
+    for name in ("restart", "revert_edits"):
+        registry.register(Tool(ToolSpec(name=name, description=".", parameters={}),
+                               _ok))
+    filtered = FilteredTools(registry, None, subagent=True)
+    assert [s.name for s in filtered.specs()] == ["echo", "hidden"]
+    refused = await filtered.dispatch(ToolCall(id="1", name="restart", arguments={}))
+    assert refused == "error: tool 'restart' not allowed for this agent"
+    allowlisted = FilteredTools(registry, ("restart",), subagent=True)
+    assert allowlisted.specs() == []
+
+
+async def test_subagent_scope_hands_the_run_context_to_mcp_and_send_msg_only() -> None:
+    async def whoami(context: ToolContext | None = None) -> str:
+        return context.thread_key if context is not None else "none"
+
+    registry = ToolRegistry()
+    for name in ("mcp_srv_whoami", "send_msg", "native_whoami"):
+        registry.register(Tool(ToolSpec(name=name, description=".", parameters={}),
+                               whoami, wants_context=True))
+    scope = SubagentScope(registry)
+    run = ToolContext("+15551234567", "imessage", subagent="sub:+15551234567:abc")
+    seen = [await scope.dispatch(ToolCall(id="1", name=n, arguments={}), run)
+            for n in ("mcp_srv_whoami", "send_msg", "native_whoami")]
+    assert seen == ["+15551234567", "+15551234567", "none"]
+
+
 async def test_spawn_agent_screens_sub_session_tool_results(tmp_path: Path) -> None:
     call = ToolCall(id="c1", name="echo", arguments={"text": "notes"})
     provider = FakeProvider(
@@ -154,91 +227,37 @@ async def test_spawn_agent_screens_sub_session_tool_results(tmp_path: Path) -> N
         screened.append(tool_call.name)
         return f"[screened] {result}"
 
-    registry = echo_registry()
-    register_spawn_tool(registry, make_agents(tmp_path), provider, "m",
-                        post_tool=post_tool)
+    registry = spawn_registry(tmp_path, provider, post_tool)
     await registry.dispatch(ToolCall(
-        id="1", name="spawn_agent", arguments={"name": "researcher", "task": "t"}))
+        id="1", name="spawn_agent",
+        arguments={"name": "researcher", "task": "t", "wait": True}), CONTEXT)
     assert screened == ["echo"]
     assert provider.calls[1][-1]["content"].startswith("[screened]")
 
 
-def context_registry() -> ToolRegistry:
-    """An opted-in MCP-style tool and a native context tool, each reporting
-    the session context it was handed."""
-
-    async def whoami(context: ToolContext | None = None) -> str:
-        return context.thread_key if context is not None else "none"
-
-    registry = ToolRegistry()
-    for name in ("mcp_srv_whoami", "native_whoami"):
-        registry.register(
-            Tool(
-                ToolSpec(name=name, description=".", parameters={}),
-                whoami,
-                wants_context=True,
-            )
-        )
-    return registry
-
-
-async def test_subagents_inherit_the_parent_session_for_mcp_tools_only() -> None:
-    # An opted-in MCP server (the per-session browser) must see a subagent as
-    # its parent's session — else every subagent shares one tab. Native tools
-    # keep their old behavior: a subagent must not, e.g., move its parent's
-    # persistent shell cwd.
-    parent = ToolContext(thread_key="+15551234567", channel="imessage")
-    filtered = FilteredTools(context_registry(), None, inherited=parent)
-    mcp = await filtered.dispatch(ToolCall(id="1", name="mcp_srv_whoami", arguments={}))
-    native = await filtered.dispatch(
-        ToolCall(id="2", name="native_whoami", arguments={})
-    )
-    assert mcp == "+15551234567"
-    assert native == "none"
-
-
-async def test_spawn_agent_hands_its_session_to_the_sub_session(tmp_path: Path) -> None:
-    call = ToolCall(id="c1", name="mcp_srv_whoami", arguments={})
-    provider = FakeProvider(
-        [[Completion(text="", tool_calls=(call,))], text_turn("ok")]
-    )
-    agents_dir = tmp_path / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "browser.md").write_text(
-        "---\nname: browser\ndescription: browses\ntools: [mcp_srv_whoami]\n---\nGo.\n"
-    )
-    registry = context_registry()
-    register_spawn_tool(registry, AgentRegistry(agents_dir), provider, "m")
-    await registry.dispatch(
-        ToolCall(
-            id="1", name="spawn_agent", arguments={"name": "browser", "task": "t"}
-        ),
-        ToolContext(thread_key="thread-A", channel="web"),
-    )
-    tool_result = provider.calls[1][-1]
-    assert tool_result["role"] == "tool"
-    assert tool_result["content"] == "thread-A"
-
-
-async def test_spawn_agent_runs_a_sub_session(tmp_path: Path) -> None:
+async def test_spawn_agent_wait_returns_the_final_answer(tmp_path: Path) -> None:
     call = ToolCall(id="c1", name="echo", arguments={"text": "notes"})
     provider = FakeProvider(
         [[Completion(text="", tool_calls=(call,))], text_turn("summary: notes")]
     )
-    registry = echo_registry()
-    register_spawn_tool(registry, make_agents(tmp_path), provider, "default-model")
+    registry = spawn_registry(tmp_path, provider)
     result = await registry.dispatch(
         ToolCall(
             id="1",
             name="spawn_agent",
-            arguments={"name": "researcher", "task": "summarize my notes"},
-        )
+            arguments={"name": "researcher", "task": "summarize my notes",
+                       "wait": True},
+        ),
+        CONTEXT,
     )
     assert result == "summary: notes"
     system = provider.calls[0][0]
-    assert system["content"].startswith("You are a focused researcher.")
-    # The subagent never sees spawn_agent (no recursion).
+    assert "You are a focused researcher." in system["content"]
+    # The subagent never sees spawn_agent (no recursion), but gets finish.
+    names = [spec.name for spec in provider.tool_specs[0]]
+    assert "spawn_agent" not in names and "finish" in names
     unknown = await registry.dispatch(
-        ToolCall(id="2", name="spawn_agent", arguments={"name": "ghost", "task": "x"})
+        ToolCall(id="2", name="spawn_agent", arguments={"name": "ghost", "task": "x"}),
+        CONTEXT,
     )
-    assert unknown.startswith("error: no agent named 'ghost'")
+    assert unknown.startswith("error: no agent named 'ghost' (known: researcher)")

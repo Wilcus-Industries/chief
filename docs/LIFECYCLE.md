@@ -139,7 +139,18 @@ returns a generic message rather than leaking internals.
 
 **Concurrency:** the dispatcher is *not* serial. Serialization comes from three
 places — iMessage's per-thread FIFO worker, `Session._lock` per thread, and
-`SessionManager._semaphore` globally (`max_concurrent_sessions`).
+`SessionManager._semaphore` globally (`max_concurrent_sessions`). Subagent
+turns take a separate semaphore (`subagents.max_concurrent`, held only while a
+subagent turn runs) and never call `enter_turn`, so a restart never waits on
+them.
+
+**Quiet turns:** in a thread `owner_audience` rejects, `_run_turn` sends nothing
+to the adapter — no deltas, final, notice, error — whoever triggered it (see
+SECURITY.md, the non-owner output rule); hub frames still fire.
+
+**Leftover inbox:** right after `session.run_turn` returns (no await between the
+lock release and the take), anything delivered to the session too late for a
+tool step starts a follow-up `system` turn as a tracked background task.
 
 ## 5. Session and the turn — `agent/session.py`, `agent/manager.py`
 
@@ -219,9 +230,12 @@ source attribute — contributed text may be attacker-influenced.
    string instead of running. Otherwise `tools.dispatch(call)`, then the
    `post_tool` hooks screen the result — annotate or veto — before step 5
    appends it. The repeat-limit refusal is not screened.
-5. Appends the tool result, then any owner messages injected since
-   (`Dispatcher.try_inject` — a web interrupt, or an iMessage text taken at
-   its poll stage while the thread's turn runs) as user messages.
+5. Appends the tool result, then any messages injected since — owner messages
+   (`Dispatcher.try_inject`: a web interrupt, or an iMessage text taken at its
+   poll stage while the thread's turn runs) and peer messages (`PeerRouter.deliver`)
+   share the session's inbox — as user messages. The Anthropic wire folds such a
+   user message into the tool-result turn. Then `stop()` returning True ends the
+   turn with the last assistant text (a subagent's `finish`).
 6. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry
@@ -235,7 +249,9 @@ tool name is recorded and passed through to the registry for a helpful error —
 a bad-arguments string, anything else becomes an error string. Tool handlers
 follow the same rule — return error strings, don't raise.
 
-Approval cards ride the session's own channel: the `ask` closure resolves
+Approval cards ride the session's own channel (owner threads only — a non-owner
+thread's card goes to the cockpit plus a pointer on the owner's primary surface;
+`gate_surface.py`): the `ask` closure resolves
 `dispatcher.adapter(ctx.channel).send`, so the card appears where the
 conversation is — and also mirrors to any dashboard client tapped into that
 thread via `dispatcher.tapped()`, answerable there through the same broker

@@ -1,7 +1,7 @@
 """The tool gate: thin, code-enforced safety.
 
 NEVER and APPROVED lists decide most calls; read-only tools auto-approve; the
-remaining gray zone raises an approval card on the session's own surface. From
+remaining gray zone raises an approval card (where it lands: ``gate_surface``). From
 a card the owner can approve once or "always allow" a tool, which persists it
 to the approved set (#187). Every call that does *not* raise a card is instead
 announced on the session's surface as it starts, so an approved or "always"
@@ -16,9 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from chief.approvals import Approval, ApprovalBroker
+from chief.approvals import Approval
 from chief.audit import AuditLog
-from chief.dispatch import WEB_CHANNEL, Dispatcher
 from chief.gate_text import announce_text, card_denied, never_denied
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import ToolContext, ToolDispatcher
@@ -60,32 +59,6 @@ class GatePolicy:
 AskApproval = Callable[[ToolContext, str], Awaitable[Approval]]
 AllowAlways = Callable[[str], None]
 Announce = Callable[[ToolContext, str], Awaitable[None]]
-
-
-def approval_asker(dispatcher: Dispatcher, approvals: ApprovalBroker) -> AskApproval:
-    """The card path: ask on the calling thread's own surface, and mirror the
-    same card to any dashboard client tapped into that thread (#267).
-
-    Shared by the gate's own gray-zone cards and by tools that raise their own
-    card (``schedule``'s command creation), so both reach the owner the same way.
-    """
-
-    async def ask(ctx: ToolContext, question: str) -> Approval:
-        tk = ctx.thread_key
-        send = dispatcher.adapter(ctx.channel).send
-
-        async def send_and_card(q: str) -> None:
-            dispatcher.tapped(tk, {"type": "approval", "thread": tk, "question": q})
-            if ctx.channel != WEB_CHANNEL:  # web's card above is enough (#267)
-                await send(tk, q)
-
-        answer = await approvals.ask(tk, question, send_and_card)
-        dispatcher.tapped(
-            tk, {"type": "approval_resolved", "thread": tk, "verdict": answer.value}
-        )
-        return answer
-
-    return ask
 
 
 def load_approved(path: Path) -> set[str]:
@@ -179,6 +152,8 @@ class GatedTools:
         return {spec.name for spec in self._registry.specs() if spec.read_only}
 
     def _record(self, call: ToolCall, outcome: str) -> None:
+        # A subagent's calls carry its parent's thread plus its own run id.
+        extra = {"subagent": self._context.subagent} if self._context.subagent else {}
         self._audit.record(
             "tool_call",
             tool=call.name,
@@ -186,4 +161,5 @@ class GatedTools:
             outcome=outcome,
             thread=self._context.thread_key,
             channel=self._context.channel,
+            **extra,
         )

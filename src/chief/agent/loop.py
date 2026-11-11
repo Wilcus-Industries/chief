@@ -37,6 +37,10 @@ PostTool = Callable[[ToolCall, str], Awaitable[str]]
 # depends on this landing in the store as it happens (#261).
 OnCommit = Callable[[dict[str, Any]], Awaitable[None]]
 
+# Fires with each model call's usage as it lands, so a caller whose turn may be
+# cancelled midway (a detached subagent) still records what it spent.
+OnUsage = Callable[[Usage], Awaitable[None]]
+
 # Backstop against a model that never stops calling tools; generous because
 # real multi-step work legitimately chains many calls.
 MAX_ITERATIONS = 25
@@ -75,6 +79,8 @@ async def run_turn(
     injections: Injections | None = None,
     on_interim: OnInterim | None = None,
     on_reasoning: OnDelta | None = None,
+    stop: Callable[[], bool] | None = None,
+    on_usage: OnUsage | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls.
@@ -85,14 +91,22 @@ async def run_turn(
     the turn continues on the new text, keeping the conversation in order.
 
     Reasoning streams to ``on_reasoning`` and is stored on its assistant
-    message for display, but is stripped from everything sent to the model."""
+    message for display, but is stripped from everything sent to the model.
+
+    ``stop`` returning True after a tool batch ends the turn there with the
+    last assistant text — a subagent that called ``finish`` costs no further
+    model call. ``on_usage`` sees each model call's usage as it lands."""
     usage = Usage()
     seen_calls: dict[tuple[str, str], int] = {}
+    last_text = ""
     for iteration in range(max_iterations):
         completion = await stream_once(
             provider, model, messages, tools, on_delta, on_reasoning
         )
         usage = usage + completion.usage
+        if on_usage is not None:
+            await on_usage(completion.usage)
+        last_text = completion.text or last_text
         message = assistant_message(completion)
         messages.append(message)
         if on_commit is not None:
@@ -115,6 +129,8 @@ async def run_turn(
             messages.append(user_message)
             if on_commit is not None:
                 await on_commit(user_message)
+        if stop is not None and stop():
+            return TurnResult(text=last_text, usage=usage)
     return TurnResult(
         text="error: turn exceeded the tool-call iteration limit", usage=usage
     )

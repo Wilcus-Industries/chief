@@ -1,20 +1,36 @@
-"""Subagents: named agent definitions plus the spawn tool.
+"""Subagents: named agent definitions, their tool filter, and the spawn tool.
 
 A definition is a markdown file in the agents dir (YAML frontmatter: name,
 description, optional tools allowlist and model; body: its system prompt).
-Spawning runs a sub-session with its own tool loop and returns the final
-text. Subagents can never spawn further subagents.
+A spawn starts a detached run (``chief.agent.subagent_pool``) that talks to its
+parent over ``send_msg``; ``wait=true`` keeps the old blocking form. Subagents
+can never spawn further subagents.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
-from chief.agent.loop import PostTool, run_turn
-from chief.budget import Budget
-from chief.provider.base import Provider, ToolCall, ToolSpec
+from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
+
+if TYPE_CHECKING:  # the pool imports this module's AgentDef/FilteredTools
+    from chief.agent.subagent_pool import SubagentPool
+
+# Prepended to every definition's prompt (PRD #308): runs are detached, and
+# messaging is for questions and blockers, never status chatter.
+PREAMBLE = (
+    "You are a subagent: you run detached from the session that spawned you "
+    "(your parent), which carries on with its own work meanwhile. Use "
+    "`send_msg` (to your parent, the default) only to ask a question you "
+    "can't answer yourself or to report a blocker — never for status updates "
+    "or acknowledgements. If you never message your parent, your final reply "
+    "is your result. Once you have messaged your parent, you must call "
+    "`finish(result)` when you are done; ending a reply without it leaves you "
+    "waiting for the parent's answer."
+)
 
 
 @dataclass(frozen=True)
@@ -55,31 +71,29 @@ def _parse(path: Path) -> AgentDef | None:
     )
 
 
+SUBAGENT_NEVER = frozenset({"spawn_agent", "restart", "revert_edits"})
+
+
 class FilteredTools:
     """A ToolDispatcher restricted to an allowlist (spawn always excluded).
 
-    ``inherited`` is the spawning session's context. A sub-session's own loop
-    dispatches with no context, so it is handed only to MCP tools: an
-    MCP server opted in to ``session_context`` (e.g. the per-session browser)
-    must see a subagent as its parent's session, while native tools keep
-    their context-free behavior inside subagents (a subagent must not, say,
-    move its parent's persistent shell cwd).
-    """
+    For a detached subagent, ``send_msg`` is always allowed (else an
+    allowlisted agent could never reach its parent) and ``restart`` /
+    ``revert_edits`` never are: no turn boundary would fire the exec."""
 
     def __init__(
-        self,
-        inner: ToolDispatcher,
-        allow: tuple[str, ...] | None,
-        inherited: ToolContext | None = None,
+        self, inner: ToolDispatcher, allow: tuple[str, ...] | None,
+        subagent: bool = False,
     ) -> None:
         self._inner = inner
         self._allow = allow
-        self._inherited = inherited
+        self._always = frozenset({"send_msg"}) if subagent else frozenset()
+        self._never = SUBAGENT_NEVER if subagent else frozenset({"spawn_agent"})
 
     def _allowed(self, name: str) -> bool:
-        if name == "spawn_agent":
+        if name in self._never:
             return False
-        return self._allow is None or name in self._allow
+        return self._allow is None or name in self._allow or name in self._always
 
     def specs(self) -> list[ToolSpec]:
         return [s for s in self._inner.specs() if self._allowed(s.name)]
@@ -89,63 +103,80 @@ class FilteredTools:
     ) -> str:
         if not self._allowed(call.name):
             return f"error: tool '{call.name}' not allowed for this agent"
-        if context is None and call.name.startswith("mcp_"):
-            context = self._inherited
+        return await self._inner.dispatch(call, context)
+
+
+class SubagentScope:
+    """The registry under a subagent's gate. The gate uses the run's context
+    (parent + run id) for cards and audit; only ``send_msg`` and MCP tools
+    (an opted-in server must see the parent's session) receive it. Native
+    tools run context-free: a subagent must not move its parent's shell cwd,
+    switch its model, or schedule as it."""
+
+    def __init__(self, inner: ToolDispatcher) -> None:
+        self._inner = inner
+
+    def specs(self) -> list[ToolSpec]:
+        return self._inner.specs()
+
+    async def dispatch(
+        self, call: ToolCall, context: ToolContext | None = None
+    ) -> str:
+        if call.name != "send_msg" and not call.name.startswith("mcp_"):
+            context = None
         return await self._inner.dispatch(call, context)
 
 
 _SPAWN_SPEC = ToolSpec(
     name="spawn_agent",
     description=(
-        "Run a named subagent on a task in its own sub-session and return "
-        "its final answer."
+        "Run a named subagent on a task, detached. action=spawn (default) "
+        "needs `name` and `task` and returns the subagent's id at once; it "
+        "works while you carry on, and its result arrives later as a message "
+        "from it. It may message you a question — answer with "
+        "send_msg(to=<its id>). With `wait`=true the call blocks and returns "
+        "the result instead, or returns early with the subagent's first "
+        "question, after which it runs on async. action=list shows your "
+        "running subagents; action=cancel needs `id` and stops one of them."
     ),
     parameters={
         "type": "object",
-        "properties": {"name": {"type": "string"}, "task": {"type": "string"}},
-        "required": ["name", "task"],
+        "properties": {
+            "action": {"type": "string", "enum": ["spawn", "list", "cancel"]},
+            "name": {"type": "string"},
+            "task": {"type": "string"},
+            "wait": {"type": "boolean"},
+            "id": {"type": "string", "description": "cancel: the subagent id"},
+        },
     },
 )
 
-
 def register_spawn_tool(
-    registry: ToolRegistry,
-    agents: AgentRegistry,
-    provider: Provider,
-    default_model: str,
-    budget: Budget | None = None,
-    post_tool: PostTool | None = None,
+    registry: ToolRegistry, agents: AgentRegistry, pool: "SubagentPool"
 ) -> None:
-    """Expose spawn_agent; sub-sessions reuse the shared registry, filtered.
-
-    ``post_tool`` screens the sub-session's own tool results (the core
-    injection screen), so a subagent reads fetched content no less guarded
-    than the parent session does."""
+    """Expose spawn_agent (spawn/list/cancel), scoped to the caller's own runs."""
 
     async def spawn_agent(
-        name: str, task: str, context: ToolContext | None = None
+        context: ToolContext | None, action: str = "spawn", name: str = "",
+        task: str = "", wait: bool = False, id: str = "",  # noqa: A002 - tool arg
     ) -> str:
+        if context is None:
+            return "error: spawn_agent needs a session context"
+        parent = context.thread_key
+        if action == "list":
+            return pool.describe(parent)
+        if action == "cancel":
+            run = pool.get(id)
+            if run is None or run.parent_key != parent:
+                return f"error: no running subagent of yours named '{id}'"
+            await pool.cancel(id, by="parent")
+            return f"cancelled {id}"
+        if action != "spawn":
+            return f"error: unknown action '{action}' (spawn, list, cancel)"
         definition = agents.get(name)
         if definition is None:
             known = ", ".join(d.name for d in agents.scan()) or "none"
             return f"error: no agent named '{name}' (known: {known})"
-
-        async def drop_delta(text: str) -> None:
-            pass
-
-        result = await run_turn(
-            provider=provider,
-            model=definition.model or default_model,
-            messages=[
-                {"role": "system", "content": definition.system_prompt},
-                {"role": "user", "content": task},
-            ],
-            tools=FilteredTools(registry, definition.tools, inherited=context),
-            on_delta=drop_delta,
-            post_tool=post_tool,
-        )
-        if budget is not None:
-            await budget.record(f"subagent:{name}", result.usage.cost)
-        return result.text
+        return await pool.spawn(parent, context.channel, definition, task, wait)
 
     registry.register(Tool(_SPAWN_SPEC, spawn_agent, wants_context=True))

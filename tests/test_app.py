@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Message
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
@@ -26,7 +26,7 @@ from chief.tools import ToolRegistry
 from chief.tools.shell.service import GUARD_REFUSED_EXIT_CODE
 from chief.wiring import build_mcp, build_provider
 
-from .fakes import FakeProvider, text_turn
+from .fakes import CapturingAdapter, FakeProvider, text_turn
 
 Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 
@@ -640,38 +640,24 @@ async def test_prompt_schedule_creation_raises_no_card(
         await shutdown(app, streams)
 
 
-class _CapturingAdapter(Adapter):
-    """A registered origin adapter that captures its outbound sends — the
-    fake device transport at the edge (#277). Everything upstream of ``send``
-    (the web route, the dispatcher, the session turn) is the real wiring."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.sent: list[tuple[str, str]] = []
-
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
-
-    async def send(self, thread_key: str, text: str) -> None:
-        self.sent.append((thread_key, text))
-
-
 async def test_web_send_drives_the_real_cross_channel_dispatch_path(
     tmp_path: Path, sock_path: Path
 ) -> None:
-    # #277: an authed POST /send for a non-web 1:1 thread runs through the REAL
-    # dispatcher → session turn → the thread's registered origin adapter, and
-    # the outbound reply mirrors to the web hub. Only the model (FakeProvider)
-    # and the device transport (the capturing adapter's send) are faked.
+    # #277: an authed POST /send for the owner's non-web 1:1 thread runs through
+    # the REAL dispatcher → session turn → the thread's registered origin
+    # adapter, and the outbound reply mirrors to the web hub. Only the model
+    # (FakeProvider) and the device transport (the capturing adapter's send) are
+    # faked. (A stranger's thread stays quiet instead: test_owner_audience.)
     # An ephemeral port, so the test never collides with a live daemon on 8130.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         free_port = probe.getsockname()[1]
     config = make_config(
-        tmp_path, sock_path, web_password="hunter2", web_port=free_port
+        tmp_path, sock_path, web_password="hunter2", web_port=free_port,
+        imessage_owner_handles=("+15551234567",),
     )
     app, streams = await boot(config, FakeProvider([text_turn("on my way")]))
-    device = _CapturingAdapter("imessage")
+    device = CapturingAdapter("imessage")
     app.dispatcher.register(device)
     assert app.web_server is not None
     client = httpx.AsyncClient(

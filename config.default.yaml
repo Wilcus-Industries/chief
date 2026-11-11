@@ -170,3 +170,18 @@ compaction:
 update:
   autonomy: clean-only
   schedule: ""
+
+# Async subagents (`spawn_agent`). `max_concurrent` caps subagent turns running
+# at once, separate from max_concurrent_sessions so a fan-out can't starve your
+# chat threads; an idle subagent (waiting on its parent) holds no slot. One idle
+# longer than `idle_timeout_s` is killed and its parent told.
+subagents:
+  max_concurrent: 6
+  idle_timeout_s: 1800
+
+# Session-to-session messaging (`send_msg`). Past `loop_warn_count` messages
+# between the same two sessions within `loop_window_s` seconds, both get a
+# warning to stop if they are looping. Sends are never refused.
+peers:
+  loop_warn_count: 8
+  loop_window_s: 600

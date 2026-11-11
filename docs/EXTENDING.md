@@ -94,11 +94,17 @@ core services call classifiers by name.
 Drop a `<name>.md` in `agents/` with frontmatter `name`, `description`, optional
 `tools` allowlist and `model`; the body is its system prompt.
 
-Omitting `tools` grants every tool **minus `spawn_agent`** — the recursion guard is
-hardcoded ahead of the allowlist, so a subagent can never spawn another one.
+Omitting `tools` grants every tool **minus `spawn_agent`, `restart` and
+`revert_edits`** — hardcoded ahead of the allowlist, so a subagent can never spawn
+another one, and never restart or roll back the daemon (a detached run has no turn
+boundary for the restart to fire at).
 
-Subagent output does not stream; only the final text returns as the tool result.
-Subagents never fire hooks.
+A spawn is async by default: the run works detached and its result arrives at the
+parent as a message (`wait=true` keeps the blocking form). The core `PREAMBLE` is
+prepended to every definition's prompt — don't repeat it. A subagent can always
+`send_msg` its parent regardless of `tools`, and its calls are gated on the
+parent's thread like the parent's own. Output does not stream. Subagents never
+fire hooks. See SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
 
 ## Add a skill
 
