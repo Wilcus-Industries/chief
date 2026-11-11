@@ -38,8 +38,8 @@ from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.recovery import RestartController
 from chief.skills import SkillLibrary
-from chief.subagents import SubagentScope
 from chief.strangers import StrangerLog
+from chief.subagents import SubagentScope
 from chief.tools import ToolContext, ToolDispatcher, ToolRegistry
 from chief.tools.native import register_native_tools
 from chief.tools.shell.prompt import shell_prompt_line
