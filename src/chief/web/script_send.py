@@ -51,9 +51,11 @@ SEND_SCRIPT = PENDING_SCRIPT + KEYS_SCRIPT + """
 const pending = {};  /* thread -> [{text, mode, seen}] sent, not yet taken */
 const TOUCH = matchMedia("(pointer: coarse)").matches;
 const PENDING_TAG = {queued: "queued", injected: "interrupt \\u2014 next step"};
-input.placeholder = "message chief   \\u00b7   / for commands   \\u00b7   " +
-  (TOUCH ? "enter interrupts"
-    : "shift+enter newline   \\u00b7   ctrl+enter interrupts");
+input.placeholder = matchMedia("(max-width: 640px)").matches
+  ? "message chief \\u00b7 / for commands"
+  : "message chief   \\u00b7   / for commands   \\u00b7   " +
+    (TOUCH ? "enter interrupts"
+      : "shift+enter newline   \\u00b7   ctrl+enter interrupts");
 
 /* grow the textarea with its text, up to a cap; past that it scrolls */
 function fitInput(){

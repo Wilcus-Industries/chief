@@ -40,6 +40,8 @@ function follow(){
 function toBottom(){
   pinned = true; log.scrollTop = log.scrollHeight; el("jump").hidden = true;
 }
+/* a turn is running on the focused thread: from its inbound frame to its final */
+const working = (on) => { el("working").hidden = !on; };
 
 const storedRows = () => [...log.children].filter(
   (n) => !n.classList.contains("eph") && !n.classList.contains("empty"));
@@ -83,7 +85,7 @@ async function reloadHistory(tk, keepScroll){
   const rows = await getJSON("/history?thread=" + encodeURIComponent(tk));
   if (seq !== reloadSeq || tk !== state.current) return;
   const top = log.scrollTop;
-  live = null; liveThink = null; log.replaceChildren();
+  live = null; liveThink = null; log.replaceChildren(); working(false);
   (rows || []).forEach((r) => {
     if (r.role === "tool") addTool(r.call_id, r.name);
     else if (r.role === "thinking") addThinking(r.text);
@@ -121,6 +123,7 @@ function onFrame(e){
   /* any frame but more thinking ends the thinking block; inbound/tool/thinking
      close the streaming bubble, so later text lands below them as history has it */
   if (f.type !== "thinking") liveThink = null;
+  if (["inbound", "tool", "thinking", "delta"].includes(f.type)) working(true);
   if (f.type === "inbound"){
     live = null; cmdWait[f.thread] = 0; onInbound(f.thread, f.text);
   } else if (f.type === "tool"){ live = null; addTool(f.call_id, f.name); }
@@ -146,6 +149,6 @@ function onFinal(f){
      model calls and the final carries only the last */
   if (live){ setMarkdown(live, liveText || f.text); live = null; }
   else addMsg("chief", f.text);
-  bumpThread(f.thread, f.text);
+  working(false); bumpThread(f.thread, f.text);
 }
 """

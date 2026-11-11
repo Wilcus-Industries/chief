@@ -28,6 +28,7 @@ CHAT_PAGE = """<!doctype html>
 <link rel="stylesheet" href="/app.css">
 </head><body>
 <header id="statusbar">
+  <button class="seg" id="menu" type="button" aria-label="buffers">&#9776;</button>
   <span class="seg brand">chief</span>
   <span class="seg" id="conn"><i class="dot"></i
     ><span id="conn-label">connecting</span></span>
@@ -60,6 +61,7 @@ CHAT_PAGE = """<!doctype html>
     </div>
     <div id="log"></div>
     <button id="jump" type="button" hidden>&darr; latest</button>
+    <div id="working" hidden><i class="spin"></i>chief is working&hellip;</div>
     <div id="queued"></div>
     <div id="toast" role="status" aria-live="polite" hidden></div>
     <div id="readonly" hidden>group thread &mdash; view only; send with imsg.</div>

@@ -63,16 +63,22 @@ body{
   font-size:10px;}
 #buflist .snippet{flex-basis:100%; color:var(--faint); font-size:11px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-#buflist .kill{color:var(--faint); font-size:13px; line-height:1;
-  padding:0 .15rem; border-radius:2px; opacity:0;}
-#buflist li:hover .kill{opacity:.7;}
+#buflist .kill{font:inherit; font-size:14px; line-height:1; color:var(--faint);
+  padding:.05rem .35rem; background:transparent; border:none; border-radius:2px;
+  cursor:pointer; opacity:.45;}
+#buflist li:hover .kill, #buflist li.active .kill,
+#buflist .kill:focus-visible{opacity:.9;}
 #buflist .kill:hover{opacity:1; color:var(--red); background:var(--bg3);}
-#newbuf{
+#newbuf, #newname{
   margin:.5rem; padding:.45rem; font:inherit; text-align:left;
   background:transparent; color:var(--aqua); border:1px dashed var(--bg3);
   border-radius:2px; cursor:pointer;
 }
 #newbuf:hover{background:var(--bg2); border-style:solid;}
+#newname{cursor:text; color:var(--fg); border-style:solid; border-color:var(--aqua);
+  outline:none;}
+#menu{display:none; font:inherit; font-size:14px; background:transparent;
+  color:var(--fg); border:none; border-right:1px solid var(--bg2); cursor:pointer;}
 /* stream-policy panel */
 #policy{display:flex; align-items:center; gap:.9rem; flex-wrap:wrap;
   padding:.4rem 1.3rem; font-size:12px; color:var(--dim);
@@ -123,5 +129,22 @@ body{
 #complete li.sel{background:var(--bg3); color:var(--fg);}
 /* focus + motion */
 :focus-visible{outline:2px solid var(--blue); outline-offset:1px;}
-@media (max-width:640px){#buffers{flex-basis:150px}}
+#working{padding:.3rem 1.3rem; font-size:12px; color:var(--aqua);
+  display:flex; align-items:center; gap:.5rem;}
+#working[hidden]{display:none;}
+.spin{width:8px; height:8px; border-radius:50%; background:var(--aqua);
+  animation:pulse 1s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:.25} 50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+/* narrow screens: the sidebar slides over the transcript */
+@media (max-width:640px){
+  #menu{display:flex;}
+  #model-seg, #mon-seg, #posture-seg{display:none;}
+  #main{position:relative;}
+  #buffers{position:absolute; inset:0 auto 0 0; width:min(80vw,280px); z-index:10;
+    transform:translateX(-100%); transition:transform .15s;
+    box-shadow:4px 0 18px rgba(0,0,0,.5);}
+  body.drawer #buffers{transform:none;}
+  #log, #f, #policy{padding-left:.9rem; padding-right:.9rem;}
+}
 """ + CHAT_STYLES

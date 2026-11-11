@@ -1,8 +1,10 @@
-"""The web UI client, served at /app.js. Buffers, readline completion; send
-and its pending list live in script_send.py, the SSE stream client in
-script_stream.py, activity groups + approval cards in script_tools.py, the
-markdown renderer in script_markdown.py (concatenated)."""
+"""The web UI client, served at /app.js. Core helpers, status bar, readline
+completion, boot; the sidebar lives in script_buffers.py, send and its pending
+list in script_send.py, the SSE stream client in script_stream.py, activity
+groups + approval cards in script_tools.py, the markdown renderer in
+script_markdown.py (concatenated)."""
 
+from chief.web.script_buffers import BUFFERS_SCRIPT
 from chief.web.script_markdown import MARKDOWN_SCRIPT
 from chief.web.script_policy import POLICY_SCRIPT
 from chief.web.script_send import SEND_SCRIPT
@@ -39,33 +41,6 @@ function notice(text, kind){
   toastTimer = setTimeout(() => { t.hidden = true; }, 5000);
 }
 
-/* ---- buffers ---- */
-function renderBuffers(){
-  const list = el("buflist"); list.replaceChildren();
-  state.sessions.forEach((s, i) => {
-    const li = document.createElement("li");
-    li.className = (s.thread === state.current ? "active " : "") +
-      (unread.has(s.thread) ? "unread" : "");
-    li.append(span("idx", i), span("name", label(s.thread)));
-    if (s.channel !== "web") li.append(span("badge", s.channel));
-    if (snippets[s.thread]) li.append(span("snippet", snippets[s.thread]));
-    if (s.channel === "web" && s.thread !== "web:main"){
-      const x = span("kill", "\\u00d7"); x.title = "delete buffer";
-      x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
-      li.append(x);
-    }
-    li.onclick = () => switchTo(s.thread); list.appendChild(li);
-  });
-}
-
-async function delBuf(tk){
-  await fetch("/delete", {method: "POST",
-    headers: {"content-type": "application/json"},
-    body: JSON.stringify({thread: tk})});
-  unread.delete(tk); if (state.current === tk) await switchTo("web:main");
-  await loadSessions();
-}
-
 function setStatus(tk){
   const s = state.sessions.find((x) => x.thread === tk);
   el("buf-seg").textContent = label(tk);
@@ -77,7 +52,7 @@ function setStatus(tk){
 }
 
 async function switchTo(tk){
-  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
+  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers(); closeDrawer();
   resolveApproval(tk);  /* drop another thread's card hint; subscribe replays */
   renderPending(); await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
@@ -94,17 +69,6 @@ function addMsg(role, text, who){
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
   follow(); return body;
-}
-
-async function loadSessions(){
-  const rows = await getJSON("/sessions") || [];
-  if (!rows.some((s) => s.thread === "web:main"))
-    rows.unshift({thread: "web:main", channel: "web", model: null, count: 0});
-  state.sessions = rows; renderBuffers();
-  if (!state.current || !rows.some((s) => s.thread === state.current)){
-    const start = rows.find((s) => s.channel === "web") || rows[0];
-    switchTo(state.current || start.thread);
-  }
 }
 
 /* ---- readline-style completion ---- */
@@ -146,14 +110,7 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Escape"){ e.preventDefault(); hidePop(); }
 });
 
-/* ---- new buffer + keybinds ---- */
-el("newbuf").onclick = () => {
-  const name = (prompt("new buffer name") || "").trim(); if (!name) return;
-  const tk = "web:" + name;
-  if (!state.sessions.some((s) => s.thread === tk))
-    state.sessions.unshift({thread: tk, channel: "web", model: null, count: 0});
-  switchTo(tk);
-};
+/* ---- keybinds: Alt+digit focuses that buffer ---- */
 document.addEventListener("keydown", (e) => {
   if (e.altKey && /^[0-9]$/.test(e.key)){
     const s = state.sessions[+e.key]; if (s){ e.preventDefault(); switchTo(s.thread); }
@@ -180,4 +137,7 @@ async function posture(){
   const poll = () => { monitors(); posture(); };
   poll(); setInterval(poll, 10000);
 })();
-""" + SEND_SCRIPT + POLICY_SCRIPT + STREAM_SCRIPT + TOOL_SCRIPT + MARKDOWN_SCRIPT
+""" + (
+    BUFFERS_SCRIPT + SEND_SCRIPT + POLICY_SCRIPT + STREAM_SCRIPT + TOOL_SCRIPT
+    + MARKDOWN_SCRIPT
+)
