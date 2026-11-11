@@ -72,6 +72,8 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
     update = raw.get("update") or {}
     stream = raw.get("stream") or {}
     typesafe = raw.get("typesafe") or {}
+    subagents = raw.get("subagents") or {}
+    peers = raw.get("peers") or {}
     imessage_mode = coerce.imessage_mode(imessage.get("mode", "self"))
     self_handles = coerce.as_handles(imessage.get("self_handles"))
     owner_db_path = (
@@ -154,6 +156,14 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         stream_channel_defaults=coerce.stream_channel_defaults(
             stream.get("channel_defaults")
         ),
+        subagents_max_concurrent=coerce.positive_int(
+            subagents.get("max_concurrent", 6), "subagents.max_concurrent"),
+        subagents_idle_timeout_s=coerce.positive_int(
+            subagents.get("idle_timeout_s", 1800), "subagents.idle_timeout_s"),
+        peers_loop_warn_count=coerce.positive_int(
+            peers.get("loop_warn_count", 8), "peers.loop_warn_count"),
+        peers_loop_window_s=coerce.positive_int(
+            peers.get("loop_window_s", 600), "peers.loop_window_s"),
     )
 
 

@@ -438,3 +438,42 @@ def test_a_typo_in_update_autonomy_is_refused_not_coerced(tmp_path: Path) -> Non
     path.write_text("update:\n  autonomy: yes-please\n")
     with pytest.raises(ConfigError):
         load_config(path)
+
+
+def test_subagent_and_peer_defaults(tmp_path: Path) -> None:
+    config = load_config(tmp_path / "missing.yaml")
+    assert config.subagents_max_concurrent == 6
+    assert config.subagents_idle_timeout_s == 1800
+    assert config.peers_loop_warn_count == 8
+    assert config.peers_loop_window_s == 600
+
+
+def test_subagent_and_peer_yaml_override(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "subagents:\n  max_concurrent: 2\n  idle_timeout_s: 60\n"
+        "peers:\n  loop_warn_count: 3\n  loop_window_s: 30\n"
+    )
+    config = load_config(path)
+    assert config.subagents_max_concurrent == 2
+    assert config.subagents_idle_timeout_s == 60
+    assert config.peers_loop_warn_count == 3
+    assert config.peers_loop_window_s == 30
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "subagents:\n  max_concurrent: 0\n",
+        "subagents:\n  idle_timeout_s: -5\n",
+        "peers:\n  loop_warn_count: lots\n",
+        "peers:\n  loop_window_s: 1.5\n",
+    ],
+)
+def test_subagent_and_peer_values_must_be_positive_ints(
+    tmp_path: Path, block: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(block)
+    with pytest.raises(ConfigError, match="must be a positive integer"):
+        load_config(path)

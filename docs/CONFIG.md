@@ -91,6 +91,10 @@ template line.
 | `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
 | `compaction.windows.<model>` | `compaction_windows` | `dict[str,int]` | `{}` | — |
 | `stream.channel_defaults.<channel>` | `stream_channel_defaults` | `dict[str,StreamPolicy]` | `{imessage,web: rich}` | — |
+| `subagents.max_concurrent` | `subagents_max_concurrent` | positive `int` | `6` | — |
+| `subagents.idle_timeout_s` | `subagents_idle_timeout_s` | positive `int` | `1800` | — |
+| `peers.loop_warn_count` | `peers_loop_warn_count` | positive `int` | `8` | — |
+| `peers.loop_window_s` | `peers_loop_window_s` | positive `int` | `600` | — |
 
 `Config.default_model` is a derived property: `self.models["default"]`.
 

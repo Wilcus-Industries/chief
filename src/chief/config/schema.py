@@ -148,6 +148,15 @@ class Config:
     # when it is missing — so switching scheduled updates off means clearing
     # this key, not only deleting the schedule.
     update_schedule: str = ""
+    # Async subagents (PRD #308): their own turn cap, apart from
+    # max_concurrent_sessions so a fan-out can't starve the owner's threads; a
+    # slot is held only while a subagent turn runs, never while it sits idle.
+    subagents_max_concurrent: int = 6
+    subagents_idle_timeout_s: int = 1800
+    # Peer messaging loop guard: past this many messages between one pair of
+    # sessions inside the rolling window, both sides get a warning (never refused).
+    peers_loop_warn_count: int = 8
+    peers_loop_window_s: int = 600
 
     @property
     def default_model(self) -> str:
