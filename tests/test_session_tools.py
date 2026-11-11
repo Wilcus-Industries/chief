@@ -12,7 +12,9 @@ from .fakes import FakeProvider
 
 
 def make_registry(
-    store: MessageStore, owner_handles: tuple[str, ...] = ()
+    store: MessageStore,
+    owner_handles: tuple[str, ...] = (),
+    primary: tuple[str, str] | None = None,
 ) -> tuple[ToolRegistry, SessionManager]:
     manager = SessionManager(
         provider=FakeProvider([]),
@@ -23,7 +25,9 @@ def make_registry(
         max_concurrent=4,
     )
     registry = ToolRegistry()
-    register_session_tools(registry, manager, owner_handles=owner_handles)
+    register_session_tools(
+        registry, manager, owner_handles=owner_handles, primary=primary
+    )
     return registry, manager
 
 
@@ -59,6 +63,26 @@ async def test_list_tags_threads_that_reach_only_the_owner(
     assert "(owner)" in by_thread["+15550001"]
     assert "(owner)" in by_thread["web:main"]
     assert "(owner)" not in by_thread["+15559999"]
+    assert "primary" not in "".join(lines)
+
+
+async def test_list_tags_the_primary_owner_thread(
+    engine: AsyncEngine, store: MessageStore
+) -> None:
+    """With several owner threads (phone and email handles), exactly one —
+    ``primary_target`` — is where a forward to the owner goes."""
+    await store.ensure_session("+15550001", "imessage")
+    await store.ensure_session("owner@example.com", "imessage")
+    registry, _ = make_registry(
+        store,
+        owner_handles=("+15550001", "owner@example.com"),
+        primary=("imessage", "+15550001"),
+    )
+    lines = (await registry.dispatch(call("list"), context=CTX)).splitlines()
+    by_thread = {line.split()[1]: line for line in lines}
+    assert "(owner, primary)" in by_thread["+15550001"]
+    assert "primary" not in by_thread["owner@example.com"]
+    assert "(owner)" in by_thread["owner@example.com"]
 
 
 async def test_list_when_empty(engine: AsyncEngine, store: MessageStore) -> None:

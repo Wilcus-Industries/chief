@@ -148,6 +148,10 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
     # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
     model_aliases = frozenset(config.provider_aliases)
+    # A forward to the owner targets this row by its `(owner, primary)` tag,
+    # and send_msg refuses an unknown thread — so it exists from boot.
+    primary = primary_target(config)
+    await store.ensure_session(primary[1], primary[0])
     register_native_tools(
         core.registry,
         manager=core.manager,
@@ -157,7 +161,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         shell_service=shell_service, agents_dir=config.agents_dir,
         root=Path.cwd(), shell_guards=shell_guards, model_aliases=model_aliases,
         ask=core.ask, router=peers.router, pool=peers.pool,
-        owner_handles=config.imessage_owner_handles,
+        owner_handles=config.imessage_owner_handles, primary=primary,
     )
     await ensure_update_schedule(core.cron, config)
     commands = CommandSet(

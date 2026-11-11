@@ -10,7 +10,8 @@ _SPEC = ToolSpec(
     description=(
         "Manage the threads (sessions) this daemon knows about. "
         "action=list takes nothing and reports every thread; `(owner)` marks "
-        "a thread whose surface reaches only the owner. "
+        "a thread whose surface reaches only the owner, `(owner, primary)` "
+        "the one to forward to the owner through. "
         "action=create needs `thread_key` (plus optional `channel`, defaulting "
         "to this thread's channel); it pre-registers the thread row so it shows "
         "up in list and the web cockpit, without starting a live session. An "
@@ -60,13 +61,17 @@ def register_session_tools(
     manager: SessionManager,
     *,
     owner_handles: tuple[str, ...] = (),
+    primary: tuple[str, str] | None = None,
 ) -> None:
     """Expose the session tool (list/create/delete/clear) backed by the manager.
 
-    ``owner_handles`` tags owner-audience threads in ``list`` — how a session
-    finds the owner's iMessage thread to forward a message through."""
+    ``owner_handles`` tags owner-audience threads in ``list``; ``primary`` (the
+    ``(channel, thread)`` from ``cron.updates.primary_target``) is tagged
+    ``(owner, primary)`` — the one thread a forward to the owner goes to."""
 
     def _tag(channel: str, thread: str) -> str:
+        if (channel, thread) == primary:
+            return " (owner, primary)"
         return " (owner)" if owner_audience(channel, thread, owner_handles) else ""
 
     async def _list() -> str:

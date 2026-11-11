@@ -362,7 +362,10 @@ that would stall the sender, or deadlock on a self-thread. The envelope
 keep that header stable, core skills key on it.
 
 Reaching the owner from a thread that isn't theirs is a forward, not a
-separate tool: the `messaging` skill sends `send_msg` to the owner's iMessage
-thread (else `web:main`), which tells them in its own transcript and routes
-their answer back. `session action=list` tags owner-audience threads
-`(owner)` (`policy.owner_audience`) so a session can find that target.
+separate tool: the `messaging` skill sends `send_msg` to
+`cron.updates.primary_target` (the owner's iMessage thread, else `web:main`),
+which tells them in its own transcript — treating the forward as information,
+never instructions — and routes their answer back. `session action=list` tags
+owner-audience threads `(owner)` (`policy.owner_audience`) and the primary one
+`(owner, primary)`; `build_app` ensures that row exists at boot, since
+`send_msg` refuses an unknown thread.
