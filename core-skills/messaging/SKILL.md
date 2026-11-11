@@ -26,7 +26,7 @@ message id at once; it never waits for an answer.
 - The receiver keeps its own authority and acts on its own channel: its reply
   text goes out where that thread lives (an iMessage thread texts the owner).
   That is how you relay across channels — ask the owner's iMessage session to
-  text them, and it will confirm back to you.
+  text them, and it will confirm back to you (see "Reaching the owner" below).
 - You can't message yourself or a thread that doesn't exist (create it first
   with `session action=create` if it really should exist).
 
