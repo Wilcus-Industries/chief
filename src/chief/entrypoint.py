@@ -14,7 +14,7 @@ from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
-from chief.selfedit.resume import resume_interrupted
+from chief.selfedit.resume import resume_interrupted, resume_plan
 
 if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
     from chief.daemon import App
@@ -110,6 +110,10 @@ async def amain() -> None:
         # chat.db and answer every iMessage twice. Held for the whole process.
         _lock = acquire_instance_lock(config.db_path.parent / "chief.lock")
         app = await build_app(config)
+        # The messages the last process died holding. Their threads are held
+        # before any adapter starts, so nothing sent since overtakes them.
+        plan = resume_plan(app.inflight.take_interrupted() if app.inflight else [])
+        app.dispatcher.hold(list(plan))
         await app.start()
     except AlreadyRunning:
         logger.error("another chief instance is already running — refusing to start")
@@ -131,9 +135,9 @@ async def amain() -> None:
         logger.info("now running %s", version)
     await report_restart(app, repo_root)
     await deliver_subagent_notices(app, config.db_path.parent)
-    # Held on to until shutdown: the turns the last process died holding.
-    resuming = resume_interrupted(
-        app.dispatcher, app.restart.take_interrupted() if app.restart else []
+    # Held on to until shutdown; each releases its thread when done.
+    resuming = (
+        resume_interrupted(app.dispatcher, app.inflight, plan) if app.inflight else []
     )
     logger.info("chief up — socket at %s", config.socket_path)
 
@@ -142,8 +146,8 @@ async def amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
-    # A resumed turn still running is cut off like any other; its in-flight
-    # record survives the cancel, so the next boot picks it up again.
+    # A resumed turn still running is cut off like any other; its record
+    # survives the cancel, and the next boot gives up on it (one retry).
     for task in resuming:
         task.cancel()
     await app.stop()

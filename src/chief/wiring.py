@@ -43,6 +43,7 @@ from chief.persistence.db import (
 from chief.persistence.store import MessageStore
 from chief.provider.base import Provider
 from chief.provider.factory import build_provider as build_provider
+from chief.selfedit.inflight import InflightLog
 from chief.selfedit.recovery import RestartController
 from chief.tools import ToolDispatcher, ToolRegistry
 from chief.web.adapter import WebAdapter
@@ -78,6 +79,8 @@ class Core:
     ask: AskApproval | None = None
     # Builds a thread's gated tools; the subagent pool reuses it per run.
     tools_factory: Callable[..., ToolDispatcher] | None = None
+    # Messages held unanswered, on disk; the boot resumes its leftovers.
+    inflight: InflightLog | None = None
 
 
 @dataclass
@@ -162,7 +165,7 @@ def build_adapters(
     if config.imessage_enabled and sys.platform == "darwin":
         imessage_adapter = IMessageAdapter(
             # fire_restart=False: adapter fires it after its cursor is durable.
-            lambda m: dispatcher.handle(m, fire_restart=False),
+            lambda m, t: dispatcher.handle(m, fire_restart=False, ticket=t),
             db_path=config.imessage_db_path, self_handles=config.imessage_self_handles,
             cursor_path=config.db_path.parent / "imessage_cursor",
             owner_db_path=config.imessage_owner_db_path,
@@ -171,6 +174,7 @@ def build_adapters(
             restart=core.restart, dedicated=config.imessage_dedicated,
             # Poll stage, ahead of the FIFO worker: card answers, mid-turn owner texts.
             resolve_approval=dispatcher.resolve_approval, inject=dispatcher.try_inject,
+            track=dispatcher.track,  # at enqueue: the cursor is already saved
         )
         dispatcher.register(imessage_adapter)
 

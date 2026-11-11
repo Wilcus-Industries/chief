@@ -16,7 +16,7 @@ from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
 from chief.peers.wiring import Peers
 from chief.persistence.store import MessageStore
-from chief.selfedit.recovery import RestartController
+from chief.selfedit.inflight import InflightLog
 from chief.tools.shell.service import ShellService
 from chief.web.adapter import WebAdapter
 from chief.web.server import WebServer
@@ -44,7 +44,7 @@ class App:
     imessage_adapter: IMessageAdapter | None
     shell_service: ShellService
     peers: Peers | None = None
-    restart: RestartController | None = None
+    inflight: InflightLog | None = None
 
     async def start(self) -> None:
         # Fail closed on monitors written before the scoping rule (#285).

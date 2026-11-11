@@ -9,53 +9,47 @@ implementation; ``_NullGate`` is the no-op used by tests and non-daemon runs.
 from typing import Protocol
 
 
-class TurnTicket(Protocol):
-    """One turn's entry in the durable in-flight record
-    (``chief.selfedit.inflight``): ``started`` once its user message is in
-    the transcript, ``done`` when it finishes. A turn killed before ``done``
-    is replayed or woken by the next boot."""
-
-    def started(self) -> None: ...
-
-    def done(self) -> None: ...
-
-
 class RestartGate(Protocol):
     """Brackets a turn so a pending self-edit restart drains it before exec.
 
     ``enter_turn`` blocks while a restart is pending and otherwise registers
     the turn as active; ``leave_turn`` deregisters it; ``fire_if_requested``
-    restarts (never returning) once the turn has committed. ``track`` records
-    a turn the moment it is queued, so a restart that kills it can't lose it.
+    restarts (never returning) once the turn has committed.
     """
-
-    def track(
-        self, thread_key: str, channel: str, sender: str, text: str
-    ) -> TurnTicket: ...
 
     async def enter_turn(self) -> None: ...
 
     def leave_turn(self) -> None: ...
 
     async def fire_if_requested(self) -> None: ...
-
-
-class NullTicket:
-    def started(self) -> None: ...
-
-    def done(self) -> None: ...
 
 
 class _NullGate:
     """No-op gate for sessions with no restart coordinator (tests, non-daemon)."""
 
-    def track(
-        self, thread_key: str, channel: str, sender: str, text: str
-    ) -> TurnTicket:
-        return NullTicket()
-
     async def enter_turn(self) -> None: ...
 
     def leave_turn(self) -> None: ...
 
     async def fire_if_requested(self) -> None: ...
+
+
+class TurnTicket(Protocol):
+    """One message's entry in the durable in-flight record
+    (``chief.selfedit.inflight``), held by whoever owns the message from the
+    moment it reaches chief: ``started`` once its user message is in the
+    transcript, ``done`` once it is answered (or failed, or was never a turn).
+    A message whose ticket isn't done when the process dies is replayed or
+    woken by the next boot."""
+
+    def started(self) -> None: ...
+
+    def done(self) -> None: ...
+
+
+class NullTicket:
+    """The ticket where nothing is recorded (tests, strangers, no log)."""
+
+    def started(self) -> None: ...
+
+    def done(self) -> None: ...

@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from chief.adapters.base import Message
+from chief.adapters.base import Message, Requeue
 from chief.agent.inbox import Inbox, Injected
 from chief.agent.loop import run_turn
 from chief.agent.manager import SessionManager
@@ -256,6 +256,11 @@ async def test_on_begin_fires_once_the_turn_holds_the_lock(
 # ---- dispatcher ----
 
 
+def back(into: list[Message]) -> Requeue:
+    """A requeue path that just keeps what comes back."""
+    return lambda message, ticket: into.append(message)
+
+
 def owner(text: str, sender: str = "owner", channel: str = "cli") -> Message:
     return Message(channel=channel, sender=sender, thread_key="cli:t", text=text)
 
@@ -266,11 +271,11 @@ async def test_try_inject_refuses_strangers_commands_and_unknown_threads(
     manager = manager_for(FakeProvider([]), store)
     dispatcher = Dispatcher(manager)
     requeued: list[Message] = []
-    assert dispatcher.try_inject(owner("hi"), requeued.append) is False  # no session
+    assert dispatcher.try_inject(owner("hi"), back(requeued)) is False  # no session
     await manager.get_or_create("cli:t", "cli")
-    assert dispatcher.try_inject(owner("hi"), requeued.append) is False  # idle
-    assert dispatcher.try_inject(owner("hi", sender="+1555"), requeued.append) is False
-    assert dispatcher.try_inject(owner("/stop"), requeued.append) is False
+    assert dispatcher.try_inject(owner("hi"), back(requeued)) is False  # idle
+    assert dispatcher.try_inject(owner("hi", sender="+1555"), back(requeued)) is False
+    assert dispatcher.try_inject(owner("/stop"), back(requeued)) is False
     assert requeued == []
 
 
@@ -294,7 +299,7 @@ async def test_injected_message_streams_inbound_and_publishes_on_consume(
     turn = asyncio.create_task(dispatcher.handle(owner("start")))
     await gate.entered.wait()
     requeued: list[Message] = []
-    assert dispatcher.try_inject(owner("also this"), requeued.append) is True
+    assert dispatcher.try_inject(owner("also this"), back(requeued)) is True
     gate.release.set()
     await turn
     inbound = []
@@ -319,7 +324,7 @@ async def test_an_overtaken_answer_is_sent_before_the_final(
     turn = asyncio.create_task(dispatcher.handle(owner("start")))
     await provider.entered.wait()
     requeued: list[Message] = []
-    assert dispatcher.try_inject(owner("wait, also"), requeued.append) is True
+    assert dispatcher.try_inject(owner("wait, also"), back(requeued)) is True
     provider.gate.set()
     await turn
     assert adapter.sent == [("cli:t", "answer one"), ("cli:t", "answer two")]
@@ -337,7 +342,7 @@ async def test_leftover_injection_is_requeued_through_the_callback(
     await provider.entered.wait()
     requeued: list[Message] = []
     late = owner("late")
-    assert dispatcher.try_inject(late, requeued.append) is True
+    assert dispatcher.try_inject(late, back(requeued)) is True
     provider.gate.set()
     await turn
     assert requeued == [late]

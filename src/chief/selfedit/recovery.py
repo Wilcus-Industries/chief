@@ -15,8 +15,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from chief.agent.restart_gate import NullTicket, TurnTicket
-from chief.selfedit.inflight import InflightLog, Interrupted
 from chief.selfedit.notice import RestartNotice, write_restart_notice
 
 logger = logging.getLogger(__name__)
@@ -56,9 +54,7 @@ class RestartController:
         restart: Callable[[], None] | None = None,
         drain_timeout: float = DRAIN_TIMEOUT_SECONDS,
         repo_root: Path = Path("."),
-        inflight: InflightLog | None = None,
     ) -> None:
-        self._inflight = inflight
         self._restart = restart if restart is not None else restart_daemon
         self._drain_timeout = drain_timeout
         self._repo_root = repo_root
@@ -89,19 +85,6 @@ class RestartController:
         self._requested = True
         self._notice = notice
         self._admitting.clear()
-
-    def track(
-        self, thread_key: str, channel: str, sender: str, text: str
-    ) -> TurnTicket:
-        """Record a turn as it is queued (see ``chief.selfedit.inflight``):
-        a held turn dies at the exec, and the next boot replays it."""
-        if self._inflight is None:
-            return NullTicket()
-        return self._inflight.track(thread_key, channel, sender, text)
-
-    def take_interrupted(self) -> list[Interrupted]:
-        """The turns the previous process died holding (boot calls once)."""
-        return [] if self._inflight is None else self._inflight.take_interrupted()
 
     async def enter_turn(self) -> None:
         """Admission gate: hold new turns once a restart is pending, then

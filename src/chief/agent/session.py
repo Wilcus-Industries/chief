@@ -104,6 +104,7 @@ class Session:
         on_begin: Callable[[], Awaitable[None]] | None = None,
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
+        ticket: TurnTicket | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
@@ -119,36 +120,9 @@ class Session:
         global semaphore so queued turns on one busy thread can't starve every
         concurrency slot.
 
-        The turn is recorded in flight before it queues (``track``) and
-        dropped when it returns or raises; a cancel (the daemon going down)
-        leaves it for the next boot to replay or wake.
+        ``ticket`` is the message's in-flight record; the caller owns it (and
+        ends it), the session only marks it started once the text is stored.
         """
-        ticket = self._gate.track(
-            self.thread_key, self._origin_channel or "", sender, user_text
-        )
-        try:
-            result = await self._queued_turn(
-                ticket, user_text, on_delta, sender, on_tool, on_tool_result,
-                on_begin, on_interim, on_reasoning,
-            )
-        except Exception:
-            ticket.done()
-            raise
-        ticket.done()
-        return result
-
-    async def _queued_turn(
-        self,
-        ticket: TurnTicket,
-        user_text: str,
-        on_delta: OnDelta,
-        sender: str,
-        on_tool: OnTool | None,
-        on_tool_result: OnToolResult | None,
-        on_begin: Callable[[], Awaitable[None]] | None,
-        on_interim: OnInterim | None,
-        on_reasoning: OnDelta | None,
-    ) -> TurnResult:
         async with self._lock:
             async with self._semaphore:
                 # Held new turns wait here while a restart drains; active ones
@@ -198,7 +172,7 @@ class Session:
         user_message = {"role": "user", "content": user_text}
         await self._store.append(self.thread_key, [user_message])
         if ticket is not None:
-            ticket.started()
+            ticket.started()  # a cut-off turn is now woken, not replayed
         transcript = [
             {"role": "system", "content": system},
             *self._messages,
