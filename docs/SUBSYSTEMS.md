@@ -285,10 +285,15 @@ frontmatter shape — but with a tool and a real tool loop. `AgentDef`: `name`,
   the run to wind down and the parent is told `cancelled by parent`. The owner's
   `/tasks` and `/cancel <id>` cover every run (`cancelled by owner`).
 
-Lifecycle (`agent/subagent_run.py` `drive`): each turn is the standard
+Lifecycle (`agent/subagent_drive.py` `drive`): each turn is the standard
 `agent.loop.run_turn` on `definition.model or default_model`, with a no-op
 `on_delta`, the core `post_tool` screen, the run's inbox as the loop's `drain`,
-and `stop` once `finish` was called. Cost is recorded under `subagent:<name>`.
+and `stop` once `finish` was called. Cost is recorded under `subagent:<name>`
+per model call (`on_usage`), so a cancelled or failed turn's spend still counts.
+Before each turn the budget is checked: once exhausted the run switches to the
+`downgrade` model role, or stops (`stopped: budget exhausted`) without one. A
+kill or cancel notice's "last progress" is the run's latest assistant text, read
+off the live transcript, so a run killed mid-turn reports where it got to.
 A run that never messaged its parent auto-finishes with its last text; once it
 has, a turn ending means idle — it waits for a message, then continues; it ends
 on `finish(result)` or `subagents.idle_timeout_s` (kill notice with task and

@@ -7,9 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 
+from chief.agent.subagent_drive import RunDeps
 from chief.agent.subagent_notices import write_notices
 from chief.agent.subagent_pool import SubagentPool
-from chief.agent.subagent_run import RunDeps
 from chief.audit import AuditLog
 from chief.config import Config
 from chief.peers.loopguard import PairCounter
@@ -54,6 +54,7 @@ def build_peers(
         provider=provider, default_model=config.default_model,
         slots=asyncio.Semaphore(config.subagents_max_concurrent),
         budget=core.budget, post_tool=core.post_tool,
+        downgrade_model=config.models.get("downgrade"),
     )
     pool = SubagentPool(deps, core.tools_factory, router.deliver, audit,
                         float(config.subagents_idle_timeout_s))

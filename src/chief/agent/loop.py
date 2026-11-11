@@ -41,6 +41,10 @@ OnCommit = Callable[[dict[str, Any]], Awaitable[None]]
 # are appended after a tool batch so the running turn sees them next step.
 Drain = Callable[[], list[dict[str, Any]]]
 
+# Fires with each model call's usage as it lands, so a caller whose turn may be
+# cancelled midway (a detached subagent) still records what it spent.
+OnUsage = Callable[[Usage], Awaitable[None]]
+
 # Backstop against a model that never stops calling tools; generous because
 # real multi-step work legitimately chains many calls.
 MAX_ITERATIONS = 25
@@ -78,6 +82,7 @@ async def run_turn(
     on_tool_result: OnToolResult | None = None,
     drain: Drain | None = None,
     stop: Callable[[], bool] | None = None,
+    on_usage: OnUsage | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls.
@@ -93,6 +98,8 @@ async def run_turn(
     for _ in range(max_iterations):
         completion = await _stream_once(provider, model, messages, tools, on_delta)
         usage = usage + completion.usage
+        if on_usage is not None:
+            await on_usage(completion.usage)
         last_text = completion.text or last_text
         assistant_message = _assistant_message(completion)
         messages.append(assistant_message)

@@ -5,8 +5,8 @@ from pathlib import Path
 
 from chief.adapters.base import Message
 from chief.agent.loop import PostTool
+from chief.agent.subagent_drive import RunDeps
 from chief.agent.subagent_pool import SubagentPool
-from chief.agent.subagent_run import RunDeps
 from chief.audit import AuditLog
 from chief.provider.base import Completion, ToolCall, ToolSpec
 from chief.skills import SkillLibrary, register_skill_tools

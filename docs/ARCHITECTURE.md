@@ -83,7 +83,7 @@ through the adapter named on the `Message` that started it.
   featureless file tools are `src/chief/tools/files.py`. Peer messaging
   (`send_msg`) is `src/chief/peers/`; async subagents (`spawn_agent`) are
   `src/chief/subagents.py` over `src/chief/agent/subagent_pool.py` /
-  `subagent_run.py`, wired by `src/chief/peers/wiring.py`. The host `shell` tool
+  `subagent_run.py` / `subagent_drive.py`, wired by `src/chief/peers/wiring.py`. The host `shell` tool
   is `src/chief/tools/shell/service.py` over `src/chief/tools/shell/host.py` +
   `src/chief/tools/shell/frame.py`.
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py` (`/help`,

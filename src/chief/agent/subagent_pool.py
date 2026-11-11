@@ -13,13 +13,8 @@ import secrets
 from collections.abc import Callable
 from typing import Any
 
-from chief.agent.subagent_run import (
-    RunDeps,
-    RunTools,
-    SubagentRun,
-    describe_all,
-    drive,
-)
+from chief.agent.subagent_drive import RunDeps, drive
+from chief.agent.subagent_run import RunTools, SubagentRun, describe_all
 from chief.audit import AuditLog
 from chief.peers.envelope import PeerMessage, new_id, render, subagent_label
 from chief.subagents import PREAMBLE, AgentDef, FilteredTools
