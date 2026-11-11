@@ -71,6 +71,14 @@ Per-thread sessions, like today: each conversation thread gets its own session a
 serial turn queue; N threads run concurrently under a semaphore. Monitors wake their
 own thread or spawn a fresh one.
 
+**Sessions message each other** (PRD #308) through `send_msg(to, text, reply_to?)`:
+a plain envelope (`id`, `from`, `to`, `reply_to?`, `text`), async, addressed by
+`thread_key`, delivered in-daemon only. A busy receiver reads it at its next
+tool-loop step; an idle one starts a turn. The receiver keeps its own authority —
+the header only names the sender — and its output goes out on its own channel
+(delegate-and-report-back, cross-channel relay, long-lived specialist threads). A
+per-pair rolling-window count warns both sides of a likely loop; nothing is refused.
+
 ### Model configuration
 
 No preset roles. Config ships with exactly one key: `default: <model>`. The agent
@@ -89,8 +97,13 @@ its first call.
   agent pulls a skill's full body via tool call when relevant.
 - **Subagents: full registry.** Named agent definitions (custom system prompt, tool
   allowlist, optional model) live in the harness dir; packages can ship agents; the
-  agent can author its own (self-edit pipeline applies). A spawn tool runs a
-  sub-session with its own tool loop and returns the final result to the parent.
+  agent can author its own (self-edit pipeline applies). A spawn runs a detached
+  sub-session (async by default; `wait=true` blocks) that is just another peer: it
+  can `send_msg` its parent a question and only its parent, and the parent answers
+  it the same way. It auto-finishes when a turn ends if it never messaged; once it
+  has, it ends only via `finish(result)` or a 30-min idle timeout. Results, kills
+  and timeouts reach the parent as messages. Its tool calls pass the gate on the
+  parent's thread. Ephemeral: no thread row, not resumable across a restart.
 - **Classifiers: internal categorical-label primitive.** Named definitions
   (frontmatter: name, description, labels, optional model; body: the classification
   prompt) live in the classifiers dir; the agent self-authors them via the self-edit
@@ -210,9 +223,11 @@ required; the audit log records everything.
 
 The default native tool set is deliberately small — `read_file`, `grep`,
 `write_file`, `edit_file`, `shell`, `restart`, `load_skill`, `session`,
-`switch_model`, `monitor`, `schedule`, `spawn_agent` — with the
+`switch_model`, `monitor`, `schedule`, `spawn_agent`, `send_msg` — with the
 create/list/delete verbs folded into one action argument on
-`session`/`monitor`/`schedule`. There is no `self_edit` or `install_package`
+`session`/`monitor`/`schedule`/`spawn_agent`. `send_msg` is a deliberate
+exception to the folding rule: as a dedicated tool the model finds it far more
+readily than a `session action=send` verb. There is no `self_edit` or `install_package`
 tool: writing is `write_file`/`edit_file`, and package install is
 document-driven through `shell`. Everything channel- or capability-specific
 arrives as package-registered tools.

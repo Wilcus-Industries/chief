@@ -139,7 +139,18 @@ returns a generic message rather than leaking internals.
 
 **Concurrency:** the dispatcher is *not* serial. Serialization comes from three
 places — iMessage's per-thread FIFO worker, `Session._lock` per thread, and
-`SessionManager._semaphore` globally (`max_concurrent_sessions`).
+`SessionManager._semaphore` globally (`max_concurrent_sessions`). Subagent
+turns take a separate semaphore (`subagents.max_concurrent`, held only while a
+subagent turn runs) and never call `enter_turn`, so a restart never waits on
+them.
+
+**Quiet turns:** in a thread `owner_audience` rejects, `_run_turn` sends nothing
+to the adapter — no deltas, final, notice, error — whoever triggered it (see
+SECURITY.md, the non-owner output rule); hub frames still fire.
+
+**Leftover inbox:** right after `session.run_turn` returns (no await between the
+lock release and the take), anything delivered to the session too late for a
+tool step starts a follow-up `system` turn as a tracked background task.
 
 ## 5. Session and the turn — `agent/session.py`, `agent/manager.py`
 
@@ -216,7 +227,12 @@ source attribute — contributed text may be attacker-influenced.
    `post_tool` hooks screen the result — annotate or veto — before step 5
    appends it. The repeat-limit refusal is not screened.
 5. Appends the tool result.
-6. Exhausting the iteration cap returns an explicit error string.
+6. After the batch, `drain()` (the session's inbox: peer messages that arrived
+   mid-turn) appends each as a user message, committed like the rest; then
+   `stop()` returning True ends the turn with the last assistant text (a
+   subagent's `finish`). The Anthropic wire folds such a user message into the
+   tool-result turn.
+7. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry
 
@@ -229,7 +245,9 @@ tool name is recorded and passed through to the registry for a helpful error —
 a bad-arguments string, anything else becomes an error string. Tool handlers
 follow the same rule — return error strings, don't raise.
 
-Approval cards ride the session's own channel: the `ask` closure resolves
+Approval cards ride the session's own channel (owner threads only — a non-owner
+thread's card goes to the cockpit plus a pointer on the owner's primary surface;
+`gate_surface.py`): the `ask` closure resolves
 `dispatcher.adapter(ctx.channel).send`, so the card appears where the
 conversation is — and also mirrors to any dashboard client tapped into that
 thread via `dispatcher.tapped()`, answerable there through the same broker

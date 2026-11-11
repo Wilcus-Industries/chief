@@ -17,7 +17,7 @@ itself, so line numbers rot; grep the symbol.
 |---|---|
 | [LIFECYCLE.md](./LIFECYCLE.md) | inbound message → bus → dispatch → session → turn → tool loop → reply |
 | [SECURITY.md](./SECURITY.md) | trust model, the gate, approvals, strangers, audit, budget, locks |
-| [SUBSYSTEMS.md](./SUBSYSTEMS.md) | web UI, monitors, classifiers, subagents |
+| [SUBSYSTEMS.md](./SUBSYSTEMS.md) | web UI, monitors, classifiers, subagents, peer messaging |
 | [CONFIG.md](./CONFIG.md) | every config key, on-disk layout, the package registry |
 | [EXTENDING.md](./EXTENDING.md) | recipes: tools, commands, packages, skills, hooks, MCP |
 | [OPERATIONS.md](./OPERATIONS.md) | install, the service, releases + `chief update`, `chief-pkg` |
@@ -59,7 +59,7 @@ through the adapter named on the `Message` that started it.
   from `config.yaml`.
 - **System prompt** — the boot-static base is `src/chief/agent/prompt.py`
   (`system_prompt` + `ONBOARDING_SUFFIX`); skill one-liners are appended in
-  `chief.app._build_prompt`. The *per-turn* message (soul on top, then base +
+  `boot_prompt` there. The *per-turn* message (soul on top, then base +
   origin note, then package hook blocks) is assembled fresh each turn in
   `Session._assemble_system`. **It is never persisted**, so prompt and package
   edits apply to existing threads on the next turn.
@@ -80,11 +80,14 @@ through the adapter named on the `Message` that started it.
   `register_native_tools` in `src/chief/tools/native.py` and wired at boot in
   `src/chief/app.py`. Each tool's spec + handler lives with its feature
   (`src/chief/monitors/tools.py`, `src/chief/agent/session_tools.py`); the
-  featureless file tools are `src/chief/tools/files.py`. The host `shell` tool
+  featureless file tools are `src/chief/tools/files.py`. Peer messaging
+  (`send_msg`) is `src/chief/peers/`; async subagents (`spawn_agent`) are
+  `src/chief/subagents.py` over `src/chief/agent/subagent_pool.py` /
+  `subagent_run.py`, wired by `src/chief/peers/wiring.py`. The host `shell` tool
   is `src/chief/tools/shell/service.py` over `src/chief/tools/shell/host.py` +
   `src/chief/tools/shell/frame.py`.
 - **Owner slash commands** — `CommandSet` in `src/chief/commands.py` (`/help`,
-  `/clear`, `/prune`, `/model`, `/compact`, …). These run *before* a turn.
+  `/clear`, `/prune`, `/model`, `/compact`, `/tasks`, `/cancel <id>`, …). These run *before* a turn.
 - **Packages** — bundled under `packages/`, cloned under `data/packages/`; loader
   is `src/chief/pkg/loader.py`. Discover with `chief-pkg` (`src/chief/pkg/cli.py`).
   Install/uninstall are **document-driven** — follow the package's `INSTALL.md`
