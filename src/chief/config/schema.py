@@ -80,7 +80,7 @@ class Config:
     provider_base_url: str = "https://openrouter.ai/api/v1"
     # Named extra backends and typed-name -> (backend, real model) aliases for
     # per-model routing (see RouterProvider). Empty = the single legacy default
-    # backend above; the anthropic-oauth package populates them.
+    # backend above.
     provider_backends: dict[str, "BackendSpec"] = field(default_factory=dict)
     provider_aliases: dict[str, "AliasSpec"] = field(default_factory=dict)
     gate_never: tuple[str, ...] = ()

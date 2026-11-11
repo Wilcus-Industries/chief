@@ -56,11 +56,25 @@ def _parse(path: Path) -> AgentDef | None:
 
 
 class FilteredTools:
-    """A ToolDispatcher restricted to an allowlist (spawn always excluded)."""
+    """A ToolDispatcher restricted to an allowlist (spawn always excluded).
 
-    def __init__(self, inner: ToolDispatcher, allow: tuple[str, ...] | None) -> None:
+    ``inherited`` is the spawning session's context. A sub-session's own loop
+    dispatches with no context, so it is handed only to MCP tools: an
+    MCP server opted in to ``session_context`` (e.g. the per-session browser)
+    must see a subagent as its parent's session, while native tools keep
+    their context-free behavior inside subagents (a subagent must not, say,
+    move its parent's persistent shell cwd).
+    """
+
+    def __init__(
+        self,
+        inner: ToolDispatcher,
+        allow: tuple[str, ...] | None,
+        inherited: ToolContext | None = None,
+    ) -> None:
         self._inner = inner
         self._allow = allow
+        self._inherited = inherited
 
     def _allowed(self, name: str) -> bool:
         if name == "spawn_agent":
@@ -75,6 +89,8 @@ class FilteredTools:
     ) -> str:
         if not self._allowed(call.name):
             return f"error: tool '{call.name}' not allowed for this agent"
+        if context is None and call.name.startswith("mcp_"):
+            context = self._inherited
         return await self._inner.dispatch(call, context)
 
 
@@ -106,7 +122,9 @@ def register_spawn_tool(
     injection screen), so a subagent reads fetched content no less guarded
     than the parent session does."""
 
-    async def spawn_agent(name: str, task: str) -> str:
+    async def spawn_agent(
+        name: str, task: str, context: ToolContext | None = None
+    ) -> str:
         definition = agents.get(name)
         if definition is None:
             known = ", ".join(d.name for d in agents.scan()) or "none"
@@ -122,7 +140,7 @@ def register_spawn_tool(
                 {"role": "system", "content": definition.system_prompt},
                 {"role": "user", "content": task},
             ],
-            tools=FilteredTools(registry, definition.tools),
+            tools=FilteredTools(registry, definition.tools, inherited=context),
             on_delta=drop_delta,
             post_tool=post_tool,
         )
@@ -130,4 +148,4 @@ def register_spawn_tool(
             await budget.record(f"subagent:{name}", result.usage.cost)
         return result.text
 
-    registry.register(Tool(_SPAWN_SPEC, spawn_agent))
+    registry.register(Tool(_SPAWN_SPEC, spawn_agent, wants_context=True))
