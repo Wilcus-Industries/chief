@@ -462,7 +462,8 @@ async def test_web_origin_turn_omits_the_rich_final(store: MessageStore) -> None
     )
     frames = _drain(queue)
     assert not any(f["type"] == "final" for f in frames)
-    assert frames == [{
-        "type": "tick", "thread": "web:main",
-        "channel": "web", "preview": "hello back",
-    }]
+    assert frames == [
+        {"type": "inbound", "thread": "web:main", "text": "hi"},
+        {"type": "tick", "thread": "web:main",
+         "channel": "web", "preview": "hello back"},
+    ]

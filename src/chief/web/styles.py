@@ -98,6 +98,25 @@ body{
 .msg.owner .who::before{content:"owner\\2009>\\2009";}
 .msg.chief .who::before{content:"chief\\2009>\\2009";}
 .msg.peer .who::after{content:"\\2009>\\2009";}
+/* chief replies rendered as markdown (script_markdown.py) */
+.md{white-space:normal;}
+.md > :first-child{margin-top:0;} .md > :last-child{margin-bottom:0;}
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md table{margin:.45rem 0;}
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6{margin:.8rem 0 .35rem;
+  font-size:1em; color:var(--yellow);}
+.md h1, .md h2{color:var(--orange);}
+.md ul, .md ol{padding-left:3.5ch;}
+.md code{background:var(--bg1); color:var(--aqua); padding:0 .25rem; border-radius:2px;}
+.md pre{background:var(--bg1); border:1px solid var(--bg2); border-radius:2px;
+  padding:.5rem .7rem; overflow-x:auto; white-space:pre;}
+.md pre code{background:none; padding:0; color:var(--fg);}
+.md blockquote{border-left:2px solid var(--bg3); padding-left:.8rem; color:var(--dim);}
+.md hr{border:none; border-top:1px solid var(--bg2);}
+.md a{color:var(--blue);}
+.md table{display:block; overflow-x:auto; border-collapse:collapse;}
+.md th, .md td{border:1px solid var(--bg2); padding:.15rem .6rem; text-align:left;}
+.md th{color:var(--yellow);}
+.md del{color:var(--faint);}
 .msg.tool{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
   color:var(--dim); font-size:12px;}
 .msg.tool .who{display:inline; margin:0; text-transform:none; color:var(--blue);}
@@ -116,6 +135,11 @@ body{
 .approval-btns button:hover{background:var(--bg2);}
 .approval-btns button:disabled{opacity:.5; cursor:default;}
 .empty{color:var(--faint); padding:1.3rem;}
+/* sent, not yet taken by a turn (script_send.py) */
+#queued{padding:0 1.3rem; max-height:30vh; overflow-y:auto;}
+#queued:empty{display:none;}
+.msg.pending{opacity:.55; margin-bottom:.5rem;}
+.ptag{margin-left:.6rem; font-size:11px; color:var(--faint);}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
 /* prompt line */

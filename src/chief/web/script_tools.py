@@ -3,7 +3,7 @@ stream client: tool rows are collapsed by default (args + result fetched
 lazily off a click); an approval card renders yes/always/no buttons that POST
 /approve, answering the same broker the origin channel's reply would (#267);
 the stream subscribes to the focused thread, renders its rich frames, and
-re-syncs from history on a final frame or an SSE reconnect. Split out of
+re-syncs from history on an SSE reconnect. Split out of
 script.py to keep that file under the length cap (#261, #263). All JS is
 concatenated into one global scope, so cross-file references resolve fine."""
 
@@ -31,11 +31,17 @@ function addApproval(thread, question){
   d.append(span("who", "approval"), span(null, question), btns);
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
+  /* the server takes the next message as this card's answer, not a turn */
+  if (!input.dataset.ph) input.dataset.ph = input.placeholder;
+  input.placeholder = "typing here answers the approval card";
 }
 
 function resolveApproval(thread){
   const card = log.querySelector(`.approval[data-thread="${CSS.escape(thread)}"]`);
   if (card) card.remove();
+  if (input.dataset.ph){
+    input.placeholder = input.dataset.ph; delete input.dataset.ph;
+  }
 }
 
 /* collapsed tool-call row: name only, args + result fetched on demand */
@@ -72,10 +78,13 @@ function bumpThread(thread, preview){
   renderBuffers();
 }
 
-/* canonical re-render of a thread from stored history */
+/* canonical re-render of a thread from stored history; only the newest call
+   may paint, so a slow fetch can't overwrite a later one */
+let reloadSeq = 0;
 async function reloadHistory(tk){
+  const seq = ++reloadSeq;
   const rows = await getJSON("/history?thread=" + encodeURIComponent(tk));
-  if (tk !== state.current) return;                /* switched away mid-fetch */
+  if (seq !== reloadSeq || tk !== state.current) return;
   live = null; log.replaceChildren();
   if (!rows || !rows.length){
     log.appendChild(span("empty", "no messages yet \\u2014 type below to start."));
@@ -83,6 +92,9 @@ async function reloadHistory(tk){
     rows.forEach((r) =>
       r.role === "tool" ? addTool(r.call_id, r.name) : addMsg(r.role, r.text));
   }
+  reconcilePending(pending[tk] || [],
+    (rows || []).filter((r) => r.role === "owner").map((r) => r.text));
+  renderPending();
   log.scrollTop = log.scrollHeight;
 }
 
@@ -106,16 +118,23 @@ function onFrame(e){
   const f = JSON.parse(e.data);
   if (f.type === "tick"){ bumpThread(f.thread, f.preview); return; }
   if (f.thread !== state.current) return;   /* rich frame racing a buffer switch */
-  if (f.type === "inbound") addMsg("owner", f.text);
-  else if (f.type === "tool") addTool(f.call_id, f.name);
+  /* inbound/tool close the streaming bubble: text after them is a new message,
+     placed below them, matching how history renders the same turn */
+  if (f.type === "inbound"){ live = null; onInbound(f.thread, f.text); }
+  else if (f.type === "tool"){ live = null; addTool(f.call_id, f.name); }
   else if (f.type === "approval") addApproval(f.thread, f.question);
   else if (f.type === "approval_resolved") resolveApproval(f.thread);
   else if (f.type === "delta"){
-    if (!live) live = addMsg("chief", ""); live.textContent += f.text;
+    if (!live){ live = addMsg("chief", ""); liveText = ""; }
+    liveText += f.text; setMarkdown(live, liveText);  /* re-parse: marks span deltas */
   } else if (f.type === "final"){
-    if (live){ live.textContent = f.text; live = null; }
+    /* no history re-render here: it raced the next queued turn's frames and
+       wiped messages not yet persisted; reconnect + switch still re-sync */
+    /* keep the streamed text: with tool frames off, one bubble holds several
+       model calls and the final carries only the last */
+    if (live){ setMarkdown(live, liveText || f.text); live = null; }
     else addMsg("chief", f.text);
-    bumpThread(f.thread, f.text); reloadHistory(f.thread);
+    bumpThread(f.thread, f.text);
   }
   log.scrollTop = log.scrollHeight;
 }

@@ -1,7 +1,11 @@
-"""The web UI client, served at /app.js. Buffers, send, readline completion;
-the SSE stream client and tool rows live in script_tools.py (concatenated)."""
+"""The web UI client, served at /app.js. Buffers, readline completion; send
+and its pending list live in script_send.py, the SSE stream client and tool
+rows in script_tools.py, the markdown renderer in script_markdown.py
+(concatenated)."""
 
+from chief.web.script_markdown import MARKDOWN_SCRIPT
 from chief.web.script_policy import POLICY_SCRIPT
+from chief.web.script_send import SEND_SCRIPT
 from chief.web.script_tools import TOOL_SCRIPT
 
 SCRIPT = """
@@ -10,7 +14,7 @@ const log = el("log"), input = el("input"), pop = el("complete");
 const state = {current: null, sessions: [], commands: [], matches: [], sel: -1};
 const unread = new Set();
 const snippets = {};  /* thread -> last reply preview, shown in the sidebar */
-let live = null;
+let live = null, liveText = "";  /* streaming reply's body + its raw text */
 
 const bare = (tk) => tk.startsWith("web:") ? tk.slice(4) : null;
 const label = (tk) => bare(tk) ?? tk;
@@ -65,14 +69,17 @@ function setStatus(tk){
 
 async function switchTo(tk){
   state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
-  await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
+  resolveApproval(tk);  /* drop another thread's card hint; subscribe replays */
+  renderPending(); await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
 }
 
 function addMsg(role, text, who){
   const empty = log.querySelector(".empty"); if (empty) empty.remove();
   const d = document.createElement("div"); d.className = "msg " + role;
-  const body = span(null, text);
+  /* only chief's replies are markdown; owner/peer text stays literal */
+  const body = role === "chief" ? document.createElement("div") : span(null, text);
+  if (role === "chief"){ body.className = "md"; setMarkdown(body, text); }
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
   log.scrollTop = log.scrollHeight; return body;
@@ -88,20 +95,6 @@ async function loadSessions(){
     switchTo(state.current || start.thread);
   }
 }
-
-/* ---- send ---- */
-el("f").onsubmit = async (e) => {
-  e.preventDefault();
-  if (acceptCompletion()) return;
-  const text = input.value.trim(); if (!text || input.disabled) return;
-  const s = state.sessions.find((x) => x.thread === state.current);
-  if (s && s.send_guard &&
-      !confirm(`This reply goes to ${label(state.current)} on ${s.channel} — `
-        + `not you. Send it?`)) return;
-  addMsg("owner", text); input.value = ""; hidePop();
-  await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
-    body: JSON.stringify({thread: state.current, text})});
-};
 
 /* ---- readline-style completion ---- */
 function showPop(){
@@ -176,4 +169,4 @@ async function posture(){
   const poll = () => { monitors(); posture(); };
   poll(); setInterval(poll, 10000);
 })();
-""" + POLICY_SCRIPT + TOOL_SCRIPT
+""" + SEND_SCRIPT + POLICY_SCRIPT + TOOL_SCRIPT + MARKDOWN_SCRIPT
