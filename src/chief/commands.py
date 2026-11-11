@@ -15,7 +15,6 @@ from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.provider.model_names import UnknownModelError, validate_model_name
 from chief.skills import SkillLibrary
-from chief.subagents import describe_all
 
 CommandHandler = Callable[[str, Message], Awaitable[str]]
 
@@ -108,7 +107,7 @@ class CommandSet:
 
     async def _tasks(self, args: str, message: Message) -> str:
         """Every running subagent, across all parents."""
-        return describe_all(self._pool.live()) if self._pool else "no subagents"
+        return self._pool.describe() if self._pool else "no subagents"
 
     async def _cancel(self, args: str, message: Message) -> str:
         """Kill one subagent by id; its parent is told it was cancelled."""

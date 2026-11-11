@@ -76,6 +76,26 @@ class SubagentRun:
         return f"{how}.\ntask: {self.task}\nlast progress: {self.progress()}"
 
 
+TASK_PREVIEW_CHARS = 60
+
+
+def describe(run: SubagentRun, now: float) -> str:
+    """One ``/tasks`` / ``action=list`` line for a live run."""
+    state = "running" if run.running else "idle"
+    task = run.task
+    if len(task) > TASK_PREVIEW_CHARS:
+        task = task[:TASK_PREVIEW_CHARS] + "…"
+    age = int(now - run.started)
+    parent = run.parent_key
+    return f"{run.id} [{run.agent.name}] parent={parent} {state} {age}s — {task}"
+
+
+def describe_all(runs: list[SubagentRun]) -> str:
+    """Every line, or the empty-list answer."""
+    now = time.monotonic()
+    return "\n".join(describe(r, now) for r in runs) or "no subagents running"
+
+
 class RunTools:
     """The run's dispatcher: its filtered, gated tools plus ``finish``, which
     never reaches the gate — it only marks the run done."""

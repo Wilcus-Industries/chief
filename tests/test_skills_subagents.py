@@ -186,6 +186,21 @@ async def _ok() -> str:
     return "ok"
 
 
+async def test_a_subagent_can_never_restart_or_revert_the_daemon() -> None:
+    # A detached run has no turn boundary to fire the restart at: request()
+    # would close turn admission and nothing would ever exec — a wedge.
+    registry = echo_registry()
+    for name in ("restart", "revert_edits"):
+        registry.register(Tool(ToolSpec(name=name, description=".", parameters={}),
+                               _ok))
+    filtered = FilteredTools(registry, None, subagent=True)
+    assert [s.name for s in filtered.specs()] == ["echo", "hidden"]
+    refused = await filtered.dispatch(ToolCall(id="1", name="restart", arguments={}))
+    assert refused == "error: tool 'restart' not allowed for this agent"
+    allowlisted = FilteredTools(registry, ("restart",), subagent=True)
+    assert allowlisted.specs() == []
+
+
 async def test_subagent_scope_hands_the_run_context_to_mcp_and_send_msg_only() -> None:
     async def whoami(context: ToolContext | None = None) -> str:
         return context.thread_key if context is not None else "none"

@@ -311,8 +311,11 @@ run_id), allow, subagent=True))`: the parent's **gated** tools (cards on the
 parent's thread, audit `subagent` field, no announcements), filtered, plus
 `finish`, which `RunTools` intercepts before the gate.
 
-**`_allowed` hardcodes `spawn_agent → False` before consulting the allowlist**, so
-a subagent can never spawn further subagents even if its frontmatter names it.
+**`_allowed` refuses `SUBAGENT_NEVER` (`spawn_agent`, `restart`, `revert_edits`)
+before consulting the allowlist**, so a subagent can never spawn further subagents,
+nor restart or roll back the daemon, even if its frontmatter names them. A restart
+fires only at a session turn's boundary; a detached run calling it would close turn
+admission with nothing left to exec, wedging the daemon.
 For a subagent `send_msg` is always allowed, or an allowlisted agent could never
 reach its parent. The filter applies in both directions — `specs()` hides
 disallowed tools from the model, and `dispatch()` re-checks at call time and

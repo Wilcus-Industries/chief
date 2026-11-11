@@ -13,7 +13,13 @@ import secrets
 from collections.abc import Callable
 from typing import Any
 
-from chief.agent.subagent_run import RunDeps, RunTools, SubagentRun, drive
+from chief.agent.subagent_run import (
+    RunDeps,
+    RunTools,
+    SubagentRun,
+    describe_all,
+    drive,
+)
 from chief.audit import AuditLog
 from chief.peers.envelope import PeerMessage, new_id, render, subagent_label
 from chief.subagents import PREAMBLE, AgentDef, FilteredTools
@@ -96,6 +102,10 @@ class SubagentPool:
     def live(self, parent: str | None = None) -> list[SubagentRun]:
         """Live runs, oldest first; only ``parent``'s children when given."""
         return [r for r in self._runs.values() if parent in (None, r.parent_key)]
+
+    def describe(self, parent: str | None = None) -> str:
+        """The ``/tasks`` / ``action=list`` listing of :meth:`live`."""
+        return describe_all(self.live(parent))
 
     def deliver(self, run_id: str, text: str) -> None:
         """A message for a run: drained at its next tool step, or wakes it idle."""

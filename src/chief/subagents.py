@@ -7,10 +7,9 @@ parent over ``send_msg``; ``wait=true`` keeps the old blocking form. Subagents
 can never spawn further subagents.
 """
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import yaml
 
@@ -72,11 +71,15 @@ def _parse(path: Path) -> AgentDef | None:
     )
 
 
+SUBAGENT_NEVER = frozenset({"spawn_agent", "restart", "revert_edits"})
+
+
 class FilteredTools:
     """A ToolDispatcher restricted to an allowlist (spawn always excluded).
 
-    For a subagent, ``send_msg`` is always allowed whatever the allowlist
-    says — otherwise an allowlisted agent could never reach its parent."""
+    For a detached subagent, ``send_msg`` is always allowed (else an
+    allowlisted agent could never reach its parent) and ``restart`` /
+    ``revert_edits`` never are: no turn boundary would fire the exec."""
 
     def __init__(
         self, inner: ToolDispatcher, allow: tuple[str, ...] | None,
@@ -85,9 +88,10 @@ class FilteredTools:
         self._inner = inner
         self._allow = allow
         self._always = frozenset({"send_msg"}) if subagent else frozenset()
+        self._never = SUBAGENT_NEVER if subagent else frozenset({"spawn_agent"})
 
     def _allowed(self, name: str) -> bool:
-        if name == "spawn_agent":
+        if name in self._never:
             return False
         return self._allow is None or name in self._allow or name in self._always
 
@@ -147,27 +151,6 @@ _SPAWN_SPEC = ToolSpec(
     },
 )
 
-TASK_PREVIEW_CHARS = 60
-
-
-def describe(run: Any, now: float) -> str:
-    """One ``/tasks`` / ``action=list`` line for a live run (a SubagentRun;
-    typed loosely to avoid the import cycle with the pool)."""
-    state = "running" if run.running else "idle"
-    task = run.task
-    if len(task) > TASK_PREVIEW_CHARS:
-        task = task[:TASK_PREVIEW_CHARS] + "…"
-    age = int(now - run.started)
-    parent = run.parent_key
-    return f"{run.id} [{run.agent.name}] parent={parent} {state} {age}s — {task}"
-
-
-def describe_all(runs: list[Any]) -> str:
-    """Every line, or the empty-list answer."""
-    now = time.monotonic()
-    return "\n".join(describe(r, now) for r in runs) or "no subagents running"
-
-
 def register_spawn_tool(
     registry: ToolRegistry, agents: AgentRegistry, pool: "SubagentPool"
 ) -> None:
@@ -181,7 +164,7 @@ def register_spawn_tool(
             return "error: spawn_agent needs a session context"
         parent = context.thread_key
         if action == "list":
-            return describe_all(pool.live(parent))
+            return pool.describe(parent)
         if action == "cancel":
             run = pool.get(id)
             if run is None or run.parent_key != parent:
