@@ -225,3 +225,29 @@ async def test_restart_notice_for_a_stranger_thread_goes_to_the_owner_instead(
         write_restart_notice(tmp_path, RestartNotice("imessage", OWNER_HANDLE))
         await report_restart(app, tmp_path)
         assert device.sent == [(OWNER_HANDLE, "✅ restart success — back up")]
+
+
+async def test_session_list_tags_owner_threads_and_the_primary_target(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    """Boot wires the owner handles and ``primary_target`` into ``session list``
+    — the messaging skill's forward-to-owner rule sends to the row tagged
+    primary, so that row must exist from boot (here iMessage is off, so it is
+    ``web:main``, which otherwise gets a row only once someone chats there)."""
+    provider = FakeProvider(
+        [tool_turn("session", {"action": "list"}), text_turn("ok")]
+    )
+    async with running(
+        tmp_path, sock_path, provider, gate_approved=("session",)
+    ) as (app, _device, _web):
+        await app.store.ensure_session(OWNER_HANDLE, "imessage")
+        await app.dispatcher.handle(wake(STRANGER))
+        listing = next(
+            str(m["content"]) for m in await app.store.load(STRANGER)
+            if m["role"] == "tool"
+        )
+    rows = {line.split()[1]: line for line in listing.splitlines()}
+    assert "(owner, primary)" in rows["web:main"]
+    assert "(owner)" in rows[OWNER_HANDLE]
+    assert "primary" not in rows[OWNER_HANDLE]
+    assert "owner" not in rows[STRANGER]

@@ -48,6 +48,8 @@ def register_native_tools(
     ask: AskApproval | None = None,
     router: PeerRouter | None = None,
     pool: SubagentPool | None = None,
+    owner_handles: tuple[str, ...] = (),
+    primary: tuple[str, str] | None = None,
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
@@ -58,9 +60,13 @@ def register_native_tools(
     ``switch_model`` validates against; ``ask`` is the approval-card path the
     ``schedule`` tool raises for command schedules (without it, creating one is
     refused); ``router`` backs ``send_msg`` and ``pool`` runs ``spawn_agent``'s
-    subagents (each absent in unit wiring that builds no messaging).
+    subagents (each absent in unit wiring that builds no messaging);
+    ``owner_handles`` and ``primary`` let ``session list`` mark the owner's
+    threads and the one a forward to the owner goes to.
     """
-    register_session_tools(registry, manager)
+    register_session_tools(
+        registry, manager, owner_handles=owner_handles, primary=primary
+    )
     register_switch_model_tool(registry, manager, model_aliases=model_aliases)
     register_monitor_tools(registry, monitor_service)
     register_cron_tools(registry, cron_service, ask=ask)

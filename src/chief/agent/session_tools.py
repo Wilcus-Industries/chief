@@ -1,7 +1,7 @@
 """Native tool for the agent to manage its own sessions (threads)."""
 
 from chief.agent.manager import SessionManager
-from chief.policy import RESULT_MODES, StreamPolicy
+from chief.policy import RESULT_MODES, StreamPolicy, owner_audience
 from chief.provider.base import ToolSpec
 from chief.tools import Tool, ToolContext, ToolRegistry
 
@@ -9,7 +9,9 @@ _SPEC = ToolSpec(
     name="session",
     description=(
         "Manage the threads (sessions) this daemon knows about. "
-        "action=list takes nothing and reports every thread. "
+        "action=list takes nothing and reports every thread; `(owner)` marks "
+        "a thread whose surface reaches only the owner, `(owner, primary)` "
+        "the one to forward to the owner through. "
         "action=create needs `thread_key` (plus optional `channel`, defaulting "
         "to this thread's channel); it pre-registers the thread row so it shows "
         "up in list and the web cockpit, without starting a live session. An "
@@ -54,15 +56,31 @@ def _busy_error(thread_key: str) -> str:
     return f"error: session '{thread_key}' is mid-turn; try again once idle"
 
 
-def register_session_tools(registry: ToolRegistry, manager: SessionManager) -> None:
-    """Expose the session tool (list/create/delete/clear) backed by the manager."""
+def register_session_tools(
+    registry: ToolRegistry,
+    manager: SessionManager,
+    *,
+    owner_handles: tuple[str, ...] = (),
+    primary: tuple[str, str] | None = None,
+) -> None:
+    """Expose the session tool (list/create/delete/clear) backed by the manager.
+
+    ``owner_handles`` tags owner-audience threads in ``list``; ``primary`` (the
+    ``(channel, thread)`` from ``cron.updates.primary_target``) is tagged
+    ``(owner, primary)`` — the one thread a forward to the owner goes to."""
+
+    def _tag(channel: str, thread: str) -> str:
+        if (channel, thread) == primary:
+            return " (owner, primary)"
+        return " (owner)" if owner_audience(channel, thread, owner_handles) else ""
 
     async def _list() -> str:
         rows = await manager.list_sessions()
         if not rows:
             return "no sessions"
         return "\n".join(
-            f"[{r['channel']}] {r['thread']} — {r['count']} msgs, last {r['last']}"
+            f"[{r['channel']}] {r['thread']}{_tag(r['channel'], r['thread'])}"
+            f" — {r['count']} msgs, last {r['last']}"
             for r in rows
         )
 
