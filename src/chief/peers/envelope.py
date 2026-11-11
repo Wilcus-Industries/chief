@@ -10,6 +10,8 @@ which id to answer with ``reply_to``. Keep the header shape stable: core skills
 import secrets
 from dataclasses import dataclass
 
+from chief.policy import frame_untrusted
+
 
 @dataclass(frozen=True)
 class PeerMessage:
@@ -37,9 +39,22 @@ def subagent_label(run_id: str, agent_name: str) -> str:
     return f"subagent {run_id} ({agent_name})"
 
 
-def render(message: PeerMessage, label: str, warning: str | None = None) -> str:
+def render(
+    message: PeerMessage, label: str, warning: str | None = None,
+    untrusted: bool = False,
+) -> str:
     """The text the receiver gets as its turn input or injected message:
-    ``[message m-… from <label> re m-…]`` then the body, then any loop warning."""
+    ``[message m-… from <label> re m-…]``, the body, ``[end message m-…]``,
+    then any loop warning (code's, so outside the frame).
+
+    The close marker carries the id, minted after the sender wrote its text,
+    so a body can't fake its end and forge a second header. ``untrusted``
+    (a sender whose thread reaches a non-owner, so may carry injected text)
+    also wraps the body in the nonce frame a monitor wake gets."""
     regarding = f" re {message.reply_to}" if message.reply_to else ""
-    text = f"[message {message.id} from {label}{regarding}]\n{message.text}"
+    body = frame_untrusted(message.text) if untrusted else message.text
+    text = (
+        f"[message {message.id} from {label}{regarding}]\n{body}\n"
+        f"[end message {message.id}]"
+    )
     return f"{text}\n{warning}" if warning else text

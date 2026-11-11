@@ -225,7 +225,7 @@ documented, accepted exception, not a bug. For 1:1 senders the rule closes the
 path completely: an unknown sender can never reach a classifier, because the
 owner cannot name a contact they do not know.
 
-`_fire` wraps the payload in `UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers, each
+`_fire` wraps the payload in `policy.UNTRUSTED_OPEN` / `UNTRUSTED_CLOSE` markers, each
 carrying a per-fire nonce so a sender can't type the close marker into their own
 message and land the rest of their text outside the frame. It does this
 because the wake dispatches as `sender="system"` and so takes the owner path in
@@ -281,6 +281,14 @@ Peer messages are **not re-screened** — untrusted content is screened where it
 first enters a session (monitor payloads, `shell`/`mcp_*` results, a subagent's
 own tool results), so a message is at most a relay of already-screened text.
 
+**Framing, so a sender can't forge another.** Every message closes with
+`[end message m-…]`, its own id — minted after the sender wrote its text, so a
+body can't fake its end and append a header claiming another session. A message
+from a thread whose surface reaches a non-owner (whose turns may carry injected
+text) also has its body wrapped in the same nonce frame as a monitor wake
+(`policy.frame_untrusted`). The `send_msg` description, in every session's
+toolset, tells the receiver only that header/close pair bounds a message.
+
 Scope is code-enforced in `PeerRouter`: no self-sends; a target must be a known
 `thread_key`; a `sub:` target must be a live run *of the sender*; a subagent may
 message only its parent. Every `send_msg` writes a `peer_message` audit line
@@ -290,7 +298,7 @@ message only its parent. Every `send_msg` writes a `peer_message` audit line
 (NEVER/APPROVED lists, cards, audit with a `subagent` field), never announced —
 approving the spawn can't stand in for authorizing every call of a long detached
 run. `send_msg` is always allowed to a subagent whatever its definition's
-allowlist; `spawn_agent` never is. `finish` never reaches the gate (it only ends
+allowlist; `spawn_agent`, `restart` and `revert_edits` never are. `finish` never reaches the gate (it only ends
 the run).
 
 ## Audit — `audit.py`

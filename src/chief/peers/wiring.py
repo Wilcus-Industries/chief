@@ -5,6 +5,7 @@ out of ``chief.app`` so that file stays a short table of contents."""
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 from chief.agent.subagent_notices import write_notices
 from chief.agent.subagent_pool import SubagentPool
@@ -14,6 +15,7 @@ from chief.config import Config
 from chief.peers.loopguard import PairCounter
 from chief.peers.router import PeerRouter
 from chief.persistence.store import MessageStore
+from chief.policy import owner_audience
 from chief.provider.base import Provider
 from chief.wiring import Core
 
@@ -44,7 +46,10 @@ def build_peers(
     if core.tools_factory is None:
         raise ValueError("build_peers needs the core's tools_factory")
     counter = PairCounter(config.peers_loop_warn_count, config.peers_loop_window_s)
-    router = PeerRouter(core.manager, store, audit, core.dispatcher.handle, counter)
+    audience = partial(owner_audience, owner_handles=config.imessage_owner_handles)
+    router = PeerRouter(
+        core.manager, store, audit, core.dispatcher.handle, counter, audience
+    )
     deps = RunDeps(
         provider=provider, default_model=config.default_model,
         slots=asyncio.Semaphore(config.subagents_max_concurrent),

@@ -22,6 +22,7 @@ from chief.audit import AuditLog
 from chief.peers.envelope import PeerMessage, new_id, render, session_label
 from chief.peers.loopguard import LOOP_WARNING, PairCounter
 from chief.persistence.store import MessageStore
+from chief.policy import Audience
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,9 @@ class PeerRouter:
         audit: AuditLog,
         wake: Wake,
         counter: PairCounter,
+        audience: Audience | None = None,
     ) -> None:
+        self._audience = audience
         self._manager = manager
         self._store = store
         self._audit = audit
@@ -88,7 +91,10 @@ class PeerRouter:
                 f"error: no such session '{to}' — use the thread_key from "
                 "`session action=list`"
             )
-        message, warning, rendered = self._envelope(sender, to, text, reply_to)
+        untrusted = not await self._owner_thread(sender)
+        message, warning, rendered = self._envelope(
+            sender, to, text, reply_to, untrusted
+        )
         self.deliver(to, channel, rendered)
         return self._sent(message, warning)
 
@@ -129,12 +135,22 @@ class PeerRouter:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    async def _owner_thread(self, thread: str) -> bool:
+        """Whether ``thread``'s surface reaches only the owner (fails closed
+        on a thread with no row)."""
+        if self._audience is None:
+            return True
+        channel = await self._store.channel(thread)
+        return channel is not None and self._audience(channel, thread)
+
     def _envelope(
-        self, sender: str, to: str, text: str, reply_to: str | None
+        self, sender: str, to: str, text: str, reply_to: str | None,
+        untrusted: bool = False,
     ) -> tuple[PeerMessage, str | None, str]:
         message = PeerMessage(new_id(), sender, to, text, reply_to)
         warning = self._note(message)
-        return message, warning, render(message, session_label(sender), warning)
+        label = session_label(sender)
+        return message, warning, render(message, label, warning, untrusted)
 
     def _note(self, message: PeerMessage) -> str | None:
         warn = self._counter.note(message.sender, message.to)
