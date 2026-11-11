@@ -10,11 +10,13 @@ before each turn and recorded after.
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from chief.agent.compaction import Compactor
-from chief.agent.loop import OnDelta, OnTool, OnToolResult, TurnResult, run_turn
+from chief.agent.inbox import Inbox, Injected, OnInterim
+from chief.agent.loop import OnTool, OnToolResult, TurnResult, run_turn
+from chief.agent.model_call import OnDelta
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, _NullGate
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
@@ -27,7 +29,7 @@ from chief.hooks import (
     tool_screener,
 )
 from chief.persistence.store import MessageStore
-from chief.provider.base import Provider
+from chief.provider.base import Provider, for_model
 from chief.tools import ToolDispatcher
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ class Session:
         self._hooks = hooks
         self._hooks_timeout_seconds = hooks_timeout_seconds
         self._session_started = False
+        self._inbox = Inbox()
 
     @property
     def busy(self) -> bool:
@@ -86,6 +89,11 @@ class Session:
         """The per-turn lock; a wipe holds it so no turn starts mid-write."""
         return self._lock
 
+    def inject(self, item: Injected) -> bool:
+        """Offer an owner message to the in-flight turn (seen at its next tool
+        boundary, or handed back via ``item.on_leftover``); False when idle."""
+        return self._inbox.offer(item)
+
     async def run_turn(
         self,
         user_text: str,
@@ -93,8 +101,17 @@ class Session:
         sender: str = "owner",
         on_tool: OnTool | None = None,
         on_tool_result: OnToolResult | None = None,
+        on_begin: Callable[[], Awaitable[None]] | None = None,
+        on_interim: OnInterim | None = None,
+        on_reasoning: OnDelta | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
+
+        ``on_begin`` fires once the turn holds the thread — the moment its user
+        text becomes the conversation's next message, not when it was queued.
+        ``on_interim`` delivers an answer an injected message overtook (see
+        :func:`chief.agent.loop.run_turn`); ``on_reasoning`` streams the
+        model's thinking, display only.
 
         ``sender`` (``"owner"``, ``"system"``, or a stranger id) is carried to
         the context hooks so private-data hooks can gate on who is speaking;
@@ -110,12 +127,19 @@ class Session:
                 # imessage poll) once the reply — and the inbound cursor — are
                 # durable too, never here where the reply is still un-sent.
                 await self._gate.enter_turn()
+                self._inbox.open()
                 try:
+                    if on_begin is not None:
+                        await on_begin()
                     return await self._one_turn(
-                        user_text, on_delta, sender, on_tool, on_tool_result
+                        user_text, on_delta, sender, on_tool, on_tool_result,
+                        on_interim, on_reasoning,
                     )
                 finally:
-                    self._gate.leave_turn()
+                    try:
+                        self._inbox.close()
+                    finally:
+                        self._gate.leave_turn()
 
     async def _one_turn(
         self,
@@ -124,6 +148,8 @@ class Session:
         sender: str,
         on_tool: OnTool | None = None,
         on_tool_result: OnToolResult | None = None,
+        on_interim: OnInterim | None = None,
+        on_reasoning: OnDelta | None = None,
     ) -> TurnResult:
         model = self.model
         status = await self._budget.status() if self._budget else None
@@ -159,6 +185,9 @@ class Session:
                 on_commit=self._live_append,
                 on_tool=on_tool,
                 on_tool_result=on_tool_result,
+                injections=self._inbox,
+                on_interim=on_interim,
+                on_reasoning=on_reasoning,
             )
         except BaseException:
             # A provider/network raise mid-turn must not orphan the turn: the
@@ -173,7 +202,7 @@ class Session:
         self._messages.extend(new_messages)
         if self._hooks is not None:
             await run_post_turn(
-                self._hooks.post_turn(), result, new_messages,
+                self._hooks.post_turn(), result, for_model(new_messages),
                 self._hooks_timeout_seconds, logger,
             )
         return await settle_budget(self._budget, self.thread_key, result, status)
@@ -191,7 +220,7 @@ class Session:
         self._session_started = True
         turn = TurnContext(
             user_text=user_text,
-            messages=self._messages,
+            messages=for_model(self._messages),
             sender=sender,
             thread_key=self.thread_key,
             channel=self._origin_channel,

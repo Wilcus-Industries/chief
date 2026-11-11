@@ -122,6 +122,10 @@ class Harness:
         self.on_deliver: Callable[[Message], Awaitable[None]] | None = None
         # Optional poll-stage approval resolver (dispatcher.resolve_approval).
         self.resolve_approval: Callable[[Message], bool] | None = None
+        # Optional poll-stage mid-turn injector (dispatcher.try_inject).
+        self.inject: (
+            Callable[[Message, Callable[[Message], None]], bool] | None
+        ) = None
         # imessage.mode = dedicated: chief on its own Apple ID, so the four
         # self-DM compensations are off.
         self.dedicated = False
@@ -147,6 +151,7 @@ class Harness:
             run_jxa=run_jxa,
             restart=self.restart,
             resolve_approval=self.resolve_approval,
+            inject=self.inject,
             dedicated=self.dedicated,
             owner_db_path=(
                 None if self.owner_store is None else self.owner_store.path
@@ -518,6 +523,47 @@ async def test_approval_answer_bypasses_blocked_worker(tmp_path: Path) -> None:
     # unblocked gated turn now completes.
     await asyncio.wait_for(adapter.drain(), timeout=1.0)
     assert [m.text for m in harness.delivered] == ["run the tool"]
+    await adapter.stop()
+
+
+async def test_owner_text_mid_turn_injects_ahead_of_the_busy_worker(
+    tmp_path: Path,
+) -> None:
+    """Texting is interrupt-by-default: a message arriving while its thread's
+    turn runs is offered to that turn at poll stage, never parked in the FIFO
+    behind it. A leftover the turn never reached comes back through the FIFO."""
+    harness = Harness(tmp_path)
+    release = asyncio.Event()
+    offered: list[str] = []
+    requeue: list[Callable[[Message], None]] = []
+
+    async def on_deliver(message: Message) -> None:
+        await release.wait()  # the first turn is still running
+
+    def inject(message: Message, back: Callable[[Message], None]) -> bool:
+        if message.text == "start":
+            return False  # idle thread: no turn to take it, runs normally
+        offered.append(message.text)
+        requeue.append(back)
+        return True
+
+    harness.on_deliver = on_deliver
+    harness.inject = inject
+    harness.store.add_message(OWNER, "start", from_me=1, chat=OWNER, date=1)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    harness.store.add_message(OWNER, "actually wait", from_me=1, chat=OWNER, date=2)
+    await asyncio.wait_for(adapter.poll_once(), timeout=1.0)
+    assert offered == ["actually wait"]
+    release.set()
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["start"]
+    leftover = Message(
+        channel="imessage", sender="owner", thread_key=OWNER, text="actually wait"
+    )
+    requeue[0](leftover)  # the turn ended before a tool boundary
+    await adapter.drain()
+    assert [m.text for m in harness.delivered] == ["start", "actually wait"]
     await adapter.stop()
 
 

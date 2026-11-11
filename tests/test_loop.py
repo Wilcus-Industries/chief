@@ -3,7 +3,14 @@
 from typing import Any
 
 from chief.agent.loop import run_turn
-from chief.provider.base import Completion, TextDelta, ToolCall, ToolSpec, Usage
+from chief.provider.base import (
+    Completion,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+    Usage,
+)
 from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
@@ -209,3 +216,45 @@ async def test_iteration_cap_stops_a_tool_loop_runaway() -> None:
     )
     assert "iteration limit" in result.text
     assert len(provider.calls) == 3
+
+
+async def test_reasoning_streams_to_its_callback_and_is_kept_for_display() -> None:
+    provider = FakeProvider(
+        [[ReasoningDelta("think"), TextDelta("hi"),
+          Completion(text="hi", reasoning="think")]]
+    )
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "hi"}]
+    seen: list[str] = []
+
+    async def on_reasoning(text: str) -> None:
+        seen.append(text)
+
+    await run_turn(
+        provider=provider, model="m", messages=messages, tools=ToolRegistry(),
+        on_delta=DeltaSink(), on_reasoning=on_reasoning,
+    )
+    assert seen == ["think"]
+    assert messages[-1] == {"role": "assistant", "content": "hi", "reasoning": "think"}
+
+
+async def test_stored_reasoning_never_reaches_the_model() -> None:
+    """Display-only: the model's context is exactly what it was before."""
+    call = ToolCall(id="c1", name="echo", arguments={"text": "x"})
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(call,), reasoning="private")],
+            [TextDelta("done"), Completion(text="done")],
+        ]
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "ok", "reasoning": "old thoughts"},
+        {"role": "user", "content": "hi"},
+    ]
+    await run_turn(
+        provider=provider, model="m", messages=messages, tools=echo_registry(),
+        on_delta=DeltaSink(),
+    )
+    for sent in provider.calls:
+        assert all("reasoning" not in m for m in sent)
+    assert messages[1]["reasoning"] == "old thoughts"  # the transcript keeps it

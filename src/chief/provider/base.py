@@ -49,6 +49,13 @@ class TextDelta:
 
 
 @dataclass(frozen=True)
+class ReasoningDelta:
+    """A streamed chunk of the model's reasoning (thinking) — display only."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Usage:
     """Token/cost accounting for one model call."""
 
@@ -71,9 +78,23 @@ class Completion:
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
     usage: Usage = Usage()
+    reasoning: str = ""
 
 
-ProviderEvent = TextDelta | Completion
+ProviderEvent = TextDelta | ReasoningDelta | Completion
+
+# Transcript keys kept for the owner's eyes only (the web UI's thinking rows):
+# stored with a message, but never part of what a model is sent or measured on.
+DISPLAY_ONLY_KEYS = ("reasoning",)
+
+
+def for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``messages`` without their display-only keys — what a model may see."""
+    return [
+        {k: v for k, v in m.items() if k not in DISPLAY_ONLY_KEYS}
+        if any(k in m for k in DISPLAY_ONLY_KEYS) else m
+        for m in messages
+    ]
 
 
 def parse_arguments(raw: str) -> dict[str, Any]:

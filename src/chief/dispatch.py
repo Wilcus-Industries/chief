@@ -5,7 +5,9 @@ command routing plus the turn's own observer-streaming callbacks); the pure
 policy frame logic already lives in chief.policy. Splitting scatters one turn.
 
 Inbound order: approval answers are consumed first (a turn blocked on an
-approval card would deadlock behind the session lock otherwise), strangers
+approval card would deadlock behind the session lock otherwise); an owner
+message sent as an interrupt is offered to the thread's running turn
+(``try_inject``) instead of queuing behind it; strangers
 are logged and published to the bus but never run a turn, owner messages go on
 the event bus and run a turn. ``system`` senders (monitor/cron wakes) run a
 turn but are never published — that would let monitors trigger themselves.
@@ -13,8 +15,13 @@ turn but are never published — that would let monitors trigger themselves.
 Every completed turn emits one coarse ``tick`` to the observer hub so the
 cockpit can watch a thread it isn't tapped into (other tabs' unread/reorder/
 snippet); web turns also stream their own ``delta``/``final`` through the web
-adapter, so the dispatcher skips only the rich ``final`` for them. A client
-*tapped into* a non-web thread also gets that turn's inbound/final and — as the
+adapter, so the dispatcher skips only the rich ``final`` for them. Every turn's
+``inbound`` streams to its watchers when the turn begins (and an injected
+message's when the loop takes it). A slash command's answer is a ``command``
+frame to its watchers on every channel — for web *instead of* a ``final``, so
+the client never mistakes it for a streaming reply. A client *tapped into* a
+non-web thread
+also gets that turn's final and — as the
 thread's :class:`~chief.policy.StreamPolicy` allows (resolved once per turn from
 the row override or channel default) — its delta / tool-tick / inline
 tool-result frames. Via the public ``tapped()``, it also gets an out-of-turn
@@ -24,12 +31,20 @@ approval card the gate's ``approval_asker`` raises (#267).
 import logging
 from typing import Protocol
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Adapter, Message, Requeue
+from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
-from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
+from chief.policy import (
+    StreamPolicy,
+    delta_frame,
+    resolve,
+    result_frame,
+    thinking_frame,
+    tool_frame,
+)
 from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
@@ -98,6 +113,30 @@ class Dispatcher:
             return False
         return self._approvals.resolve(message.thread_key, message.text)
 
+    def try_inject(self, message: Message, requeue: Requeue) -> bool:
+        """Offer an owner message to its thread's in-flight turn instead of
+        queuing it behind; True means the turn took it (or will hand it back
+        through ``requeue`` if it finishes first — the caller's normal queue
+        path, e.g. the iMessage FIFO). False: no turn running, a stranger, or
+        a slash command (those always route through :meth:`handle`).
+
+        The agent sees it at the turn's next tool boundary, where it streams
+        as an ``inbound`` frame and is published to the bus like any owner
+        message."""
+        if message.sender != OWNER or message.text.startswith("/"):
+            return False
+        session = self._manager.peek(message.thread_key)
+        if session is None:
+            return False
+
+        async def consumed() -> None:
+            self._inbound(message)
+            await self._publish(message)
+
+        return session.inject(
+            Injected(message.text, consumed, lambda: requeue(message))
+        )
+
     async def handle(self, message: Message, *, fire_restart: bool = True) -> None:
         """Run one turn for an inbound message and send the reply back.
 
@@ -117,7 +156,7 @@ class Dispatcher:
         if self._commands is not None:
             outcome = await self._commands.run(message)
             if isinstance(outcome, str):
-                await self.adapter(message.channel).send(message.thread_key, outcome)
+                await self._answer_command(message, outcome)
                 return
             if isinstance(outcome, Message):
                 message = outcome
@@ -126,6 +165,20 @@ class Dispatcher:
         await self._run_turn(message)
         if fire_restart and self._restart is not None:
             await self._restart.fire_if_requested()
+
+    async def _answer_command(self, message: Message, answer: str) -> None:
+        """A slash command's answer: never stored, not a turn. The origin
+        channel replies as before — except web, whose client gets only a
+        ``command`` frame (carrying the command too), so it is never mistaken
+        for the reply a running turn is streaming. A client tapped into any
+        other thread gets the same frame."""
+        tk = message.thread_key
+        if message.channel != WEB_CHANNEL:
+            await self.adapter(message.channel).send(tk, answer)
+        self.tapped(
+            tk, {"type": "command", "thread": tk, "command": message.text,
+                 "text": answer},
+        )
 
     async def _publish(self, message: Message) -> None:
         if self._bus is None:
@@ -150,16 +203,25 @@ class Dispatcher:
         tk = message.thread_key
         override = await self._manager.stream_policy(tk)
         policy = resolve(message.channel, override, self._channel_defaults)
-        # Web turns stream their own inbound/delta (adapter + JS); for every
-        # other channel tapped() re-checks the live subscription at emit time.
+        # Web turns stream their own delta (adapter); for every other channel
+        # tapped() re-checks the live subscription at emit time.
         non_web = message.channel != WEB_CHANNEL
-        if non_web:
-            self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
+
+        async def on_begin() -> None:
+            # Every channel, web included: the client renders the owner's text
+            # from this frame once the turn starts, not optimistically at send.
+            self._inbound(message)
 
         async def on_delta(text: str) -> None:
             await adapter.send_delta(tk, text)
             if non_web and (frame := delta_frame(policy, tk, text)):
                 self.tapped(tk, frame)
+
+        async def on_interim(text: str) -> None:
+            # An answer an injected message overtook still reaches the owner.
+            await adapter.send(tk, text)
+            if non_web:
+                self.tapped(tk, {"type": "final", "thread": tk, "text": text})
 
         async def on_tool(call: ToolCall) -> None:
             # Web turns get tool ticks too — the WebAdapter never emits them.
@@ -170,10 +232,17 @@ class Dispatcher:
             if frame := result_frame(policy, tk, call_id=call.id, result=result):
                 self.tapped(tk, frame)
 
+        async def on_reasoning(text: str) -> None:
+            # Web turns too: the WebAdapter only carries reply text.
+            if frame := thinking_frame(policy, tk, text):
+                self.tapped(tk, frame)
+
         try:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
+                on_begin=on_begin, on_interim=on_interim,
+                on_reasoning=on_reasoning,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
@@ -198,6 +267,10 @@ class Dispatcher:
     ) -> None:
         await adapter.send(message.thread_key, text)
         self._turn_end(message, text)
+
+    def _inbound(self, message: Message) -> None:
+        tk = message.thread_key
+        self.tapped(tk, {"type": "inbound", "thread": tk, "text": message.text})
 
     def tapped(self, thread_key: str, frame: dict[str, object]) -> None:
         """Deliver a rich frame only if a client is tapped into the thread."""

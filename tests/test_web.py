@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -22,14 +23,24 @@ from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
+from chief.web.styles import STYLES
+from chief.web.view import render_transcript
 
 from .fakes import FakeProvider
 
 HANDLED: list[Message] = []
+# Messages offered mid-turn; INJECT_TAKES decides whether the "turn" takes them.
+INJECTED: list[Message] = []
+INJECT_TAKES = [True]
 
 
 async def handle(message: Message) -> None:
     HANDLED.append(message)
+
+
+def inject(message: Message, requeue: Callable[[Message], None]) -> bool:
+    INJECTED.append(message)
+    return INJECT_TAKES[0]
 
 
 async def _no_wake(message: Message) -> None:
@@ -54,6 +65,8 @@ WebParts = tuple[
 @pytest.fixture
 def web(engine: AsyncEngine) -> WebParts:
     HANDLED.clear()
+    INJECTED.clear()
+    INJECT_TAKES[0] = True
     hub = ObserverHub()
     adapter = WebAdapter(hub)
     factory = make_session_factory(engine)
@@ -74,7 +87,8 @@ def web(engine: AsyncEngine) -> WebParts:
     )
     approvals = ApprovalBroker()
     app = build_web_app(
-        Auth("hunter2"), adapter, hub, handle, monitors, store, _palette, manager,
+        Auth("hunter2"), adapter, hub, handle, inject, monitors, store, _palette,
+        manager,
         approvals, DEFAULT_CHANNEL_DEFAULTS, ("+15550009999",),
     )
     client = httpx.AsyncClient(
@@ -128,6 +142,72 @@ async def test_send_dispatches_an_owner_message(web: WebParts) -> None:
     assert message.sender == "owner"
     assert message.thread_key == "web:main"
     assert message.text == "hi"
+
+
+async def test_plain_send_queues_and_never_injects(web: WebParts) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post("/send", json={"thread": "web:main", "text": "hi"})
+    assert response.text == "queued"
+    await asyncio.sleep(0)
+    assert INJECTED == []
+    assert [m.text for m in HANDLED] == ["hi"]
+
+
+async def test_interrupt_send_offers_the_message_to_the_running_turn(
+    web: WebParts,
+) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "stop", "interrupt": True}
+    )
+    assert response.status_code == 202
+    assert response.text == "injected"
+    await asyncio.sleep(0)
+    assert [m.text for m in INJECTED] == ["stop"]
+    assert HANDLED == []  # the running turn took it — no second turn
+
+
+async def test_interrupt_send_on_an_idle_thread_runs_a_normal_turn(
+    web: WebParts,
+) -> None:
+    INJECT_TAKES[0] = False
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "hi", "interrupt": True}
+    )
+    assert response.text == "queued"
+    await asyncio.sleep(0)
+    assert [m.text for m in HANDLED] == ["hi"]
+
+
+async def test_send_while_a_card_is_pending_answers_it(web: WebParts) -> None:
+    """The reply says so, so the client can drop its pending bubble — that
+    message will never start a turn or stream an inbound frame."""
+    client, _, _, _, _, _, approvals = web
+    card = asyncio.create_task(approvals.ask("web:main", "ok?", _noop_send))
+    await asyncio.sleep(0)
+    await login(client)
+    response = await client.post("/send", json={"thread": "web:main", "text": "yes"})
+    assert response.text == "answered"
+    assert await card is Approval.ONCE
+    assert HANDLED == []
+
+
+async def test_slash_command_send_says_command_and_never_injects(
+    web: WebParts,
+) -> None:
+    client, *_ = web
+    await login(client)
+    response = await client.post(
+        "/send", json={"thread": "web:main", "text": "/model", "interrupt": True}
+    )
+    assert response.text == "command"
+    await asyncio.sleep(0)
+    assert INJECTED == []
+    assert [m.text for m in HANDLED] == ["/model"]
 
 
 async def test_send_omitted_thread_defaults_to_web_main(web: WebParts) -> None:
@@ -443,6 +523,26 @@ async def test_history_without_thread_is_empty(web: WebParts) -> None:
     assert (await client.get("/history")).json() == []
 
 
+def test_history_shows_stored_reasoning_as_a_thinking_row_before_its_step() -> None:
+    rows = render_transcript(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant", "content": None, "reasoning": "check disk",
+                "tool_calls": [{"id": "c1", "function": {"name": "bash"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "fine", "reasoning": "  "},
+        ]
+    )
+    assert rows == [
+        {"role": "owner", "text": "hi"},
+        {"role": "thinking", "text": "check disk"},
+        {"role": "tool", "call_id": "c1", "name": "bash"},
+        {"role": "chief", "text": "fine"},  # blank reasoning shows nothing
+    ]
+
+
 async def test_history_includes_collapsed_tool_rows(web: WebParts) -> None:
     """A tool call shows as a name + call-id row, interleaved in order — no
     args or result in the list payload (#261)."""
@@ -743,6 +843,14 @@ async def test_policy_panel_and_route_wired_into_the_page(web: WebParts) -> None
     assert 'id="policy"' in (await client.get("/")).text
     js = (await client.get("/app.js")).text
     assert "/policy" in js and "loadPolicy" in js and "savePolicy" in js
+
+
+def test_sidebar_cannot_be_stretched_by_a_long_snippet() -> None:
+    # A flex item defaults to min-width:auto, so one long nowrap snippet (a
+    # tool call's args) widened the sidebar to thousands of px instead of
+    # ellipsizing. min-width:0 pins it to its flex-basis.
+    rule = STYLES.split("#buffers{", 1)[1].split("}", 1)[0]
+    assert "min-width:0" in rule.replace(" ", "")
 
 
 async def test_assets_are_served(web: WebParts) -> None:

@@ -1,11 +1,12 @@
 """Per-thread stream policy: what a turn streams to a tapped-in observer.
 
-A turn always emits its coarse ``tick`` and (for non-web threads) the rich
-``inbound``/``final``; this policy gates only the *extra* live detail — token
-``delta``s, per-call ``tool`` ticks, and whether a tool's ``result`` loads
-live (``lazy`` = only on click via /history/tool, ``inline`` = streamed as a
-``result`` frame, ``off`` = no live result at all, and the ``tool`` tick omits
-its ``call_id`` so no load button binds to it). History always renders full,
+A turn always emits its coarse ``tick``, its ``inbound``, and (for non-web
+threads; web streams its own) the rich ``final``; this policy gates only the
+*extra* live detail — token ``delta``s, per-call ``tool`` ticks, and whether
+a tool's ``result`` loads live (``lazy`` = only on click via /history/tool,
+``inline`` = streamed as a ``result`` frame, ``off`` = no live result at all,
+and the ``tool`` tick omits its ``call_id`` so no load button binds to it).
+History always renders full,
 independent of this — the policy governs the live stream only.
 
 Resolution order: a session row's stored override wins; else the channel's
@@ -121,6 +122,15 @@ def delta_frame(
     if not policy.deltas:
         return None
     return {"type": "delta", "thread": thread, "text": text}
+
+
+def thinking_frame(
+    policy: StreamPolicy, thread: str, text: str
+) -> dict[str, object] | None:
+    """Live reasoning text — streamed model output, so gated like deltas."""
+    if not policy.deltas:
+        return None
+    return {"type": "thinking", "thread": thread, "text": text}
 
 
 def tool_frame(

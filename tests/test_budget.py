@@ -6,7 +6,7 @@ from chief.agent.manager import SessionManager
 from chief.budget import Budget, BudgetState
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
-from chief.provider.base import Completion, TextDelta, Usage
+from chief.provider.base import Completion, ProviderEvent, Usage
 from chief.tools import ToolRegistry
 
 from .fakes import FakeProvider
@@ -16,7 +16,7 @@ async def noop_delta(text: str) -> None:
     pass
 
 
-def costed_turn(text: str, cost: float) -> list[TextDelta | Completion]:
+def costed_turn(text: str, cost: float) -> list[ProviderEvent]:
     return [Completion(text=text, usage=Usage(cost=cost))]
 
 

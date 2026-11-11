@@ -1,7 +1,5 @@
 """The web UI's ASGI app: login, chat, sessions, SSE stream, monitor list."""
 
-import asyncio
-import re
 from collections.abc import Callable
 
 from starlette.applications import Starlette
@@ -15,7 +13,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from chief.adapters.base import Message
+from chief.adapters.base import Inject
 from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
@@ -29,13 +27,10 @@ from chief.web.live import build_live_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
+from chief.web.send_route import build_send_route
 from chief.web.status_routes import build_status_routes
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript, tool_call_response
-
-# An iMessage group's thread_key is an opaque 32-char hex chat id; a 1:1 key is
-# a phone/email handle. Groups have no core send path (see the send route).
-_GROUP_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 
 
 def build_web_app(
@@ -43,6 +38,7 @@ def build_web_app(
     adapter: WebAdapter,
     hub: ObserverHub,
     handle: HandleMessage,
+    inject: Inject,
     monitors: MonitorService,
     store: MessageStore,
     palette: Callable[[], list[str]],
@@ -53,7 +49,9 @@ def build_web_app(
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
-    ``palette`` yields the current ``/command`` names for input completion;
+    ``inject`` offers an interrupt-send to the thread's running turn
+    (``Dispatcher.try_inject``); ``palette`` yields the current ``/command``
+    names for input completion;
     ``store`` backs the session list and per-thread transcript history;
     ``manager`` deletes buffers (row + live session) for the sidebar × control;
     ``approvals`` is the same broker the gate's cards run on — ``/approve``
@@ -85,30 +83,6 @@ def build_web_app(
             COOKIE_NAME, auth.cookie_value(), httponly=True, samesite="strict"
         )
         return response
-
-    async def send(request: Request) -> Response:
-        if not auth.is_authed(request):
-            return unauthorized()
-        body = await request.json()
-        # The client sends the thread's real key; the channel is resolved from
-        # the store (the device that owns the thread), never trusted from the
-        # client. An unknown thread is a fresh web scratch buffer.
-        thread_key = str(body.get("thread") or "web:main")
-        channel = await store.channel(thread_key) or adapter.name
-        if channel == "imessage" and _GROUP_RE.match(thread_key):
-            # A group's send path is imsg (owner-directed), not the core
-            # one-to-one adapter; the cockpit keeps groups view-only.
-            return PlainTextResponse(
-                "group threads are view-only — send with imsg", status_code=400
-            )
-        message = Message(
-            channel=channel,
-            sender="owner",
-            thread_key=thread_key,
-            text=str(body["text"]),
-        )
-        asyncio.get_running_loop().create_task(handle(message))
-        return PlainTextResponse("", status_code=202)
 
     async def sessions(request: Request) -> Response:
         if not auth.is_authed(request):
@@ -172,7 +146,10 @@ def build_web_app(
         routes=[
             Route("/", index),
             Route("/login", login, methods=["POST"]),
-            Route("/send", send, methods=["POST"]),
+            build_send_route(
+                store, adapter.name, handle, inject, approvals,
+                auth.is_authed, unauthorized,
+            ),
             Route("/sessions", sessions),
             Route("/delete", delete, methods=["POST"]),
             Route("/history", history),
