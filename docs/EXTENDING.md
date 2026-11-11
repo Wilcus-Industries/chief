@@ -67,6 +67,15 @@ The next boot connects it and its tools appear as `mcp_<name>_<tool>`. A server
 that fails to start is logged and skipped — a dead sidecar must not keep the whole
 daemon down. Reconnects re-register tools with `replace=True`.
 
+Optional per-server keys: `env` and `cwd` (stdio only; the environment is opt-in),
+`timeout` (connect wait, seconds), and `session_context: true`, which sends each
+tool call's calling session as `_meta` `chief/thread` + `chief/channel` — for a
+server that keeps per-session state (the playwright package's one-tab-per-session
+browser). A subagent's calls carry the session that spawned it. It is off by
+default because thread keys are often phone numbers; only turn it on for a
+server you trust with them. An opted-in server's tools cannot take an argument
+named `context` (chief's context replaces it; registration logs a warning).
+
 ## Add a classifier
 
 Drop a `<name>.md` in `classifiers/` with frontmatter `name`, `description`,
