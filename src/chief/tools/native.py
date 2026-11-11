@@ -22,6 +22,8 @@ from chief.cron.tools import register_cron_tools
 from chief.gate import AskApproval
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
+from chief.peers.router import PeerRouter
+from chief.peers.tools import register_send_msg_tool
 from chief.provider.base import Provider
 from chief.selfedit.pipeline import SelfEditPipeline
 from chief.selfedit.tools import register_restart_tool
@@ -50,6 +52,7 @@ def register_native_tools(
     model_aliases: frozenset[str] = frozenset(),
     ask: AskApproval | None = None,
     post_tool: PostTool | None = None,
+    router: PeerRouter | None = None,
 ) -> None:
     """Register the always-on native tool set onto ``registry`` at boot.
 
@@ -59,7 +62,8 @@ def register_native_tools(
     ``model_aliases`` are the configured ``provider_aliases`` keys that
     ``switch_model`` validates against; ``ask`` is the approval-card path the
     ``schedule`` tool raises for command schedules (without it, creating one is
-    refused); ``post_tool`` screens subagent tool results.
+    refused); ``post_tool`` screens subagent tool results; ``router`` backs
+    ``send_msg`` (absent in unit wiring that builds no messaging).
     """
     register_session_tools(registry, manager)
     register_switch_model_tool(registry, manager, model_aliases=model_aliases)
@@ -69,6 +73,8 @@ def register_native_tools(
     register_shell_tool(registry, shell_service, guards=shell_guards)
     register_restart_tool(registry, selfedit_pipeline)
     register_skill_tools(registry, skills)
+    if router is not None:
+        register_send_msg_tool(registry, router)
     register_spawn_tool(
         registry, AgentRegistry(agents_dir), provider, default_model, budget,
         post_tool=post_tool,

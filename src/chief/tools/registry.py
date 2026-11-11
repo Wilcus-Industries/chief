@@ -19,10 +19,14 @@ ToolHandler = Callable[..., Awaitable[str]]
 
 @dataclass(frozen=True)
 class ToolContext:
-    """Where a tool call came from; injected into tools that want it."""
+    """Where a tool call came from; injected into tools that want it.
+
+    ``subagent`` is the run id when a subagent made the call: ``thread_key`` and
+    ``channel`` are then its parent's, so cards and wakes land on the parent."""
 
     thread_key: str
     channel: str
+    subagent: str | None = None
 
 
 @dataclass(frozen=True)

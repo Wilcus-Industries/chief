@@ -7,6 +7,7 @@ real daemon round-trip with only the model call swapped out.
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -20,6 +21,13 @@ from chief.provider.base import (
     ToolSpec,
 )
 from chief.typesafe import TypeSafeClient
+
+
+@dataclass
+class _Route:
+    marker: str
+    script: list[list[ProviderEvent]]
+    hold: asyncio.Event | None
 
 
 class FakeProvider:
@@ -37,6 +45,22 @@ class FakeProvider:
         # Optional handshake for concurrency tests: when set, each call waits
         # here after recording itself, so tests control interleaving.
         self.gate: asyncio.Event | None = None
+        self._routes: list[_Route] = []
+
+    def route(
+        self, marker: str, script: list[list[ProviderEvent]],
+        hold: asyncio.Event | None = None,
+    ) -> None:
+        """Play calls whose messages contain ``marker`` from ``script`` instead
+        of the shared one (first matching route wins) — for multi-session tests
+        whose turns interleave in an order the shared FIFO can't pin down.
+        ``hold`` parks this route's *first* call (after recording it) until set,
+        so a test can keep one session mid-turn."""
+        self._routes.append(_Route(marker, list(script), hold))
+
+    def _route_for(self, messages: list[dict[str, Any]]) -> "_Route | None":
+        seen = json.dumps(messages, default=str)
+        return next((r for r in self._routes if r.marker in seen), None)
 
     async def stream(
         self,
@@ -50,7 +74,12 @@ class FakeProvider:
         self.tool_specs.append(list(tools))
         if self.gate is not None:
             await self.gate.wait()
-        for event in self._script.pop(0):
+        route = self._route_for(messages)
+        if route is not None and route.hold is not None:
+            hold, route.hold = route.hold, None
+            await hold.wait()
+        script = route.script if route is not None else self._script
+        for event in script.pop(0):
             yield event
 
 

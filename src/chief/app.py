@@ -32,6 +32,7 @@ from chief.hooks.boot import build_hooks
 from chief.hooks.posttool import tool_screener
 from chief.hub import ObserverHub
 from chief.monitors.service import MonitorService
+from chief.peers.wiring import build_peers
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
 from chief.policy import owner_audience
@@ -152,6 +153,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         config, provider, store, factory, gate, skills, shell_service, shell_guards
     )
 
+    peers = build_peers(core, config, store, gate.audit)
     selfedit_pipeline = SelfEditPipeline(Path.cwd(), gate.audit, core.restart.request)
     # Accepted by `/model` / `switch_model` — see chief.provider.model_names.
     model_aliases = frozenset(config.provider_aliases)
@@ -166,7 +168,7 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         budget=core.budget, root=Path.cwd(),
         shell_guards=shell_guards, model_aliases=model_aliases,
         post_tool=core.post_tool,
-        ask=core.ask,
+        ask=core.ask, router=peers.router,
     )
     await ensure_update_schedule(core.cron, config)
     commands = CommandSet(
@@ -193,4 +195,5 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         mcp_configs=mcp_configs,
         imessage_adapter=adapters.imessage,
         shell_service=shell_service,
+        peers=peers,
     )
