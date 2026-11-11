@@ -288,13 +288,15 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    path). A record is flagged `started` once its user message is stored and
    ends once the reply is sent, or on failure; a cancel keeps it. The next
    boot (`selfedit/resume.py`) holds each affected thread on the dispatcher
-   before any adapter starts, replays each never-started message verbatim
-   through `Dispatcher.replay` (owner/system only, no second publish or
-   command pass), and wakes each cut-off thread once with `RESUME_NOTE`.
+   before any adapter starts (a held thread takes no injections either),
+   replays each never-started message verbatim
+   through `Dispatcher.replay` (owner/system only, commands run, no second
+   publish), and wakes each cut-off thread once with `RESUME_NOTE`.
    Records stay on disk until their resume ends them; one that dies again is
-   given up on, and any older than an hour since it arrived is dropped. Not
+   given up on once it had started, and any older than an hour since it arrived is dropped. Not
    covered: a message lost before chief records it (an iMessage row between
-   cursor save and enqueue, a web request before `handle` runs), and a
+   cursor save and enqueue, a web request before `handle` runs), peer
+   messages (`PeerRouter.deliver` injections and wakes), and a
    reply whose send the exec cuts short (the thread is woken instead).
 3. **Approval answers must be consumed before enqueue** on any channel with a
    serialized per-thread worker — otherwise the answer queues behind the very

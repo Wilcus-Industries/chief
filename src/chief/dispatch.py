@@ -177,6 +177,8 @@ class Dispatcher:
         message."""
         if message.sender != OWNER or message.text.startswith("/"):
             return False
+        if message.thread_key in self._held:
+            return False  # queue behind the boot's replays, never overtake them
         session = self._manager.peek(message.thread_key)
         if session is None:
             return False
@@ -222,16 +224,18 @@ class Dispatcher:
             await self._restart.fire_if_requested()
 
     async def replay(self, message: Message, ticket: TurnTicket) -> None:
-        """Run a turn a death killed (``chief.selfedit.resume``). Its message
-        was already approval-checked, published and command-routed before it
-        was held, so only the turn itself runs again — and only ever as the
-        owner or system: nothing else is recorded, but a record is a file."""
+        """Run a message a death killed (``chief.selfedit.resume``). It was
+        approval-checked and published before it was recorded, so neither
+        runs again; the command stage does (a queued ``/clear`` is recorded
+        before it reaches it). Only ever as the owner or system: nothing else
+        is recorded, but a record is a file."""
         if message.sender not in (OWNER, SYSTEM):
             logger.warning("not resuming a %r turn on %s", message.sender,
                            message.thread_key)
             ticket.done()
             return
-        await self._ended(message, ticket)
+        if (routed := await self._command(message, ticket)) is not None:
+            await self._ended(*routed)
         if self._restart is not None:
             await self._restart.fire_if_requested()
 
@@ -249,20 +253,31 @@ class Dispatcher:
             return
         if (resuming := self._held.get(message.thread_key)) is not None:
             await resuming.wait()
-        if self._commands is not None:
-            outcome = await self._commands.run(message)
-            if isinstance(outcome, str):
-                await self._answer_command(message, outcome)
-                ticket.done()
-                return
-            if isinstance(outcome, Message):
-                # A replay must run the rewritten turn, not re-run the command.
-                rewritten = self.track(outcome)
-                ticket.done()
-                message, ticket = outcome, rewritten
+        if (routed := await self._command(message, ticket)) is None:
+            return
+        message, ticket = routed
         if message.sender == OWNER:
             await self._publish(message)
         await self._ended(message, ticket)
+
+    async def _command(
+        self, message: Message, ticket: TurnTicket
+    ) -> tuple[Message, TurnTicket] | None:
+        """The slash-command stage: None when a command answered (its record
+        ended), else the turn to run — a skill rewrite swaps in a fresh record,
+        so a replay runs the rewritten turn, not the command again."""
+        if self._commands is None:
+            return message, ticket
+        outcome = await self._commands.run(message)
+        if isinstance(outcome, str):
+            await self._answer_command(message, outcome)
+            ticket.done()
+            return None
+        if isinstance(outcome, Message):
+            rewritten = self.track(outcome)
+            ticket.done()
+            return outcome, rewritten
+        return message, ticket
 
     async def _ended(self, message: Message, ticket: TurnTicket) -> None:
         """Run the turn, then end its record: after the reply is sent, so a

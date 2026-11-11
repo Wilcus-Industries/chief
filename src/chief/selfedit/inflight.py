@@ -17,8 +17,9 @@ the daemon is going down. The fresh boot notes the leftovers at construction;
 they stay on disk, and so survive a death mid-resume, until the resume
 ``adopt``s each one and its replay ends it. An adopted record that dies again
 is given up on at the next boot (logged), so a turn that kills the process
-can't crash-loop it. Records past :data:`STALE_SECONDS` since the message
-first arrived are dropped instead of answered hours late.
+can't crash-loop it (one that never got to start, held behind another
+restart, is not counted). Records past :data:`STALE_SECONDS` since the
+message first arrived are dropped instead of answered hours late.
 """
 
 import json
@@ -52,12 +53,13 @@ class Interrupted:
 
 
 class _Ticket:
-    def __init__(self, log: "InflightLog", turn_id: str) -> None:
+    def __init__(self, log: "InflightLog", turn_id: str, *, resumed: bool = False):
         self._log = log
         self._id = turn_id
+        self._resumed = resumed
 
     def started(self) -> None:
-        self._log._update(self._id, started=True)
+        self._log._started(self._id, self._resumed)
 
     def done(self) -> None:
         self._log.forget(self._id)
@@ -92,20 +94,19 @@ class InflightLog:
         ]
 
     def adopt(self, turn_id: str) -> _Ticket:
-        """Take over a leftover for its resume; counts the attempt, keeps its
-        arrival time."""
-        if turn_id in self._entries:
-            self._entries[turn_id]["attempts"] += 1
-            self._save()
-        return _Ticket(self, turn_id)
+        """Take over a leftover for its resume, keeping its arrival time. The
+        attempt counts only once the resumed turn starts: one held at the gate
+        by a restart never ran, so dying there is no strike against it."""
+        return _Ticket(self, turn_id, resumed=True)
 
     def forget(self, turn_id: str) -> None:
         if self._entries.pop(turn_id, None) is not None:
             self._save()
 
-    def _update(self, turn_id: str, **fields: Any) -> None:
-        if turn_id in self._entries:
-            self._entries[turn_id].update(fields)
+    def _started(self, turn_id: str, resumed: bool) -> None:
+        if (entry := self._entries.get(turn_id)) is not None:
+            entry["started"] = True
+            entry["attempts"] += resumed
             self._save()
 
     def _load(self) -> dict[str, dict[str, Any]]:

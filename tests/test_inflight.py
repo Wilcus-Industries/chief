@@ -102,8 +102,18 @@ def test_a_resume_that_dies_too_is_given_up_on(tmp_path: Path) -> None:
     InflightLog(tmp_path).track("cli:t", "cli", "owner", "kills the daemon")
     reboot = InflightLog(tmp_path)
     [turn] = reboot.take_interrupted()
-    reboot.adopt(turn.turn_id)  # the replay dies again: no done
+    reboot.adopt(turn.turn_id).started()  # the replay dies again: no done
     assert leftovers(tmp_path) == []  # no crash loop
+
+
+def test_a_resume_that_never_started_is_not_counted(tmp_path: Path) -> None:
+    # Adopted, then held at the gate by another thread's restart: it never
+    # ran, so that death is no strike against it.
+    InflightLog(tmp_path).track("cli:t", "cli", "owner", "still wanted")
+    reboot = InflightLog(tmp_path)
+    [turn] = reboot.take_interrupted()
+    reboot.adopt(turn.turn_id)
+    assert leftovers(tmp_path) == [("still wanted", False)]
 
 
 def test_age_counts_from_arrival_not_from_the_last_resume(tmp_path: Path) -> None:
@@ -274,11 +284,11 @@ async def test_a_message_sent_while_down_waits_behind_the_resume(
     assert adapter.sent == [("cli:t", "did X"), ("cli:t", "ok, stopping")]
 
 
-async def test_replay_runs_the_turn_without_republishing_or_commands(
+async def test_replay_runs_commands_but_never_republishes(
     store: MessageStore, tmp_path: Path
 ) -> None:
-    # The message was already published and command-routed before it was
-    # held; replaying must do neither twice.
+    # A queued "/help" was recorded before the command stage ever saw it, so
+    # the replay must run it as a command; the publish already happened.
     events: list[Event] = []
 
     async def seen(event: Event) -> None:
@@ -287,14 +297,34 @@ async def test_replay_runs_the_turn_without_republishing_or_commands(
     bus = EventBus()
     bus.subscribe(seen)
     provider = FakeProvider([text_turn("ok")])
-    dispatcher, _ = make_dispatcher(provider, store, InflightLog(tmp_path), bus=bus)
+    log = InflightLog(tmp_path)
+    dispatcher, adapter = make_dispatcher(provider, store, log, bus=bus)
     commands = RecordingCommands()
     dispatcher.set_commands(commands)
-    await dispatcher.replay(msg("/help"), NullTicket())
+    await dispatcher.replay(msg("/help"), log.track("cli:t", "cli", "owner", "/help"))
+    await dispatcher.replay(msg("plain"), NullTicket())
 
-    assert provider.calls[0][-1] == {"role": "user", "content": "/help"}
-    assert commands.seen == []
+    assert adapter.sent == [("cli:t", "help text"), ("cli:t", "ok")]
+    assert [c[-1]["content"] for c in provider.calls] == ["plain"]
     assert events == []
+    assert leftovers(tmp_path) == []
+
+
+async def test_a_resumed_thread_takes_no_injections(
+    store: MessageStore, tmp_path: Path
+) -> None:
+    # "never mind" must queue behind the replays, not jump into the wake.
+    provider = FakeProvider([text_turn("resumed")])
+    provider.gate = asyncio.Event()
+    dispatcher, _ = make_dispatcher(provider, store, InflightLog(tmp_path))
+    dispatcher.hold(["cli:t"])
+    wake = asyncio.create_task(dispatcher.replay(msg("x", "system"), NullTicket()))
+    await provider.entered.wait()
+    assert not dispatcher.try_inject(msg("never mind"), lambda m, t: None)
+    dispatcher.release("cli:t")
+    assert dispatcher.try_inject(msg("never mind"), lambda m, t: None)
+    provider.gate.set()
+    await wake
 
 
 async def test_replay_never_runs_a_stranger_turn(
