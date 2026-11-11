@@ -255,63 +255,6 @@ def test_manifest_python_deps_parse_into_the_package(tmp_path: Path) -> None:
     assert package.python_deps == ("chromadb", "networkx")
 
 
-# --- install.sh preflight: fail fast before any mutation (audit M1) ---------
-
-
-def _run_install(script: Path, cwd: Path, env: dict[str, str]) -> object:
-    import os
-    import subprocess
-
-    return subprocess.run(
-        ["bash", str(script)],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        env={**os.environ, **env},
-    )
-
-
-def test_anthropic_oauth_install_fails_fast_without_secret(tmp_path: Path) -> None:
-    # A missing bearer must abort before the skill copy or any config write —
-    # wiring a dead setup into config.yaml while "succeeding" was audit M1.
-    script = REPO_PACKAGES / "anthropic-oauth" / "install.sh"
-    result = _run_install(
-        script, tmp_path, {"PROXY_URL": "http://127.0.0.1:1/v1", "MODEL": "m"}
-    )
-    assert result.returncode == 1  # type: ignore[attr-defined]
-    assert "proxy_api_key" in result.stderr  # type: ignore[attr-defined]
-    assert not (tmp_path / "config.yaml").exists()
-    assert not (tmp_path / "skills").exists()
-
-
-def test_anthropic_oauth_install_rejects_non_http_proxy_url(
-    tmp_path: Path,
-) -> None:
-    # A PROXY_URL starting with a dash would be parsed as curl OPTIONS, not a
-    # URL — require an http(s) scheme before anything runs (#234).
-    script = REPO_PACKAGES / "anthropic-oauth" / "install.sh"
-    result = _run_install(
-        script, tmp_path, {"PROXY_URL": "-o/tmp/evil", "MODEL": "m"}
-    )
-    assert result.returncode == 1  # type: ignore[attr-defined]
-    assert "http" in result.stderr  # type: ignore[attr-defined]
-    assert not (tmp_path / "config.yaml").exists()
-    assert not (tmp_path / "skills").exists()
-
-
-def test_anthropic_oauth_install_fails_fast_on_dead_proxy(tmp_path: Path) -> None:
-    (tmp_path / "secrets").mkdir()
-    (tmp_path / "secrets" / "proxy_api_key").write_text("k\n")
-    script = REPO_PACKAGES / "anthropic-oauth" / "install.sh"
-    result = _run_install(
-        script, tmp_path, {"PROXY_URL": "http://127.0.0.1:1/v1", "MODEL": "m"}
-    )
-    assert result.returncode == 1  # type: ignore[attr-defined]
-    assert "did not answer" in result.stderr  # type: ignore[attr-defined]
-    assert not (tmp_path / "config.yaml").exists()
-    assert not (tmp_path / "skills").exists()
-
-
 # --- installer static checks ------------------------------------------------
 #
 # Package installers are the one executable surface the done-check never runs:

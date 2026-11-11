@@ -34,9 +34,8 @@ provider_base_url: https://openrouter.ai/api/v1
 # to (backend, real model) under `provider_aliases`. A thread routes to an alias
 # with `/model <alias>` or the agent's switch_model tool; any unlisted model uses
 # the default backend. The anthropic kind prices calls from a built-in table so
-# the budget cap stays live. To drive a Claude SUBSCRIPTION via OAuth (a local
-# proxy) instead, install the `anthropic-oauth` package — it fills these in and
-# documents the ToS / dead-budget-cap caveats. Example:
+# the budget cap stays live. A backend that reports no dollar cost (e.g. a
+# local proxy) is invisible to the budget cap. Example:
 #   provider_backends:
 #     anthropic: {kind: anthropic, api_key_secret: anthropic_api_key}
 #     proxy: {base_url: http://127.0.0.1:8000/v1, api_key_secret: proxy_api_key}
