@@ -35,12 +35,32 @@ function reconcilePending(list, ownerTexts){
 }
 """
 
-SEND_SCRIPT = PENDING_SCRIPT + """
+# Pure too: the composer keybinds as a decision, so they test without a DOM.
+KEYS_SCRIPT = """
+/* a composer keydown -> "send" | "interrupt" | null (null: the textarea's own
+   behaviour, so Shift+Enter inserts a newline and an IME keeps its Enter) */
+function composerKey(e, touch){
+  if (e.key !== "Enter" || e.isComposing) return null;
+  if (e.ctrlKey || e.metaKey) return "interrupt";
+  if (e.shiftKey || e.altKey) return null;
+  return touch ? "interrupt" : "send";
+}
+"""
+
+SEND_SCRIPT = PENDING_SCRIPT + KEYS_SCRIPT + """
 const pending = {};  /* thread -> [{text, mode, seen}] sent, not yet taken */
 const TOUCH = matchMedia("(pointer: coarse)").matches;
 const PENDING_TAG = {queued: "queued", injected: "interrupt \\u2014 next step"};
 input.placeholder = "message chief   \\u00b7   / for commands   \\u00b7   " +
-  (TOUCH ? "enter interrupts" : "ctrl+enter interrupts");
+  (TOUCH ? "enter interrupts"
+    : "shift+enter newline   \\u00b7   ctrl+enter interrupts");
+
+/* grow the textarea with its text, up to a cap; past that it scrolls */
+function fitInput(){
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, innerHeight * 0.4) + "px";
+}
+input.addEventListener("input", fitInput);
 
 function renderPending(){
   const box = el("queued"); box.replaceChildren();
@@ -72,13 +92,13 @@ async function send(interrupt){
     return;
   const item = {text, mode: interrupt ? "injected" : "queued", seen: ownerRows(text)};
   (pending[tk] ||= []).push(item); renderPending();
-  input.value = ""; hidePop();
-  let outcome = null;
+  input.value = ""; fitInput(); hidePop();
+  let outcome = null, reason = "network error";
   try {
     const r = await fetch("/send", {method: "POST",
       headers: {"content-type": "application/json"},
       body: JSON.stringify({thread: tk, text, interrupt})});
-    if (r.ok) outcome = await r.text();
+    if (r.ok) outcome = await r.text(); else reason = await r.text();
   } catch (err) { /* network down: treated like a refusal below */ }
   if (outcome === "injected" || outcome === "queued"){
     item.mode = outcome;           /* an idle thread turns an interrupt into a turn */
@@ -87,15 +107,17 @@ async function send(interrupt){
     if (i >= 0) q.splice(i, 1);
     /* a card answer or a command: shown, but never streamed back verbatim */
     if (outcome && tk === state.current) addMsg("owner", text);
-    if (!outcome && !input.value) input.value = text;  /* failed: keep the draft */
+    if (!outcome){                              /* failed: keep the draft */
+      if (!input.value){ input.value = text; fitInput(); }
+      notice("not sent \\u2014 " + (reason || "server error"), "bad");
+    }
   }
   if (tk === state.current) renderPending();
 }
 
 el("f").onsubmit = (e) => { e.preventDefault(); send(TOUCH); };
 input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)){
-    e.preventDefault(); send(true);
-  }
+  const act = composerKey(e, TOUCH); if (!act) return;
+  e.preventDefault(); send(act === "interrupt");
 });
 """

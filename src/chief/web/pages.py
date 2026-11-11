@@ -60,11 +60,13 @@ CHAT_PAGE = """<!doctype html>
     </div>
     <div id="log"></div>
     <div id="queued"></div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
     <div id="readonly" hidden>group thread &mdash; view only; send with imsg.</div>
     <form id="f" autocomplete="off">
       <span class="sigil" id="sigil">owner&gt;</span>
-      <input id="input" name="text"
-        placeholder="message chief   &middot;   / for commands" autofocus>
+      <textarea id="input" name="text" rows="1"
+        placeholder="message chief   &middot;   / for commands" autofocus></textarea>
+      <button id="sendbtn" type="submit" title="send (enter)">send</button>
       <ul id="complete" hidden></ul>
     </form>
   </section>

@@ -144,13 +144,21 @@ body{
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
 /* prompt line */
-#f{display:flex; align-items:center; gap:.6rem; padding:.7rem 1.3rem;
+#f{display:flex; align-items:flex-end; gap:.6rem; padding:.7rem 1.3rem;
   border-top:1px solid var(--bg2); background:var(--bg1); position:relative;}
 #f.disabled{opacity:.5; pointer-events:none;}
-.sigil{color:var(--orange); flex:0 0 auto; font-weight:700;}
+.sigil{color:var(--orange); flex:0 0 auto; font-weight:700; line-height:1.55;}
 #input{flex:1; font:inherit; color:var(--fg); background:transparent;
-  border:none; outline:none; caret-color:var(--orange);}
+  border:none; outline:none; caret-color:var(--orange); resize:none;
+  padding:0; margin:0; min-height:1.55em; overflow-y:auto;}
 #input::placeholder{color:var(--faint);}
+#sendbtn{font:inherit; font-size:12px; padding:.15rem .7rem; flex:0 0 auto;
+  background:transparent; color:var(--orange); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+#sendbtn:hover{background:var(--bg2); border-color:var(--orange);}
+#toast{padding:.4rem 1.3rem; font-size:12px; color:var(--aqua);
+  background:var(--bg1); border-top:1px solid var(--bg2);}
+#toast.bad{color:var(--red);}
 /* readline-style completion popup */
 #complete{
   position:absolute; left:1.3rem; bottom:calc(100% - .2rem); margin:0;

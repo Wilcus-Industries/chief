@@ -30,6 +30,14 @@ const span = (cls, text) => {
 async function getJSON(url){ const r = await fetch(url);
   return r.ok ? r.json() : null; }
 
+/* a short-lived line above the prompt: failures the owner must see */
+let toastTimer = null;
+function notice(text, kind){
+  const t = el("toast"); t.textContent = text; t.className = kind || "";
+  t.hidden = false; clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 5000);
+}
+
 /* ---- buffers ---- */
 function renderBuffers(){
   const list = el("buflist"); list.replaceChildren();
@@ -99,7 +107,7 @@ async function loadSessions(){
 /* ---- readline-style completion ---- */
 function showPop(){
   const q = input.value;
-  state.matches = (q.startsWith("/") && !q.includes(" "))
+  state.matches = (q.startsWith("/") && !/\\s/.test(q))
     ? state.commands.filter((c) => c.startsWith(q)) : [];
   if (!state.matches.length){ hidePop(); return; }
   state.sel = 0; pop.hidden = false; pop.replaceChildren();
@@ -122,7 +130,7 @@ function moveSel(step){
 }
 function acceptCompletion(){
   if (pop.hidden || state.sel < 0) return false;
-  input.value = state.matches[state.sel] + " "; hidePop(); input.focus();
+  input.value = state.matches[state.sel] + " "; hidePop(); fitInput(); input.focus();
   return true;
 }
 

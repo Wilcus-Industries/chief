@@ -13,7 +13,7 @@ import pytest
 
 from chief.web.pages import CHAT_PAGE
 from chief.web.script import SCRIPT
-from chief.web.script_send import PENDING_SCRIPT
+from chief.web.script_send import KEYS_SCRIPT, PENDING_SCRIPT
 
 NODE = shutil.which("node")
 # Bound at import: a fake subprocess.run from another test file can outlive its
@@ -66,3 +66,31 @@ process.stdout.write(JSON.stringify(list.map((p) => p.text)));
 
 def test_page_has_the_pending_container() -> None:
     assert '<div id="queued"></div>' in CHAT_PAGE
+
+
+def _key(event: str, touch: str = "false") -> Any:
+    return run(
+        KEYS_SCRIPT
+        + f"process.stdout.write(JSON.stringify(composerKey({event}, {touch}) ?? null));"
+    )
+
+
+def test_enter_sends_and_shift_enter_is_a_newline() -> None:
+    assert _key('{key: "Enter"}') == "send"
+    assert _key('{key: "Enter", shiftKey: true}') is None  # native newline
+    assert _key('{key: "a"}') is None
+
+
+def test_ctrl_or_cmd_enter_interrupts() -> None:
+    assert _key('{key: "Enter", ctrlKey: true}') == "interrupt"
+    assert _key('{key: "Enter", metaKey: true}') == "interrupt"
+
+
+def test_enter_interrupts_on_touch_and_ime_composition_is_left_alone() -> None:
+    assert _key('{key: "Enter"}', "true") == "interrupt"
+    assert _key('{key: "Enter", isComposing: true}') is None
+
+
+def test_composer_is_a_multiline_textarea_with_a_send_button() -> None:
+    assert '<textarea id="input"' in CHAT_PAGE
+    assert 'id="sendbtn"' in CHAT_PAGE
