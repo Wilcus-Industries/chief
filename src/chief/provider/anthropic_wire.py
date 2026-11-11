@@ -87,6 +87,11 @@ def _turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 turns.append({"role": "user", "content": [result]})
         elif message["role"] == "assistant" and message.get("tool_calls"):
             turns.append({"role": "assistant", "content": _assistant_blocks(message)})
+        elif message["role"] == "user" and turns and _is_result_turn(turns[-1]):
+            # A message injected mid-turn follows the tool results; the API
+            # refuses two consecutive user turns, so it joins theirs.
+            text = str(message.get("content") or EMPTY_TURN)
+            turns[-1]["content"].append({"type": "text", "text": text})
         else:
             content = message.get("content") or EMPTY_TURN
             turns.append({"role": message["role"], "content": content})
@@ -98,7 +103,8 @@ def _is_result_turn(turn: dict[str, Any]) -> bool:
     return (
         turn["role"] == "user"
         and isinstance(content, list)
-        and all(block.get("type") == "tool_result" for block in content)
+        and bool(content)
+        and content[0].get("type") == "tool_result"
     )
 
 

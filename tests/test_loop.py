@@ -209,3 +209,45 @@ async def test_iteration_cap_stops_a_tool_loop_runaway() -> None:
     )
     assert "iteration limit" in result.text
     assert len(provider.calls) == 3
+
+
+async def test_drain_appends_injected_messages_after_the_tool_results() -> None:
+    call = ToolCall(id="c1", name="echo", arguments={"text": "hi"})
+    provider = FakeProvider(
+        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+    )
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    committed: list[dict[str, Any]] = []
+    pending = [{"role": "user", "content": "[message m-1] also check x"}]
+
+    async def commit(message: dict[str, Any]) -> None:
+        committed.append(message)
+
+    def drain() -> list[dict[str, Any]]:
+        taken = list(pending)
+        pending.clear()
+        return taken
+
+    result = await run_turn(
+        provider=provider, model="m", messages=messages, tools=echo_registry(),
+        on_delta=DeltaSink(), on_commit=commit, drain=drain,
+    )
+    assert result.text == "done"
+    # The second model call sees the tool result, then the injected message.
+    second = provider.calls[1]
+    assert second[-2]["role"] == "tool"
+    assert second[-1] == {"role": "user", "content": "[message m-1] also check x"}
+    assert {"role": "user", "content": "[message m-1] also check x"} in committed
+
+
+async def test_stop_ends_the_turn_after_the_tool_batch_without_a_model_call() -> None:
+    call = ToolCall(id="c1", name="echo", arguments={"text": "hi"})
+    provider = FakeProvider([[Completion(text="wrapping up", tool_calls=(call,))]])
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
+    result = await run_turn(
+        provider=provider, model="m", messages=messages, tools=echo_registry(),
+        on_delta=DeltaSink(), stop=lambda: True,
+    )
+    assert result.text == "wrapping up"
+    assert len(provider.calls) == 1
+    assert messages[-1]["role"] == "tool"

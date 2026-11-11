@@ -74,12 +74,33 @@ class Session:
         self._hooks = hooks
         self._hooks_timeout_seconds = hooks_timeout_seconds
         self._session_started = False
+        self._inbox: list[str] = []
 
     @property
     def busy(self) -> bool:
         """True while a turn is in flight (the per-thread lock is held for the
         whole of ``run_turn``)."""
         return self._lock.locked()
+
+    def deliver(self, text: str) -> bool:
+        """Queue ``text`` for the in-flight turn, which appends it at its next
+        tool step. Accepted (True) only while a turn holds the lock: an idle
+        session needs a fresh turn instead, which is the caller's to start.
+        The check and append are synchronous, so on the single event loop they
+        can't interleave with the lock's release."""
+        if not self._lock.locked():
+            return False
+        self._inbox.append(text)
+        return True
+
+    def take_inbox(self) -> list[str]:
+        """Everything delivered but not yet drained into a turn (the turn ended
+        on a text-only answer first); the dispatcher starts a follow-up turn."""
+        taken, self._inbox = self._inbox, []
+        return taken
+
+    def _drain(self) -> list[dict[str, Any]]:
+        return [{"role": "user", "content": text} for text in self.take_inbox()]
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -159,6 +180,7 @@ class Session:
                 on_commit=self._live_append,
                 on_tool=on_tool,
                 on_tool_result=on_tool_result,
+                drain=self._drain,
             )
         except BaseException:
             # A provider/network raise mid-turn must not orphan the turn: the

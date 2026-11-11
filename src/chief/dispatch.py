@@ -28,10 +28,12 @@ fire, so the cockpit (always the owner) sees the turn. And only an owner's
 message ever answers an approval card.
 """
 
+import asyncio
 import logging
 from typing import Protocol
 
 from chief.adapters.base import Adapter, Message
+from chief.agent.loop import TurnResult
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
@@ -88,6 +90,7 @@ class Dispatcher:
         self._audience: Audience = audience or (lambda _channel, _thread: True)
         self._adapters: dict[str, Adapter] = {}
         self._commands: CommandRunner | None = None
+        self._tasks: set[asyncio.Task[None]] = set()
 
     def set_commands(self, commands: CommandRunner) -> None:
         """Attach the slash-command set (built after the dispatcher exists)."""
@@ -199,11 +202,19 @@ class Dispatcher:
             if frame := result_frame(policy, tk, call_id=call.id, result=result):
                 self.tapped(tk, frame)
 
+        async def turn() -> TurnResult:
+            try:
+                return await session.run_turn(
+                    message.text, on_delta, sender=message.sender,
+                    on_tool=on_tool, on_tool_result=on_tool_result,
+                )
+            finally:
+                # No await between the lock's release and this take, so a
+                # message delivered mid-turn is either drained or picked up.
+                self._follow_up(message, session.take_inbox())
+
         try:
-            result = await session.run_turn(
-                message.text, on_delta, sender=message.sender,
-                on_tool=on_tool, on_tool_result=on_tool_result,
-            )
+            result = await turn()
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
             # key): surface its message so it's actionable, not a dead end.
@@ -223,6 +234,23 @@ class Dispatcher:
             if result.notice:
                 await adapter.send(tk, result.notice)
         self._turn_end(message, result.text)
+
+    def _follow_up(self, message: Message, leftover: list[str]) -> None:
+        """Start a turn for messages delivered too late for the last tool
+        step — a background task, since this turn still has a reply to send."""
+        if not leftover:
+            return
+        follow = Message(message.channel, SYSTEM, message.thread_key,
+                         "\n\n".join(leftover))
+        task = asyncio.get_running_loop().create_task(self.handle(follow))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def aclose(self) -> None:
+        """Cancel follow-up turns still running (daemon shutdown)."""
+        for task in list(self._tasks):
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
 
     async def _reply(
         self, adapter: Adapter, message: Message, text: str, quiet: bool

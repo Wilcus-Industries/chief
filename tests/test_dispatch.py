@@ -466,3 +466,33 @@ async def test_web_origin_turn_omits_the_rich_final(store: MessageStore) -> None
         "type": "tick", "thread": "web:main",
         "channel": "web", "preview": "hello back",
     }]
+
+
+async def test_leftover_inbox_after_a_text_answer_starts_a_follow_up_turn(
+    store: MessageStore,
+) -> None:
+    # A message delivered during a turn that then ends text-only (no tool step
+    # left to drain it) must not be stranded: it starts the next turn.
+    provider = FakeProvider([text_turn("first"), text_turn("second")])
+    provider.gate = asyncio.Event()
+    manager = make_manager(provider, store)
+    dispatcher = Dispatcher(manager)
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    turn = asyncio.create_task(dispatcher.handle(owner_message("go")))
+    while not provider.calls:
+        await asyncio.sleep(0)
+    session = manager.peek("cli:t")
+    assert session is not None and session.deliver("[message m-1] late news")
+    provider.gate.set()
+    await turn
+
+    async def both_sent() -> None:
+        while len(adapter.sent) < 2:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(both_sent(), timeout=5)
+    assert adapter.sent == [("cli:t", "first"), ("cli:t", "second")]
+    late = {"role": "user", "content": "[message m-1] late news"}
+    assert provider.calls[1][-1] == late
+    await dispatcher.aclose()
