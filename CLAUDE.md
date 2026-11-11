@@ -46,7 +46,7 @@ more from the chief-packages repo).
 
 `packages/` is for the few packages that **must** ship atomically with core —
 ones whose skills document core internals, so a split repo would let the two
-skew (`screening`, `build-imessage`, `anthropic-oauth`). Everything else
+skew (`screening`, `build-imessage`). Everything else
 belongs in the chief-packages repo.
 
 `obsidian-memory` and `watchers` are also still bundled but have **not** been
