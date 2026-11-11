@@ -256,6 +256,12 @@ def whoami(ctx: Context) -> str:
     return json.dumps({k: v for k, v in extra.items() if k.startswith("chief/")})
 
 
+@mcp.tool()
+def takes_context(context: str) -> str:
+    \"\"\"A tool whose argument collides with chief's injected context.\"\"\"
+    return context
+
+
 mcp.run()
 """
 
@@ -293,6 +299,31 @@ async def test_opted_in_server_learns_the_calling_session(tmp_path: Path) -> Non
         "chief/thread": "+15551234567",
         "chief/channel": "imessage",
     }
+
+
+async def test_opted_in_tool_with_a_context_argument_is_flagged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # chief's injected context replaces a model-supplied argument named
+    # ``context`` for an opted-in server, so registration must say so loudly.
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    try:
+        with caplog.at_level("WARNING"):
+            await manager.connect(
+                ServerConfig(
+                    name="metasrv",
+                    command=write_meta_server(tmp_path),
+                    session_context=True,
+                )
+            )
+    finally:
+        await manager.stop()
+    assert any(
+        "takes_context" in r.getMessage() and "context" in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+    )
 
 
 async def test_server_not_opted_in_is_told_nothing(tmp_path: Path) -> None:

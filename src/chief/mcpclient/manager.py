@@ -143,6 +143,13 @@ class McpManager:
                 description=tool.description or "",
                 parameters=tool.inputSchema,
             )
+            props = (tool.inputSchema or {}).get("properties") or {}
+            if config.session_context and "context" in props:
+                logger.warning(
+                    "mcp server %s tool %s takes an argument named 'context'; "
+                    "session_context replaces it with chief's session context",
+                    server, tool.name,
+                )
             handler = self._make_handler(server, tool.name, config.session_context)
             self._registry.register(
                 Tool(spec, handler, wants_context=config.session_context),
