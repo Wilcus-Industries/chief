@@ -2,6 +2,7 @@
 only the LLM provider swapped (PRD #183 testing seam)."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import socket
@@ -733,3 +734,49 @@ async def test_scheduled_command_gets_the_owner_send_guard(
     # Refused by the guard before reaching the shell — so `echo` never ran.
     assert f"exit={GUARD_REFUSED_EXIT_CODE}" in fired[0]
     assert not marker.exists()
+
+
+async def test_stop_completes_while_a_web_events_stream_is_open(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Regression: an open web UI tab holds a /events SSE stream that only ends
+    # when the hub closes. stop() used to await the web server's graceful
+    # shutdown (which waits for every open connection) BEFORE closing the hub,
+    # so any restart with a tab open hung forever holding the instance lock.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    config = make_config(
+        tmp_path, sock_path, web_password="hunter2", web_port=free_port
+    )
+    app, streams = await boot(config, FakeProvider([]))
+    base = f"http://127.0.0.1:{free_port}"
+    async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+        for _ in range(100):  # start() only schedules uvicorn; wait for bind
+            with contextlib.suppress(httpx.ConnectError):
+                resp = await client.post("/login", data={"password": "hunter2"})
+                break
+            await asyncio.sleep(0.05)
+        client.cookies.update(resp.cookies)
+        opened = asyncio.Event()
+
+        async def hold_events_open() -> None:
+            async with client.stream("GET", "/events") as events:
+                assert events.status_code == 200
+                opened.set()
+                async for _ in events.aiter_bytes():
+                    pass
+
+        reader = asyncio.create_task(hold_events_open())
+        await asyncio.wait_for(opened.wait(), timeout=5)
+        # Backstop for any other long-lived connection: graceful shutdown of
+        # the web server is bounded, never "wait for every client forever".
+        assert app.web_server is not None
+        assert app.web_server.graceful_shutdown_seconds is not None
+        streams[1].close()
+        # Well under the backstop: the stream must END (hub closed first),
+        # not merely be abandoned when the graceful-shutdown timeout fires.
+        await asyncio.wait_for(app.stop(), timeout=3)
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+            await reader

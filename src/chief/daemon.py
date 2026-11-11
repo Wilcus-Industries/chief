@@ -61,12 +61,16 @@ class App:
 
     async def stop(self) -> None:
         await self.mcp_manager.stop()
+        # End every web UI /events stream BEFORE stopping the web server: its
+        # graceful shutdown waits for open connections, and those streams only
+        # end on hub.close() — closing the hub after it deadlocked every
+        # restart made while a web UI tab was open.
+        self.hub.close()
         if self.web_server is not None:
             await self.web_server.stop()
         await self.cron_service.stop()
         if self.imessage_adapter is not None:
             await self.imessage_adapter.stop()
-        self.hub.close()
         await self.web_adapter.stop()
         await self.socket_adapter.stop()
         await self.shell_service.aclose()
