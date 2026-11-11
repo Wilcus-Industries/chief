@@ -3,7 +3,14 @@
 from typing import Any
 
 from chief.agent.loop import run_turn
-from chief.provider.base import Completion, TextDelta, ToolCall, ToolSpec, Usage
+from chief.provider.base import (
+    Completion,
+    ReasoningDelta,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+    Usage,
+)
 from chief.tools import Tool, ToolRegistry
 
 from .fakes import FakeProvider, text_turn
@@ -211,33 +218,46 @@ async def test_iteration_cap_stops_a_tool_loop_runaway() -> None:
     assert len(provider.calls) == 3
 
 
-async def test_drain_appends_injected_messages_after_the_tool_results() -> None:
-    call = ToolCall(id="c1", name="echo", arguments={"text": "hi"})
+async def test_reasoning_streams_to_its_callback_and_is_kept_for_display() -> None:
     provider = FakeProvider(
-        [[Completion(text="", tool_calls=(call,))], text_turn("done")]
+        [[ReasoningDelta("think"), TextDelta("hi"),
+          Completion(text="hi", reasoning="think")]]
     )
-    messages: list[dict[str, Any]] = [{"role": "user", "content": "go"}]
-    committed: list[dict[str, Any]] = []
-    pending = [{"role": "user", "content": "[message m-1] also check x"}]
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "hi"}]
+    seen: list[str] = []
 
-    async def commit(message: dict[str, Any]) -> None:
-        committed.append(message)
+    async def on_reasoning(text: str) -> None:
+        seen.append(text)
 
-    def drain() -> list[dict[str, Any]]:
-        taken = list(pending)
-        pending.clear()
-        return taken
+    await run_turn(
+        provider=provider, model="m", messages=messages, tools=ToolRegistry(),
+        on_delta=DeltaSink(), on_reasoning=on_reasoning,
+    )
+    assert seen == ["think"]
+    assert messages[-1] == {"role": "assistant", "content": "hi", "reasoning": "think"}
 
-    result = await run_turn(
+
+async def test_stored_reasoning_never_reaches_the_model() -> None:
+    """Display-only: the model's context is exactly what it was before."""
+    call = ToolCall(id="c1", name="echo", arguments={"text": "x"})
+    provider = FakeProvider(
+        [
+            [Completion(text="", tool_calls=(call,), reasoning="private")],
+            [TextDelta("done"), Completion(text="done")],
+        ]
+    )
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "earlier"},
+        {"role": "assistant", "content": "ok", "reasoning": "old thoughts"},
+        {"role": "user", "content": "hi"},
+    ]
+    await run_turn(
         provider=provider, model="m", messages=messages, tools=echo_registry(),
-        on_delta=DeltaSink(), on_commit=commit, drain=drain,
+        on_delta=DeltaSink(),
     )
-    assert result.text == "done"
-    # The second model call sees the tool result, then the injected message.
-    second = provider.calls[1]
-    assert second[-2]["role"] == "tool"
-    assert second[-1] == {"role": "user", "content": "[message m-1] also check x"}
-    assert {"role": "user", "content": "[message m-1] also check x"} in committed
+    for sent in provider.calls:
+        assert all("reasoning" not in m for m in sent)
+    assert messages[1]["reasoning"] == "old thoughts"  # the transcript keeps it
 
 
 async def test_stop_ends_the_turn_after_the_tool_batch_without_a_model_call() -> None:

@@ -1,9 +1,11 @@
 """PeerRouter: resolve a ``send_msg`` target, apply the scope rules, audit,
 and deliver (PRD #308).
 
-Delivery to a session goes through the live session's inbox when it is
-mid-turn (drained at its next tool step), else wakes it with a system-sender
-turn like a monitor or cron wake. The wake is a tracked background task, never
+Delivery to a session is offered to its running turn through the same inbox
+as an owner's mid-turn message (``agent/inbox.py``: open only while a turn
+runs, read at its next tool step); a message the turn never reaches is handed
+back on close, and an idle receiver gets one either way: a system-sender turn,
+like a monitor or cron wake. The wake is a tracked background task, never
 awaited inline: inline would stall the sender's tool call for the receiver's
 whole turn, and deadlock outright on a message to a thread whose own lock the
 sender holds. A receiver keeps its own authority — the header only says who
@@ -17,6 +19,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any, Protocol
 
 from chief.adapters.base import Message
+from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.audit import AuditLog
 from chief.peers.envelope import PeerMessage, new_id, render, session_label
@@ -30,6 +33,11 @@ SYSTEM = "system"
 SUBAGENT_PREFIX = "sub:"
 
 Wake = Callable[[Message], Coroutine[Any, Any, None]]
+
+
+async def _consumed() -> None:
+    """A peer message needs no hook when its turn takes it: it is persisted
+    with the turn, and system-sender text is never re-published to the bus."""
 
 
 class Run(Protocol):
@@ -118,14 +126,19 @@ class PeerRouter:
     def deliver(self, to: str, channel: str, rendered: str) -> None:
         """Inject into ``to``'s in-flight turn, else wake it with a new turn.
 
-        Synchronous on purpose: the busy check and the inbox append can't
-        interleave with the session's lock release on the single event loop."""
+        Synchronous on purpose: the offer and the inbox's close can't
+        interleave on the single event loop, so a message is either taken,
+        handed back to :meth:`_wake_later`, or refused and woken now."""
+        message = Message(channel, SYSTEM, to, rendered)
         session = self._manager.peek(to)
-        if session is not None and session.deliver(rendered):
-            return
-        task = asyncio.get_running_loop().create_task(
-            self._wake(Message(channel, SYSTEM, to, rendered))
-        )
+        item = Injected(rendered, _consumed, lambda: self._wake_later(message))
+        if session is None or not session.inject(item):
+            self._wake_later(message)
+
+    def _wake_later(self, message: Message) -> None:
+        """Wake the receiver as a background task: idle, or its turn ended
+        before reaching the message (the inbox hands it back on close)."""
+        task = asyncio.get_running_loop().create_task(self._wake(message))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 

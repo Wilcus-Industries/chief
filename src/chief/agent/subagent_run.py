@@ -50,10 +50,14 @@ class SubagentRun:
     waiter: "asyncio.Future[str] | None" = None
     cancelled_by: str | None = None  # None on a silent cancel (orphan cleanup)
 
-    def take(self) -> list[dict[str, Any]]:
-        """Drain the inbox as user messages (the loop's ``drain`` hook)."""
+    def pending(self) -> bool:
+        """The loop's ``Injections``: a message is waiting for this run."""
+        return bool(self.inbox)
+
+    async def take(self) -> list[str]:
+        """Drain the inbox (the loop appends each as a user message)."""
         taken, self.inbox = self.inbox, []
-        return [{"role": "user", "content": text} for text in taken]
+        return taken
 
     def progress(self) -> str:
         """The last assistant text so far, cut short — the 'partial progress'

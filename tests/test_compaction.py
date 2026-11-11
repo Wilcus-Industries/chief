@@ -39,6 +39,22 @@ def compactor_for(
     )
 
 
+def test_stored_reasoning_does_not_count_toward_the_compaction_threshold() -> None:
+    plain = [{"role": "assistant", "content": "ok"}]
+    shown = [{"role": "assistant", "content": "ok", "reasoning": "z" * 4000}]
+    assert estimate_tokens(shown) == estimate_tokens(plain)
+
+
+async def test_stored_reasoning_is_not_fed_to_the_summary() -> None:
+    provider = FakeProvider([text_turn("summary")])
+    messages = [
+        {"role": m["role"], "content": m["content"], "reasoning": "SECRET-THOUGHT"}
+        for m in chat(6)
+    ]
+    await compactor_for(provider, messages, keep_recent=2).compact(messages, force=True)
+    assert provider.calls and "SECRET-THOUGHT" not in str(provider.calls[0])
+
+
 def chat(n: int) -> list[dict[str, Any]]:
     turns: list[dict[str, Any]] = []
     for i in range(n):

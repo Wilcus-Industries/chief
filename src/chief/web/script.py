@@ -1,7 +1,14 @@
-"""The web UI client, served at /app.js. Buffers, send, readline completion;
-the SSE stream client and tool rows live in script_tools.py (concatenated)."""
+"""The web UI client, served at /app.js. Core helpers, status bar, readline
+completion, boot; the sidebar lives in script_buffers.py, send and its pending
+list in script_send.py, the SSE stream client in script_stream.py, activity
+groups + approval cards in script_tools.py, the markdown renderer in
+script_markdown.py (concatenated)."""
 
+from chief.web.script_buffers import BUFFERS_SCRIPT
+from chief.web.script_markdown import MARKDOWN_SCRIPT
 from chief.web.script_policy import POLICY_SCRIPT
+from chief.web.script_send import SEND_SCRIPT
+from chief.web.script_stream import STREAM_SCRIPT
 from chief.web.script_tools import TOOL_SCRIPT
 
 SCRIPT = """
@@ -10,7 +17,7 @@ const log = el("log"), input = el("input"), pop = el("complete");
 const state = {current: null, sessions: [], commands: [], matches: [], sel: -1};
 const unread = new Set();
 const snippets = {};  /* thread -> last reply preview, shown in the sidebar */
-let live = null;
+let live = null, liveText = "";  /* streaming reply's body + its raw text */
 
 const bare = (tk) => tk.startsWith("web:") ? tk.slice(4) : null;
 const label = (tk) => bare(tk) ?? tk;
@@ -26,31 +33,12 @@ const span = (cls, text) => {
 async function getJSON(url){ const r = await fetch(url);
   return r.ok ? r.json() : null; }
 
-/* ---- buffers ---- */
-function renderBuffers(){
-  const list = el("buflist"); list.replaceChildren();
-  state.sessions.forEach((s, i) => {
-    const li = document.createElement("li");
-    li.className = (s.thread === state.current ? "active " : "") +
-      (unread.has(s.thread) ? "unread" : "");
-    li.append(span("idx", i), span("name", label(s.thread)));
-    if (s.channel !== "web") li.append(span("badge", s.channel));
-    if (snippets[s.thread]) li.append(span("snippet", snippets[s.thread]));
-    if (s.channel === "web" && s.thread !== "web:main"){
-      const x = span("kill", "\\u00d7"); x.title = "delete buffer";
-      x.onclick = (e) => { e.stopPropagation(); delBuf(s.thread); };
-      li.append(x);
-    }
-    li.onclick = () => switchTo(s.thread); list.appendChild(li);
-  });
-}
-
-async function delBuf(tk){
-  await fetch("/delete", {method: "POST",
-    headers: {"content-type": "application/json"},
-    body: JSON.stringify({thread: tk})});
-  unread.delete(tk); if (state.current === tk) await switchTo("web:main");
-  await loadSessions();
+/* a short-lived line above the prompt: failures the owner must see */
+let toastTimer = null;
+function notice(text, kind){
+  const t = el("toast"); t.textContent = text; t.className = kind || "";
+  t.hidden = false; clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 5000);
 }
 
 function setStatus(tk){
@@ -64,50 +52,29 @@ function setStatus(tk){
 }
 
 async function switchTo(tk){
-  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers();
-  await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
+  state.current = tk; unread.delete(tk); setStatus(tk); renderBuffers(); closeDrawer();
+  resolveApproval(tk);  /* drop another thread's card hint; subscribe replays */
+  renderPending(); await reloadHistory(tk); subscribe(tk); loadPolicy(tk);
   if (!input.disabled) input.focus();
 }
 
+function dropEmpty(){ const e = log.querySelector(".empty"); if (e) e.remove(); }
+
 function addMsg(role, text, who){
-  const empty = log.querySelector(".empty"); if (empty) empty.remove();
+  dropEmpty();
   const d = document.createElement("div"); d.className = "msg " + role;
-  const body = span(null, text);
+  /* only chief's replies are markdown; owner/peer text stays literal */
+  const body = role === "chief" ? document.createElement("div") : span(null, text);
+  if (role === "chief"){ body.className = "md"; setMarkdown(body, text); }
   /* owner/chief label via CSS ::before; peer carries its sender handle */
   d.append(span("who", who), body); log.appendChild(d);
-  log.scrollTop = log.scrollHeight; return body;
+  follow(); return body;
 }
-
-async function loadSessions(){
-  const rows = await getJSON("/sessions") || [];
-  if (!rows.some((s) => s.thread === "web:main"))
-    rows.unshift({thread: "web:main", channel: "web", model: null, count: 0});
-  state.sessions = rows; renderBuffers();
-  if (!state.current || !rows.some((s) => s.thread === state.current)){
-    const start = rows.find((s) => s.channel === "web") || rows[0];
-    switchTo(state.current || start.thread);
-  }
-}
-
-/* ---- send ---- */
-el("f").onsubmit = async (e) => {
-  e.preventDefault();
-  if (acceptCompletion()) return;
-  const text = input.value.trim(); if (!text || input.disabled) return;
-  const s = state.sessions.find((x) => x.thread === state.current);
-  if (s && s.send_guard &&
-      !confirm(`This thread reaches ${label(state.current)} on ${s.channel} — `
-        + `not you. Chief's reply stays here in the cockpit; nothing is sent `
-        + `to them unless chief uses a gated tool. Send it?`)) return;
-  addMsg("owner", text); input.value = ""; hidePop();
-  await fetch("/send", {method: "POST", headers: {"content-type": "application/json"},
-    body: JSON.stringify({thread: state.current, text})});
-};
 
 /* ---- readline-style completion ---- */
 function showPop(){
   const q = input.value;
-  state.matches = (q.startsWith("/") && !q.includes(" "))
+  state.matches = (q.startsWith("/") && !/\\s/.test(q))
     ? state.commands.filter((c) => c.startsWith(q)) : [];
   if (!state.matches.length){ hidePop(); return; }
   state.sel = 0; pop.hidden = false; pop.replaceChildren();
@@ -130,7 +97,7 @@ function moveSel(step){
 }
 function acceptCompletion(){
   if (pop.hidden || state.sel < 0) return false;
-  input.value = state.matches[state.sel] + " "; hidePop(); input.focus();
+  input.value = state.matches[state.sel] + " "; hidePop(); fitInput(); input.focus();
   return true;
 }
 
@@ -143,14 +110,7 @@ input.addEventListener("keydown", (e) => {
   else if (e.key === "Escape"){ e.preventDefault(); hidePop(); }
 });
 
-/* ---- new buffer + keybinds ---- */
-el("newbuf").onclick = () => {
-  const name = (prompt("new buffer name") || "").trim(); if (!name) return;
-  const tk = "web:" + name;
-  if (!state.sessions.some((s) => s.thread === tk))
-    state.sessions.unshift({thread: tk, channel: "web", model: null, count: 0});
-  switchTo(tk);
-};
+/* ---- keybinds: Alt+digit focuses that buffer ---- */
 document.addEventListener("keydown", (e) => {
   if (e.altKey && /^[0-9]$/.test(e.key)){
     const s = state.sessions[+e.key]; if (s){ e.preventDefault(); switchTo(s.thread); }
@@ -177,4 +137,7 @@ async function posture(){
   const poll = () => { monitors(); posture(); };
   poll(); setInterval(poll, 10000);
 })();
-""" + POLICY_SCRIPT + TOOL_SCRIPT
+""" + (
+    BUFFERS_SCRIPT + SEND_SCRIPT + POLICY_SCRIPT + STREAM_SCRIPT + TOOL_SCRIPT
+    + MARKDOWN_SCRIPT
+)

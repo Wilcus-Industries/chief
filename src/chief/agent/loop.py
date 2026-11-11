@@ -12,10 +12,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from chief.provider.base import Completion, Provider, TextDelta, ToolCall, Usage
+from chief.agent.inbox import Injections, OnInterim
+from chief.agent.model_call import OnDelta, assistant_message, stream_once
+from chief.provider.base import Provider, ToolCall, Usage
 from chief.tools import ToolDispatcher
-
-OnDelta = Callable[[str], Awaitable[None]]
 
 # Fires as each requested tool call fires, so an observer can emit a name-only
 # tool tick to a watching client (#263). Independent of on_commit (which
@@ -36,10 +36,6 @@ PostTool = Callable[[ToolCall, str], Awaitable[str]]
 # the whole turn to finish — the transcript view's "pending" tool-call state
 # depends on this landing in the store as it happens (#261).
 OnCommit = Callable[[dict[str, Any]], Awaitable[None]]
-
-# Pulls messages that arrived for this session mid-turn (peer messages); they
-# are appended after a tool batch so the running turn sees them next step.
-Drain = Callable[[], list[dict[str, Any]]]
 
 # Fires with each model call's usage as it lands, so a caller whose turn may be
 # cancelled midway (a detached subagent) still records what it spent.
@@ -80,64 +76,59 @@ async def run_turn(
     on_commit: OnCommit | None = None,
     on_tool: OnTool | None = None,
     on_tool_result: OnToolResult | None = None,
-    drain: Drain | None = None,
+    injections: Injections | None = None,
+    on_interim: OnInterim | None = None,
+    on_reasoning: OnDelta | None = None,
     stop: Callable[[], bool] | None = None,
     on_usage: OnUsage | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls.
 
-    After each tool batch, ``drain`` (if given) supplies messages to append
-    before the next model call, and ``stop`` returning True ends the turn
-    there with the last assistant text — a subagent that called ``finish``
-    costs no further model call. Leftovers after a text-only answer are the
-    caller's to pick up (the turn's final text stays intact)."""
+    Owner messages injected mid-turn join the transcript after each tool batch.
+    One still waiting when the model answers text-only means the owner spoke
+    before that answer reached them: the answer goes out via ``on_interim`` and
+    the turn continues on the new text, keeping the conversation in order.
+
+    Reasoning streams to ``on_reasoning`` and is stored on its assistant
+    message for display, but is stripped from everything sent to the model.
+
+    ``stop`` returning True after a tool batch ends the turn there with the
+    last assistant text — a subagent that called ``finish`` costs no further
+    model call. ``on_usage`` sees each model call's usage as it lands."""
     usage = Usage()
     seen_calls: dict[tuple[str, str], int] = {}
     last_text = ""
-    for _ in range(max_iterations):
-        completion = await _stream_once(provider, model, messages, tools, on_delta)
+    for iteration in range(max_iterations):
+        completion = await stream_once(
+            provider, model, messages, tools, on_delta, on_reasoning
+        )
         usage = usage + completion.usage
         if on_usage is not None:
             await on_usage(completion.usage)
         last_text = completion.text or last_text
-        assistant_message = _assistant_message(completion)
-        messages.append(assistant_message)
+        message = assistant_message(completion)
+        messages.append(message)
         if on_commit is not None:
-            await on_commit(assistant_message)
+            await on_commit(message)
+        # Never take on the last iteration: the model could not see the text,
+        # so leave it for the inbox's close to hand back for requeueing.
+        inbox = injections if iteration < max_iterations - 1 else None
         if not completion.tool_calls:
-            return TurnResult(text=completion.text, usage=usage)
-        for call in completion.tool_calls:
-            if on_tool is not None:
-                await on_tool(call)
-            key = (call.name, json.dumps(call.arguments, sort_keys=True))
-            seen_calls[key] = seen_calls.get(key, 0) + 1
-            if seen_calls[key] > REPEAT_LIMIT:
-                result = (
-                    f"error: this exact {call.name} call already ran "
-                    f"{REPEAT_LIMIT} times this turn with identical arguments "
-                    # "a different approach" used to sit here, which on a
-                    # repeated *denial* authorised the exact workaround the
-                    # gate's denial texts forbid (gate_text.py).
-                    "— repeating it cannot change the result. Stop. If "
-                    "something refused this call, do not look for another way "
-                    "to get the same effect — tell the owner. Otherwise "
-                    "rethink the approach or ask the owner for help."
-                )
-            else:
-                result = await tools.dispatch(call)
-                if post_tool is not None:
-                    result = await post_tool(call, result)
-            tool_message = {"role": "tool", "tool_call_id": call.id, "content": result}
-            messages.append(tool_message)
+            if inbox is None or not inbox.pending():
+                return TurnResult(text=completion.text, usage=usage)
+            if on_interim is not None and completion.text:
+                await on_interim(completion.text)
+        else:
+            await _dispatch_calls(
+                completion.tool_calls, tools, messages, seen_calls,
+                post_tool, on_commit, on_tool, on_tool_result,
+            )
+        for text in await inbox.take() if inbox is not None else []:
+            user_message = {"role": "user", "content": text}
+            messages.append(user_message)
             if on_commit is not None:
-                await on_commit(tool_message)
-            if on_tool_result is not None:
-                await on_tool_result(call, result)
-        for injected in drain() if drain is not None else []:
-            messages.append(injected)
-            if on_commit is not None:
-                await on_commit(injected)
+                await on_commit(user_message)
         if stop is not None and stop():
             return TurnResult(text=last_text, usage=usage)
     return TurnResult(
@@ -145,38 +136,41 @@ async def run_turn(
     )
 
 
-async def _stream_once(
-    provider: Provider,
-    model: str,
-    messages: list[dict[str, Any]],
+async def _dispatch_calls(
+    calls: tuple[ToolCall, ...],
     tools: ToolDispatcher,
-    on_delta: OnDelta,
-) -> Completion:
-    completion: Completion | None = None
-    stream = provider.stream(model=model, messages=messages, tools=tools.specs())
-    async for event in stream:
-        if isinstance(event, TextDelta):
-            await on_delta(event.text)
+    messages: list[dict[str, Any]],
+    seen_calls: dict[tuple[str, str], int],
+    post_tool: PostTool | None,
+    on_commit: OnCommit | None,
+    on_tool: OnTool | None,
+    on_tool_result: OnToolResult | None,
+) -> None:
+    for call in calls:
+        if on_tool is not None:
+            await on_tool(call)
+        key = (call.name, json.dumps(call.arguments, sort_keys=True))
+        seen_calls[key] = seen_calls.get(key, 0) + 1
+        if seen_calls[key] > REPEAT_LIMIT:
+            result = (
+                f"error: this exact {call.name} call already ran "
+                f"{REPEAT_LIMIT} times this turn with identical arguments "
+                # "a different approach" used to sit here, which on a
+                # repeated *denial* authorised the exact workaround the
+                # gate's denial texts forbid (gate_text.py).
+                "— repeating it cannot change the result. Stop. If "
+                "something refused this call, do not look for another way "
+                "to get the same effect — tell the owner. Otherwise "
+                "rethink the approach or ask the owner for help."
+            )
         else:
-            completion = event
-    if completion is None:
-        raise RuntimeError("provider stream ended without a Completion")
-    return completion
+            result = await tools.dispatch(call)
+            if post_tool is not None:
+                result = await post_tool(call, result)
+        tool_message = {"role": "tool", "tool_call_id": call.id, "content": result}
+        messages.append(tool_message)
+        if on_commit is not None:
+            await on_commit(tool_message)
+        if on_tool_result is not None:
+            await on_tool_result(call, result)
 
-
-def _assistant_message(completion: Completion) -> dict[str, Any]:
-    message: dict[str, Any] = {
-        "role": "assistant",
-        "content": completion.text or None,
-    }
-    if completion.tool_calls:
-        message["tool_calls"] = [_wire_call(call) for call in completion.tool_calls]
-    return message
-
-
-def _wire_call(call: ToolCall) -> dict[str, Any]:
-    return {
-        "id": call.id,
-        "type": "function",
-        "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
-    }

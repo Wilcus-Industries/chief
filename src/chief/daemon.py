@@ -71,7 +71,6 @@ class App:
         if self.web_server is not None:
             await self.web_server.stop()
         await self.cron_service.stop()
-        await self.dispatcher.aclose()
         if self.peers is not None:
             await self.peers.aclose()
         if self.imessage_adapter is not None:

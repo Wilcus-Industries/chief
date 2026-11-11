@@ -50,6 +50,10 @@ through the adapter named on the `Message` that started it.
   `MessageRow`) in `src/chief/persistence/models.py`; every read/write op is a
   method on `MessageStore` in `src/chief/persistence/store.py`. `SessionManager`
   (`src/chief/agent/manager.py`) wraps the store with a live-session cache.
+  A stored assistant message may carry a display-only `reasoning` key (the
+  model's thinking, shown in the web UI): **anything that sends stored
+  messages to a model must pass them through `provider.base.for_model()`**,
+  which strips it.
 - **Config keys** — `src/chief/config/` (`schema.py` holds the `Config`
   dataclass, `load.py` the loader, `write.py` the merge writer; the public
   surface re-exports from `chief.config`). Add

@@ -33,7 +33,7 @@ both spliced in (#267, #265, keeps `app.py` under the file-length cap):
 |---|---|
 | `GET /` | login page or chat page |
 | `POST /login` | sets cookie, 303 to `/` |
-| `POST /send` | 202 accepted, fire-and-forget |
+| `POST /send` | `{thread, text, interrupt?}` → 202 whose body says what became of it: `queued`, `injected` (into the running turn), `answered` (an approval card), `command` (slash command) |
 | `GET /sessions` | JSON buffer list |
 | `POST /delete` | buffer deletion |
 | `GET /history` | transcript for one thread — tool calls collapsed to name + call id |
@@ -82,9 +82,15 @@ Two frame shapes reach the browser:
 
 - A **web-origin** turn streams `delta`/`final` frames — `WebAdapter` (the
   origin channel for `web:` threads) calls `hub.to_watchers` from its
-  `send`/`send_delta`, reaching only the client tapped into that thread.
+  `send`/`send_delta`, reaching only the client tapped into that thread. Its
+  `inbound` (at turn start, or when an injected message is taken), `tool` and
+  `thinking` frames come via `Dispatcher.tapped()`, as for any thread.
+- A **slash command's answer** is a `command` frame (`{thread, command,
+  text}`) via `tapped()` on every channel, never a `final` — so the client
+  can't mistake it for a reply a running turn is streaming. Web sends it
+  nowhere else; other channels still reply through their adapter.
 - A client **tapped into** any other thread also gets that turn's
-  `inbound`/`delta`/`tool`/`final` frames via `Dispatcher.tapped()`, which
+  `inbound`/`delta`/`tool`/`thinking`/`final` frames via `Dispatcher.tapped()`, which
   checks `hub.is_watched()` before calling `to_watchers` — cheap for a thread
   nobody is watching. Out-of-turn cards (see Approvals surface below) reach a
   tapped thread the same way. **Every** completed turn, on every channel, also
@@ -93,8 +99,8 @@ Two frame shapes reach the browser:
   snippet) without mirroring its whole transcript.
 
 A `tick` bumps the thread to the top of the sidebar, marks it unread, and shows
-the reply preview as a snippet; a `delta`/`final` for an unknown thread
-triggers a session reload.
+the reply preview as a snippet; a `tick` for an unknown thread triggers a
+session reload.
 
 ### Approvals surface
 
@@ -119,8 +125,19 @@ daemon. Both server fields are `| None` because the web UI is optional.
 `view.py` maps stored wire messages to display rows: a text row (`{role: owner|
 chief, text}`, relabeling `user`→`owner`/`assistant`→`chief`) and, for each tool
 call an assistant message made, its own collapsed row (`{role: tool, call_id,
-name}`) — no args or result, so the row list's size tracks message count, not
-tool-output size. System prompts and empty turns drop out. `find_tool_call` looks
+name}`) — no args or result, so tool output never inflates the row list —
+preceded by a `{role: thinking, text}` row when the message stored reasoning
+(sent inline, so a reasoning model's rows do grow with its thinking). System
+prompts and empty turns drop out.
+
+Client side, a run of tool calls and thinking renders as one collapsed
+activity group labelled with the latest call's name. The transcript re-renders
+from `/history` only on a buffer switch, an SSE reconnect, or a command answer
+while idle (`/clear`, `/compact` rewrite what is stored) — never per frame. A
+slash command and its answer are never stored, so the client keeps them as
+client-only rows marked "not saved", anchored by stored-row count and
+re-placed after each re-render (dropped once the transcript shrinks past
+them). `find_tool_call` looks
 up one call's args + result on demand for `GET /history/tool`; a result that
 hasn't landed yet (call committed, its tool-role message not — mid-turn, or a
 crash `SessionManager` hasn't repaired yet) reports `pending`, and a call id

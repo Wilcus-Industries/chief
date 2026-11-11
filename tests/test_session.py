@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.persistence.store import MessageStore
 from chief.provider.base import ProviderEvent, ToolSpec
@@ -403,52 +404,20 @@ async def test_delete_and_clear_wipe_an_idle_thread(store: MessageStore) -> None
     assert await store.channel("cli:b") == "cli"
 
 
-async def test_deliver_refuses_an_idle_session(store: MessageStore) -> None:
-    manager = make_manager(FakeProvider([]), store)
-    session = await manager.get_or_create("cli:t", "cli")
-    assert session.deliver("hello") is False
-    assert session.take_inbox() == []
-
-
-async def test_deliver_refuses_a_lock_held_by_compact_or_wipe(
+async def test_inject_refuses_a_lock_held_by_compact_or_wipe(
     store: MessageStore,
 ) -> None:
     # compact() and a wipe hold the lock with no turn to drain the inbox: a
-    # message accepted then would sit until some unrelated turn (or be lost
-    # with the wiped session). The caller must wake a turn instead.
+    # peer message accepted then would sit until some unrelated turn (or be
+    # lost with the wiped session). Refused, the router wakes a turn instead.
     manager = make_manager(FakeProvider([]), store)
     session = await manager.get_or_create("cli:t", "cli")
+    requeued: list[str] = []
+
+    async def consumed() -> None:
+        pass
+
     async with session.lock:
-        assert session.deliver("hello") is False
-    assert session.take_inbox() == []
-
-
-async def test_deliver_mid_turn_lands_at_the_next_tool_step(
-    store: MessageStore,
-) -> None:
-    spec = ToolSpec(name="noop", description="", parameters={"type": "object"})
-
-    async def noop() -> str:
-        return "ok"
-
-    registry = ToolRegistry()
-    registry.register(Tool(spec=spec, handler=noop))
-    provider = FakeProvider([tool_turn("noop", {}), text_turn("done")])
-    provider.gate = asyncio.Event()
-    manager = SessionManager(
-        provider=provider, tools_factory=lambda thread, channel: registry,
-        store=store, default_model="m", system_prompt="p", max_concurrent=2,
-    )
-    session = await manager.get_or_create("cli:t", "cli")
-    turn = asyncio.create_task(session.run_turn("go", noop_delta))
-    while not provider.calls:  # the turn is in the model call, lock held
-        await asyncio.sleep(0)
-    assert session.deliver("[message m-1] news") is True
-    provider.gate.set()
-    result = await turn
-    assert result.text == "done"
-    assert provider.calls[1][-1] == {"role": "user", "content": "[message m-1] news"}
-    assert session.take_inbox() == []
-    # Persisted in order with the rest of the turn.
-    stored = await store.load("cli:t")
-    assert {"role": "user", "content": "[message m-1] news"} in stored
+        item = Injected("hello", consumed, lambda: requeued.append("hello"))
+        assert session.inject(item) is False
+    assert requeued == []

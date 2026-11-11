@@ -65,7 +65,7 @@ async def drive(
                     result = await run_turn(
                         provider=deps.provider, model=model,
                         messages=run.messages, tools=tools, on_delta=_drop_delta,
-                        post_tool=deps.post_tool, drain=run.take,
+                        post_tool=deps.post_tool, injections=run,
                         stop=lambda: run.finished_result is not None,
                         on_usage=spent,
                     )
@@ -78,7 +78,9 @@ async def drive(
             timeout = idle_timeout()
             if not await _await_message(run, timeout):
                 return report(run, run.ended(f"killed: idle {_span(timeout)}"))
-            run.messages.extend(run.take())
+            run.messages.extend(
+                {"role": "user", "content": text} for text in await run.take()
+            )
     except asyncio.CancelledError:
         if run.cancelled_by is not None:
             report(run, run.ended(f"cancelled by {run.cancelled_by}"))

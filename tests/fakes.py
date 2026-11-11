@@ -45,6 +45,9 @@ class FakeProvider:
         # Optional handshake for concurrency tests: when set, each call waits
         # here after recording itself, so tests control interleaving.
         self.gate: asyncio.Event | None = None
+        # Set as each call records itself (before the gate), so a test can wait
+        # until a turn is provably at the model instead of sleeping.
+        self.entered = asyncio.Event()
         self._routes: list[_Route] = []
 
     def route(
@@ -72,6 +75,7 @@ class FakeProvider:
         self.models.append(model)
         self.calls.append([dict(m) for m in messages])
         self.tool_specs.append(list(tools))
+        self.entered.set()
         if self.gate is not None:
             await self.gate.wait()
         route = self._route_for(messages)

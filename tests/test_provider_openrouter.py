@@ -6,7 +6,13 @@ from typing import Any
 import httpx
 import pytest
 
-from chief.provider.base import Completion, ProviderError, TextDelta, ToolSpec
+from chief.provider.base import (
+    Completion,
+    ProviderError,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from chief.provider.openrouter import OpenRouterProvider
 
 
@@ -286,3 +292,21 @@ async def test_request_payload_carries_tools_auth_and_usage() -> None:
     assert payload["stream"] is True
     assert payload["usage"] == {"include": True}
     assert payload["tools"][0]["function"]["name"] == "echo"
+
+
+async def test_streams_reasoning_deltas_apart_from_the_reply_text() -> None:
+    provider = make_provider(
+        [
+            delta_chunk({"reasoning": "hmm, "}),
+            delta_chunk({"reasoning": "disk first"}),
+            delta_chunk({"content": "Hi"}),
+        ]
+    )
+    events = await collect(provider)
+    assert events[:3] == [
+        ReasoningDelta("hmm, "), ReasoningDelta("disk first"), TextDelta("Hi")
+    ]
+    final = events[-1]
+    assert isinstance(final, Completion)
+    assert final.text == "Hi"
+    assert final.reasoning == "hmm, disk first"
