@@ -54,10 +54,8 @@ def test_page_has_the_pending_container() -> None:
 
 
 def _key(event: str, touch: str = "false") -> Any:
-    return run(
-        KEYS_SCRIPT
-        + f"process.stdout.write(JSON.stringify(composerKey({event}, {touch}) ?? null));"
-    )
+    expr = f"composerKey({event}, {touch}) ?? null"
+    return run(KEYS_SCRIPT + f"process.stdout.write(JSON.stringify({expr}));")
 
 
 def test_enter_sends_and_shift_enter_is_a_newline() -> None:

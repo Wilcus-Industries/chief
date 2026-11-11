@@ -112,11 +112,10 @@ async function loadCall(callId, body){
     r = await getJSON(`/history/tool?thread=${t}&call_id=${c}`);
     if (r && r.status !== "pending") callCache[callId] = r;
   }
-  if (!r || r.status === "pending"){
-    body.replaceChildren(span("act-note", "result pending \\u2014 reopen to retry"));
-  } else if (r.status !== "ok"){
-    body.replaceChildren(span("act-note", "unavailable \\u2014 folded away by compaction"));
-  } else {
+  const note = (t) => body.replaceChildren(span("act-note", t));
+  if (!r || r.status === "pending") note("result pending \\u2014 reopen to retry");
+  else if (r.status !== "ok") note("unavailable \\u2014 folded away by compaction");
+  else {
     body.replaceChildren(pre("act-args", JSON.stringify(r.args, null, 2)),
       pre("act-result", r.result));
   }

@@ -15,7 +15,14 @@ from chief.hub import ObserverHub
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.policy import RICH, StreamPolicy
-from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
+from chief.provider.base import (
+    Completion,
+    ProviderError,
+    ProviderEvent,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
 from chief.tools import Tool, ToolRegistry
@@ -264,6 +271,36 @@ def _drain(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
     while not queue.empty():
         frames.append(queue.get_nowait())
     return frames
+
+
+async def _reasoning_frames(
+    store: MessageStore, policy: StreamPolicy
+) -> list[dict[str, Any]]:
+    """One reasoning + text turn on a tapped ``cli:t`` under ``policy``."""
+    manager = SessionManager(
+        provider=FakeProvider(
+            [[ReasoningDelta("plan"), TextDelta("ok"),
+              Completion(text="ok", reasoning="plan")]]
+        ),
+        tools_factory=lambda thread, channel: ToolRegistry(),
+        store=store, default_model="m", system_prompt="s", max_concurrent=4,
+    )
+    hub = ObserverHub()
+    dispatcher = Dispatcher(manager, hub=hub, channel_defaults={"cli": policy})
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("hi"))
+    return _drain(queue)
+
+
+async def test_reasoning_streams_as_thinking_frames(store: MessageStore) -> None:
+    frames = await _reasoning_frames(store, RICH)
+    assert {"type": "thinking", "thread": "cli:t", "text": "plan"} in frames
+
+
+async def test_deltas_off_withholds_thinking_frames(store: MessageStore) -> None:
+    frames = await _reasoning_frames(store, StreamPolicy(tools=True))
+    assert all(f["type"] != "thinking" for f in frames)
 
 
 async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:

@@ -13,10 +13,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from chief.agent.inbox import Injections, OnInterim
-from chief.provider.base import Completion, Provider, TextDelta, ToolCall, Usage
+from chief.agent.model_call import OnDelta, assistant_message, stream_once
+from chief.provider.base import Provider, ToolCall, Usage
 from chief.tools import ToolDispatcher
-
-OnDelta = Callable[[str], Awaitable[None]]
 
 # Fires as each requested tool call fires, so an observer can emit a name-only
 # tool tick to a watching client (#263). Independent of on_commit (which
@@ -75,6 +74,7 @@ async def run_turn(
     on_tool_result: OnToolResult | None = None,
     injections: Injections | None = None,
     on_interim: OnInterim | None = None,
+    on_reasoning: OnDelta | None = None,
     max_iterations: int = MAX_ITERATIONS,
 ) -> TurnResult:
     """Drive the model until it answers with text and no tool calls.
@@ -82,16 +82,21 @@ async def run_turn(
     Owner messages injected mid-turn join the transcript after each tool batch.
     One still waiting when the model answers text-only means the owner spoke
     before that answer reached them: the answer goes out via ``on_interim`` and
-    the turn continues on the new text, keeping the conversation in order."""
+    the turn continues on the new text, keeping the conversation in order.
+
+    Reasoning streams to ``on_reasoning`` and is stored on its assistant
+    message for display, but is stripped from everything sent to the model."""
     usage = Usage()
     seen_calls: dict[tuple[str, str], int] = {}
     for iteration in range(max_iterations):
-        completion = await _stream_once(provider, model, messages, tools, on_delta)
+        completion = await stream_once(
+            provider, model, messages, tools, on_delta, on_reasoning
+        )
         usage = usage + completion.usage
-        assistant_message = _assistant_message(completion)
-        messages.append(assistant_message)
+        message = assistant_message(completion)
+        messages.append(message)
         if on_commit is not None:
-            await on_commit(assistant_message)
+            await on_commit(message)
         # Never take on the last iteration: the model could not see the text,
         # so leave it for the inbox's close to hand back for requeueing.
         inbox = injections if iteration < max_iterations - 1 else None
@@ -153,39 +158,3 @@ async def _dispatch_calls(
         if on_tool_result is not None:
             await on_tool_result(call, result)
 
-
-async def _stream_once(
-    provider: Provider,
-    model: str,
-    messages: list[dict[str, Any]],
-    tools: ToolDispatcher,
-    on_delta: OnDelta,
-) -> Completion:
-    completion: Completion | None = None
-    stream = provider.stream(model=model, messages=messages, tools=tools.specs())
-    async for event in stream:
-        if isinstance(event, TextDelta):
-            await on_delta(event.text)
-        else:
-            completion = event
-    if completion is None:
-        raise RuntimeError("provider stream ended without a Completion")
-    return completion
-
-
-def _assistant_message(completion: Completion) -> dict[str, Any]:
-    message: dict[str, Any] = {
-        "role": "assistant",
-        "content": completion.text or None,
-    }
-    if completion.tool_calls:
-        message["tool_calls"] = [_wire_call(call) for call in completion.tool_calls]
-    return message
-
-
-def _wire_call(call: ToolCall) -> dict[str, Any]:
-    return {
-        "id": call.id,
-        "type": "function",
-        "function": {"name": call.name, "arguments": json.dumps(call.arguments)},
-    }

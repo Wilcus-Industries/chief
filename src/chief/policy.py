@@ -124,6 +124,15 @@ def delta_frame(
     return {"type": "delta", "thread": thread, "text": text}
 
 
+def thinking_frame(
+    policy: StreamPolicy, thread: str, text: str
+) -> dict[str, object] | None:
+    """Live reasoning text — streamed model output, so gated like deltas."""
+    if not policy.deltas:
+        return None
+    return {"type": "thinking", "thread": thread, "text": text}
+
+
 def tool_frame(
     policy: StreamPolicy, thread: str, *, name: str, call_id: str
 ) -> dict[str, object] | None:

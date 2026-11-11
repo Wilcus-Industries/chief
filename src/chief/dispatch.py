@@ -34,7 +34,14 @@ from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.bus import Event, EventBus
 from chief.hub import ObserverHub
-from chief.policy import StreamPolicy, delta_frame, resolve, result_frame, tool_frame
+from chief.policy import (
+    StreamPolicy,
+    delta_frame,
+    resolve,
+    result_frame,
+    thinking_frame,
+    tool_frame,
+)
 from chief.provider.base import ProviderError, ToolCall
 from chief.selfedit.recovery import RestartBoundary
 from chief.strangers import StrangerLog
@@ -208,11 +215,17 @@ class Dispatcher:
             if frame := result_frame(policy, tk, call_id=call.id, result=result):
                 self.tapped(tk, frame)
 
+        async def on_reasoning(text: str) -> None:
+            # Web turns too: the WebAdapter only carries reply text.
+            if frame := thinking_frame(policy, tk, text):
+                self.tapped(tk, frame)
+
         try:
             result = await session.run_turn(
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
                 on_begin=on_begin, on_interim=on_interim,
+                on_reasoning=on_reasoning,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

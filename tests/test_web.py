@@ -24,6 +24,7 @@ from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
 from chief.web.styles import STYLES
+from chief.web.view import render_transcript
 
 from .fakes import FakeProvider
 
@@ -520,6 +521,26 @@ async def test_history_without_thread_is_empty(web: WebParts) -> None:
     client, *_ = web
     await login(client)
     assert (await client.get("/history")).json() == []
+
+
+def test_history_shows_stored_reasoning_as_a_thinking_row_before_its_step() -> None:
+    rows = render_transcript(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant", "content": None, "reasoning": "check disk",
+                "tool_calls": [{"id": "c1", "function": {"name": "bash"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "fine", "reasoning": "  "},
+        ]
+    )
+    assert rows == [
+        {"role": "owner", "text": "hi"},
+        {"role": "thinking", "text": "check disk"},
+        {"role": "tool", "call_id": "c1", "name": "bash"},
+        {"role": "chief", "text": "fine"},  # blank reasoning shows nothing
+    ]
 
 
 async def test_history_includes_collapsed_tool_rows(web: WebParts) -> None:
