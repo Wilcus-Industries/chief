@@ -103,3 +103,15 @@ def vault(tmp_path: Path) -> Path:
     destination = tmp_path / "vault"
     shutil.copytree(_FIXTURE_VAULT, destination)
     return destination
+
+
+@pytest.fixture(autouse=True)
+def _plain_message_content(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the clock out of exact-content assertions; opt back in with
+    ``@pytest.mark.timestamps``."""
+    if request.node.get_closest_marker("timestamps"):
+        return
+    for module in ("chief.agent.loop", "chief.agent.session"):
+        monkeypatch.setattr(f"{module}.stamp", lambda text, now=None: text)
