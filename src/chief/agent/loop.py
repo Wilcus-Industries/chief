@@ -14,6 +14,7 @@ from typing import Any
 
 from chief.agent.inbox import Injections, OnInterim
 from chief.agent.model_call import OnDelta, assistant_message, stream_once
+from chief.agent.timestamps import stamp
 from chief.provider.base import Provider, ToolCall, Usage
 from chief.tools import ToolDispatcher
 
@@ -125,7 +126,7 @@ async def run_turn(
                 post_tool, on_commit, on_tool, on_tool_result,
             )
         for text in await inbox.take() if inbox is not None else []:
-            user_message = {"role": "user", "content": text}
+            user_message = {"role": "user", "content": stamp(text)}
             messages.append(user_message)
             if on_commit is not None:
                 await on_commit(user_message)
@@ -167,7 +168,11 @@ async def _dispatch_calls(
             result = await tools.dispatch(call)
             if post_tool is not None:
                 result = await post_tool(call, result)
-        tool_message = {"role": "tool", "tool_call_id": call.id, "content": result}
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": stamp(result),
+        }
         messages.append(tool_message)
         if on_commit is not None:
             await on_commit(tool_message)

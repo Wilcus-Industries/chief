@@ -19,6 +19,7 @@ from chief.agent.loop import OnTool, OnToolResult, TurnResult, run_turn
 from chief.agent.model_call import OnDelta
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, TurnTicket, _NullGate
+from chief.agent.timestamps import stamp
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
 from chief.hooks import (
@@ -169,7 +170,7 @@ class Session:
         # the loop produces persist as they land (`_live_append`), not batched
         # at the end, so a thread viewed mid-turn shows real progress instead
         # of nothing (#261's pending tool-call state depends on this).
-        user_message = {"role": "user", "content": user_text}
+        user_message = {"role": "user", "content": stamp(user_text)}
         await self._store.append(self.thread_key, [user_message])
         if ticket is not None:
             ticket.started()  # a cut-off turn is now woken, not replayed

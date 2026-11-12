@@ -102,5 +102,6 @@ timeout = 30
 # in its own CI job (a real Chromium launch is slow and needs a browser binary).
 addopts = "-m 'not browser'"
 markers = [
+    "timestamps: keep real message timestamps (default tests strip them)",
     "browser: end-to-end test that drives a real browser (opt-in; needs playwright + `playwright install chromium`)",
 ]
