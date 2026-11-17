@@ -226,8 +226,10 @@ class Session:
         start blocks are added only on a thread's first turn of the process.
 
         The per-turn :class:`TurnContext` handed to the context hooks carries
-        ``self._messages`` as-is — the transcript *before* this user turn is
-        appended — so a hook judges relevance against the conversation so far."""
+        the transcript *before* this user turn is appended, in the form a model
+        is sent it (``for_model(self._messages)``: each message's stamp folded
+        into its content, not the stored text) — so a hook judges relevance
+        against the conversation so far, as the model sees it."""
         first_turn = not self._session_started
         self._session_started = True
         turn = TurnContext(
