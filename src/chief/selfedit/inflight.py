@@ -42,7 +42,7 @@ _FIELDS = {"thread_key": str, "channel": str, "sender": str, "text": str,
 
 @dataclass(frozen=True)
 class Interrupted:
-    """One message the previous process died holding."""
+    """One message the previous process died holding, and when it arrived."""
 
     turn_id: str
     thread_key: str
@@ -50,6 +50,7 @@ class Interrupted:
     sender: str
     text: str
     started: bool
+    at: float
 
 
 class _Ticket:
@@ -89,7 +90,7 @@ class InflightLog:
         self._leftovers = []
         return [
             Interrupted(i, e["thread_key"], e["channel"], e["sender"], e["text"],
-                        e["started"])
+                        e["started"], e["at"])
             for i, e in taken
         ]
 

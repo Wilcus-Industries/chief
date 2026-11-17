@@ -15,20 +15,16 @@ Commit = Callable[[list[dict[str, Any]]], Awaitable[None]]
 
 
 async def refuse_over_budget(
-    commit: Commit, user_text: str, status: BudgetStatus
+    commit: Commit, user: dict[str, Any], status: BudgetStatus
 ) -> TurnResult:
-    """Record and return the refusal when the budget is spent and no downgrade
-    model is configured — the turn never reaches the provider."""
+    """Record the owner's message (``user``, already built and stamped like any
+    turn's) and the refusal, and return it when the budget is spent and no
+    downgrade model is configured — the turn never reaches the provider."""
     text = (
         f"budget exhausted (${status.spent:.2f} of ${status.cap:.2f} this "
         "cycle) and no downgrade model is configured; not running this turn"
     )
-    await commit(
-        [
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": text},
-        ]
-    )
+    await commit([user, {"role": "assistant", "content": text}])
     return TurnResult(text=text)
 
 

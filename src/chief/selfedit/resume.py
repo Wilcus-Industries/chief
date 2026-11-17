@@ -67,7 +67,9 @@ def resume_plan(turns: list[Interrupted]) -> dict[str, list[Resume]]:
     for turn in turns:
         queue = plan.setdefault(turn.thread_key, [])
         if not turn.started:
-            message = Message(turn.channel, turn.sender, turn.thread_key, turn.text)
+            message = Message(
+                turn.channel, turn.sender, turn.thread_key, turn.text, at=turn.at
+            )
             queue.append(Resume(message, turn.turn_id))
         elif queue and queue[0].message.text == RESUME_NOTE:
             queue[0] = dataclasses.replace(

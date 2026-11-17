@@ -51,9 +51,15 @@ through the adapter named on the `Message` that started it.
   method on `MessageStore` in `src/chief/persistence/store.py`. `SessionManager`
   (`src/chief/agent/manager.py`) wraps the store with a live-session cache.
   A stored assistant message may carry a display-only `reasoning` key (the
-  model's thinking, shown in the web UI): **anything that sends stored
-  messages to a model must pass them through `provider.base.for_model()`**,
-  which strips it.
+  model's thinking, shown in the web UI). A stored user or tool message
+  carries a `stamp` key beside its raw `content`:
+  `[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` in the host's zone, formatted once
+  when the message *arrived*; `src/chief/agent/timestamps.py` builds every such
+  message. The web history and anything else that reads `content` therefore
+  sees what was said. **Anything that sends stored messages to a model must
+  pass them through `provider.base.for_model()`**: it strips `reasoning` and is
+  the one place a stamp is prefixed onto `content`, which keeps each message
+  byte-identical across calls (prompt caching).
 - **Config keys** — `src/chief/config/` (`schema.py` holds the `Config`
   dataclass, `load.py` the loader, `write.py` the merge writer; the public
   surface re-exports from `chief.config`). Add

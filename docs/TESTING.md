@@ -41,6 +41,7 @@ tree except in those warnings.
 | `sock_path` | a **short** AF_UNIX path under `/tmp` |
 | `embedder` | session-scoped model2vec embedder, imported lazily |
 | `vault` | a mutable copy of `tests/fixtures/vault` |
+| `_plain_message_content` (autouse) | builds transcript messages **without** their arrival stamp, by patching `chief.agent.timestamps.stamped` — keeps the clock out of exact-message assertions. A test of the stamp opts back in with `@pytest.mark.timestamps` (`tests/test_timestamps.py` does, module-wide) |
 
 `sock_path` is short on purpose: macOS caps `sun_path` at ~104 bytes and pytest's
 `tmp_path` (`/private/var/folders/...`) overflows it.

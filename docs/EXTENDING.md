@@ -264,7 +264,9 @@ existing file. `obsidian-memory`'s `memory-relevance` gate is the worked
 example.
 
 `TurnContext` carries `user_text`, `messages` (the transcript *before* the
-incoming turn), `sender`, `thread_key`, and `channel`.
+incoming turn, as a model is sent it: user and tool content lead with their
+`[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` arrival stamp), `sender`, `thread_key`,
+and `channel`. `user_text` is the incoming text as written, with no stamp.
 
 Rules that matter:
 

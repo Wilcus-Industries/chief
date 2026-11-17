@@ -191,7 +191,11 @@ one busy thread can't starve every concurrency slot.
    the stored copy.
 3. `_assemble_system(user_text, sender)`, then commits the user message to the
    store immediately (never lost to a mid-turn crash) and builds
-   `transcript = [system, *messages, user]`, recording a baseline index.
+   `transcript = [system, *messages, user]`, recording a baseline index. The
+   user message is built up front (`timestamps.user_message`) with the
+   `Message.at` the dispatcher passes — when the text *arrived*, not when the
+   turn got the lock — as its `stamp`; `refuse_over_budget` stores that same
+   message.
 4. Calls `agent.loop.run_turn`, which **mutates `transcript` in place** and, via
    the `on_commit` hook, persists each assistant turn and tool result to the
    store the instant it's produced (`Session._live_append`) — not batched at
@@ -236,12 +240,14 @@ source attribute — contributed text may be attacker-influenced.
    string instead of running. Otherwise `tools.dispatch(call)`, then the
    `post_tool` hooks screen the result — annotate or veto — before step 5
    appends it. The repeat-limit refusal is not screened.
-5. Appends the tool result, then any messages injected since — owner messages
-   (`Dispatcher.try_inject`: a web interrupt, or an iMessage text taken at its
-   poll stage while the thread's turn runs) and peer messages (`PeerRouter.deliver`)
-   share the session's inbox — as user messages. The Anthropic wire folds such a
-   user message into the tool-result turn. Then `stop()` returning True ends the
-   turn with the last assistant text (a subagent's `finish`).
+5. Appends the tool result (stamped as it lands), then any messages injected
+   since — owner messages (`Dispatcher.try_inject`: a web interrupt, or an
+   iMessage text taken at its poll stage while the thread's turn runs) and peer
+   messages (`PeerRouter.deliver`) share the session's inbox — as user messages,
+   each stamped with its own arrival time (`Injected.at`), not the tool
+   boundary's. The Anthropic wire folds such a user message into the tool-result
+   turn. Then `stop()` returning True ends the turn with the last assistant text
+   (a subagent's `finish`).
 6. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry

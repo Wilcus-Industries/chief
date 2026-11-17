@@ -124,7 +124,9 @@ daemon's own event loop** — no separate process. Lifecycle is owned by the
 daemon. Both server fields are `| None` because the web UI is optional.
 
 `view.py` maps stored wire messages to display rows: a text row (`{role: owner|
-chief, text}`, relabeling `user`→`owner`/`assistant`→`chief`) and, for each tool
+chief, text}`, relabeling `user`→`owner`/`assistant`→`chief`; the text is the
+stored `content`, which never carries the model-facing arrival stamp — the
+client matches a pending message to its stored row by exact text) and, for each tool
 call an assistant message made, its own collapsed row (`{role: tool, call_id,
 name}`) — no args or result, so tool output never inflates the row list —
 preceded by a `{role: thinking, text}` row when the message stored reasoning

@@ -45,7 +45,9 @@ class TurnContext:
     Built once per turn and passed to every ``pre_turn``/``session_start``
     hook. ``messages`` is the recent transcript *before* the incoming user
     turn is appended, so a hook can judge relevance against the conversation
-    so far. ``sender`` is the inbound message's origin (``"owner"``,
+    so far — as a model is sent it (``provider.base.for_model``): user and tool
+    content lead with their arrival stamp, while ``user_text`` is the incoming
+    text as written. ``sender`` is the inbound message's origin (``"owner"``,
     ``"system"`` for monitor/cron wakes, or a stranger id) — hooks that touch
     private data gate on it. ``channel`` is None for wakes without a channel.
     """

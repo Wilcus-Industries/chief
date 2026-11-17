@@ -41,7 +41,9 @@ class SubagentRun:
     task: str
     messages: list[dict[str, Any]]
     started: float = field(default_factory=time.monotonic)
-    inbox: list[str] = field(default_factory=list)
+    # Stamped user messages (see ``SubagentPool.deliver``), not bare text: a
+    # message is stamped as it arrives, whenever the run gets to it.
+    inbox: list[dict[str, Any]] = field(default_factory=list)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     running: bool = False
     messaged_parent: bool = False
@@ -54,8 +56,9 @@ class SubagentRun:
         """The loop's ``Injections``: a message is waiting for this run."""
         return bool(self.inbox)
 
-    async def take(self) -> list[str]:
-        """Drain the inbox (the loop appends each as a user message)."""
+    async def take(self) -> list[dict[str, Any]]:
+        """Drain the inbox: the user messages the loop (or an idle wake)
+        appends as they are."""
         taken, self.inbox = self.inbox, []
         return taken
 

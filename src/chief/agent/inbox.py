@@ -11,11 +11,17 @@ one, exactly as it would a normally queued message.
 The turn's context hooks (memory recall, sender gating) ran once for the
 turn's own text; injected text inherits that owner context and is not
 re-screened or recalled against.
+
+What the loop takes are ready user messages, each stamped with when its text
+*arrived* — not with the later tool boundary that picks it up.
 """
 
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from chief.agent.timestamps import user_message
 
 # Delivers an answer the model finished while an injected owner message was
 # already waiting, before the turn continues on that message (see
@@ -28,18 +34,20 @@ class Injections(Protocol):
 
     def pending(self) -> bool: ...
 
-    async def take(self) -> list[str]: ...
+    async def take(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
 class Injected:
     """One offered message: its text, an async hook fired as the loop takes it
-    (stream the inbound frame, publish to the bus), and a sync hook to requeue
-    it when the turn ends first."""
+    (stream the inbound frame, publish to the bus), a sync hook to requeue it
+    when the turn ends first, and when it arrived (epoch seconds; the offer, by
+    default)."""
 
     text: str
     on_consumed: Callable[[], Awaitable[None]]
     on_leftover: Callable[[], None]
+    at: float = field(default_factory=time.time)
 
 
 class Inbox:
@@ -62,15 +70,16 @@ class Inbox:
     def pending(self) -> bool:
         return bool(self._items)
 
-    async def take(self) -> list[str]:
-        """Drain every queued text, in arrival order, firing its consume hook.
-        Items leave one at a time, so a raising hook leaves the rest for close."""
-        texts = []
+    async def take(self) -> list[dict[str, Any]]:
+        """Drain every queued message as a user message stamped with its
+        arrival, in arrival order, firing its consume hook. Items leave one at
+        a time, so a raising hook leaves the rest for close."""
+        taken = []
         while self._items:
             item = self._items.pop(0)
             await item.on_consumed()
-            texts.append(item.text)
-        return texts
+            taken.append(user_message(item.text, item.at))
+        return taken
 
     def close(self) -> None:
         """Stop accepting and hand every untaken item back for requeueing."""

@@ -195,7 +195,7 @@ class Dispatcher:
         def leftover() -> None:
             requeue(message, ticket)  # the queue path now owns the record
 
-        if session.inject(Injected(message.text, consumed, leftover)):
+        if session.inject(Injected(message.text, consumed, leftover, message.at)):
             return True
         ticket.done()
         return False
@@ -372,7 +372,7 @@ class Dispatcher:
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
                 on_begin=on_begin, on_interim=on_interim,
-                on_reasoning=on_reasoning, ticket=ticket,
+                on_reasoning=on_reasoning, ticket=ticket, at=message.at,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad
