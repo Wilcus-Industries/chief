@@ -15,7 +15,7 @@ from chief.config import Config
 
 from .fake_oauth import FakeOAuth, serve_fake
 from .fakes import FakeProvider, text_turn, tool_turn
-from .test_app import Streams, make_config, read_finals, send_frame
+from .test_app import Streams, boot, make_config, read_finals, send_frame, shutdown
 
 NOTICE = 'Rh needs login. Say "connect rh" or /login rh.'
 LINK_SENT = "login link sent to the owner"
@@ -68,6 +68,24 @@ def link_in(text: str) -> str:
 @pytest.fixture(autouse=True)
 def private_token_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("chief.mcpclient.auth_tools.TOKEN_DIR", tmp_path / "tokens")
+
+
+async def test_an_install_with_no_oauth_server_gains_no_tools_or_commands(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    provider = FakeProvider([text_turn("hello"), text_turn("unused")])
+    app, streams = await boot(make_config(tmp_path, sock_path), provider)
+    try:
+        send_frame(streams, "hi")
+        await read_finals(streams, 1)
+        offered = {spec.name for spec in provider.tool_specs[0]}
+        assert not {"server_login", "server_login_complete"} & offered
+
+        send_frame(streams, "/login rh")
+        (reply,) = await read_finals(streams, 1)
+        assert reply["text"] == "unknown command /login — try /help"
+    finally:
+        await shutdown(app, streams)
 
 
 async def test_boot_parks_the_server_tells_the_owner_and_hints_the_model(

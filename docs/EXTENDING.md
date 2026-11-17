@@ -105,7 +105,8 @@ server is skipped (config) or the manifest fails validation (package).
   robinhood" or /login robinhood.` — not repeated on later boots. The model's
   prompt lists the servers waiting.
 - **Logging in.** Say "connect robinhood" (the model calls `server_login`) or send
-  `/login robinhood`. Chief sends a login link to *that conversation*; the model is
+  `/login robinhood` (the tools, `/login` and `/logout` exist only while some server
+  has `auth: oauth`). Chief sends a login link to *that conversation*; the model is
   only told it went out. Approve it in a browser and the browser lands on
   `http://127.0.0.1:<web_port>/oauth/callback?code=…`. On the machine running
   chief's web UI that page says "connected". From a phone it fails to load, which

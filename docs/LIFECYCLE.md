@@ -21,9 +21,9 @@ monitor / cron wake ────────────────┼─→ Di
 `build_app` (`src/chief/app.py`) runs phases in a fixed order:
 `build_persistence` → `build_gate` → `_build_agent_core` → `register_native_tools`
 → `CommandSet` → `build_mcp` → `build_adapters`. `build_mcp` also builds the OAuth
-broker and registers the login tools, `/login` / `/logout` and the "needs login" hint
-on the core's registry, commands and hooks; `build_adapters` hands the broker to
-the web app for `/oauth/callback`.
+broker and — only when some server has `auth: oauth` — registers the login tools,
+`/login` / `/logout` and the "needs login" hint on the core's registry, commands
+and hooks; `build_adapters` hands the broker to the web app for `/oauth/callback`.
 
 The closure cycle is deliberate: `tools_factory` references `dispatcher`, which
 is constructed *after* it — late binding resolves at call time. Don't "fix" it

@@ -130,13 +130,16 @@ def build_mcp(
     """MCP servers are pure config: the agent adds one by editing the
     ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
 
-    An ``auth: oauth`` server logs in through the broker built here, whose
+    An ``auth: oauth`` server logs in through the broker built here. Its
     ``server_login`` tools, ``/login`` ``/logout`` commands and "needs login"
-    hint are registered on the core's registry, commands and hooks.
+    hint are registered on the core's registry, commands and hooks only when some
+    server needs them — an install without one keeps its toolset as it was.
     """
     broker = build_broker(config, core.dispatcher, audit)
-    register_auth_surface(broker, core.registry, commands, core.hooks)
-    return McpManager(core.registry, broker), build_mcp_configs(config), broker
+    mcp_configs = build_mcp_configs(config)
+    if any(sc.auth == "oauth" for sc in mcp_configs):
+        register_auth_surface(broker, core.registry, commands, core.hooks)
+    return McpManager(core.registry, broker), mcp_configs, broker
 
 
 def build_adapters(

@@ -107,6 +107,7 @@ class Supervisor:
         """Park on the login wall; returns the ``/login`` that lifts it."""
         name = self.config.name
         notify = broker.needs_login(name)
+        logger.info("mcp server %s needs login; waiting for the owner", name)
         self._drop()  # in-flight calls learn why, now that the state says so
         if not ready.done():
             ready.set_result(0)  # boot is not held up by a login
