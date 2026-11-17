@@ -42,6 +42,9 @@ class FakeOAuth:
         self.required_headers: dict[str, str] = {}  # lower-cased name -> value
         self.token_ttl = 3600
         self.refresh_error: str | None = None  # e.g. "invalid_grant"
+        # Answer a refresh with this bare status instead, no OAuth error body: 503
+        # or 429 is an endpoint having a bad moment, 401 one refusing the client.
+        self.refresh_status: int | None = None
         self.exchange_error: str | None = None  # fail the authorization_code grant
         self.rotate_refresh = True  # False: refresh responses omit refresh_token
         self.revocation = False  # advertise a revocation endpoint
@@ -180,6 +183,8 @@ class FakeOAuth:
         return self._issue() if same else _oauth_error("invalid_grant")
 
     def _refresh_grant(self, form: dict[str, str]) -> Response:
+        if self.refresh_status:  # before anything is spent: the token stays good
+            return Response(status_code=self.refresh_status)
         if self.refresh_error:
             return _oauth_error(self.refresh_error)
         token = form.get("refresh_token", "")

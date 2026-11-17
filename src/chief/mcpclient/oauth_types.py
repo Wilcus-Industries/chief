@@ -26,8 +26,10 @@ class NeedsAuth(Exception):
 
     Raised from the redirect step of an attempt that is not a ``/login``: the
     SDK reaches that step only after a real auth failure (no token, a refresh
-    that failed, a token the server no longer accepts), never for a network
-    error or a 5xx, so catching it is the whole "needs login" test."""
+    the token endpoint refused, a token the server no longer accepts), never for
+    a network error, a 5xx or a 429 — ``oauth_flow`` keeps a token endpoint that
+    merely could not answer from reading as a refusal — so catching it is the
+    whole "needs login" test."""
 
     def __init__(self, server: str) -> None:
         super().__init__(f"mcp server {server} needs login")

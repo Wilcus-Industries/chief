@@ -3,10 +3,13 @@
 The SDK's ``OAuthClientProvider`` does the protocol — discovery, registration,
 PKCE, refresh. This broker is what chief adds around it. A server connects
 *passively* on every boot and reconnect: a good token connects, a refreshable
-one refreshes, and only a real auth failure reaches the redirect step, where it
-becomes ``NeedsAuth`` and parks the server (one notice to the owner). A
-``/login`` arms one *interactive* attempt that sends the owner a link instead
-and waits, bounded, for the address the browser ends up on.
+one refreshes, and only a real auth failure — a refresh the token endpoint
+refused, a token the server no longer accepts — reaches the redirect step, where
+it becomes ``NeedsAuth`` and parks the server (one notice to the owner). A
+network error, a 5xx or a 429 is not one: that connection fails the ordinary way
+and is retried with the stored login kept. A ``/login`` arms one *interactive*
+attempt that sends the owner a link instead and waits, bounded, for the address
+the browser ends up on.
 """
 
 import logging

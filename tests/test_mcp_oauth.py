@@ -588,6 +588,37 @@ async def test_a_dead_refresh_token_after_a_restart_parks_the_server_again(
     assert rig.sent == [(NOTICE_TO, NOTICE)]
 
 
+async def test_a_struggling_token_endpoint_at_boot_fails_the_start_not_the_login(
+    rig: Rig,
+) -> None:
+    await log_in(rig)
+    age_the_stored_token(rig.root)
+    token_file = rig.root / "tokens" / "rh.json"
+    saved, kinds = token_file.read_text(), rig.audit_kinds
+    rig.fake.refresh_status = 503
+    rig.sent.clear()
+
+    again = await rig.reboot()
+    try:
+        with pytest.raises(RuntimeError, match="failed to start"):
+            await asyncio.wait_for(again.manager.connect(again.config), 10)
+        assert again.broker.state(SERVER) == "disabled"  # like any server down at boot
+    finally:
+        await again.manager.stop()
+
+    assert rig.sent == []  # nobody is asked to log in over a blip
+    assert rig.audit_kinds == kinds
+    assert token_file.read_text() == saved
+    # The login is still there: the next boot, once the endpoint is back, uses it.
+    rig.fake.refresh_status = None
+    later = await again.reboot()
+    try:
+        assert await asyncio.wait_for(later.manager.connect(later.config), 10) == 1
+    finally:
+        await later.manager.stop()
+    assert len(rig.fake.authorize_requests) == 1  # no second login
+
+
 async def test_a_changed_server_url_ignores_the_stored_login(
     rig: Rig, tmp_path: Path
 ) -> None:
@@ -654,6 +685,58 @@ async def test_a_login_lost_mid_session_parks_the_server_and_answers_the_call(
     assert len(rig.fake.seen_headers) == seen
 
 
+@pytest.mark.parametrize("status", [400, 401])
+async def test_a_token_endpoint_that_refuses_the_refresh_parks_the_server_for_a_login(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    await log_in(rig)
+    rig.sent.clear()
+    run_the_sdk_clock_forward(monkeypatch, 7200)
+    rig.fake.refresh_status = status
+
+    reply = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+
+    assert reply == "error: rh needs login; call server_login"
+    assert rig.broker.state(SERVER) == "needs_auth"
+    assert rig.sent == [(NOTICE_TO, NOTICE)]
+
+
+@pytest.mark.parametrize("status", [500, 503, 429])
+async def test_a_struggling_token_endpoint_keeps_the_login_and_the_server_reconnects(
+    rig: Rig,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    await log_in(rig)
+    token_file = rig.root / "tokens" / "rh.json"
+    saved, kinds = token_file.read_text(), rig.audit_kinds
+    rig.sent.clear()
+    monkeypatch.setattr("chief.mcpclient.supervisor.RECONNECT_DELAY_SECONDS", 0.05)
+    run_the_sdk_clock_forward(monkeypatch, 7200)  # the access token has run out
+    rig.fake.refresh_status = status  # and the endpoint that renews it is struggling
+
+    with caplog.at_level(logging.ERROR):
+        reply = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+
+    # Not a login problem: an ordinary dropped connection, the login untouched.
+    assert reply == "error: mcp server 'rh' is not connected"
+    assert rig.broker.state(SERVER) != "needs_auth"
+    assert rig.sent == []
+    assert rig.audit_kinds == kinds
+    assert "connection failed; retrying" in caplog.text
+    assert token_file.read_text() == saved
+
+    rig.fake.refresh_status = None  # the endpoint recovers; the backoff finds it
+    await eventually(lambda: rig.broker.state(SERVER) == "connected")
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants[0] == "authorization_code"
+    assert set(grants[1:]) == {"refresh_token"}  # stored login, not a new one
+    assert len(rig.fake.authorize_requests) == 1
+    assert rig.sent == []
+
+
 async def test_a_login_the_server_revokes_mid_session_parks_it_and_can_be_redone(
     rig: Rig,
 ) -> None:
@@ -689,6 +772,30 @@ async def test_a_login_request_that_a_refresh_can_answer_just_connects(
 
     assert len(rig.sent) == sent  # no link: the refresh token still worked
     assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+
+
+async def test_a_login_request_that_meets_a_struggling_endpoint_sends_no_link(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await log_in(rig)
+    run_the_sdk_clock_forward(monkeypatch, 7200)
+    rig.fake.refresh_error = "invalid_grant"  # a hiccup, not a real revocation
+    await asyncio.wait_for(rig.registry.dispatch(PING), 10)  # parks the server
+    rig.fake.refresh_error = None
+    monkeypatch.undo()
+    age_the_stored_token(rig.root)
+    rig.fake.refresh_status = 503
+    sent = len(rig.sent)
+
+    reply = await rig.broker.start_login(SERVER, SURFACE)
+
+    # The stored login may well still be good, so nobody is sent off to redo it.
+    assert reply.startswith("login failed:") and "503" in reply
+    assert len(rig.sent) == sent
+    assert rig.broker.state(SERVER) == "needs_auth"
+    rig.fake.refresh_status = None
+    assert await rig.broker.start_login(SERVER, SURFACE) == "rh connected (1 tool)"
+    assert len(rig.sent) == sent  # the stored login did it: still no link
 
 
 # -- logout ------------------------------------------------------------------

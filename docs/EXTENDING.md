@@ -116,10 +116,14 @@ discovered endpoints (mode 0600). `auth` and `headers` are for `url` entries; on
   `server_login_complete`. A link is good for ten minutes and a second `/login`
   replaces it. The tools appear live — no restart.
 - **Staying logged in.** The access token refreshes on its own, across restarts
-  too. Only a real auth failure — the refresh is refused, or the server stops
-  honouring the token — parks the server again (one notice, and a tool call in
-  flight answers `error: <server> needs login; call server_login`). A network
-  error or a 5xx is not a login problem: it keeps the ordinary reconnect/backoff.
+  too. Only a real auth failure — the token endpoint refuses the refresh (a 4xx
+  such as `invalid_grant`), or the server stops honouring the token — parks the
+  server again (one notice, and a tool call in flight answers `error: <server>
+  needs login; call server_login`). A network error, a 5xx or a 429 — the token
+  endpoint's included — is not a login problem: the stored login is kept and the
+  connection takes the ordinary reconnect/backoff (a call in flight answers
+  `error: mcp server '<server>' is not connected`). At boot the server fails to
+  start, like any that is down, and is not retried until the next restart.
 - **`/logout robinhood`** forgets the login: it asks the provider to revoke it when
   the provider offers a revocation endpoint (not all do), deletes the token file,
   and ends the connection, quietly. Its tools stay listed but answer with the

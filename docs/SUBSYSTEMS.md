@@ -140,7 +140,7 @@ what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
 | `supervisor.py` | the connect / reconnect loop, and parking on a login wall; releases a tool call whose connection died (`calls.py`) |
 | `transport.py` | opens the stdio or streamable-HTTP transport and a session on it |
 | `oauth.py` | `OAuthBroker`: per-server state (`connecting`, `connected`, `needs_auth`, `disabled`), provider construction, and the facade the supervisor, tools and commands call |
-| `oauth_flow.py`, `oauth_login.py`, `oauth_notice.py`, `oauth_types.py` | the redirect/callback pair the SDK drives; start / complete / logout; the once-only "needs login" notice; shared types |
+| `oauth_flow.py`, `oauth_login.py`, `oauth_notice.py`, `oauth_types.py` | the SDK provider and its redirect/callback pair; start / complete / logout; the once-only "needs login" notice; shared types |
 | `token_store.py` | `secrets/mcp-oauth/<server>.json`, the SDK's `TokenStorage` |
 | `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
 
@@ -149,8 +149,13 @@ connects with a good token, refreshes a stale one, and only a real auth failure
 reaches its redirect step — where it raises `NeedsAuth` and parks the server. A
 `/login` arms one **interactive** attempt instead: the redirect step sends the link
 to the asking conversation and the callback step waits (ten minutes, bounded) for
-the browser's address. A network error or 5xx never reaches the redirect step,
-which is why only genuine auth failures park a server.
+the browser's address. Only a genuine auth failure parks a server. A network error
+never reaches the redirect step, but a 5xx or 429 from the token endpoint would —
+the SDK reads any non-200 refresh as a refusal, drops its tokens and sends the next
+request bare into a 401 — so `oauth_flow.py` subclasses the provider to raise on
+those before anything is dropped: the connection fails the ordinary way (backoff,
+no notice) with the stored login intact. A `/login` that meets one reports it and
+sends no link.
 
 The SDK restores stored tokens without their expiry, does not refresh on a 401, and
 does not restore what its discovery found — so the first refresh after a restart or

@@ -1,11 +1,13 @@
-"""The redirect/callback pair the SDK's OAuth provider drives, and the text and
-URL handling around it."""
+"""The SDK's OAuth provider as chief builds it: the redirect/callback pair it
+drives, the line it draws between a refresh that was refused and one that could
+not be answered, and the text and URL handling around them."""
 
 import asyncio
 import logging
 from collections.abc import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import httpx
 from mcp.client.auth import OAuthClientProvider
 from mcp.shared.auth import OAuthClientMetadata
 
@@ -97,6 +99,27 @@ class LoginFlow:
                 self._record.flow = None
 
 
+class _TransientAwareProvider(OAuthClientProvider):
+    """The SDK's provider, except that a token endpoint which could not answer
+    is not taken for one that refused.
+
+    The SDK reads every non-200 refresh response as a refusal: it drops the
+    tokens it holds, the request after it goes out bare and meets a 401, and the
+    flow walks into the redirect step — a login wall, and a "needs login" text
+    to the owner, for one 503. A 5xx or a 429 raises here instead, before
+    anything is dropped, so the connection fails like any other and is retried
+    on the supervisor's backoff with the stored login intact. Any other non-200,
+    a 4xx above all, is the server's answer and still reaches the redirect step.
+
+    ``_handle_refresh_response`` is the SDK's private method (mcp 1.28); the
+    struggling-endpoint tests fail loudly if an upgrade moves it."""
+
+    async def _handle_refresh_response(self, response: httpx.Response) -> bool:
+        if response.status_code >= 500 or response.status_code == 429:
+            response.raise_for_status()
+        return await super()._handle_refresh_response(response)
+
+
 def new_provider(
     config: ServerConfig, storage: FileTokenStorage, flow: LoginFlow,
     redirect_uri: str, ttl: float,
@@ -112,7 +135,7 @@ def new_provider(
             "token_endpoint_auth_method": "none",
         }
     )
-    provider = OAuthClientProvider(
+    provider = _TransientAwareProvider(
         config.url, metadata, storage, flow.redirect, flow.callback, timeout=ttl
     )
     storage.attach(provider.context)
