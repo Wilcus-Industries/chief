@@ -387,6 +387,10 @@ send the owner login links. `gate.never` still wins.
 
 **Audit.** `mcp_auth_needed`, `_start`, `_complete`, `_fail` and `_logout` record
 the server and a short reason — never a token, a code, or a URL carrying either.
+The three the supervisor writes by itself (`_needed`, `_complete`, `_fail`) are best
+effort: a log that cannot be written is warned about and skipped, so a full or
+unwritable disk can leave a gap there but cannot end the supervisor. `_start` and
+`_logout` run on the owner's request and fail where the owner can see it.
 
 **Static headers.** Secrets reach a header only as `${secret:name}` (env `NAME`,
 then `secrets/name`). The expanded values stay out of `ServerConfig.__repr__`, a

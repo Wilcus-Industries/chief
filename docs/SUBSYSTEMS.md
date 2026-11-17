@@ -181,6 +181,17 @@ generation (`ServerAuth.generation`). The connection a logout ends sends its goo
 through the OAuth client and may refresh first; without that gate the refresh would
 write the deleted login back.
 
+The supervisor never dies of a file it cannot write. It records a wall and a
+connection from inside its own failure handling, so a write that raised there (a
+file left owned by another user, a full disk) would end it silently: the server
+neither connected nor parked, and every later `/login` timing out. Each such write
+is best effort — logged with its file, then skipped: the notice flag set stays
+authoritative in memory for the run (a restart may repeat a notice, or skip one the
+file never recorded), `force_refresh` declines so the server parks as it would have
+without the retry, and the supervisor's own audit lines (`mcp_auth_needed`, `_fail`,
+`_complete`) can go missing. The owner's `/login` and `/logout` audit lines are not
+best effort: they fail where the owner sees it.
+
 ## Monitors — `src/chief/monitors/`
 
 A monitor is a persisted, agent-created event subscription: watch a channel,

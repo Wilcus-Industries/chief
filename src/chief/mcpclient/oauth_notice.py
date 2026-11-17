@@ -21,7 +21,13 @@ class Notices:
 
     A server that stays logged out must not text the owner on every boot, so a
     notice is due once; a successful login clears it, because the *next* wall is
-    news again. A logout the owner asked for is marked sent: they know."""
+    news again. A logout the owner asked for is marked sent: they know.
+
+    The file is best effort. The supervisor marks and clears from inside its own
+    failure and connect handling, where a write that raised would end it, so one
+    that cannot be written (left owned by another user, a full disk) is logged
+    and the set in memory stays what this run goes by. The file keeps its old
+    contents: a restart may repeat a notice, or skip one."""
 
     def __init__(self, send: Send, target: Surface, path: Path) -> None:
         self._send = send
@@ -53,9 +59,19 @@ class Notices:
 
     def mark(self, server: str) -> None:
         self._sent.add(server)
-        save_names(self._sent, self._path)
+        self._persist()
 
     def clear(self, server: str) -> None:
         if server in self._sent:
             self._sent.discard(server)
+            self._persist()
+
+    def _persist(self) -> None:
+        try:
             save_names(self._sent, self._path)
+        except OSError:
+            logger.warning(
+                "could not save %s; notices are remembered for this run only",
+                self._path,
+                exc_info=True,
+            )

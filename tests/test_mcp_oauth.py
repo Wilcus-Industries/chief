@@ -8,8 +8,10 @@ the provider and "the owner's browser" is ``FakeOAuth.browser_approve``.
 
 import asyncio
 import dataclasses
+import errno
 import json
 import logging
+import os
 import socket
 import time
 from collections.abc import AsyncIterator, Callable
@@ -30,6 +32,7 @@ from chief.hooks.registry import HookRegistry
 from chief.mcpclient.auth_tools import register_auth_surface
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.mcpclient.oauth import OAuthBroker
+from chief.mcpclient.oauth_notice import Notices
 from chief.mcpclient.oauth_types import Surface
 from chief.provider.base import ToolCall
 from chief.tools import ToolContext, ToolRegistry
@@ -78,6 +81,7 @@ def build(
     sent: list[tuple[Surface, str]],
     dead_channel: bool = False,
     hang_notices: bool = False,
+    audit: AuditLog | None = None,
     **options: Any,
 ) -> Rig:
     async def send(surface: Surface, text: str) -> None:
@@ -89,7 +93,7 @@ def build(
 
     broker = OAuthBroker(
         send=send,
-        audit=AuditLog(root / "audit.jsonl"),
+        audit=audit or AuditLog(root / "audit.jsonl"),
         notice_to=NOTICE_TO,
         redirect_uri=REDIRECT,
         token_dir=root / "tokens",
@@ -226,6 +230,156 @@ async def test_an_unreadable_notice_file_is_ignored_not_fatal(
     finally:
         await rig.manager.stop()
     assert rig.sent == [(NOTICE_TO, NOTICE)]
+
+
+# A file the supervisor cannot write -----------------------------------------
+#
+# It records a wall and a connection from inside its own failure handling, so a
+# write that raises there (a file left owned by another user, a full disk) ends
+# it silently: every /login afterwards waits out its minute and times out.
+
+not_root = pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+
+
+def freeze_notified(root: Path, names: list[str]) -> Path:
+    """The notice file as a migration can leave it: readable, but not by anyone
+    who may write it."""
+    path = root / "notified.json"
+    path.write_text(json.dumps(names))
+    path.chmod(0o400)
+    return path
+
+
+def warned_about(caplog: pytest.LogCaptureFixture, text: str) -> bool:
+    """Whether a warning itself (not a traceback it carries) mentions ``text``."""
+    return any(
+        r.levelno == logging.WARNING and text in r.getMessage() for r in caplog.records
+    )
+
+
+class FullDiskAudit(AuditLog):
+    """An audit log whose disk is full for ``kinds``: those lines raise, the rest
+    are written."""
+
+    def __init__(self, path: Path, kinds: set[str]) -> None:
+        super().__init__(path)
+        self._kinds = kinds
+
+    def record(self, kind: str, **data: object) -> None:
+        if kind in self._kinds:
+            raise OSError(errno.ENOSPC, "No space left on device", str(self._path))
+        super().record(kind, **data)
+
+
+async def never_sends(_surface: Surface, _text: str) -> None:
+    raise AssertionError("nothing here sends a notice")
+
+
+@not_root
+def test_notices_that_cannot_be_saved_are_still_kept_for_this_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = freeze_notified(tmp_path, [])
+    notices = Notices(never_sends, NOTICE_TO, path)
+
+    with caplog.at_level(logging.WARNING):
+        notices.mark(SERVER)
+        assert not notices.due(SERVER)  # this run goes by what it has sent
+        notices.clear(SERVER)
+        assert notices.due(SERVER)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2  # one per failed write, each naming the file
+    assert all(str(path) in message for message in warnings)
+    assert json.loads(path.read_text()) == []  # nothing reached the file
+
+
+@not_root
+async def test_a_notice_that_cannot_be_recorded_is_still_sent_and_logged(
+    tmp_path: Path, fake: FakeOAuth, caplog: pytest.LogCaptureFixture
+) -> None:
+    notified = freeze_notified(tmp_path, [])
+    rig = build(fake, tmp_path, [])
+    try:
+        with caplog.at_level(logging.WARNING):
+            await connect_parked(rig)
+    finally:
+        await rig.manager.stop()
+
+    assert rig.sent == [(NOTICE_TO, NOTICE)]
+    assert warned_about(caplog, str(notified))
+
+
+@not_root
+async def test_a_login_still_connects_when_the_notice_flag_cannot_be_written(
+    tmp_path: Path, fake: FakeOAuth
+) -> None:
+    freeze_notified(tmp_path, [])
+    rig = build(fake, tmp_path, [])
+    try:
+        await connect_parked(rig)
+        # A supervisor that died on the failed write is not there to pick this up.
+        link = await asyncio.wait_for(rig.broker.start_login(SERVER, SURFACE), 5)
+        assert link == LINK_SENT
+
+        callback = await fake.browser_approve(link_in(rig.sent[-1][1]))
+        result = await rig.broker.complete_login(callback, SERVER)
+
+        # Connecting has the flag to clear and cannot: that is not a failed login.
+        assert (result.ok, result.message) == (True, "rh connected (1 tool)")
+        assert rig.broker.state(SERVER) == "connected"
+        assert await rig.registry.dispatch(PING) == "pong"
+    finally:
+        await rig.manager.stop()
+
+
+@not_root
+async def test_a_stored_login_connects_at_boot_when_the_notice_flag_cannot_be_cleared(
+    rig: Rig, caplog: pytest.LogCaptureFixture
+) -> None:
+    await log_in(rig)
+    notified = freeze_notified(rig.root, [SERVER])  # told, back before this login
+
+    again = await rig.reboot()
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert await asyncio.wait_for(again.manager.connect(again.config), 10) == 1
+        # Dealt with where it happened, not by failing the connection and retrying.
+        assert warned_about(caplog, str(notified))
+        assert again.broker.state(SERVER) == "connected"
+        assert await again.registry.dispatch(PING) == "pong"
+    finally:
+        await again.manager.stop()
+
+
+async def test_an_audit_log_that_cannot_be_written_does_not_end_the_supervisor(
+    tmp_path: Path, fake: FakeOAuth, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The lines the supervisor writes for itself: a wall, a login that broke, a
+    # connection. The owner's own /login is audited as ever, and loudly.
+    its_lines = {"mcp_auth_needed", "mcp_auth_fail", "mcp_auth_complete"}
+    audit = FullDiskAudit(tmp_path / "audit.jsonl", its_lines)
+    rig = build(fake, tmp_path, [], audit=audit)
+    fake.deny_authorize = True
+    try:
+        with caplog.at_level(logging.WARNING):
+            await connect_parked(rig)
+            await rig.broker.start_login(SERVER, SURFACE)
+            denied = await fake.browser_approve(link_in(rig.sent[-1][1]))
+            assert not (await rig.broker.complete_login(denied, SERVER)).ok
+
+            fake.deny_authorize = False
+            again = rig.broker.start_login(SERVER, SURFACE)
+            assert await asyncio.wait_for(again, 5) == LINK_SENT  # still listening
+            callback = await fake.browser_approve(link_in(rig.sent[-1][1]))
+            assert (await rig.broker.complete_login(callback, SERVER)).ok
+    finally:
+        await rig.manager.stop()
+
+    assert rig.sent[0] == (NOTICE_TO, NOTICE)
+    for kind in its_lines:
+        assert warned_about(caplog, kind), kind
+    assert rig.audit_kinds == ["mcp_auth_start", "mcp_auth_start"]
 
 
 async def test_a_login_wall_is_not_logged_as_an_error(

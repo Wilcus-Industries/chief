@@ -214,7 +214,7 @@ one that came up fine (`gate: {approved: ["*"]}` parses and boots).
 | `chief.db` | sqlite sessions + transcripts; schema created at boot, **no migrations** |
 | `chief.sock` | unix socket for `chief-cli` |
 | `audit.jsonl` | every gated tool call, and each MCP login step (`mcp_auth_*`: server + reason only) |
-| `mcp-oauth-notified.json` | MCP servers the owner has already been told need a login (cleared by a successful login) |
+| `mcp-oauth-notified.json` | MCP servers the owner has already been told need a login (cleared by a successful login). Best effort: when it cannot be written the daemon logs that and remembers only until the next restart |
 | `gate_approved.json` | persisted "always allow" set, minus config-approved |
 | `installed.yaml` | package install registry |
 | `config-history/` | a copy of every `config.yaml` that booted healthy (see above) |

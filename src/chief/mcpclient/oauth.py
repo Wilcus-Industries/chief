@@ -13,6 +13,7 @@ sends the owner a link instead and waits, bounded, for the address the browser
 ends up on.
 """
 
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -35,6 +36,8 @@ from chief.mcpclient.oauth_types import (
     Surface,
 )
 from chief.mcpclient.token_store import FileTokenStorage
+
+logger = logging.getLogger(__name__)
 
 
 class OAuthBroker:
@@ -81,7 +84,7 @@ class OAuthBroker:
         """Park ``server`` on a login; True when the owner has not been told."""
         record = self._servers[server]
         if record.state != "needs_auth":  # a failed login is already parked
-            self._audit.record("mcp_auth_needed", server=server, reason="no_login")
+            self._audit_best_effort("mcp_auth_needed", server, "no_login")
         record.state = "needs_auth"
         return self._notices.due(server)
 
@@ -103,7 +106,7 @@ class OAuthBroker:
         record.dropped.clear()
         self._notices.clear(server)
         if attempts.connected(record, count, attempt):
-            self._audit.record("mcp_auth_complete", server=server, reason="connected")
+            self._audit_best_effort("mcp_auth_complete", server, "connected")
 
     def disconnected(self, server: str) -> None:
         """A connected ``server`` dropped for a reason that is not a login wall."""
@@ -123,7 +126,7 @@ class OAuthBroker:
         """End ``attempt`` with the reason; the server stays parked."""
         record = self._servers[attempt.server]
         reason = attempts.failed(record, attempt, exc)
-        self._audit.record("mcp_auth_fail", server=attempt.server, reason=reason)
+        self._audit_best_effort("mcp_auth_fail", attempt.server, reason)
 
     async def logged_out(self, server: str) -> None:
         """Wait for ``logout`` to ask the live connection to end."""
@@ -169,6 +172,14 @@ class OAuthBroker:
             self._notices.mark(server)
             self._audit.record("mcp_auth_logout", server=server, reason="requested")
         return result.message
+
+    def _audit_best_effort(self, kind: str, server: str, reason: str) -> None:
+        """The supervisor audits mid-failure and mid-connect, where a log that
+        cannot be written must cost the line, not the supervisor."""
+        try:
+            self._audit.record(kind, server=server, reason=reason)
+        except OSError:
+            logger.warning("could not audit %s for %s", kind, server, exc_info=True)
 
     def _storage(self, record: ServerAuth) -> FileTokenStorage:
         """A token store that stops writing once a logout bumps the generation
