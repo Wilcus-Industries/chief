@@ -11,7 +11,7 @@ import json
 import logging
 import socket
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,9 +72,15 @@ class Rig:
 
 
 def build(
-    fake: FakeOAuth, root: Path, sent: list[tuple[Surface, str]], **options: Any
+    fake: FakeOAuth,
+    root: Path,
+    sent: list[tuple[Surface, str]],
+    dead_channel: bool = False,
+    **options: Any,
 ) -> Rig:
     async def send(surface: Surface, text: str) -> None:
+        if dead_channel:
+            raise ConnectionError("the owner's channel is down")
         sent.append((surface, text))
 
     broker = OAuthBroker(
@@ -103,6 +109,14 @@ async def rig(tmp_path: Path, fake: FakeOAuth) -> AsyncIterator[Rig]:
     current = build(fake, tmp_path, [])
     yield current
     await current.manager.stop()
+
+
+async def eventually(check: Callable[[], bool], timeout: float = 5.0) -> None:
+    """Wait (bounded) for something that happens on another task — the thing
+    asserted, not a stand-in for it."""
+    async with asyncio.timeout(timeout):
+        while not check():
+            await asyncio.sleep(0.01)
 
 
 def link_in(message: str) -> str:
@@ -154,6 +168,38 @@ async def test_a_restart_with_no_login_does_not_repeat_the_notice(rig: Rig) -> N
 
     assert rig.sent == [(NOTICE_TO, NOTICE)]  # still just the one
     assert len(rig.fake.registrations) == 1  # and no second registration
+
+
+async def test_a_notice_that_could_not_be_sent_is_retried_on_the_next_boot(
+    tmp_path: Path, fake: FakeOAuth, caplog: pytest.LogCaptureFixture
+) -> None:
+    sent: list[tuple[Surface, str]] = []
+    down = build(fake, tmp_path, sent, dead_channel=True)
+    try:
+        with caplog.at_level(logging.ERROR):
+            assert await asyncio.wait_for(down.manager.connect(down.config), 10) == 0
+    finally:
+        await down.manager.stop()
+    assert sent == [] and "could not tell the owner" in caplog.text
+
+    up = build(fake, tmp_path, sent)
+    try:
+        assert await asyncio.wait_for(up.manager.connect(up.config), 10) == 0
+    finally:
+        await up.manager.stop()
+    assert sent == [(NOTICE_TO, NOTICE)]
+
+
+async def test_an_unreadable_notice_file_is_ignored_not_fatal(
+    tmp_path: Path, fake: FakeOAuth
+) -> None:
+    (tmp_path / "notified.json").write_text("{nope")
+    rig = build(fake, tmp_path, [])
+    try:
+        assert await asyncio.wait_for(rig.manager.connect(rig.config), 10) == 0
+    finally:
+        await rig.manager.stop()
+    assert rig.sent == [(NOTICE_TO, NOTICE)]
 
 
 async def test_a_login_wall_is_not_logged_as_an_error(
@@ -316,7 +362,7 @@ async def test_an_unanswered_link_times_out_and_the_owner_can_ask_again(
     try:
         await connect_parked(rig)
         assert await rig.broker.start_login(SERVER, SURFACE) == LINK_SENT
-        await asyncio.sleep(0.6)  # the link's whole life, unanswered
+        await eventually(lambda: "mcp_auth_fail" in rig.audit_kinds)  # it lapsed
 
         assert rig.broker.state(SERVER) == "needs_auth"
         assert await rig.broker.start_login(SERVER, SURFACE) == LINK_SENT
@@ -370,6 +416,31 @@ async def test_login_requests_for_servers_that_cannot_log_in_are_refused(
 async def test_a_login_while_still_connecting_is_asked_to_wait(rig: Rig) -> None:
     rig.broker.register(rig.config)  # known, but its first attempt has not landed
     assert "still connecting" in await rig.broker.start_login(SERVER, SURFACE)
+
+
+async def test_two_servers_are_parked_and_logged_in_independently(rig: Rig) -> None:
+    async with serve_fake() as second:
+        other = ServerConfig(name="gh", url=second.mcp_url, auth="oauth")
+        try:
+            await connect_parked(rig)
+            assert await asyncio.wait_for(rig.manager.connect(other), 10) == 0
+            assert rig.broker.needs_auth() == ["gh", "rh"]
+            assert [text for _, text in rig.sent] == [
+                NOTICE,
+                'Gh needs login. Say "connect gh" or /login gh.',
+            ]
+
+            await rig.broker.start_login("gh", SURFACE)
+            callback = await second.browser_approve(link_in(rig.sent[-1][1]))
+            # The address is gh's: it cannot finish a login for rh.
+            assert not (await rig.broker.complete_login(callback, SERVER)).ok
+            assert (await rig.broker.complete_login(callback)).ok
+
+            assert rig.broker.state("gh") == "connected"
+            assert rig.broker.state(SERVER) == "needs_auth"
+            assert rig.broker.needs_auth() == [SERVER]
+        finally:
+            await rig.manager.stop()
 
 
 # -- surviving a restart -----------------------------------------------------
