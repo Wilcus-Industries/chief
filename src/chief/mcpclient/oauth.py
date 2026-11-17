@@ -78,8 +78,10 @@ class OAuthBroker:
 
     def needs_login(self, server: str) -> bool:
         """Park ``server`` on a login; True when the owner has not been told."""
-        self._servers[server].state = "needs_auth"
-        self._audit.record("mcp_auth_needed", server=server, reason="login_required")
+        record = self._servers[server]
+        if record.state != "needs_auth":  # a failed login is already parked
+            self._audit.record("mcp_auth_needed", server=server, reason="no_login")
+        record.state = "needs_auth"
         return self._notices.due(server)
 
     async def send_notice(self, server: str) -> None:
@@ -102,7 +104,8 @@ class OAuthBroker:
         attempt, record.attempt = record.attempt, None
         if attempt is not None and not attempt.connected:
             attempt.connected = True
-            attempt.finish(LoginResult(True, f"{server} connected ({count} tools)"))
+            plural = "tool" if count == 1 else "tools"
+            attempt.finish(LoginResult(True, f"{server} connected ({count} {plural})"))
             self._audit.record("mcp_auth_complete", server=server, reason="connected")
 
     def disconnected(self, server: str) -> None:

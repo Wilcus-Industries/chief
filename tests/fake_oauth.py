@@ -46,6 +46,7 @@ class FakeOAuth:
         self.rotate_refresh = True  # False: refresh responses omit refresh_token
         self.revocation = False  # advertise a revocation endpoint
         self.deny_authorize = False  # the browser step answers access_denied
+        self.as_base: str | None = None  # where PRM says the AS lives (default: here)
         # Observations.
         self.clients: dict[str, dict[str, Any]] = {}
         self.registrations: list[dict[str, Any]] = []
@@ -96,7 +97,7 @@ class FakeOAuth:
         return JSONResponse(
             {
                 "resource": self.mcp_url,
-                "authorization_servers": [self.base_url],
+                "authorization_servers": [self.as_base or self.base_url],
                 "scopes_supported": ["internal"],
             }
         )

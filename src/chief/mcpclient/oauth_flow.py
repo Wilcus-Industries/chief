@@ -26,12 +26,14 @@ from chief.mcpclient.token_store import FileTokenStorage
 class _ExpectedLoginWall(logging.Filter):
     """Keeps the SDK from logging a login wall as an ERROR with a traceback.
 
-    The SDK logs every exception its flow raises; ``NeedsAuth`` is the normal
-    way a server that wants a login announces itself, on every boot."""
+    The SDK logs every exception its flow raises. ``NeedsAuth`` is the normal
+    way a server that wants a login announces itself, on every boot, and a
+    ``LoginError`` (declined, expired, replaced) is an owner-facing outcome the
+    broker already reports."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         exc = record.exc_info[1] if record.exc_info else None
-        return not isinstance(exc, NeedsAuth)
+        return not isinstance(exc, NeedsAuth | LoginError)
 
 
 logging.getLogger("mcp.client.auth.oauth2").addFilter(_ExpectedLoginWall())
