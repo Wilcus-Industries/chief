@@ -24,16 +24,22 @@ async def next_attempt(record: ServerAuth) -> LoginAttempt:
             return record.attempt
 
 
-def connected(record: ServerAuth, count: int) -> bool:
-    """End the login that got ``record``'s server up; False when there was none."""
-    attempt, record.attempt = record.attempt, None
-    if attempt is None or attempt.connected:
-        return False
-    attempt.connected = True
+def connected(record: ServerAuth, count: int, attempt: LoginAttempt | None) -> bool:
+    """End the logins that got ``record``'s server up; False when there were none.
+
+    ``attempt`` is the ``/login`` the connection was made for, which is not always
+    ``record.attempt``: a ``start`` that gave up waiting cleared that, and a newer
+    ``/login`` replaced it. Both end here — the first so that a later network
+    blip is not read as its login breaking, the second so that its owner, who is
+    still waiting, gets the answer."""
+    ending = [a for a in (attempt, record.attempt) if a is not None and not a.connected]
+    record.attempt = None
     plural = "tool" if count == 1 else "tools"
-    name = record.config.name
-    attempt.finish(LoginResult(True, f"{name} connected ({count} {plural})"))
-    return True
+    result = LoginResult(True, f"{record.config.name} connected ({count} {plural})")
+    for ended in ending:
+        ended.connected = True
+        ended.finish(result)
+    return bool(ending)
 
 
 def failed(record: ServerAuth, attempt: LoginAttempt, exc: BaseException) -> str:

@@ -147,7 +147,7 @@ class Supervisor:
             if not ready.done():
                 ready.set_result(count)
             if broker is not None:
-                broker.connected(config.name, count)
+                broker.connected(config.name, count, attempt)
                 self._retrying = False  # the next wall earns its own retry
             logger.info("mcp server %s up with %d tools", config.name, count)
             if broker is not None:

@@ -879,6 +879,64 @@ async def test_a_call_during_the_refresh_retry_is_not_sent_down_the_old_connecti
     assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
 
 
+# -- a login the broker no longer has on record --------------------------------
+
+
+async def assert_a_blip_is_not_a_failed_login(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server is up through a login. A struggling token endpoint then drops
+    the connection: an ordinary failure to retry, not that login breaking."""
+    sent, kinds = list(rig.sent), rig.audit_kinds
+    monkeypatch.setattr("chief.mcpclient.supervisor.RECONNECT_DELAY_SECONDS", 0.05)
+    run_the_sdk_clock_forward(monkeypatch, 7200)
+    rig.fake.refresh_status = 503
+
+    reply = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+
+    assert reply == "error: mcp server 'rh' is not connected"
+    assert rig.broker.state(SERVER) != "needs_auth"
+    assert (rig.sent, rig.audit_kinds) == (sent, kinds)  # no notice, no mcp_auth_fail
+    rig.fake.refresh_status = None  # the endpoint recovers; the backoff finds it
+    await eventually(lambda: rig.broker.state(SERVER) == "connected")
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+
+
+async def test_a_login_that_connects_after_its_request_gave_up_is_still_a_login(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await park_on_a_hiccup(rig, monkeypatch)
+    monkeypatch.setattr("chief.mcpclient.oauth_login.LOGIN_WAIT_SECONDS", 0.2)
+    rig.fake.refresh_delay = 0.6  # the stored login's refresh outlasts the wait
+
+    reply = await rig.broker.start_login(SERVER, SURFACE)
+
+    assert reply.startswith("error: timed out reaching rh")  # nothing is on record
+    await eventually(lambda: rig.broker.state(SERVER) == "connected")
+    rig.fake.refresh_delay = 0.0
+    await assert_a_blip_is_not_a_failed_login(rig, monkeypatch)
+
+
+async def test_a_login_replaced_by_a_newer_request_is_still_the_one_that_connected(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await park_on_a_hiccup(rig, monkeypatch)
+    rig.fake.refresh_delay = 0.6
+    asked = len(rig.fake.token_requests)
+    first = asyncio.ensure_future(rig.broker.start_login(SERVER, SURFACE))
+    await eventually(lambda: len(rig.fake.token_requests) > asked)  # mid-refresh
+
+    second = await asyncio.wait_for(
+        rig.broker.start_login(SERVER, ("web", "web:main")), 10
+    )
+
+    assert await first == "login failed: replaced by a newer login request"
+    assert second == "rh connected (1 tool)"  # the newer request gets the answer
+    assert rig.audit_kinds.count("mcp_auth_complete") == 2  # this login, once
+    rig.fake.refresh_delay = 0.0
+    await assert_a_blip_is_not_a_failed_login(rig, monkeypatch)
+
+
 # -- logout ------------------------------------------------------------------
 
 

@@ -93,13 +93,16 @@ class OAuthBroker:
         """Wait until the owner asks to log in to ``server``."""
         return await attempts.next_attempt(self._servers[server])
 
-    def connected(self, server: str, count: int) -> None:
-        """``server`` is up: clear its notice, and end the login that got it here."""
+    def connected(
+        self, server: str, count: int, attempt: LoginAttempt | None
+    ) -> None:
+        """``server`` is up: clear its notice, and end the login(s) that got it
+        here; ``attempt`` is the ``/login`` the connection was made for."""
         record = self._servers[server]
         record.state = "connected"
         record.dropped.clear()
         self._notices.clear(server)
-        if attempts.connected(record, count):
+        if attempts.connected(record, count, attempt):
             self._audit.record("mcp_auth_complete", server=server, reason="connected")
 
     def disconnected(self, server: str) -> None:
