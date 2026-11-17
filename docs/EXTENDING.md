@@ -135,7 +135,7 @@ A package is a directory with `manifest.yaml`:
 | `secrets` | list[str] | filenames expected under `secrets/` |
 | `python_deps` | list[str] | **import** names (`yaml`), never dist names (`PyYAML`) |
 | `hooks` | mapping | `{module, register}` |
-| `mcp_servers` | mapping | `{<name>: {url}}` or `{<name>: {command}}` — exactly one |
+| `mcp_servers` | mapping | `{<name>: {url}}` or `{<name>: {command}}` — exactly one. A `url` entry may add `auth: oauth`, `headers` (name → string; secrets only as `${secret:name}` refs, never by value) and `scopes` (list of str); `auth`/`headers` on a `command` entry fail validation |
 
 Plus `INSTALL.md` / `UNINSTALL.md`, and ideally an `install.sh` for the
 deterministic path.
