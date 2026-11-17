@@ -667,8 +667,8 @@ async def test_a_server_that_does_not_connect_in_time_is_disabled_not_stuck_conn
     await log_in(rig)
     age_the_stored_token(rig.root)
     slow = await rig.reboot()
-    rig.fake.refresh_delay = 1.0  # the token endpoint is slow at boot
-    config = dataclasses.replace(slow.config, timeout=0.3)
+    rig.fake.refresh_delay = 0.6  # the token endpoint is slow at boot
+    config = dataclasses.replace(slow.config, timeout=0.2)
     try:
         with pytest.raises(TimeoutError, match="did not connect"):
             await slow.manager.connect(config)

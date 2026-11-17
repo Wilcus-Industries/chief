@@ -109,11 +109,16 @@ class FileTokenStorage:
 
     def force_refresh(self) -> bool:
         """Have the next provider refresh the stored access token instead of
-        sending it. False when no refresh token is stored to do that with."""
+        sending it. False when no refresh token is stored to do that with, or
+        the file cannot be written (the caller is mid-failure, so no raising)."""
         if not (self._load().get("tokens") or {}).get("refresh_token"):
             return False
-        # A positive past: the SDK reads a falsy expiry as "never expires".
-        self._save(expires_at=time.time() - 1)
+        try:
+            # A positive past: the SDK reads a falsy expiry as "never expires".
+            self._save(expires_at=time.time() - 1)
+        except OSError:
+            logger.warning("could not mark %s for a refresh", self._path, exc_info=True)
+            return False
         return True
 
     def clear(self) -> None:

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import stat
 import time
 from pathlib import Path
@@ -269,6 +270,25 @@ async def test_forcing_a_refresh_needs_a_refresh_token_to_do_it_with(
 
     assert store.force_refresh() is False
     assert (tmp_path / "mcp-oauth" / "rh.json").read_text() == saved
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+async def test_forcing_a_refresh_that_cannot_be_recorded_declines_instead_of_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # It runs inside the supervisor's failure handling: raising would end the
+    # supervisor, where declining just parks the server as before.
+    store = storage(tmp_path)
+    await store.set_tokens(tokens())
+    directory = tmp_path / "mcp-oauth"
+    directory.chmod(0o500)  # readable, but no temp file can be made in it
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert store.force_refresh() is False
+    finally:
+        directory.chmod(0o700)
+
+    assert "rh.json" in caplog.text
 
 
 async def test_a_refresh_response_without_a_refresh_token_keeps_the_old_one(
