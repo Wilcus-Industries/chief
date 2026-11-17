@@ -502,6 +502,24 @@ async def test_an_expired_access_token_refreshes_after_a_restart_not_a_new_login
     assert len(rig.sent) == 2  # the first notice and the link: nothing since
 
 
+async def test_a_session_started_from_stored_tokens_refreshes_in_place_at_expiry(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await log_in(rig)
+    again = await rig.reboot()
+    try:
+        assert await asyncio.wait_for(again.manager.connect(again.config), 10) == 1
+        run_the_sdk_clock_forward(monkeypatch, 7200)  # the restored expiry passes
+
+        assert await asyncio.wait_for(again.registry.dispatch(PING), 10) == "pong"
+        assert again.broker.state(SERVER) == "connected"
+    finally:
+        await again.manager.stop()
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token"]
+    assert len(rig.sent) == 2  # no notice: nothing was ever wrong
+
+
 async def test_a_refresh_that_returns_no_new_refresh_token_keeps_working(
     rig: Rig,
 ) -> None:
@@ -572,11 +590,12 @@ async def test_the_authorization_server_being_down_is_a_failure_not_a_login_wall
 def run_the_sdk_clock_forward(
     monkeypatch: pytest.MonkeyPatch, seconds: float
 ) -> None:
-    """Make the SDK's provider believe ``seconds`` have passed (its tokens'
-    expiry is judged on its own clock)."""
+    """Make the SDK's provider believe ``seconds`` have passed: it judges a
+    token's expiry on its own clock, and computes a new one's on ``auth_utils``'."""
     real = time.time
     stand_in = SimpleNamespace(time=lambda: real() + seconds)
     monkeypatch.setattr("mcp.client.auth.oauth2.time", stand_in)
+    monkeypatch.setattr("mcp.shared.auth_utils.time", stand_in)
 
 
 async def test_a_login_lost_mid_session_parks_the_server_and_answers_the_call(
