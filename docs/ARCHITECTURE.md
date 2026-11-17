@@ -68,8 +68,11 @@ through the adapter named on the `Message` that started it.
   a silent no-op. `mcp_servers` in particular is a runtime value read straight
   from `config.yaml`.
 - **System prompt** — the boot-static base is `src/chief/agent/prompt.py`
-  (`system_prompt` + `ONBOARDING_SUFFIX`); skill one-liners are appended in
-  `boot_prompt` there. The *per-turn* message (soul on top, then base +
+  (`system_prompt` + `ONBOARDING_SUFFIX`); `boot_prompt` there appends the
+  host's own notes after it — the stamp explanation (`STAMP_NOTE`, defined
+  beside `stamp()` in `timestamps.py`) and the skill one-liners — so a
+  `data/system.md` override cannot leave them out. A subagent's `PREAMBLE`
+  carries `STAMP_NOTE` too. The *per-turn* message (soul on top, then base +
   origin note, then package hook blocks) is assembled fresh each turn in
   `Session._assemble_system`. **It is never persisted**, so prompt and package
   edits apply to existing threads on the next turn.

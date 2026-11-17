@@ -21,6 +21,15 @@ from typing import Any
 
 from chief.provider.base import STAMP_KEY
 
+# The one explanation of the stamp, for every system prompt whose model is sent
+# stamped messages (the main agent's and each subagent's). It lives beside
+# ``stamp`` so a change of format and of its explanation travel together.
+STAMP_NOTE = (
+    "User messages and tool results begin with a host-added local-time stamp, "
+    "[date time zone, UTC offset], saying when they arrived: use it to reason "
+    "about time, but never write one yourself or repeat it in a reply."
+)
+
 
 def stamp(at: float | None = None) -> str:
     """``[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]`` for the instant ``at`` (epoch

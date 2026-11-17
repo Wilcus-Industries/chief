@@ -27,7 +27,7 @@ from chief.adapters.base import Message
 from chief.agent.loop import TurnResult, run_turn
 from chief.agent.subagent_drive import RunDeps
 from chief.agent.subagent_pool import SubagentPool
-from chief.agent.timestamps import stamp, tool_message, user_message
+from chief.agent.timestamps import STAMP_NOTE, stamp, tool_message, user_message
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
 from chief.hooks import HookRegistry, TurnContext
@@ -454,24 +454,46 @@ async def test_a_replayed_message_keeps_the_time_it_arrived(
 # ---- subagents --------------------------------------------------------------
 
 
-async def test_a_subagent_stamps_its_messages_the_same_idle_or_mid_turn(
-    tmp_path: Path,
-) -> None:
-    agent = AgentDef(
-        name="researcher", description=".", system_prompt="Go.", tools=None,
-        model=None,
-    )
-    provider = FakeProvider([text_turn("one"), text_turn("two"), text_turn("three")])
-    provider.gate = asyncio.Event()
-    pool = SubagentPool(
+RESEARCHER = AgentDef(
+    name="researcher", description=".", system_prompt="Go.", tools=None, model=None,
+)
+
+
+def make_pool(tmp_path: Path, provider: FakeProvider) -> SubagentPool:
+    return SubagentPool(
         RunDeps(provider, "m", asyncio.Semaphore(1)),
         lambda parent, channel, run_id: ToolRegistry(),
         lambda to, channel, text: None,
         AuditLog(tmp_path / "audit.jsonl"),
         idle_timeout=60.0,
     )
+
+
+async def test_a_subagent_is_told_what_the_stamp_is(tmp_path: Path) -> None:
+    # Its messages carry stamps like any other, and it never sees the main
+    # agent's system prompt: the explanation has to arrive with its own.
+    provider = FakeProvider([text_turn("done")])
+    pool = make_pool(tmp_path, provider)
     try:
-        await pool.spawn("cli:a", "cli", agent, "dig in")
+        await pool.spawn("cli:a", "cli", RESEARCHER, "dig in")
+        await until(lambda: len(provider.calls) == 1)
+    finally:
+        await pool.aclose()
+
+    system = provider.calls[0][0]
+    assert system["role"] == "system"
+    assert STAMP_NOTE in system["content"]
+    assert system["content"].endswith("Go.")  # its own prompt still follows
+
+
+async def test_a_subagent_stamps_its_messages_the_same_idle_or_mid_turn(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider([text_turn("one"), text_turn("two"), text_turn("three")])
+    provider.gate = asyncio.Event()
+    pool = make_pool(tmp_path, provider)
+    try:
+        await pool.spawn("cli:a", "cli", RESEARCHER, "dig in")
         await provider.entered.wait()  # its first turn is at the model
         [run] = pool.live()
         run.messaged_parent = True  # it idles after a turn instead of finishing

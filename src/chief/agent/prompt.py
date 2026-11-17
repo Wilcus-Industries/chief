@@ -5,7 +5,9 @@ Two pieces with different lifecycles:
 - The **base prompt** lives in an editable file (a self-edit target for the
   agent); the built-in default only covers a box where that file doesn't exist
   yet. It is boot-static — changing it goes through the self-edit pipeline,
-  which restarts the daemon.
+  which restarts the daemon. The host's own notes (how to read a stamp, the
+  skill and shell lines) are appended after it at boot, so replacing the base
+  never leaves them out.
 - The **soul** (``data/memory/Soul.md``, seeded by the soul package) is the
   agent's character. It is edited with the ordinary file/git tools, *not* the
   self-edit pipeline, so it must be read fresh — ``read_soul`` is called by the
@@ -15,6 +17,7 @@ Two pieces with different lifecycles:
 
 from pathlib import Path
 
+from chief.agent.timestamps import STAMP_NOTE
 from chief.persistence.store import MessageStore
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -23,10 +26,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "needs them; answer plainly when it doesn't. Before explaining a failure "
     "of your own tooling or behavior, verify the mechanism — read the "
     "relevant source or your audit log with your tools; never guess at how "
-    "your own system works. User messages and tool results begin with a "
-    "host-added local-time stamp, [date time zone, UTC offset], saying when "
-    "they arrived: use it to reason about time, but never write one yourself "
-    "or repeat it in a reply."
+    "your own system works."
 )
 
 SYSTEM_PROMPT_PATH = Path("data/system.md")
@@ -53,9 +53,10 @@ def system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
 
 
 async def boot_prompt(store: MessageStore, extras: str) -> str:
-    """The boot-time base prompt: the base text plus ``extras`` (skill and
-    shell lines), with the onboarding suffix while no session exists yet."""
-    prompt = system_prompt() + extras
+    """The boot-time base prompt: the base text, the stamp explanation, then
+    ``extras`` (skill and shell lines), with the onboarding suffix while no
+    session exists yet. The host's notes follow whichever base a box has."""
+    prompt = f"{system_prompt()}\n\n{STAMP_NOTE}{extras}"
     if not await store.has_sessions():
         prompt += ONBOARDING_SUFFIX
     return prompt

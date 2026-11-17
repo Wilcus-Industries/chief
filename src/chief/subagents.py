@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from chief.agent.timestamps import STAMP_NOTE
 from chief.provider.base import ToolCall, ToolSpec
 from chief.tools import Tool, ToolContext, ToolDispatcher, ToolRegistry
 
@@ -20,7 +21,8 @@ if TYPE_CHECKING:  # the pool imports this module's AgentDef/FilteredTools
     from chief.agent.subagent_pool import SubagentPool
 
 # Prepended to every definition's prompt (PRD #308): runs are detached, and
-# messaging is for questions and blockers, never status chatter.
+# messaging is for questions and blockers, never status chatter. A subagent
+# never sees the main agent's prompt, so it is told about the stamp here.
 PREAMBLE = (
     "You are a subagent: you run detached from the session that spawned you "
     "(your parent), which carries on with its own work meanwhile. Use "
@@ -29,7 +31,7 @@ PREAMBLE = (
     "or acknowledgements. If you never message your parent, your final reply "
     "is your result. Once you have messaged your parent, you must call "
     "`finish(result)` when you are done; ending a reply without it leaves you "
-    "waiting for the parent's answer."
+    "waiting for the parent's answer. " + STAMP_NOTE
 )
 
 

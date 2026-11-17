@@ -2,7 +2,16 @@
 
 from pathlib import Path
 
-from chief.agent.prompt import DEFAULT_SYSTEM_PROMPT, read_soul, system_prompt
+import pytest
+
+from chief.agent.prompt import (
+    DEFAULT_SYSTEM_PROMPT,
+    boot_prompt,
+    read_soul,
+    system_prompt,
+)
+from chief.agent.timestamps import STAMP_NOTE
+from chief.persistence.store import MessageStore
 
 
 def test_default_when_no_file(tmp_path: Path) -> None:
@@ -63,8 +72,35 @@ def test_default_prompt_teaches_verify_before_explain() -> None:
     assert "verify the mechanism" in DEFAULT_SYSTEM_PROMPT
 
 
-def test_default_prompt_explains_the_host_added_time_stamp() -> None:
+def test_the_stamp_note_says_the_stamp_is_host_added_and_not_to_be_written() -> None:
     # Messages arrive stamped by the host; the model must not echo the stamp
     # into its own replies (a transcript full of stamps invites imitating one).
-    assert "host-added local-time stamp" in DEFAULT_SYSTEM_PROMPT
-    assert "never write one yourself" in DEFAULT_SYSTEM_PROMPT
+    assert "host-added local-time stamp" in STAMP_NOTE
+    assert "never write one yourself" in STAMP_NOTE
+
+
+async def test_a_box_on_the_default_prompt_is_told_about_the_stamp_once(
+    store: MessageStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)  # no data/system.md here: the built-in default
+
+    prompt = await boot_prompt(store, "")
+
+    assert prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+    assert prompt.count(STAMP_NOTE) == 1  # not also inside the default itself
+
+
+async def test_a_box_with_its_own_system_md_is_still_told_about_the_stamp(
+    store: MessageStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The note is the host's, not the persona's: replacing the base prompt must
+    # not leave the model reading stamps nobody explained.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "system.md").write_text("You are a custom chief.")
+
+    prompt = await boot_prompt(store, "\n\nSkills: none")
+
+    assert prompt.startswith("You are a custom chief.")
+    assert prompt.count(STAMP_NOTE) == 1
+    assert prompt.index(STAMP_NOTE) < prompt.index("Skills: none")

@@ -178,10 +178,11 @@ boundary for the restart to fire at).
 
 A spawn is async by default: the run works detached and its result arrives at the
 parent as a message (`wait=true` keeps the blocking form). The core `PREAMBLE` is
-prepended to every definition's prompt — don't repeat it. A subagent can always
-`send_msg` its parent regardless of `tools`, and its calls are gated on the
-parent's thread like the parent's own. Output does not stream. Subagents never
-fire hooks. See SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
+prepended to every definition's prompt — don't repeat it (it also explains the
+time stamp its messages carry). A subagent can always `send_msg` its parent
+regardless of `tools`, and its calls are gated on the parent's thread like the
+parent's own. Output does not stream. Subagents never fire hooks. See
+SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
 
 ## Add a skill
 
