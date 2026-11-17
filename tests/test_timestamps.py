@@ -3,7 +3,8 @@
 A user or tool message is stored with its raw ``content`` and a ``stamp`` beside
 it; the stamp is folded in front of the content only when a model is sent the
 transcript (``provider.base.for_model``). The stamp names when the message
-*arrived*, formatted once and kept, so the model-facing prefix never changes.
+*arrived* — and, for one that waited past ``BACKLOG_SECONDS``, when it was
+read — formatted once and kept, so the model-facing prefix never changes.
 
 Every test here runs with real stamps: the suite's autouse
 ``_plain_message_content`` builds messages unstamped for every other module
@@ -18,6 +19,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,7 +29,13 @@ from chief.adapters.base import Message
 from chief.agent.loop import TurnResult, run_turn
 from chief.agent.subagent_drive import RunDeps
 from chief.agent.subagent_pool import SubagentPool
-from chief.agent.timestamps import STAMP_NOTE, stamp, tool_message, user_message
+from chief.agent.timestamps import (
+    BACKLOG_SECONDS,
+    STAMP_NOTE,
+    stamp,
+    tool_message,
+    user_message,
+)
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
 from chief.hooks import HookRegistry, TurnContext
@@ -56,6 +64,9 @@ LABEL = r"\[(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d) \S+, UTC([+-]\d\d:\d\d)\]"
 # moment it is *processed* would put it on the wrong day.
 ARRIVED = datetime(2026, 11, 12, 23, 58, tzinfo=UTC).timestamp()
 ARRIVED_STAMP = "[2026-11-12 23:58:00 UTC, UTC+00:00]"
+# The clock a test starts with: just after ARRIVED, so a message that arrived
+# then is fresh and its stamp is the single arrival time.
+NOW = ARRIVED + 2
 
 
 @pytest.fixture
@@ -71,6 +82,22 @@ def zone() -> Iterator[Callable[[str], None]]:
 
         yield use
     time.tzset()
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
+    """Pin the time ``chief.agent.timestamps`` reads as now, at ``NOW`` until a
+    test moves it. A message built long after it arrived also names the moment
+    it is built, so a test with a fixed arrival time needs a fixed clock to know
+    what its stamp says."""
+
+    def set_now(epoch: float) -> None:
+        monkeypatch.setattr(
+            "chief.agent.timestamps.time", SimpleNamespace(time=lambda: epoch)
+        )
+
+    set_now(NOW)
+    return set_now
 
 
 def moment_of(label: str) -> datetime:
@@ -140,9 +167,46 @@ def test_a_stamp_in_any_zone_names_the_same_instant(
     assert moment_of(in_india) == moment_of(in_new_york) == instant
 
 
+def test_stamp_adds_when_it_was_read_in_the_same_zone(
+    zone: Callable[[str], None],
+) -> None:
+    zone("America/Los_Angeles")
+    sent = datetime(2026, 11, 17, 17, 0, 0, tzinfo=UTC).timestamp()
+    read = datetime(2026, 11, 17, 18, 30, 12, tzinfo=UTC).timestamp()
+
+    assert stamp(sent, read) == "[2026-11-17 09:00:00 PST, UTC-08:00; read 10:30:12]"
+
+
+def test_stamp_names_the_day_of_a_read_time_that_falls_on_another_day(
+    zone: Callable[[str], None],
+) -> None:
+    # A bare "read 00:10:00" would pass for the 12th, nearly a day before the
+    # message was sent, when it is twenty minutes after.
+    zone("UTC")
+
+    label = stamp(ARRIVED - 8 * 60, ARRIVED + 12 * 60)
+
+    assert label == "[2026-11-12 23:50:00 UTC, UTC+00:00; read 2026-11-13 00:10:00]"
+
+
+def test_stamp_names_the_offset_of_a_read_time_after_the_clocks_change(
+    zone: Callable[[str], None],
+) -> None:
+    # 40 minutes pass, yet the wall clock reads 20 minutes *earlier*: only the
+    # offset keeps the read time from being taken for the same one as the send.
+    zone("America/New_York")
+    sent = datetime(2026, 11, 1, 5, 30, tzinfo=UTC).timestamp()  # 01:30 EDT
+    read = datetime(2026, 11, 1, 6, 10, tzinfo=UTC).timestamp()  # 01:10 EST
+
+    assert stamp(sent, read) == (
+        "[2026-11-01 01:30:00 EDT, UTC-04:00; read 01:10:00 EST, UTC-05:00]"
+    )
+
+
 # ---- the message builders ---------------------------------------------------
 
 
+@pytest.mark.usefixtures("clock")
 def test_a_user_message_keeps_its_text_raw_and_carries_the_arrival_stamp(
     zone: Callable[[str], None],
 ) -> None:
@@ -160,6 +224,76 @@ def test_a_tool_message_keeps_its_result_raw_and_is_stamped_when_built() -> None
     assert message["tool_call_id"] == "c1"
     assert message["content"] == "echo: hi"
     assert is_recent(message[STAMP_KEY])
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_tool_result_never_carries_a_read_time(zone: Callable[[str], None]) -> None:
+    # It is built the moment it lands, so its one time already is now: there is
+    # no wait for a read time to describe.
+    zone("UTC")
+
+    assert tool_message("c1", "echo: hi")[STAMP_KEY] == (
+        "[2026-11-12 23:58:02 UTC, UTC+00:00]"
+    )
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_message_that_waited_says_when_it_was_sent_and_when_it_was_read(
+    zone: Callable[[str], None],
+) -> None:
+    zone("UTC")
+
+    message = user_message("remind me in an hour", NOW - 90 * 60)
+
+    assert message == {
+        "role": "user",
+        "content": "remind me in an hour",
+        "stamp": "[2026-11-12 22:28:02 UTC, UTC+00:00; read 23:58:02]",
+    }
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_message_that_just_arrived_carries_a_single_stamp(
+    zone: Callable[[str], None],
+) -> None:
+    zone("UTC")
+
+    assert user_message("hi")[STAMP_KEY] == "[2026-11-12 23:58:02 UTC, UTC+00:00]"
+    assert user_message("hi", NOW - 5)[STAMP_KEY] == (
+        "[2026-11-12 23:57:57 UTC, UTC+00:00]"
+    )
+
+
+@pytest.mark.usefixtures("clock")
+@pytest.mark.parametrize(
+    ("waited", "says_read"),
+    [
+        (0.0, False),
+        (BACKLOG_SECONDS - 0.1, False),
+        (BACKLOG_SECONDS, False),  # at the threshold is not past it
+        (BACKLOG_SECONDS + 0.1, True),
+        (90 * 60.0, True),
+        (3 * 24 * 3600.0, True),
+    ],
+)
+def test_only_a_wait_past_the_threshold_adds_the_read_time(
+    zone: Callable[[str], None], waited: float, says_read: bool
+) -> None:
+    zone("UTC")
+
+    label = user_message("x", NOW - waited)[STAMP_KEY]
+
+    assert ("; read " in label) is says_read
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_message_from_the_future_carries_a_single_stamp(
+    zone: Callable[[str], None],
+) -> None:
+    # A channel's clock running ahead of this one is not a wait.
+    zone("UTC")
+
+    assert "read" not in user_message("hi", NOW + 3600)[STAMP_KEY]
 
 
 def test_a_message_remembers_when_it_arrived_but_that_is_not_its_identity() -> None:
@@ -189,6 +323,20 @@ def test_for_model_passes_unstamped_messages_through() -> None:
     assert for_model(legacy) == legacy
 
 
+# ---- the note that explains the stamp to the model --------------------------
+
+
+def test_the_stamp_note_says_what_each_time_means_and_which_one_is_now() -> None:
+    # Without this the model reads a backlog message's send time as the time it
+    # is, and schedules "in an hour" from the past.
+    assert "; read" in STAMP_NOTE  # the shape a waiting message's stamp takes
+    assert "when the owner sent it" in STAMP_NOTE
+    assert "when chief received it" in STAMP_NOTE
+    assert "same zone" in STAMP_NOTE
+    assert "closest thing to now" in STAMP_NOTE
+    assert "latest stamp" in STAMP_NOTE  # the fallback when there is no read time
+
+
 # ---- the loop ---------------------------------------------------------------
 
 
@@ -213,6 +361,7 @@ async def test_the_loop_stores_a_tool_result_raw_and_sends_it_stamped() -> None:
 # ---- the session: user messages ---------------------------------------------
 
 
+@pytest.mark.usefixtures("clock")
 async def test_a_user_turn_is_stored_raw_and_sent_to_the_model_stamped(
     store: MessageStore, zone: Callable[[str], None]
 ) -> None:
@@ -263,10 +412,39 @@ async def test_a_resumed_thread_sends_the_stored_stamps_unchanged(
     assert second.calls[0][1] == first.calls[0][1]
 
 
-async def test_a_queued_message_is_stamped_when_it_arrived_not_when_its_turn_ran(
-    store: MessageStore, zone: Callable[[str], None]
+async def test_a_backlog_message_reaches_the_model_unchanged_on_every_later_call(
+    store: MessageStore, zone: Callable[[str], None], clock: Callable[[float], None]
 ) -> None:
-    zone("UTC")
+    zone("America/New_York")
+    first = FakeProvider([text_turn("one"), text_turn("two")])
+    session = await make_manager(first, store).get_or_create("cli:t", "cli")
+    await session.run_turn("remind me in an hour", noop_delta, at=NOW - 90 * 60)
+
+    zone("Asia/Kolkata")  # the zone and the clock move on; neither time may
+    clock(NOW + 3600)
+    await session.run_turn("and again", noop_delta)
+    after_restart = FakeProvider([text_turn("three")])
+    resumed = await make_manager(after_restart, store).get_or_create("cli:t", "cli")
+    await resumed.run_turn("after the restart", noop_delta)
+
+    backlog = first.calls[0][1]
+    assert backlog == {
+        "role": "user",
+        "content": "[2026-11-12 17:28:02 EST, UTC-05:00; read 18:58:02] "
+                   "remind me in an hour",
+    }
+    assert json.dumps(first.calls[1][1]) == json.dumps(backlog)
+    assert json.dumps(after_restart.calls[0][1]) == json.dumps(backlog)
+    [stored, *_] = await store.load("cli:t")
+    assert stored["content"] == "remind me in an hour"  # the stamp stays beside it
+
+
+async def queued_pair_stamps(
+    store: MessageStore, clock: Callable[[float], None], turn_ends: float
+) -> list[str]:
+    """Two messages on one thread: the second arrives at ``ARRIVED`` while the
+    first's turn is at the model, and runs when that turn ends, at ``turn_ends``.
+    Returns both user messages' stamps."""
     provider = FakeProvider([text_turn("one"), text_turn("two")])
     provider.gate = asyncio.Event()
     dispatcher = Dispatcher(manager_for(provider, store))
@@ -274,21 +452,46 @@ async def test_a_queued_message_is_stamped_when_it_arrived_not_when_its_turn_ran
     first = Message("cli", "owner", "cli:t", "start", at=ARRIVED - 240)
     queued = Message("cli", "owner", "cli:t", "and this", at=ARRIVED)
 
+    clock(ARRIVED - 239)  # the first message is built just after it arrives
     turn = asyncio.create_task(dispatcher.handle(first))
     await provider.entered.wait()  # the first turn holds the thread
     waiting = asyncio.create_task(dispatcher.handle(queued))
+    clock(turn_ends)
     provider.gate.set()
     await asyncio.gather(turn, waiting)
 
-    stamps = [m["stamp"] for m in await store.load("cli:t") if m["role"] == "user"]
+    return [m["stamp"] for m in await store.load("cli:t") if m["role"] == "user"]
+
+
+async def test_a_queued_message_is_stamped_when_it_arrived_not_when_its_turn_ran(
+    store: MessageStore, zone: Callable[[str], None], clock: Callable[[float], None]
+) -> None:
+    zone("UTC")
+
+    stamps = await queued_pair_stamps(store, clock, turn_ends=NOW)
+
     assert stamps == ["[2026-11-12 23:54:00 UTC, UTC+00:00]", ARRIVED_STAMP]
 
 
-async def test_an_imessage_polled_after_downtime_is_stamped_when_it_was_sent(
+async def test_a_message_queued_behind_a_long_turn_also_says_when_its_turn_began(
+    store: MessageStore, zone: Callable[[str], None], clock: Callable[[float], None]
+) -> None:
+    zone("UTC")
+
+    stamps = await queued_pair_stamps(store, clock, turn_ends=ARRIVED + 90)
+
+    assert stamps == [
+        "[2026-11-12 23:54:00 UTC, UTC+00:00]",
+        "[2026-11-12 23:58:00 UTC, UTC+00:00; read 23:59:30]",
+    ]
+
+
+@pytest.mark.usefixtures("clock")
+async def test_an_imessage_polled_after_downtime_says_when_it_was_sent_and_read(
     store: MessageStore, tmp_path: Path, zone: Callable[[str], None]
 ) -> None:
     zone("UTC")
-    sent = int(time.time()) - 90 * 60  # chief was down; this poll is the first
+    sent = NOW - 90 * 60  # chief was down; this poll is the first
     harness = Harness(tmp_path)
     harness.store.add_message(
         OWNER, "remind me in an hour", from_me=1, chat=OWNER, date=chat_db_date(sent)
@@ -303,10 +506,12 @@ async def test_an_imessage_polled_after_downtime_is_stamped_when_it_was_sent(
     await adapter.drain()
 
     [user, _reply] = await store.load(OWNER)
-    assert moment_of(user[STAMP_KEY]) == datetime.fromtimestamp(sent, UTC)
-    assert provider.calls[0][1]["content"] == f"{user[STAMP_KEY]} remind me in an hour"
+    label = "[2026-11-12 22:28:02 UTC, UTC+00:00; read 23:58:02]"
+    assert user[STAMP_KEY] == label
+    assert provider.calls[0][1]["content"] == f"{label} remind me in an hour"
 
 
+@pytest.mark.usefixtures("clock")
 async def test_a_message_refused_for_budget_is_stamped_like_any_other(
     engine: AsyncEngine, store: MessageStore, zone: Callable[[str], None]
 ) -> None:
@@ -350,6 +555,7 @@ async def test_a_tool_result_filled_in_after_a_crash_is_stamped_like_any_other(
 # ---- mid-turn injections ----------------------------------------------------
 
 
+@pytest.mark.usefixtures("clock")
 async def test_an_injected_message_is_stamped_when_it_arrived_not_at_the_tool_boundary(
     store: MessageStore, zone: Callable[[str], None]
 ) -> None:
@@ -374,6 +580,30 @@ async def test_an_injected_message_is_stamped_when_it_arrived_not_at_the_tool_bo
     }
 
 
+async def test_a_message_injected_before_a_long_tool_call_ends_says_when_it_was_read(
+    store: MessageStore, zone: Callable[[str], None], clock: Callable[[float], None]
+) -> None:
+    zone("UTC")
+    gate = Gate()
+    provider = FakeProvider([tool_turn("wait", {}), text_turn("switching")])
+    session = await manager_for(provider, store, gate.registry()).get_or_create(
+        "cli:t", "cli"
+    )
+    turn = asyncio.create_task(session.run_turn("start", noop_delta))
+    await gate.entered.wait()
+    assert session.inject(replace(item("change course", []), at=ARRIVED)) is True
+    clock(ARRIVED + 90)  # the tool call runs on; the loop takes it at the boundary
+    gate.release.set()
+    await turn
+
+    assert provider.calls[1][-1] == {
+        "role": "user",
+        "content": "[2026-11-12 23:58:00 UTC, UTC+00:00; read 23:59:30] "
+                   "change course",
+    }
+
+
+@pytest.mark.usefixtures("clock")
 async def test_try_inject_carries_the_messages_arrival_into_the_inbox(
     store: MessageStore, zone: Callable[[str], None]
 ) -> None:
@@ -398,6 +628,7 @@ async def test_try_inject_carries_the_messages_arrival_into_the_inbox(
 # ---- hooks ------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("clock")
 async def test_hooks_see_the_model_view_while_user_text_stays_as_written(
     store: MessageStore, zone: Callable[[str], None]
 ) -> None:
@@ -430,8 +661,9 @@ async def test_hooks_see_the_model_view_while_user_text_stays_as_written(
 # ---- replays ----------------------------------------------------------------
 
 
-async def test_a_replayed_message_keeps_the_time_it_arrived(
-    store: MessageStore, tmp_path: Path, zone: Callable[[str], None]
+async def test_a_replayed_message_keeps_the_time_it_arrived_and_says_when_it_was_read(
+    store: MessageStore, tmp_path: Path, zone: Callable[[str], None],
+    clock: Callable[[float], None],
 ) -> None:
     zone("UTC")
     # It arrived days before the process that holds it dies: an iMessage polled
@@ -440,6 +672,7 @@ async def test_a_replayed_message_keeps_the_time_it_arrived(
     first_boot, _ = make_dispatcher(FakeProvider([]), store, InflightLog(tmp_path))
     first_boot.track(held)
 
+    clock(ARRIVED + 3 * 24 * 3600)  # the replay runs three days after it arrived
     reboot = InflightLog(tmp_path)
     [resume] = resume_plan(reboot.take_interrupted())["cli:t"]
     provider = FakeProvider([text_turn("on it")])
@@ -448,7 +681,9 @@ async def test_a_replayed_message_keeps_the_time_it_arrived(
 
     assert resume.message.at == ARRIVED
     [replayed, _reply] = await store.load("cli:t")
-    assert replayed[STAMP_KEY] == ARRIVED_STAMP
+    assert replayed[STAMP_KEY] == (
+        "[2026-11-12 23:58:00 UTC, UTC+00:00; read 2026-11-15 23:58:00]"
+    )
 
 
 # ---- subagents --------------------------------------------------------------

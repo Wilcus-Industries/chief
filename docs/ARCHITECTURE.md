@@ -55,8 +55,12 @@ through the adapter named on the `Message` that started it.
   carries a `stamp` key beside its raw `content`:
   `[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` in the host's zone, formatted once
   when the message *arrived*; `src/chief/agent/timestamps.py` builds every such
-  message. The web history and anything else that reads `content` therefore
-  sees what was said. **Anything that sends stored messages to a model must
+  message. A user message built more than `BACKLOG_SECONDS` (60s) after it
+  arrived — an iMessage backlog polled after downtime, a turn queued behind a
+  long one — adds `; read HH:MM:SS` inside the brackets (the date or UTC offset
+  only when they differ from the first time), so the model has a "now" and does
+  not schedule from a send time hours past. The web history and anything else
+  that reads `content` therefore sees what was said. **Anything that sends stored messages to a model must
   pass them through `provider.base.for_model()`**: it strips `reasoning` and is
   the one place a stamp is prefixed onto `content`, which keeps each message
   byte-identical across calls (prompt caching).
@@ -70,7 +74,9 @@ through the adapter named on the `Message` that started it.
 - **System prompt** — the boot-static base is `src/chief/agent/prompt.py`
   (`system_prompt` + `ONBOARDING_SUFFIX`); `boot_prompt` there appends the
   host's own notes after it — the stamp explanation (`STAMP_NOTE`, defined
-  beside `stamp()` in `timestamps.py`) and the skill one-liners — so a
+  beside `stamp()` in `timestamps.py`; it says what the sent and read times
+  mean and that the read time, or the latest stamp, approximates now) and the
+  skill one-liners — so a
   `data/system.md` override cannot leave them out. A subagent's `PREAMBLE`
   carries `STAMP_NOTE` too. The *per-turn* message (soul on top, then base +
   origin note, then package hook blocks) is assembled fresh each turn in

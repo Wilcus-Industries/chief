@@ -120,5 +120,6 @@ def _plain_message_content(
     if request.node.get_closest_marker("timestamps"):
         return
     monkeypatch.setattr(
-        "chief.agent.timestamps.stamped", lambda message, at=None: message
+        "chief.agent.timestamps.stamped",
+        lambda message, at=None, read=None: message,
     )

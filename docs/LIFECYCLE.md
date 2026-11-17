@@ -197,8 +197,10 @@ one busy thread can't starve every concurrency slot.
    `transcript = [system, *messages, user]`, recording a baseline index. The
    user message is built up front (`timestamps.user_message`) with the
    `Message.at` the dispatcher passes — when the text *arrived*, not when the
-   turn got the lock — as its `stamp`; `refuse_over_budget` stores that same
-   message.
+   turn got the lock — as its `stamp`; one that waited more than
+   `BACKLOG_SECONDS` (60s) for its turn also says when it was read (now), so the
+   model's clock is not the message's send time; `refuse_over_budget` stores that
+   same message.
 4. Calls `agent.loop.run_turn`, which **mutates `transcript` in place** and, via
    the `on_commit` hook, persists each assistant turn and tool result to the
    store the instant it's produced (`Session._live_append`) — not batched at
@@ -248,9 +250,10 @@ source attribute — contributed text may be attacker-influenced.
    iMessage text taken at its poll stage while the thread's turn runs) and peer
    messages (`PeerRouter.deliver`) share the session's inbox — as user messages,
    each stamped with its own arrival time (`Injected.at`), not the tool
-   boundary's. The Anthropic wire folds such a user message into the tool-result
-   turn. Then `stop()` returning True ends the turn with the last assistant text
-   (a subagent's `finish`).
+   boundary's (which it adds as its read time when the tool call kept it waiting
+   past `BACKLOG_SECONDS`). The Anthropic wire folds such a user message into
+   the tool-result turn. Then `stop()` returning True ends the turn with the
+   last assistant text (a subagent's `finish`).
 6. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry
@@ -310,8 +313,9 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    Records stay on disk until their resume ends them; one that dies again is
    given up on once it had started, and any chief has held for over an hour is
    dropped. A record keeps the message's arrival time (`at`: what the replayed
-   message's stamp names, and an iMessage backlog polled after downtime arrived
-   long before chief took it) apart from when chief recorded it (`recorded`: all
+   message's stamp names — with the read time added, as for any message that
+   waited — and an iMessage backlog polled after downtime arrived long before
+   chief took it) apart from when chief recorded it (`recorded`: all
    that age counts from, so a restart right after such a backlog still replays
    it). Not covered: a message lost before chief records it (an iMessage row between
    cursor save and enqueue, a web request before `handle` runs), peer

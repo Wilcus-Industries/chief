@@ -266,8 +266,9 @@ example.
 
 `TurnContext` carries `user_text`, `messages` (the transcript *before* the
 incoming turn, as a model is sent it: user and tool content lead with their
-`[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` arrival stamp), `sender`, `thread_key`,
-and `channel`. `user_text` is the incoming text as written, with no stamp.
+`[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` arrival stamp, plus `; read HH:MM:SS`
+for a user message that waited more than a minute), `sender`, `thread_key`, and
+`channel`. `user_text` is the incoming text as written, with no stamp.
 
 Rules that matter:
 

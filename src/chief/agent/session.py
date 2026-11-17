@@ -113,7 +113,8 @@ class Session:
         ``on_begin`` fires once the turn holds the thread — the moment its user
         text becomes the conversation's next message, not when it was queued.
         ``at`` is when that text arrived (epoch seconds; now by default): the
-        message is stamped with it, however long the turn waited for the thread.
+        message is stamped with it, however long the turn waited for the thread,
+        and with when it was read too if that wait passed ``BACKLOG_SECONDS``.
         ``on_interim`` delivers an answer an injected message overtook (see
         :func:`chief.agent.loop.run_turn`); ``on_reasoning`` streams the
         model's thinking, display only.
