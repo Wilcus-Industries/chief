@@ -6,6 +6,7 @@ concerns living here:
 * the SQL that selects candidate rows past the cursor, and the read-only
   sqlite executors that run it (:func:`fetch_rows`, :func:`head_rowid`);
 * where chief is in each store — :mod:`.imessage_cursor`;
+* reading a row's ``date`` as when it was sent (:func:`sent_at`);
 * extracting a row's text — which on modern macOS is NOT always in
   ``message.text``. The owner's own sends (``is_from_me = 1``, i.e. every
   self-DM to chief) store their body only in ``message.attributedBody``, an
@@ -14,6 +15,8 @@ concerns living here:
 """
 
 import sqlite3
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Candidate rows past the cursor. A row qualifies when it is a real inbound
@@ -57,6 +60,11 @@ POLL_BATCH_LIMIT = 200
 # answers the one message twice. Dedup by (sender, text) over this window.
 DEDUP_WINDOW_NS = 5_000_000_000  # 5s
 
+# ``message.date`` counts from 2001-01-01 UTC, not 1970. Nothing chief polls
+# predates iMessage, so an earlier date is unset or corrupt.
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC).timestamp()
+IMESSAGE_LAUNCH = datetime(2011, 10, 12, tzinfo=UTC).timestamp()
+
 _NSSTRING = b"NSString"
 
 
@@ -83,6 +91,22 @@ class RecentDedup:
         prev = self._seen.get(key)
         self._seen[key] = date_ns
         return prev is not None and date_ns - prev <= self._window
+
+
+def sent_at(date: int) -> float:
+    """When a polled row was sent, as epoch seconds, from its ``message.date``.
+
+    The unit is whichever makes the date a real moment: nanoseconds on a store
+    written since macOS 10.13, seconds in the older rows an upgraded store kept
+    (the two ranges never overlap). A date that is neither — unset (0),
+    negative, from before iMessage, or in the future — gives the time now:
+    chief cannot say when it was sent, only that it has it."""
+    now = time.time()
+    for per_second in (1e9, 1.0):
+        sent = APPLE_EPOCH + date / per_second
+        if IMESSAGE_LAUNCH <= sent <= now:
+            return sent
+    return now
 
 
 def decode_attributed_body(data: bytes) -> str:
@@ -120,7 +144,8 @@ def text_of(text: object, body: object) -> str:
     return ""
 
 
-#: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date).
+#: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date);
+#: ``date`` is the raw ``message.date``, 0 when the store has none.
 PolledRow = tuple[int, str, str, int, str | None, int, int]
 
 
@@ -142,7 +167,7 @@ def fetch_rows(
         return [
             (
                 int(r[0]), str(r[1]), text_of(r[2], r[6]), int(r[3]),
-                None if r[4] is None else str(r[4]), int(r[5]), int(r[7]),
+                None if r[4] is None else str(r[4]), int(r[5]), int(r[7] or 0),
             )
             for r in cur.fetchall()
         ]

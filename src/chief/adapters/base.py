@@ -13,10 +13,11 @@ from chief.agent.restart_gate import TurnTicket
 class Message:
     """One inbound message from a channel.
 
-    ``at`` is when chief received it (epoch seconds, set where the message is
-    built): the time its transcript stamp names, however long its turn then
-    waits behind others. A replay carries the original; it is not part of a
-    message's identity."""
+    ``at`` is when the message arrived (epoch seconds): the time its transcript
+    stamp names, however long its turn then waits behind others. It defaults to
+    when the message is built; a channel that knows better passes it (iMessage,
+    for a row sent while chief was down). A replay carries the original; it is
+    not part of a message's identity."""
 
     channel: str
     sender: str

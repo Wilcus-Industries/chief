@@ -38,11 +38,12 @@ from chief.selfedit.resume import resume_plan
 from chief.subagents import AgentDef
 from chief.tools import ToolRegistry
 
-from .fakes import FakeProvider, text_turn, tool_turn
+from .fakes import CapturingAdapter, FakeProvider, text_turn, tool_turn
 from .test_budget import make_budget
 from .test_budget import make_manager as make_budget_manager
 from .test_dispatch import RecordingAdapter
 from .test_hooks import make_manager as make_hooked_manager
+from .test_imessage import OWNER, Harness, chat_db_date
 from .test_inject import Gate, item, manager_for
 from .test_loop import echo_registry
 from .test_session import make_manager, noop_delta
@@ -280,6 +281,29 @@ async def test_a_queued_message_is_stamped_when_it_arrived_not_when_its_turn_ran
 
     stamps = [m["stamp"] for m in await store.load("cli:t") if m["role"] == "user"]
     assert stamps == ["[2026-11-12 23:54:00 UTC, UTC+00:00]", ARRIVED_STAMP]
+
+
+async def test_an_imessage_polled_after_downtime_is_stamped_when_it_was_sent(
+    store: MessageStore, tmp_path: Path, zone: Callable[[str], None]
+) -> None:
+    zone("UTC")
+    sent = int(time.time()) - 90 * 60  # chief was down; this poll is the first
+    harness = Harness(tmp_path)
+    harness.store.add_message(
+        OWNER, "remind me in an hour", from_me=1, chat=OWNER, date=chat_db_date(sent)
+    )
+    provider = FakeProvider([text_turn("will do")])
+    dispatcher = Dispatcher(manager_for(provider, store))
+    dispatcher.register(CapturingAdapter("imessage"))
+    harness.on_deliver = lambda message: dispatcher.handle(message, fire_restart=False)
+    adapter = harness.adapter()
+
+    await adapter.poll_once()
+    await adapter.drain()
+
+    [user, _reply] = await store.load(OWNER)
+    assert moment_of(user[STAMP_KEY]) == datetime.fromtimestamp(sent, UTC)
+    assert provider.calls[0][1]["content"] == f"{user[STAMP_KEY]} remind me in an hour"
 
 
 async def test_a_message_refused_for_budget_is_stamped_like_any_other(

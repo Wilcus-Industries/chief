@@ -2,7 +2,9 @@
 
 import asyncio
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,9 @@ from chief.selfedit.recovery import RestartBoundary, RestartController
 
 OWNER = "+15550001111"
 CHIEF = "chief@example.com"  # chief's own Apple ID handle (dedicated mode)
+# chat.db counts from here, not from 1970 (written out so a wrong constant in
+# the adapter cannot also be the test's expectation).
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC).timestamp()
 
 # A real streamtyped attributedBody blob from a macOS chat.db (is_from_me=1,
 # text column NULL). Decodes to "I’ll take the edi too" (curly apostrophe).
@@ -60,15 +65,16 @@ class FakeStore:
         group: bool = False,
         chat: str | None = None,
         body: bytes | None = None,
-        date: int = 0,
+        date: int | None = 0,
     ) -> None:
         """Insert one message, optionally in a direct chat (``chat`` =
         the chat_identifier) or a group. ``chat`` models the self-chat
         when it equals an owner handle; with ``group=True`` it names the
         room, so repeated calls land in one group thread. ``body`` sets
         attributedBody — how modern macOS stores the owner's own sends, with
-        ``text`` left empty. ``date`` is the row's ns timestamp, used for
-        twin dedup."""
+        ``text`` left empty. ``date`` is the row's timestamp (ns since
+        2001-01-01), read for twin dedup and for when the message was sent;
+        ``None`` leaves the column NULL."""
         with sqlite3.connect(self.path) as conn:
             row = conn.execute(
                 "SELECT ROWID FROM handle WHERE id = ?", (sender,)
@@ -309,6 +315,80 @@ async def test_owner_repeats_text_after_window_delivers_both(
     await adapter.poll_once()
     await adapter.drain()
     assert [m.text for m in harness.delivered] == ["ok", "ok"]
+
+
+def chat_db_date(unix_seconds: float) -> int:
+    """What ``message.date`` holds for a message sent at that moment."""
+    return round((unix_seconds - APPLE_EPOCH) * 1e9)
+
+
+async def poll_one_row(tmp_path: Path, date: int | None) -> tuple[float, float, float]:
+    """Poll one owner self-DM carrying ``date``: the clock before and after the
+    poll, and the ``at`` of the message it delivered."""
+    harness = Harness(tmp_path)
+    harness.store.add_message(OWNER, "ping", from_me=1, chat=OWNER, date=date)
+    adapter = harness.adapter()
+    before = time.time()
+    await adapter.poll_once()
+    after = time.time()
+    await adapter.drain()
+    [message] = harness.delivered
+    return before, message.at, after
+
+
+async def test_a_row_polled_after_downtime_arrives_when_it_was_sent(
+    tmp_path: Path,
+) -> None:
+    """The saved cursor makes the first poll after downtime read a backlog. Each
+    row carries when it was sent, not when it was polled: that is the time its
+    transcript stamp names, so a poll-time stamp turns the owner's "remind me in
+    an hour" into a reminder hours late."""
+    sent = time.time() - 90 * 60
+    harness = Harness(tmp_path)
+    harness.store.add_message(
+        OWNER, "remind me in an hour", from_me=1, chat=OWNER, date=chat_db_date(sent)
+    )
+    harness.store.add_message(
+        "+15557776666", "group chatter", group=True, date=chat_db_date(sent - 60)
+    )
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    direct, group = harness.delivered
+    assert direct.at == pytest.approx(sent, abs=0.001)
+    assert group.at == pytest.approx(sent - 60, abs=0.001)
+
+
+async def test_a_legacy_seconds_date_is_read_as_seconds(tmp_path: Path) -> None:
+    """A store upgraded from before macOS 10.13 keeps its old rows' dates in
+    seconds; read as nanoseconds they would be a moment after 2001."""
+    sent = time.time() - 90 * 60
+    _, at, _ = await poll_one_row(tmp_path, round(sent - APPLE_EPOCH))
+    assert at == pytest.approx(sent, abs=1)
+
+
+UNUSABLE_DATES: dict[str, Callable[[], int | None]] = {
+    "missing": lambda: None,
+    "unset": lambda: 0,
+    "negative": lambda: -5_000_000_000,
+    "tiny": lambda: 100,
+    "from before iMessage existed": lambda: chat_db_date(
+        datetime(2005, 6, 1, tzinfo=UTC).timestamp()
+    ),
+    "a minute ahead of this clock": lambda: chat_db_date(time.time() + 60),
+    "a year in the future": lambda: chat_db_date(time.time() + 365 * 86400),
+    "past any real date": lambda: 2**62,
+}
+
+
+@pytest.mark.parametrize(
+    "make_date", UNUSABLE_DATES.values(), ids=UNUSABLE_DATES.keys()
+)
+async def test_an_unusable_date_falls_back_to_the_time_it_was_polled(
+    tmp_path: Path, make_date: Callable[[], int | None]
+) -> None:
+    before, at, after = await poll_one_row(tmp_path, make_date())
+    assert before <= at <= after
 
 
 async def test_self_chat_scope_does_not_leak_other_conversations(

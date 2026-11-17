@@ -53,7 +53,10 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    answering it twice. Graceful restarts drain instead (§6).
 5. `_map()` → `Message` or `None`. Skips, in order: empty text; text starting
    with `BOT_PREFIX` (chief's own echo); `from_me and not in_self` (the owner's
-   outbound copy to someone else).
+   outbound copy to someone else). The `Message`'s `at` is the row's `date`, when
+   it was *sent*, so a backlog polled after downtime keeps its real times (the
+   stamp's source, `sent_at` in `imessage_store.py`); a missing or implausible
+   date falls back to the poll time.
 6. `RecentDedup.is_duplicate()` on `(thread_key, sender, text)` within
    `DEDUP_WINDOW_NS` (5s, in-memory).
 7. `resolve_approval()` is called **at poll stage, before enqueue** — see §5 for
