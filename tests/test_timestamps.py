@@ -24,12 +24,13 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.base import Message
-from chief.agent.loop import run_turn
+from chief.agent.loop import TurnResult, run_turn
 from chief.agent.subagent_drive import RunDeps
 from chief.agent.subagent_pool import SubagentPool
 from chief.agent.timestamps import stamp, tool_message, user_message
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
+from chief.hooks import HookRegistry, TurnContext
 from chief.persistence.store import MessageStore
 from chief.provider.base import STAMP_KEY, for_model
 from chief.selfedit.inflight import INFLIGHT_FILE, InflightLog
@@ -41,6 +42,7 @@ from .fakes import FakeProvider, text_turn, tool_turn
 from .test_budget import make_budget
 from .test_budget import make_manager as make_budget_manager
 from .test_dispatch import RecordingAdapter
+from .test_hooks import make_manager as make_hooked_manager
 from .test_inject import Gate, item, manager_for
 from .test_loop import echo_registry
 from .test_session import make_manager, noop_delta
@@ -366,6 +368,38 @@ async def test_try_inject_carries_the_messages_arrival_into_the_inbox(
     await turn
 
     assert provider.calls[1][-1]["content"] == f"{ARRIVED_STAMP} also this"
+
+
+# ---- hooks ------------------------------------------------------------------
+
+
+async def test_hooks_see_the_model_view_while_user_text_stays_as_written(
+    store: MessageStore, zone: Callable[[str], None]
+) -> None:
+    zone("UTC")
+    contexts: list[TurnContext] = []
+    finished: list[list[dict[str, Any]]] = []
+
+    async def before(turn: TurnContext) -> None:
+        contexts.append(turn)
+
+    async def after(_result: TurnResult, messages: list[dict[str, Any]]) -> None:
+        finished.append(messages)
+
+    hooks = HookRegistry()
+    hooks.register_pre_turn("pkg", before)
+    hooks.register_post_turn("pkg", after)
+    provider = FakeProvider([text_turn("one"), text_turn("two")])
+    session = await make_hooked_manager(provider, store, hooks).get_or_create(
+        "cli:t", "cli"
+    )
+    await session.run_turn("first", noop_delta, at=ARRIVED)
+    await session.run_turn("second", noop_delta)
+
+    first_as_sent = {"role": "user", "content": f"{ARRIVED_STAMP} first"}
+    assert contexts[1].user_text == "second"  # the incoming text, as written
+    assert contexts[1].messages[0] == first_as_sent  # the history, as a model sees it
+    assert finished[0][0] == first_as_sent
 
 
 # ---- replays ----------------------------------------------------------------
