@@ -418,6 +418,20 @@ async def test_a_login_while_still_connecting_is_asked_to_wait(rig: Rig) -> None
     assert "still connecting" in await rig.broker.start_login(SERVER, SURFACE)
 
 
+async def test_stopping_with_a_login_link_outstanding_ends_cleanly(rig: Rig) -> None:
+    await connect_parked(rig)
+    assert await rig.broker.start_login(SERVER, SURFACE) == LINK_SENT
+
+    await asyncio.wait_for(rig.manager.stop(), 5)
+
+    leaked = [
+        task
+        for task in asyncio.all_tasks()
+        if "supervise" in getattr(task.get_coro(), "__qualname__", "")
+    ]
+    assert leaked == []
+
+
 async def test_two_servers_are_parked_and_logged_in_independently(rig: Rig) -> None:
     async with serve_fake() as second:
         other = ServerConfig(name="gh", url=second.mcp_url, auth="oauth")

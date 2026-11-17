@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from mcp.client.auth.oauth2 import OAuthClientProvider
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-from pydantic import AnyUrl
 
 from chief.mcpclient.token_store import FileTokenStorage
 
@@ -30,9 +29,12 @@ def tokens(**fields: object) -> OAuthToken:
 
 
 def client_info() -> OAuthClientInformationFull:
-    return OAuthClientInformationFull(
-        client_id="client-1", redirect_uris=[AnyUrl(REDIRECT)],
-        token_endpoint_auth_method="none",
+    return OAuthClientInformationFull.model_validate(
+        {
+            "client_id": "client-1",
+            "redirect_uris": [REDIRECT],
+            "token_endpoint_auth_method": "none",
+        }
     )
 
 
@@ -136,9 +138,8 @@ async def test_a_corrupt_file_reads_as_no_login_instead_of_crashing(
 
 
 def provider_for(store: FileTokenStorage) -> OAuthClientProvider:
-    provider = OAuthClientProvider(
-        URL, OAuthClientMetadata(redirect_uris=[AnyUrl(REDIRECT)]), store
-    )
+    metadata = OAuthClientMetadata.model_validate({"redirect_uris": [REDIRECT]})
+    provider = OAuthClientProvider(URL, metadata, store)
     store.attach(provider.context)
     return provider
 

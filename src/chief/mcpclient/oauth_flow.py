@@ -8,7 +8,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from mcp.client.auth import OAuthClientProvider
 from mcp.shared.auth import OAuthClientMetadata
-from pydantic import AnyUrl
 
 from chief.mcpclient.config import ServerConfig
 from chief.mcpclient.oauth_types import (
@@ -106,11 +105,13 @@ def new_provider(
     """The SDK's OAuth provider for ``config``: a public client (PKCE, no
     secret) that registers itself, with ``flow`` as its redirect/callback."""
     assert config.url is not None
-    metadata = OAuthClientMetadata(
-        client_name="chief",
-        redirect_uris=[AnyUrl(redirect_uri)],
-        grant_types=["authorization_code", "refresh_token"],
-        token_endpoint_auth_method="none",
+    metadata = OAuthClientMetadata.model_validate(
+        {
+            "client_name": "chief",
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "token_endpoint_auth_method": "none",
+        }
     )
     provider = OAuthClientProvider(
         config.url, metadata, storage, flow.redirect, flow.callback, timeout=ttl
