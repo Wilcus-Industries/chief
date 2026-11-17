@@ -101,7 +101,8 @@ def withheld_body(payload: dict[str, Any], reason: str) -> str:
     a channel that puts free text there (a display name) cannot smuggle it."""
     who = {
         key: re.sub(r"[^\w@+.:;\-]", "", str(payload.get(key, "")))[:64]
-        for key in ("sender", "thread_key")
+        for key in ("sender", "thread_key", "sender_name")
+        if key != "sender_name" or payload.get(key)
     }
     return (
         f"event (text withheld by the injection screen, {reason}): "

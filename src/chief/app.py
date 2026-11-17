@@ -19,6 +19,7 @@ from chief.budget import Budget
 from chief.bus import EventBus
 from chief.commands import CommandSet
 from chief.config import Config
+from chief.contacts import Roster
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.cron.updates import ensure_update_schedule
@@ -119,7 +120,8 @@ async def _build_agent_core(
     pointer = card_pointer(dispatcher, primary_target(config))
     ask = approval_asker(dispatcher, gate.approvals, audience, pointer)
     monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen,
-                              config.imessage_owner_handles)
+                              config.imessage_owner_handles,
+                              Roster(config.db_path.parent / "contacts.yaml"))
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
         run_command=guarded_runner(shell_service, shell_guards),

@@ -17,6 +17,7 @@ from sqlalchemy import select
 from chief.adapters.base import Message
 from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierDef
+from chief.contacts import Roster
 from chief.monitors.gate import MonitorGate, withheld_body
 from chief.monitors.predicate import in_scope, is_unscoped_classifier
 from chief.persistence.db import SessionFactory
@@ -40,8 +41,10 @@ class MonitorService:
         classifier: Classifier,
         screen: Screen | None = None,
         owner_handles: tuple[str, ...] = (),
+        roster: Roster | None = None,
     ) -> None:
         self._factory = factory
+        self._roster = roster
         self.store = MessageStore(factory)  # the tool resolves wake targets here
         self._wake = wake
         self._classifier = classifier
@@ -165,14 +168,21 @@ class MonitorService:
         logger.info("monitor %s fired on %s", monitor.id, event.type)
         # sender="system" takes the owner path in dispatch.handle, so someone
         # else's words enter the turn as trusted-origin text — frame them (#285).
-        await self._send(monitor, f"event: {json.dumps(event.payload)}")
+        await self._send(monitor, f"event: {json.dumps(self._named(event.payload))}")
+
+    def _named(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add the roster's ``sender_name`` beside the raw handle, if known."""
+        if self._roster is None:
+            return payload
+        name = self._roster.name_for(str(payload.get("sender", "")))
+        return {**payload, "sender_name": name} if name else payload
 
     async def _fire_withheld(
         self, monitor: MonitorRow, event: Event, reason: str
     ) -> None:
         """Flagged, or unscreenable: wake with who and where only."""
         logger.warning("monitor %s fired but withheld: %s", monitor.id, reason)
-        await self._send(monitor, withheld_body(event.payload, reason))
+        await self._send(monitor, withheld_body(self._named(event.payload), reason))
 
     async def _send(self, monitor: MonitorRow, body: str) -> None:
         text = (
