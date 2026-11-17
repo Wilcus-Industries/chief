@@ -15,6 +15,7 @@ import logging
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import validate_spec
+from chief.owner import primary_target
 
 logger = logging.getLogger(__name__)
 
@@ -30,13 +31,6 @@ _PROMPT = (
     "config.yaml for what you may do unattended on this run — this schedule "
     "woke you, so no one is necessarily reading this thread."
 )
-
-
-def primary_target(config: Config) -> tuple[str, str]:
-    """The owner's primary channel: the iMessage self-chat, else the web UI."""
-    if config.imessage_enabled and config.imessage_owner_handles:
-        return "imessage", config.imessage_owner_handles[0]
-    return "web", "web:main"
 
 
 async def ensure_update_schedule(

@@ -13,11 +13,8 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import defer_quiet, next_fire, parse_quiet_hours
 from chief.cron.tools import register_cron_tools
-from chief.cron.updates import (
-    UPDATE_DESCRIPTION,
-    ensure_update_schedule,
-    primary_target,
-)
+from chief.cron.updates import UPDATE_DESCRIPTION, ensure_update_schedule
+from chief.owner import primary_target
 from chief.persistence.db import make_session_factory
 from chief.persistence.models import ScheduleRow
 from chief.persistence.store import MessageStore
