@@ -308,8 +308,12 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    through `Dispatcher.replay` (owner/system only, commands run, no second
    publish), and wakes each cut-off thread once with `RESUME_NOTE`.
    Records stay on disk until their resume ends them; one that dies again is
-   given up on once it had started, and any older than an hour since it arrived is dropped. Not
-   covered: a message lost before chief records it (an iMessage row between
+   given up on once it had started, and any chief has held for over an hour is
+   dropped. A record keeps the message's arrival time (`at`: what the replayed
+   message's stamp names, and an iMessage backlog polled after downtime arrived
+   long before chief took it) apart from when chief recorded it (`recorded`: all
+   that age counts from, so a restart right after such a backlog still replays
+   it). Not covered: a message lost before chief records it (an iMessage row between
    cursor save and enqueue, a web request before `handle` runs), peer
    messages (`PeerRouter.deliver` injections and wakes), and a
    reply whose send the exec cuts short (the thread is woken instead).

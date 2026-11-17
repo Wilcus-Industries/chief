@@ -116,14 +116,51 @@ def test_a_resume_that_never_started_is_not_counted(tmp_path: Path) -> None:
     assert leftovers(tmp_path) == [("still wanted", False)]
 
 
-def test_age_counts_from_arrival_not_from_the_last_resume(tmp_path: Path) -> None:
+def test_age_counts_from_when_chief_took_it_not_from_the_last_resume(
+    tmp_path: Path,
+) -> None:
     InflightLog(tmp_path).track("cli:t", "cli", "owner", "old")
     path = tmp_path / INFLIGHT_FILE
     data = json.loads(path.read_text())
     for entry in data.values():
-        entry["at"] = time.time() - STALE_SECONDS - 1
+        entry["recorded"] = time.time() - STALE_SECONDS - 1
     path.write_text(json.dumps(data))
     assert leftovers(tmp_path) == []
+
+
+def test_a_message_that_arrived_long_before_chief_took_it_is_not_stale(
+    tmp_path: Path,
+) -> None:
+    # An iMessage backlog polled after downtime: sent hours ago, held a moment.
+    # Its arrival time is for the stamp; only how long chief has held it can
+    # make a replay stale, or a restart right after a backlog would drop it.
+    sent = time.time() - 3 * STALE_SECONDS
+    InflightLog(tmp_path).track(
+        "cli:t", "cli", "owner", "sent before the downtime", at=sent
+    )
+    [turn] = InflightLog(tmp_path).take_interrupted()
+    assert (turn.text, turn.at) == ("sent before the downtime", sent)
+
+
+def test_a_record_from_before_recorded_existed_is_aged_by_its_arrival(
+    tmp_path: Path,
+) -> None:
+    # The previous version wrote only ``at``, which then was also when chief
+    # took the message. Its leftovers across the update's own restart must not
+    # be dropped as malformed (a lost message), nor outlive the stale cutoff.
+    path = tmp_path / INFLIGHT_FILE
+    log = InflightLog(tmp_path)
+    log.track("cli:t", "cli", "owner", "fresh")
+    log.track("cli:t", "cli", "owner", "stale")
+    data = json.loads(path.read_text())
+    fresh, stale = data.values()
+    for entry in data.values():
+        entry.pop("recorded", None)
+    stale["at"] = time.time() - STALE_SECONDS - 1
+    path.write_text(json.dumps(data))
+    assert [t.text for t in InflightLog(tmp_path).take_interrupted()] == [
+        fresh["text"]
+    ]
 
 
 def test_corrupt_and_malformed_records_never_block_a_boot(tmp_path: Path) -> None:
@@ -132,6 +169,7 @@ def test_corrupt_and_malformed_records_never_block_a_boot(tmp_path: Path) -> Non
     data = json.loads(path.read_text())
     data["no-text"] = {"thread_key": "cli:t", "at": time.time()}
     data["bad-at"] = {**next(iter(data.values())), "at": "soon"}
+    data["bad-recorded"] = {**next(iter(data.values())), "recorded": "soon"}
     path.write_text(json.dumps(data))
     assert leftovers(tmp_path) == [("kept", False)]
 

@@ -68,7 +68,8 @@ class Tracker(Protocol):
     """The in-flight record (``chief.selfedit.inflight.InflightLog``)."""
 
     def track(
-        self, thread_key: str, channel: str, sender: str, text: str
+        self, thread_key: str, channel: str, sender: str, text: str,
+        at: float | None = None,
     ) -> TurnTicket: ...
 
 
@@ -136,7 +137,8 @@ class Dispatcher:
         if self._inflight is None or message.sender not in (OWNER, SYSTEM):
             return NullTicket()
         return self._inflight.track(
-            message.thread_key, message.channel, message.sender, message.text
+            message.thread_key, message.channel, message.sender, message.text,
+            message.at,
         )
 
     def hold(self, threads: list[str]) -> None:

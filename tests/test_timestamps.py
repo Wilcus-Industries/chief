@@ -33,7 +33,7 @@ from chief.dispatch import Dispatcher
 from chief.hooks import HookRegistry, TurnContext
 from chief.persistence.store import MessageStore
 from chief.provider.base import STAMP_KEY, for_model
-from chief.selfedit.inflight import INFLIGHT_FILE, InflightLog
+from chief.selfedit.inflight import InflightLog
 from chief.selfedit.resume import resume_plan
 from chief.subagents import AgentDef
 from chief.tools import ToolRegistry
@@ -44,6 +44,7 @@ from .test_budget import make_manager as make_budget_manager
 from .test_dispatch import RecordingAdapter
 from .test_hooks import make_manager as make_hooked_manager
 from .test_imessage import OWNER, Harness, chat_db_date
+from .test_inflight import make_dispatcher
 from .test_inject import Gate, item, manager_for
 from .test_loop import echo_registry
 from .test_session import make_manager, noop_delta
@@ -429,20 +430,25 @@ async def test_hooks_see_the_model_view_while_user_text_stays_as_written(
 # ---- replays ----------------------------------------------------------------
 
 
-def test_a_replayed_message_keeps_the_time_it_arrived(tmp_path: Path) -> None:
-    InflightLog(tmp_path).track("cli:t", "cli", "owner", "queued before the restart")
-    arrived = time.time() - 40 * 60  # sat in the record 40 minutes
-    path = tmp_path / INFLIGHT_FILE
-    record = json.loads(path.read_text())
-    for entry in record.values():
-        entry["at"] = arrived
-    path.write_text(json.dumps(record))
+async def test_a_replayed_message_keeps_the_time_it_arrived(
+    store: MessageStore, tmp_path: Path, zone: Callable[[str], None]
+) -> None:
+    zone("UTC")
+    # It arrived days before the process that holds it dies: an iMessage polled
+    # after downtime. The record must carry that time, not the one it was made.
+    held = Message("cli", "owner", "cli:t", "queued before the restart", at=ARRIVED)
+    first_boot, _ = make_dispatcher(FakeProvider([]), store, InflightLog(tmp_path))
+    first_boot.track(held)
 
-    [interrupted] = InflightLog(tmp_path).take_interrupted()
-    [resume] = resume_plan([interrupted])["cli:t"]
+    reboot = InflightLog(tmp_path)
+    [resume] = resume_plan(reboot.take_interrupted())["cli:t"]
+    provider = FakeProvider([text_turn("on it")])
+    dispatcher, _ = make_dispatcher(provider, store, reboot)
+    await dispatcher.replay(resume.message, reboot.adopt(resume.turn_id))
 
-    assert interrupted.at == arrived
-    assert resume.message.at == arrived
+    assert resume.message.at == ARRIVED
+    [replayed, _reply] = await store.load("cli:t")
+    assert replayed[STAMP_KEY] == ARRIVED_STAMP
 
 
 # ---- subagents --------------------------------------------------------------
