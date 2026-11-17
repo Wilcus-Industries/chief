@@ -666,6 +666,19 @@ def run_the_sdk_clock_forward(
     monkeypatch.setattr("mcp.shared.auth_utils.time", stand_in)
 
 
+async def park_on_a_hiccup(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Log in, then let the token endpoint refuse one refresh: the server parks,
+    though its stored refresh token is still good (a hiccup, not a revocation).
+    The stored access token is left aged, so the next connection refreshes it."""
+    await log_in(rig)
+    run_the_sdk_clock_forward(monkeypatch, 7200)
+    rig.fake.refresh_error = "invalid_grant"
+    await asyncio.wait_for(rig.registry.dispatch(PING), 10)  # parks the server
+    rig.fake.refresh_error = None
+    monkeypatch.undo()
+    age_the_stored_token(rig.root)
+
+
 async def test_a_login_lost_mid_session_parks_the_server_and_answers_the_call(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -749,7 +762,8 @@ async def test_a_login_the_server_revokes_mid_session_parks_it_and_can_be_redone
 
     assert reply == "error: rh needs login; call server_login"
     assert rig.sent == [(NOTICE_TO, NOTICE)]
-    rig.fake.refresh_error = None
+    # The refresh token stays revoked (a working one would just reconnect, as in
+    # the hiccup test below), so the way back in is a new login.
     assert await rig.broker.start_login(SERVER, SURFACE) == LINK_SENT
     callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
     assert (await rig.broker.complete_login(callback, SERVER)).ok
@@ -759,13 +773,7 @@ async def test_a_login_the_server_revokes_mid_session_parks_it_and_can_be_redone
 async def test_a_login_request_that_a_refresh_can_answer_just_connects(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await log_in(rig)
-    run_the_sdk_clock_forward(monkeypatch, 7200)
-    rig.fake.refresh_error = "invalid_grant"  # a hiccup, not a real revocation
-    await asyncio.wait_for(rig.registry.dispatch(PING), 10)
-    rig.fake.refresh_error = None
-    monkeypatch.undo()
-    age_the_stored_token(rig.root)
+    await park_on_a_hiccup(rig, monkeypatch)
     sent = len(rig.sent)
 
     assert await rig.broker.start_login(SERVER, SURFACE) == "rh connected (1 tool)"
@@ -777,13 +785,7 @@ async def test_a_login_request_that_a_refresh_can_answer_just_connects(
 async def test_a_login_request_that_meets_a_struggling_endpoint_sends_no_link(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    await log_in(rig)
-    run_the_sdk_clock_forward(monkeypatch, 7200)
-    rig.fake.refresh_error = "invalid_grant"  # a hiccup, not a real revocation
-    await asyncio.wait_for(rig.registry.dispatch(PING), 10)  # parks the server
-    rig.fake.refresh_error = None
-    monkeypatch.undo()
-    age_the_stored_token(rig.root)
+    await park_on_a_hiccup(rig, monkeypatch)
     rig.fake.refresh_status = 503
     sent = len(rig.sent)
 
@@ -796,6 +798,85 @@ async def test_a_login_request_that_meets_a_struggling_endpoint_sends_no_link(
     rig.fake.refresh_status = None
     assert await rig.broker.start_login(SERVER, SURFACE) == "rh connected (1 tool)"
     assert len(rig.sent) == sent  # the stored login did it: still no link
+
+
+# -- a token the server turns away early --------------------------------------
+
+
+async def test_a_token_inside_its_safety_margin_is_refreshed_before_it_is_sent(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await log_in(rig)
+    rig.sent.clear()
+    run_the_sdk_clock_forward(monkeypatch, 3600 - 30)  # thirty seconds of life left
+
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+
+    # Left to trust it to the second, the SDK would have sent it as it expired.
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token"]
+    assert rig.broker.state(SERVER) == "connected" and rig.sent == []
+
+
+@pytest.mark.parametrize("lifetime_named", [True, False], ids=["expires_in", "none"])
+async def test_a_token_the_server_turns_away_early_is_refreshed_not_parked(
+    rig: Rig, lifetime_named: bool
+) -> None:
+    # Refused before any expiry the SDK knows of (or with none at all): the SDK
+    # never refreshes on a 401, it goes to the login step. The refresh token is
+    # still good, so the connection tries it before anyone is asked to log in.
+    rig.fake.expires_in_sent = lifetime_named
+    await log_in(rig)
+    rig.sent.clear()
+    kinds = rig.audit_kinds
+    rig.fake.revoke_access_tokens()
+
+    # The call that found out is lost, like on any dropped connection.
+    first = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+    await eventually(lambda: rig.broker.state(SERVER) == "connected")
+
+    assert first == "error: mcp server 'rh' is not connected"
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+    assert rig.sent == []  # nobody was sent off to log in again
+    assert rig.audit_kinds == kinds  # and no wall was recorded
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token"]
+    assert len(rig.fake.authorize_requests) == 1
+
+
+async def test_a_refresh_token_the_server_refuses_gets_one_try_and_then_parks(
+    rig: Rig,
+) -> None:
+    await log_in(rig)
+    rig.sent.clear()
+    rig.fake.revoke_access_tokens()
+    rig.fake.refresh_error = "invalid_grant"  # a real revocation
+
+    reply = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+
+    # The call in flight is held until the retry settles, so it learns the answer.
+    assert reply == "error: rh needs login; call server_login"
+    assert rig.broker.state(SERVER) == "needs_auth"
+    assert rig.sent == [(NOTICE_TO, NOTICE)]
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token"]  # one try, no loop
+
+
+async def test_a_call_during_the_refresh_retry_is_not_sent_down_the_old_connection(
+    rig: Rig,
+) -> None:
+    await log_in(rig)
+    rig.fake.revoke_access_tokens()
+    rig.fake.refresh_delay = 0.5  # holds the retry open
+    found_out = asyncio.ensure_future(rig.registry.dispatch(PING))
+    await eventually(lambda: rig.broker.state(SERVER) == "connecting")
+
+    during = await asyncio.wait_for(rig.registry.dispatch(PING), 5)
+
+    assert during == "error: mcp server 'rh' is not connected"
+    assert await asyncio.wait_for(found_out, 10) == during
+    await eventually(lambda: rig.broker.state(SERVER) == "connected")
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
 
 
 # -- logout ------------------------------------------------------------------

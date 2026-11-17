@@ -1,9 +1,9 @@
 """One MCP server's connection: open it, register its tools, reconnect with
 backoff when it dies, and park on a login wall.
 
-An ``auth: oauth`` server that hits a real auth failure is not retried: it is
-parked as ``needs_auth`` until the owner asks to log in, and the next connect is
-that login (see ``chief.mcpclient.oauth``).
+An ``auth: oauth`` server that hits a real auth failure is parked as
+``needs_auth`` until the owner asks to log in, and the next connect is that login
+(see ``chief.mcpclient.oauth``) — once a stored refresh token has had one try.
 """
 
 import asyncio
@@ -42,6 +42,9 @@ class Supervisor:
         self._register_tools = register_tools
         self._broker = broker if config.auth == "oauth" else None
         self._live: Live | None = None
+        #: A login wall nobody asked for gets one refresh retry before it parks
+        #: the server; set from that retry until a connection comes up.
+        self._retrying = False
 
     async def supervise(self, ready: asyncio.Future[int]) -> None:
         """Run until cancelled: connect, hold, and recover. ``ready`` resolves
@@ -85,6 +88,8 @@ class Supervisor:
                 broker.login_failed(attempt, exc)  # the login itself broke
                 return await self._await_login(ready, broker), False
             if find_needs_auth(exc):
+                if self._retry_with_refresh(broker):
+                    return None, False
                 return await self._await_login(ready, broker), False
         logger.error(
             "mcp server %s connection failed; retrying in %ss",
@@ -100,6 +105,20 @@ class Supervisor:
             broker.disconnected(name)
         await asyncio.sleep(RECONNECT_DELAY_SECONDS)
         return None, False
+
+    def _retry_with_refresh(self, broker: "OAuthBroker") -> bool:
+        """Before parking on a login wall nobody asked for: True when the stored
+        refresh token gets one try. The access token may only have been turned
+        away early, or never named an expiry; a refresh the server refuses meets
+        the same wall and parks. The dead connection is not dropped, so a call in
+        flight on it waits for the outcome and learns which."""
+        name = self.config.name
+        if self._retrying or not broker.force_refresh(name):
+            return False
+        logger.info("mcp server %s turned its login away; trying a refresh first", name)
+        self._retrying = True
+        broker.disconnected(name)
+        return True
 
     async def _await_login(
         self, ready: asyncio.Future[int], broker: "OAuthBroker"
@@ -122,12 +141,14 @@ class Supervisor:
         async with AsyncExitStack() as stack:
             auth = broker.provider_for(config, attempt) if broker else None
             session = await open_session(stack, config, auth)
+            self._drop()  # a refresh retry's predecessor, held until now
             self._live = Live(session, asyncio.Event())
             count = self._register_tools(config.name, await session.list_tools())
             if not ready.done():
                 ready.set_result(count)
             if broker is not None:
                 broker.connected(config.name, count)
+                self._retrying = False  # the next wall earns its own retry
             logger.info("mcp server %s up with %d tools", config.name, count)
             if broker is not None:
                 await broker.logged_out(config.name)  # hold until a logout ends it
@@ -142,7 +163,7 @@ class Supervisor:
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Run one tool and flatten its text content; failures are strings."""
         live = self._live
-        if live is None or self._needs_login():
+        if live is None or self._retrying or self._needs_login():
             return self._unavailable()
         text = await call_tool(live, tool_name, arguments)
         return self._unavailable() if text is None else text

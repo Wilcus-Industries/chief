@@ -186,6 +186,91 @@ async def test_an_expired_stored_token_is_no_longer_valid_to_the_sdk(
     assert not provider.context.is_token_valid()
 
 
+# -- a margin before the server's own expiry ------------------------------------
+
+
+def stored_expiry(tmp_path: Path) -> float | None:
+    record = json.loads((tmp_path / "mcp-oauth" / "rh.json").read_text())
+    expires_at: float | None = record["expires_at"]
+    return expires_at
+
+
+async def test_a_login_expires_a_margin_before_the_server_says(tmp_path: Path) -> None:
+    # The SDK trusts a token until its computed expiry, which it computes after
+    # the response has arrived, and a request the server refuses never refreshes:
+    # it starts a new login. So the token is let go a minute early, and the very
+    # value the SDK judges by is what a restart brings back.
+    store = storage(tmp_path)
+    context = provider_for(store).context
+    before = time.time()
+
+    await store.set_tokens(tokens(expires_in=3600))
+
+    assert context.token_expiry_time == pytest.approx(before + 3600 - 60, abs=2)
+    assert stored_expiry(tmp_path) == context.token_expiry_time
+    fresh = storage(tmp_path)
+    restored = provider_for(fresh).context
+    await fresh.get_tokens()
+    assert restored.token_expiry_time == context.token_expiry_time
+
+
+@pytest.mark.parametrize(
+    ("lifetime", "margin"), [(100, 50), (30, 15), (2, 1), (0, 0)]
+)
+async def test_a_short_lived_token_gives_up_at_most_half_its_life(
+    tmp_path: Path, lifetime: int, margin: int
+) -> None:
+    store = storage(tmp_path)
+    context = provider_for(store).context
+    before = time.time()
+
+    await store.set_tokens(tokens(expires_in=lifetime))
+
+    assert context.token_expiry_time == pytest.approx(before + lifetime - margin, abs=2)
+
+
+async def test_a_token_with_no_lifetime_has_no_expiry(tmp_path: Path) -> None:
+    store = storage(tmp_path)
+    context = provider_for(store).context
+    context.token_expiry_time = 1.0  # what the previous token had
+
+    await store.set_tokens(tokens(expires_in=None))
+
+    assert context.token_expiry_time is None
+    assert stored_expiry(tmp_path) is None
+
+
+@pytest.mark.parametrize("expires_in", [3600, None])
+async def test_forcing_a_refresh_makes_the_stored_token_read_as_spent(
+    tmp_path: Path, expires_in: int | None
+) -> None:
+    # What lets a passive connection that was turned away try the refresh token
+    # before giving up: it is the stored expiry the next provider judges by.
+    await storage(tmp_path).set_tokens(tokens(expires_in=expires_in))
+    store = storage(tmp_path)
+
+    assert store.force_refresh() is True
+
+    fresh = storage(tmp_path)
+    provider = provider_for(fresh)
+    provider.context.current_tokens = await fresh.get_tokens()
+    assert provider.context.current_tokens == tokens(expires_in=expires_in)
+    assert not provider.context.is_token_valid()  # a positive past, not "no expiry"
+
+
+async def test_forcing_a_refresh_needs_a_refresh_token_to_do_it_with(
+    tmp_path: Path,
+) -> None:
+    store = storage(tmp_path)
+    assert store.force_refresh() is False  # nothing stored at all
+
+    await store.set_tokens(tokens(refresh_token=None))
+    saved = (tmp_path / "mcp-oauth" / "rh.json").read_text()
+
+    assert store.force_refresh() is False
+    assert (tmp_path / "mcp-oauth" / "rh.json").read_text() == saved
+
+
 async def test_a_refresh_response_without_a_refresh_token_keeps_the_old_one(
     tmp_path: Path,
 ) -> None:

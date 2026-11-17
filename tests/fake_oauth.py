@@ -41,10 +41,12 @@ class FakeOAuth:
         self.oauth_enabled = True  # False: /mcp needs no bearer (static headers)
         self.required_headers: dict[str, str] = {}  # lower-cased name -> value
         self.token_ttl = 3600
+        self.expires_in_sent = True  # False: token responses name no lifetime
         self.refresh_error: str | None = None  # e.g. "invalid_grant"
         # Answer a refresh with this bare status instead, no OAuth error body: 503
         # or 429 is an endpoint having a bad moment, 401 one refusing the client.
         self.refresh_status: int | None = None
+        self.refresh_delay = 0.0  # seconds a refresh grant sits before it is answered
         self.exchange_error: str | None = None  # fail the authorization_code grant
         self.rotate_refresh = True  # False: refresh responses omit refresh_token
         self.revocation = False  # advertise a revocation endpoint
@@ -164,6 +166,7 @@ class FakeOAuth:
         if grant == "authorization_code":
             return self._exchange(form)
         if grant == "refresh_token":
+            await asyncio.sleep(self.refresh_delay)
             return self._refresh_grant(form)
         return _oauth_error("unsupported_grant_type")
 
@@ -198,11 +201,9 @@ class FakeOAuth:
     def _issue(self, *, with_refresh: bool = True) -> Response:
         access = secrets.token_urlsafe(24)
         self._access[access] = time.time() + self.token_ttl
-        body: dict[str, Any] = {
-            "access_token": access,
-            "token_type": "Bearer",
-            "expires_in": self.token_ttl,
-        }
+        body: dict[str, Any] = {"access_token": access, "token_type": "Bearer"}
+        if self.expires_in_sent:
+            body["expires_in"] = self.token_ttl
         if with_refresh:
             refresh = secrets.token_urlsafe(24)
             self._refresh.add(refresh)

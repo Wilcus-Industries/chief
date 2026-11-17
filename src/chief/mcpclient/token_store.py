@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,10 @@ from mcp.shared.auth_utils import calculate_token_expiry
 logger = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+#: How long before the server's own expiry a token stops being trusted (never
+#: more than half its lifetime, so a short-lived token is not born spent).
+EXPIRY_MARGIN_SECONDS = 60.0
 
 #: The ``OAuthContext`` attributes discovery fills in, with the model each is.
 _DISCOVERED: dict[str, type[OAuthMetadata] | type[ProtectedResourceMetadata]] = {
@@ -86,7 +91,7 @@ class FileTokenStorage:
             tokens.refresh_token = previous
         self._save(
             tokens=tokens.model_dump(mode="json", exclude_none=True),
-            expires_at=calculate_token_expiry(tokens.expires_in),
+            expires_at=self._expire_early(tokens),
             **self._discovered(),
         )
 
@@ -102,9 +107,33 @@ class FileTokenStorage:
         metadata = self._load().get("oauth_metadata") or {}
         return metadata.get("revocation_endpoint") or None
 
+    def force_refresh(self) -> bool:
+        """Have the next provider refresh the stored access token instead of
+        sending it. False when no refresh token is stored to do that with."""
+        if not (self._load().get("tokens") or {}).get("refresh_token"):
+            return False
+        # A positive past: the SDK reads a falsy expiry as "never expires".
+        self._save(expires_at=time.time() - 1)
+        return True
+
     def clear(self) -> None:
         """Forget this server entirely (logout)."""
         self._path.unlink(missing_ok=True)
+
+    def _expire_early(self, tokens: OAuthToken) -> float | None:
+        """When ``tokens`` stop being trusted: a margin before the server's expiry.
+
+        The SDK works the expiry out once the response has arrived, and a request
+        it sends in the last moments can already be refused — and a refused request
+        never refreshes, it starts a new login. So the expiry is lowered here, on
+        the SDK's context and in what is stored, which a restart brings back."""
+        lifetime = tokens.expires_in
+        expires_at = calculate_token_expiry(lifetime)
+        if expires_at is not None and lifetime is not None:
+            expires_at -= min(EXPIRY_MARGIN_SECONDS, lifetime / 2)
+        if self._context is not None:
+            self._context.token_expiry_time = expires_at
+        return expires_at
 
     def _restore(self, context: OAuthContext, record: dict[str, Any]) -> None:
         context.token_expiry_time = record.get("expires_at")

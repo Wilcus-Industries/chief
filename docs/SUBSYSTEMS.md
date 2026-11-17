@@ -165,6 +165,17 @@ advertised. `token_store.py` stores that discovery with the tokens and puts it a
 the expiry back on each fresh provider, and keeps a refresh token a refresh response
 omits; together that is what makes a restart not cost a login.
 
+The SDK also trusts a token to the second, and a 401 sends it straight to the login
+step: a call sent just before expiry — or after the server dropped the token early,
+or with no `expires_in` at all — would park a server whose refresh token still works.
+So `token_store.py` lets a token go a minute early (half its life when shorter) and
+stores that value, and a passive wall with a refresh token on file earns one retry
+before it parks: the supervisor has the broker push the stored expiry into the past
+(`force_refresh`) and reconnects once, so the new provider refreshes first. A refresh
+the server really refuses meets the same wall and parks the server: one extra refresh
+request, no loop. The dead connection is held until that settles (`Supervisor._retrying`),
+so a call in flight on it still learns `needs login` when that is the answer.
+
 Each provider gets a store that stops writing once `/logout` bumps the server's
 generation (`ServerAuth.generation`). The connection a logout ends sends its goodbye
 through the OAuth client and may refresh first; without that gate the refresh would
