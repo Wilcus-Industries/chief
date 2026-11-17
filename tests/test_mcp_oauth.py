@@ -17,14 +17,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
+from starlette.applications import Starlette
 
+from chief.adapters.base import Message
 from chief.audit import AuditLog
+from chief.commands import CommandHandler
+from chief.hooks.context import TurnContext
+from chief.hooks.registry import HookRegistry
+from chief.mcpclient.auth_tools import register_auth_surface
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.mcpclient.oauth import OAuthBroker
 from chief.mcpclient.oauth_types import Surface
 from chief.provider.base import ToolCall
-from chief.tools import ToolRegistry
+from chief.tools import ToolContext, ToolRegistry
+from chief.web.oauth_routes import build_oauth_routes
 
 from .fake_oauth import FakeOAuth, serve_fake
 
@@ -540,3 +548,310 @@ async def test_a_login_request_that_a_refresh_can_answer_just_connects(
 
     assert len(rig.sent) == sent  # no link: the refresh token still worked
     assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+
+
+# -- logout ------------------------------------------------------------------
+
+
+async def test_logout_forgets_the_login_ends_the_connection_and_stays_quiet(
+    rig: Rig,
+) -> None:
+    await log_in(rig)
+    sent_before = list(rig.sent)
+
+    assert await rig.broker.logout(SERVER) == "rh logged out"
+
+    assert not (rig.root / "tokens" / "rh.json").exists()
+    assert rig.broker.state(SERVER) == "needs_auth"
+    assert rig.broker.needs_auth() == [SERVER]
+    assert rig.fake.revocations == []  # this server advertises no endpoint
+    # The tools stay registered but answer with the way back in.
+    reply = await asyncio.wait_for(rig.registry.dispatch(PING), 10)
+    assert reply == "error: rh needs login; call server_login"
+    assert rig.audit_kinds[-1] == "mcp_auth_logout"
+    # The owner just asked for this: no notice now, nor after a restart.
+    again = await rig.reboot()
+    try:
+        assert await asyncio.wait_for(again.manager.connect(again.config), 10) == 0
+    finally:
+        await again.manager.stop()
+    assert rig.sent == sent_before
+
+
+async def test_after_a_logout_the_owner_can_log_in_afresh(rig: Rig) -> None:
+    await log_in(rig)
+    await rig.broker.logout(SERVER)
+
+    # The supervisor is parked and listening again, and re-registers the client.
+    assert await rig.broker.start_login(SERVER, SURFACE) == LINK_SENT
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+    assert (await rig.broker.complete_login(callback, SERVER)).ok
+    assert await asyncio.wait_for(rig.registry.dispatch(PING), 10) == "pong"
+    assert len(rig.fake.registrations) == 2
+
+
+async def test_logout_revokes_at_the_server_when_it_advertises_an_endpoint(
+    tmp_path: Path,
+) -> None:
+    async with serve_fake(revocation=True) as fake:
+        rig = build(fake, tmp_path, [])
+        try:
+            await log_in(rig)
+            stored = json.loads((tmp_path / "tokens" / "rh.json").read_text())
+
+            await rig.broker.logout(SERVER)
+
+            assert fake.revocations == [
+                {
+                    "token": stored["tokens"]["refresh_token"],
+                    "token_type_hint": "refresh_token",
+                    "client_id": stored["client_info"]["client_id"],
+                }
+            ]
+        finally:
+            await rig.manager.stop()
+
+
+async def test_a_failing_revocation_never_blocks_the_logout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async with serve_fake(revocation=True, revoke_status=500) as fake:
+        rig = build(fake, tmp_path, [])
+        try:
+            await log_in(rig)
+            with caplog.at_level(logging.WARNING):
+                assert await rig.broker.logout(SERVER) == "rh logged out"
+        finally:
+            await rig.manager.stop()
+        assert len(fake.revocations) == 1
+    assert not (tmp_path / "tokens" / "rh.json").exists()
+    assert "revoking at" in caplog.text
+
+
+async def test_logout_of_an_unknown_server_or_one_still_connecting_is_refused(
+    rig: Rig,
+) -> None:
+    assert "not an OAuth MCP server" in await rig.broker.logout("nope")
+    rig.broker.register(rig.config)
+    assert "still connecting" in await rig.broker.logout(SERVER)
+
+
+async def test_logging_out_while_parked_discards_the_open_link(rig: Rig) -> None:
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    assert await rig.broker.logout(SERVER) == "rh logged out"
+
+    result = await rig.broker.complete_login(callback, SERVER)
+    assert not result.ok and "expired or not recognized" in result.message
+    assert rig.fake.token_requests == []
+
+
+# -- the tools, commands and hint the owner and the model use -----------------
+
+
+class Commands:
+    """Stands in for ``CommandSet``: records what gets registered."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[str, CommandHandler] = {}
+
+    def register(self, name: str, handler: CommandHandler) -> None:
+        self.handlers[name] = handler
+
+    async def run(self, text: str) -> str:
+        name, _, args = text[1:].partition(" ")
+        channel, thread = SURFACE
+        message = Message(channel=channel, sender="owner", thread_key=thread, text=text)
+        return await self.handlers[name](args.strip(), message)
+
+
+@dataclass
+class Surfaces:
+    rig: Rig
+    commands: Commands
+    hooks: HookRegistry
+
+    async def call(self, name: str, **arguments: Any) -> str:
+        context = ToolContext(thread_key=SURFACE[1], channel=SURFACE[0])
+        call = ToolCall(id="1", name=name, arguments=arguments)
+        return await self.rig.registry.dispatch(call, context)
+
+    async def hint(self) -> str | None:
+        ((_, hook),) = self.hooks.pre_turn()
+        turn = TurnContext("hi", [], "owner", SURFACE[1], SURFACE[0])
+        return await hook(turn)
+
+
+@pytest.fixture
+def surfaces(rig: Rig) -> Surfaces:
+    commands, hooks = Commands(), HookRegistry()
+    register_auth_surface(rig.broker, rig.registry, commands, hooks)
+    return Surfaces(rig, commands, hooks)
+
+
+async def test_the_login_tool_sends_the_link_to_the_calling_thread_not_the_model(
+    surfaces: Surfaces,
+) -> None:
+    rig = surfaces.rig
+    await connect_parked(rig)
+
+    reply = await surfaces.call("server_login", server=SERVER)
+
+    assert reply == LINK_SENT
+    assert rig.sent[-1][0] == SURFACE
+    assert link_in(rig.sent[-1][1]) not in reply
+
+
+async def test_the_complete_tool_finishes_the_login_from_the_pasted_address(
+    surfaces: Surfaces,
+) -> None:
+    rig = surfaces.rig
+    await connect_parked(rig)
+    await surfaces.call("server_login", server=SERVER)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    reply = await surfaces.call(
+        "server_login_complete", server=SERVER, callback_url=callback
+    )
+
+    assert reply == "rh connected (1 tool)"
+    assert await surfaces.call("mcp_rh_ping") == "pong"
+
+
+async def test_the_login_tools_report_bad_requests_as_strings(
+    surfaces: Surfaces,
+) -> None:
+    assert "not an OAuth MCP server" in await surfaces.call("server_login", server="x")
+    done = await surfaces.call("server_login_complete", server="x", callback_url="junk")
+    assert "expired or not recognized" in done
+
+
+async def test_the_login_tool_needs_to_know_which_conversation_asked(rig: Rig) -> None:
+    register_auth_surface(rig.broker, rig.registry, Commands(), HookRegistry())
+    call = ToolCall(id="1", name="server_login", arguments={"server": SERVER})
+    assert "session context" in await rig.registry.dispatch(call)
+
+
+async def test_login_command_starts_a_login_and_finishes_it_with_the_address(
+    surfaces: Surfaces,
+) -> None:
+    rig = surfaces.rig
+    await connect_parked(rig)
+
+    assert await surfaces.commands.run("/login rh") == LINK_SENT
+    assert rig.sent[-1][0] == SURFACE
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    reply = await surfaces.commands.run(f"/login rh {callback}")
+    assert reply == "rh connected (1 tool)"
+
+
+async def test_login_and_logout_commands_explain_bad_arguments(
+    surfaces: Surfaces,
+) -> None:
+    run = surfaces.commands.run
+    for bad in ("/login", "/login a b c"):
+        assert (await run(bad)).startswith("usage: /login")
+    assert await run("/logout") == "usage: /logout <server>"
+    assert await run("/logout a b") == "usage: /logout <server>"
+    assert "not an OAuth MCP server" in await run("/login nope")
+    assert "not an OAuth MCP server" in await run("/logout nope")
+
+
+async def test_logout_command_forgets_the_login(surfaces: Surfaces) -> None:
+    await log_in(surfaces.rig)
+    assert await surfaces.commands.run("/logout rh") == "rh logged out"
+    assert not (surfaces.rig.root / "tokens" / "rh.json").exists()
+
+
+async def test_the_model_is_told_which_servers_are_waiting_for_a_login(
+    surfaces: Surfaces,
+) -> None:
+    assert await surfaces.hint() is None  # nothing needs a login yet
+    await connect_parked(surfaces.rig)
+    assert await surfaces.hint() == (
+        "MCP servers needing login: rh "
+        "(call server_login when the owner asks to use one)"
+    )
+    await log_in_from_parked(surfaces.rig)
+    assert await surfaces.hint() is None
+
+
+async def log_in_from_parked(rig: Rig) -> None:
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+    assert (await rig.broker.complete_login(callback, SERVER)).ok
+
+
+# -- the web callback ----------------------------------------------------------
+
+
+def web_client(rig: Rig) -> httpx.AsyncClient:
+    app = Starlette(routes=build_oauth_routes(rig.broker))
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8130"
+    )
+
+
+def local_path(callback: str) -> str:
+    """The path+query of the address the browser landed on."""
+    return callback.removeprefix("http://127.0.0.1:8130")
+
+
+async def test_the_callback_route_completes_a_login_with_no_password(rig: Rig) -> None:
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+    code = callback.split("code=")[1].split("&")[0]
+
+    async with web_client(rig) as client:  # no cookie: the browser just arrives
+        response = await client.get(local_path(callback))
+
+    assert response.status_code == 200
+    assert "rh connected (1 tool)" in response.text
+    assert "you can close this tab" in response.text
+    assert code not in response.text  # never echoed back
+    assert rig.broker.state(SERVER) == "connected"
+    assert await rig.registry.dispatch(PING) == "pong"
+
+
+async def test_the_callback_route_refuses_a_state_it_did_not_issue(rig: Rig) -> None:
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+
+    async with web_client(rig) as client:
+        forged = await client.get("/oauth/callback?code=evil&state=guess")
+        bare = await client.get("/oauth/callback")
+
+    assert forged.status_code == bare.status_code == 400
+    assert "expired or not recognized" in forged.text
+    assert rig.fake.token_requests == []
+    assert rig.broker.state(SERVER) == "needs_auth"
+
+
+async def test_the_callback_route_reports_a_declined_login(rig: Rig) -> None:
+    rig.fake.deny_authorize = True
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    async with web_client(rig) as client:
+        response = await client.get(local_path(callback))
+
+    assert response.status_code == 400
+    assert "login denied (access_denied)" in response.text
+
+
+async def test_a_link_answered_twice_connects_once(rig: Rig) -> None:
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    async with web_client(rig) as client:
+        first = await client.get(local_path(callback))
+        second = await client.get(local_path(callback))
+
+    assert (first.status_code, second.status_code) == (200, 400)
+    assert [r["grant_type"] for r in rig.fake.token_requests] == ["authorization_code"]

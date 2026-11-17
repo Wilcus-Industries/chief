@@ -45,6 +45,7 @@ class FakeOAuth:
         self.exchange_error: str | None = None  # fail the authorization_code grant
         self.rotate_refresh = True  # False: refresh responses omit refresh_token
         self.revocation = False  # advertise a revocation endpoint
+        self.revoke_status = 200  # what the revocation endpoint answers
         self.deny_authorize = False  # the browser step answers access_denied
         self.as_base: str | None = None  # where PRM says the AS lives (default: here)
         # Observations.
@@ -202,7 +203,7 @@ class FakeOAuth:
         self.revocations.append(form)
         self._refresh.discard(form.get("token", ""))
         self._access.pop(form.get("token", ""), None)
-        return Response(status_code=200)
+        return Response(status_code=self.revoke_status)
 
     # -- assembly -----------------------------------------------------------
 

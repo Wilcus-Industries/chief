@@ -21,9 +21,8 @@ from chief.provider.anthropic import AnthropicProvider
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
-from chief.tools import ToolRegistry
 from chief.tools.shell.service import GUARD_REFUSED_EXIT_CODE
-from chief.wiring import build_mcp, build_provider
+from chief.wiring import build_mcp_configs, build_provider
 
 from .fakes import FakeProvider, text_turn
 
@@ -131,7 +130,7 @@ def test_build_provider_rejects_an_alias_to_an_unknown_backend() -> None:
         build_provider(config)
 
 
-def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
+def test_build_mcp_configs_translates_yaml_entries_to_server_configs() -> None:
     config = Config(
         mcp_servers={
             "http_server": {"url": "http://127.0.0.1:9000"},
@@ -144,7 +143,7 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
             "bare_stdio": {"command": ["mcp-tool"]},
         }
     )
-    _, mcp_configs = build_mcp(config, ToolRegistry())
+    mcp_configs = build_mcp_configs(config)
     by_name = {sc.name: sc for sc in mcp_configs}
 
     assert by_name["http_server"] == ServerConfig(
@@ -164,12 +163,12 @@ def test_build_mcp_translates_yaml_entries_to_server_configs() -> None:
     assert by_name["bare_stdio"].timeout == 30.0
 
 
-def test_build_mcp_empty_config_yields_no_servers() -> None:
-    _, mcp_configs = build_mcp(Config(), ToolRegistry())
+def test_build_mcp_configs_empty_config_yields_no_servers() -> None:
+    mcp_configs = build_mcp_configs(Config())
     assert mcp_configs == ()
 
 
-def test_build_mcp_rejects_non_numeric_timeout_without_crashing_boot(
+def test_build_mcp_configs_rejects_non_numeric_timeout_without_crashing_boot(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = Config(
@@ -179,13 +178,13 @@ def test_build_mcp_rejects_non_numeric_timeout_without_crashing_boot(
         }
     )
     with caplog.at_level("WARNING"):
-        _, mcp_configs = build_mcp(config, ToolRegistry())
+        mcp_configs = build_mcp_configs(config)
     names = {sc.name for sc in mcp_configs}
     assert names == {"good"}
     assert "bad" in caplog.text
 
 
-def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
+def test_build_mcp_configs_rejects_non_positive_timeout_without_crashing_boot(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = Config(
@@ -195,7 +194,7 @@ def test_build_mcp_rejects_non_positive_timeout_without_crashing_boot(
         }
     )
     with caplog.at_level("WARNING"):
-        _, mcp_configs = build_mcp(config, ToolRegistry())
+        mcp_configs = build_mcp_configs(config)
     names = {sc.name for sc in mcp_configs}
     assert names == {"good"}
     assert "bad" in caplog.text

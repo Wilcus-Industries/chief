@@ -25,12 +25,12 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
 from chief.gate import GatePolicy, load_approved, save_approved
+from chief.hooks.registry import HookRegistry
 from chief.hub import ObserverHub
-from chief.mcpclient.manager import (
-    McpManager,
-    ServerConfig,
-    server_config_from_entry,
-)
+from chief.mcpclient.auth_tools import build_broker, register_auth_surface
+from chief.mcpclient.config import ServerConfig, server_config_from_entry
+from chief.mcpclient.manager import McpManager
+from chief.mcpclient.oauth import OAuthBroker
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -71,6 +71,7 @@ class Core:
     dispatcher: Dispatcher
     monitors: MonitorService
     cron: CronService
+    hooks: HookRegistry
     post_tool: PostTool | None = None
 
 
@@ -111,26 +112,36 @@ def build_gate(config: Config) -> Gate:
     return Gate(audit, policy, allow_always, ApprovalBroker())
 
 
-def build_mcp(
-    config: Config, registry: ToolRegistry
-) -> tuple[McpManager, tuple[ServerConfig, ...]]:
-    """MCP servers are pure config: the agent adds one by editing the
-    ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
-
-    An entry with a malformed ``timeout`` is dropped (logged, not raised) by
-    ``server_config_from_entry`` — see there for why.
-    """
-    mcp_configs = tuple(
+def build_mcp_configs(config: Config) -> tuple[ServerConfig, ...]:
+    """The ``mcp_servers`` entries as server configs. An entry with a malformed
+    ``timeout``, ``headers``, ``auth`` or ``scopes`` — or a ``${secret:}`` that
+    resolves to nothing — is dropped (logged, not raised) by
+    ``server_config_from_entry``: see there for why."""
+    return tuple(
         sc
         for name, entry in config.mcp_servers.items()
         if (sc := server_config_from_entry(name, entry)) is not None
     )
-    return McpManager(registry), mcp_configs
+
+
+def build_mcp(
+    config: Config, core: Core, commands: CommandSet, audit: AuditLog
+) -> tuple[McpManager, tuple[ServerConfig, ...], OAuthBroker]:
+    """MCP servers are pure config: the agent adds one by editing the
+    ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
+
+    An ``auth: oauth`` server logs in through the broker built here, whose
+    ``server_login`` tools, ``/login`` ``/logout`` commands and "needs login"
+    hint are registered on the core's registry, commands and hooks.
+    """
+    broker = build_broker(config, core.dispatcher, audit)
+    register_auth_surface(broker, core.registry, commands, core.hooks)
+    return McpManager(core.registry, broker), build_mcp_configs(config), broker
 
 
 def build_adapters(
     config: Config, core: Core, store: MessageStore, commands: CommandSet,
-    approvals: ApprovalBroker,
+    approvals: ApprovalBroker, broker: OAuthBroker,
 ) -> Adapters:
     """Register the socket, darwin-gated iMessage, and web adapters; build the
     optional password-gated web server."""
@@ -162,6 +173,7 @@ def build_adapters(
         web_app = build_web_app(
             Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
             dispatcher.handle, core.monitors, store, commands.palette, core.manager,
-            approvals, config.stream_channel_defaults, config.imessage_owner_handles)
+            approvals, config.stream_channel_defaults, config.imessage_owner_handles,
+            broker)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

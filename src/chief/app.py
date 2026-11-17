@@ -133,7 +133,7 @@ async def _build_agent_core(
     # Subagent turns get the same post_tool seam (core injection screen first).
     post_tool = tool_screener(hooks, config.hooks_timeout_seconds, logger)
     return Core(budget, bus, hub, registry, restart, manager, dispatcher,
-                monitors, cron, post_tool)
+                monitors, cron, hooks, post_tool)
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -176,8 +176,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         model_aliases=model_aliases,
     )
     core.dispatcher.set_commands(commands)
-    mcp_manager, mcp_configs = build_mcp(config, core.registry)
-    adapters = build_adapters(config, core, store, commands, gate.approvals)
+    mcp_manager, mcp_configs, broker = build_mcp(config, core, commands, gate.audit)
+    adapters = build_adapters(config, core, store, commands, gate.approvals, broker)
 
     return App(
         config=config,
