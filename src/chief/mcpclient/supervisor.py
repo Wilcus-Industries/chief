@@ -1,18 +1,24 @@
-"""One MCP server's connection: open the transport, register its tools, and
-reconnect with backoff when it dies."""
+"""One MCP server's connection: open it, register its tools, reconnect with
+backoff when it dies, and park on a login wall.
+
+An ``auth: oauth`` server that hits a real auth failure is not retried: it is
+parked as ``needs_auth`` until the owner asks to log in, and the next connect is
+that login (see ``chief.mcpclient.oauth``).
+"""
 
 import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.types import TextContent
-
+from chief.mcpclient.calls import Live, call_tool
 from chief.mcpclient.config import ServerConfig
+from chief.mcpclient.oauth_types import LoginAttempt, NeedsAuth, find_needs_auth
+from chief.mcpclient.transport import open_session
+
+if TYPE_CHECKING:
+    from chief.mcpclient.oauth import OAuthBroker
 
 logger = logging.getLogger(__name__)
 
@@ -26,74 +32,123 @@ RegisterTools = Callable[[str, Any], int]
 class Supervisor:
     """Keeps one server connected for as long as its task lives."""
 
-    def __init__(self, config: ServerConfig, register_tools: RegisterTools) -> None:
+    def __init__(
+        self,
+        config: ServerConfig,
+        register_tools: RegisterTools,
+        broker: "OAuthBroker | None" = None,
+    ) -> None:
         self.config = config
         self._register_tools = register_tools
-        self._session: ClientSession | None = None
+        self._broker = broker if config.auth == "oauth" else None
+        self._live: Live | None = None
 
     async def supervise(self, ready: asyncio.Future[int]) -> None:
-        config = self.config
-        while True:
-            try:
-                await self._serve_once(ready)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                task = asyncio.current_task()
-                if task is not None and task.cancelling():
-                    # A cancel delivered mid-teardown can surface as an
-                    # ordinary exception instead of CancelledError itself —
-                    # e.g. a stdio transport's task group wraps a sibling's
-                    # BrokenResourceError around the very cancellation that
-                    # caused it. Honor the pending cancel rather than
-                    # treating this as a connection failure to retry, or the
-                    # retry loop spins up a fresh, uncancellable subprocess
-                    # (connect()'s single task.cancel() is already spent).
-                    raise asyncio.CancelledError() from None
-                logger.exception(
-                    "mcp server %s connection failed; retrying in %ss",
-                    config.name,
-                    RECONNECT_DELAY_SECONDS,
-                )
-                if not ready.done():
-                    ready.set_exception(
-                        RuntimeError(f"mcp server {config.name} failed to start")
-                    )
-                    return
-            self._session = None
-            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+        attempt: LoginAttempt | None = None
+        try:
+            while True:
+                try:
+                    await self._serve_once(ready, attempt)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._honor_pending_cancel()
+                    attempt, stop = await self._after_failure(exc, ready, attempt)
+                    if stop:
+                        return
+        finally:
+            self._drop()
 
-    async def _serve_once(self, ready: asyncio.Future[int]) -> None:
-        config = self.config
+    def _honor_pending_cancel(self) -> None:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            # A cancel delivered mid-teardown can surface as an
+            # ordinary exception instead of CancelledError itself —
+            # e.g. a stdio transport's task group wraps a sibling's
+            # BrokenResourceError around the very cancellation that
+            # caused it. Honor the pending cancel rather than
+            # treating this as a connection failure to retry, or the
+            # retry loop spins up a fresh, uncancellable subprocess
+            # (connect()'s single task.cancel() is already spent).
+            raise asyncio.CancelledError() from None
+
+    async def _after_failure(
+        self, exc: Exception, ready: asyncio.Future[int], attempt: LoginAttempt | None
+    ) -> tuple[LoginAttempt | None, bool]:
+        """What a dead connection earns: ``(next login attempt, stop)``."""
+        broker, name = self._broker, self.config.name
+        if broker is not None:
+            if attempt is not None and not attempt.connected:
+                broker.login_failed(attempt, exc)  # the login itself broke
+                return await self._await_login(ready, broker), False
+            if find_needs_auth(exc):
+                return await self._await_login(ready, broker), False
+        logger.error(
+            "mcp server %s connection failed; retrying in %ss",
+            name, RECONNECT_DELAY_SECONDS, exc_info=exc,
+        )
+        self._drop()
+        if not ready.done():
+            ready.set_exception(RuntimeError(f"mcp server {name} failed to start"))
+            if broker is not None:
+                broker.disabled(name)
+            return None, True
+        if broker is not None:
+            broker.disconnected(name)
+        await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+        return None, False
+
+    async def _await_login(
+        self, ready: asyncio.Future[int], broker: "OAuthBroker"
+    ) -> LoginAttempt:
+        """Park on the login wall; returns the ``/login`` that lifts it."""
+        name = self.config.name
+        notify = broker.needs_login(name)
+        self._drop()  # in-flight calls learn why, now that the state says so
+        if not ready.done():
+            ready.set_result(0)  # boot is not held up by a login
+        if notify:
+            await broker.send_notice(name)
+        return await broker.next_login(name)
+
+    async def _serve_once(
+        self, ready: asyncio.Future[int], attempt: LoginAttempt | None
+    ) -> None:
+        config, broker = self.config, self._broker
         async with AsyncExitStack() as stack:
-            if config.url is not None:
-                read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(config.url, headers=config.headers)
-                )
-            elif config.command:
-                params = StdioServerParameters(
-                    command=config.command[0],
-                    args=list(config.command[1:]),
-                    env=config.env,
-                    cwd=config.cwd,
-                )
-                read, write = await stack.enter_async_context(stdio_client(params))
-            else:
-                raise ValueError(f"mcp server {config.name} has no url or command")
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            self._session = session
+            auth = broker.provider_for(config, attempt) if broker else None
+            session = await open_session(stack, config, auth)
+            self._live = Live(session, asyncio.Event())
             count = self._register_tools(config.name, await session.list_tools())
             if not ready.done():
                 ready.set_result(count)
+            if broker is not None:
+                broker.connected(config.name, count)
             logger.info("mcp server %s up with %d tools", config.name, count)
+            if broker is not None:
+                await broker.logged_out(config.name)  # hold until a logout ends it
+                raise NeedsAuth(config.name)
             await asyncio.Event().wait()  # hold the transport open until cancel
+
+    def _drop(self) -> None:
+        live, self._live = self._live, None
+        if live is not None:
+            live.gone.set()
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Run one tool and flatten its text content; failures are strings."""
-        session = self._session
-        if session is None:
-            return f"error: mcp server '{self.config.name}' is not connected"
-        result = await session.call_tool(tool_name, arguments)
-        text = "\n".join(c.text for c in result.content if isinstance(c, TextContent))
-        return f"error: {text}" if result.isError else text
+        live = self._live
+        if live is None or self._needs_login():
+            return self._unavailable()
+        text = await call_tool(live, tool_name, arguments)
+        return self._unavailable() if text is None else text
+
+    def _needs_login(self) -> bool:
+        broker = self._broker
+        return broker is not None and broker.state(self.config.name) == "needs_auth"
+
+    def _unavailable(self) -> str:
+        name = self.config.name
+        if self._needs_login():
+            return f"error: {name} needs login; call server_login"
+        return f"error: mcp server '{name}' is not connected"

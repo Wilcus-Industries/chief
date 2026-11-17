@@ -8,7 +8,7 @@ reconnects with backoff when it dies. Discovered tools register as
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chief.mcpclient.config import ServerConfig as ServerConfig
 from chief.mcpclient.config import server_config_from_entry as server_config_from_entry
@@ -16,14 +16,20 @@ from chief.mcpclient.supervisor import Supervisor
 from chief.provider.base import ToolSpec
 from chief.tools import Tool, ToolRegistry
 
+if TYPE_CHECKING:
+    from chief.mcpclient.oauth import OAuthBroker
+
 logger = logging.getLogger(__name__)
 
 
 class McpManager:
     """Owns every MCP connection and its registered tools."""
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self, registry: ToolRegistry, broker: "OAuthBroker | None" = None
+    ) -> None:
         self._registry = registry
+        self._broker = broker
         self._links: dict[str, Supervisor] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -37,8 +43,12 @@ class McpManager:
         """
         if config.name in self._tasks:
             raise ValueError(f"mcp server '{config.name}' already connected")
+        if config.auth == "oauth":
+            if self._broker is None:
+                raise ValueError(f"mcp server '{config.name}' needs an OAuth broker")
+            self._broker.register(config)
         ready: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-        link = Supervisor(config, self._register_tools)
+        link = Supervisor(config, self._register_tools, self._broker)
         self._links[config.name] = link
         task = asyncio.create_task(link.supervise(ready))
         self._tasks[config.name] = task

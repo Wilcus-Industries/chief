@@ -1,14 +1,16 @@
 """MCP server config: one ``mcp_servers`` entry from config.yaml, parsed."""
 
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from chief.mcpclient.headers import expand_headers
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 30.0
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True)
@@ -22,7 +24,9 @@ class ServerConfig:
     script and an operator can audit the grant by reading ``config.yaml``.
 
     ``headers`` apply to url servers only and arrive here already expanded
-    (``${secret:name}`` resolved), so they stay out of ``repr``.
+    (``${secret:name}`` resolved), so they stay out of ``repr``. ``auth`` is
+    ``"oauth"`` for a server that logs in through the broker (url servers only;
+    its name becomes a token file name), ``scopes`` what that login asks for.
 
     ``timeout`` bounds how long ``connect`` waits for this server to become
     ready — a server that resolves or builds dependencies on first launch can
@@ -37,6 +41,8 @@ class ServerConfig:
     cwd: str | None = None
     timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS
     headers: dict[str, str] | None = field(default=None, repr=False)
+    auth: Literal["oauth"] | None = None
+    scopes: tuple[str, ...] | None = None
 
 
 def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig | None:
@@ -46,6 +52,8 @@ def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig |
     try:
         timeout = _timeout(entry)
         headers = _headers(entry)
+        auth = _auth(name, entry)
+        scopes = _scopes(entry)
     except ValueError as exc:
         logger.warning("mcp server %r skipped: %s", name, exc)
         return None
@@ -53,7 +61,7 @@ def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig |
         name=name, url=entry.get("url"), cwd=entry.get("cwd"), timeout=timeout,
         command=tuple(entry["command"]) if entry.get("command") else None,
         env=dict(entry["env"]) if entry.get("env") else None,
-        headers=headers,
+        headers=headers, auth=auth, scopes=scopes,
     )
 
 
@@ -82,3 +90,27 @@ def _headers(entry: dict[str, Any]) -> dict[str, str] | None:
     ):
         raise ValueError("headers must map non-empty names to string values")
     return expand_headers(raw) if raw else None
+
+
+def _auth(name: str, entry: dict[str, Any]) -> Literal["oauth"] | None:
+    auth = entry.get("auth")
+    if auth is None:
+        return None
+    if auth != "oauth":
+        raise ValueError(f"auth must be 'oauth', got {auth!r}")
+    if entry.get("command"):
+        raise ValueError("auth applies to url servers only")
+    if not _SAFE_NAME.fullmatch(name):
+        raise ValueError("an oauth server's name may only use letters, digits, - and _")
+    return "oauth"
+
+
+def _scopes(entry: dict[str, Any]) -> tuple[str, ...] | None:
+    scopes = entry.get("scopes")
+    if scopes is None:
+        return None
+    if not isinstance(scopes, list) or not all(
+        isinstance(scope, str) and scope.strip() for scope in scopes
+    ):
+        raise ValueError("scopes must be a list of non-empty strings")
+    return tuple(scopes)

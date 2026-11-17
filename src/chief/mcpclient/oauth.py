@@ -1,0 +1,176 @@
+"""OAuth logins for MCP servers: who needs one, how it is asked for, how it ends.
+
+The SDK's ``OAuthClientProvider`` does the protocol — discovery, registration,
+PKCE, refresh. This broker is what chief adds around it. A server connects
+*passively* on every boot and reconnect: a good token connects, a refreshable
+one refreshes, and only a real auth failure reaches the redirect step, where it
+becomes ``NeedsAuth`` and parks the server (one notice to the owner). A
+``/login`` arms one *interactive* attempt that sends the owner a link instead
+and waits, bounded, for the address the browser ends up on.
+"""
+
+import logging
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+from mcp.client.auth import OAuthClientProvider
+
+from chief.audit import AuditLog
+from chief.mcpclient import oauth_login as login
+from chief.mcpclient.config import ServerConfig
+from chief.mcpclient.oauth_flow import LoginFlow, new_provider
+from chief.mcpclient.oauth_notice import Notices
+from chief.mcpclient.oauth_types import (
+    FLOW_TTL_SECONDS,
+    AuthState,
+    LoginAttempt,
+    LoginError,
+    LoginResult,
+    Send,
+    ServerAuth,
+    Surface,
+    leaf,
+)
+from chief.mcpclient.token_store import FileTokenStorage
+
+logger = logging.getLogger(__name__)
+
+
+class OAuthBroker:
+    """Tracks each ``auth: oauth`` server's login state and runs its logins."""
+
+    def __init__(
+        self,
+        *,
+        send: Send,
+        audit: AuditLog,
+        notice_to: Surface,
+        redirect_uri: str,
+        token_dir: Path,
+        notified_path: Path,
+        clock: Callable[[], float] = time.monotonic,
+        flow_ttl: float = FLOW_TTL_SECONDS,
+    ) -> None:
+        self._send = send
+        self._audit = audit
+        self._redirect_uri = redirect_uri
+        self._token_dir = token_dir
+        self._clock = clock
+        self._ttl = flow_ttl
+        self._notices = Notices(send, notice_to, notified_path)
+        self._servers: dict[str, ServerAuth] = {}
+
+    # -- what the supervisor drives -----------------------------------------
+
+    def register(self, config: ServerConfig) -> None:
+        self._servers[config.name] = ServerAuth(config)
+
+    def provider_for(
+        self, config: ServerConfig, attempt: LoginAttempt | None
+    ) -> OAuthClientProvider:
+        """A fresh SDK provider for one connection attempt (``attempt`` is the
+        ``/login`` driving it, or None for a passive boot/reconnect)."""
+        record = self._servers[config.name]
+        flow = LoginFlow(record, attempt, self._send, self._clock, self._ttl)
+        storage = self._storage(config)
+        return new_provider(config, storage, flow, self._redirect_uri, self._ttl)
+
+    def needs_login(self, server: str) -> bool:
+        """Park ``server`` on a login; True when the owner has not been told."""
+        self._servers[server].state = "needs_auth"
+        self._audit.record("mcp_auth_needed", server=server, reason="login_required")
+        return self._notices.due(server)
+
+    async def send_notice(self, server: str) -> None:
+        await self._notices.send(server)
+
+    async def next_login(self, server: str) -> LoginAttempt:
+        """Wait until the owner asks to log in to ``server``."""
+        record = self._servers[server]
+        while True:
+            await record.wake.wait()
+            record.wake.clear()
+            if record.attempt is not None and not record.attempt.done.done():
+                return record.attempt
+
+    def connected(self, server: str, count: int) -> None:
+        record = self._servers[server]
+        record.state = "connected"
+        record.dropped.clear()
+        self._notices.clear(server)
+        attempt, record.attempt = record.attempt, None
+        if attempt is not None and not attempt.connected:
+            attempt.connected = True
+            attempt.finish(LoginResult(True, f"{server} connected ({count} tools)"))
+            self._audit.record("mcp_auth_complete", server=server, reason="connected")
+
+    def disconnected(self, server: str) -> None:
+        if self._servers[server].state == "connected":
+            self._servers[server].state = "connecting"
+
+    def disabled(self, server: str) -> None:
+        self._servers[server].state = "disabled"
+
+    def login_failed(self, attempt: LoginAttempt, exc: BaseException) -> None:
+        error = leaf(exc)
+        reason = str(error) if isinstance(error, LoginError) else repr(error)
+        logger.warning("mcp login for %s failed: %s", attempt.server, reason)
+        name = type(error).__name__
+        self._audit.record("mcp_auth_fail", server=attempt.server, reason=name)
+        attempt.finish(LoginResult(False, f"login failed: {reason}"))
+        record = self._servers[attempt.server]
+        if record.attempt is attempt:
+            record.attempt = None
+
+    async def logged_out(self, server: str) -> None:
+        """Wait for ``logout`` to ask the live connection to end."""
+        record = self._servers[server]
+        await record.dropped.wait()
+        record.dropped.clear()
+
+    # -- what the owner drives ----------------------------------------------
+
+    def state(self, server: str) -> AuthState:
+        record = self._servers.get(server)
+        return record.state if record else "disabled"
+
+    def needs_auth(self) -> list[str]:
+        return sorted(n for n, r in self._servers.items() if r.state == "needs_auth")
+
+    async def start_login(self, server: str, surface: Surface) -> str:
+        """Send ``surface`` a login link for ``server``; replaces any open one."""
+        record = self._servers.get(server)
+        if record is None:
+            return _unknown(server)
+        if record.state == "needs_auth":
+            self._audit.record("mcp_auth_start", server=server, reason="requested")
+        return await login.start(record, surface)
+
+    async def complete_login(
+        self, callback_url: str, server: str | None = None
+    ) -> LoginResult:
+        """Finish a login from the address the owner's browser ended up on."""
+        records = self._servers.values()
+        clock, ttl = self._clock, self._ttl
+        return await login.complete(records, callback_url, server, clock, ttl)
+
+    async def logout(self, server: str) -> str:
+        """Forget ``server``'s login; the owner is not told it needs one again."""
+        record = self._servers.get(server)
+        if record is None:
+            return _unknown(server)
+        result = await login.logout(record, self._storage(record.config))
+        if result.ok:
+            self._notices.mark(server)
+            self._audit.record("mcp_auth_logout", server=server, reason="requested")
+        return result.message
+
+    def _storage(self, config: ServerConfig) -> FileTokenStorage:
+        assert config.url is not None
+        url, redirect = config.url, self._redirect_uri
+        return FileTokenStorage(self._token_dir, config.name, url, redirect)
+
+
+def _unknown(server: str) -> str:
+    return f"error: '{server}' is not an OAuth MCP server"
