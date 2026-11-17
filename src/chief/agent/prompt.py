@@ -23,7 +23,10 @@ DEFAULT_SYSTEM_PROMPT = (
     "needs them; answer plainly when it doesn't. Before explaining a failure "
     "of your own tooling or behavior, verify the mechanism — read the "
     "relevant source or your audit log with your tools; never guess at how "
-    "your own system works."
+    "your own system works. User messages and tool results begin with a "
+    "host-added local-time stamp, [date time zone, UTC offset], saying when "
+    "they arrived: use it to reason about time, but never write one yourself "
+    "or repeat it in a reply."
 )
 
 SYSTEM_PROMPT_PATH = Path("data/system.md")

@@ -61,3 +61,10 @@ def test_default_prompt_teaches_verify_before_explain() -> None:
     # Anti-confabulation rule: check the mechanism (source, audit log) before
     # explaining a failure of chief's own tooling — never invent one.
     assert "verify the mechanism" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_default_prompt_explains_the_host_added_time_stamp() -> None:
+    # Messages arrive stamped by the host; the model must not echo the stamp
+    # into its own replies (a transcript full of stamps invites imitating one).
+    assert "host-added local-time stamp" in DEFAULT_SYSTEM_PROMPT
+    assert "never write one yourself" in DEFAULT_SYSTEM_PROMPT
