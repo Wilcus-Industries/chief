@@ -225,6 +225,11 @@ One file per secret, no extension, `chmod 0600` by the wizard. Core files:
 `openrouter_api_key`, `web_password`, optional `typesafe_api_key`. Package
 secrets land here too.
 `provider_backends[*].api_key_secret` resolves relative to this directory.
+`mcp-oauth/<server>.json` is the one daemon-written exception: the OAuth tokens
+and client registration of an `auth: oauth` MCP server (mode 0600, directory
+0700). It is bound to the server url and redirect URI — change either and it
+reads as absent, so the next login registers afresh. Delete it, or `/logout`, to
+forget a login.
 
 ### Tracked directories
 
