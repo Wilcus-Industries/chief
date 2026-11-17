@@ -429,20 +429,49 @@ async def test_twins_with_no_usable_date_still_collapse(
 
 
 @pytest.mark.parametrize(
+    "unusable_first", [False, True], ids=["unusable row last", "unusable row first"]
+)
+@pytest.mark.parametrize(
     "make_date", UNUSABLE_DATES.values(), ids=UNUSABLE_DATES.keys()
 )
-async def test_a_repeat_hours_later_with_no_usable_date_is_not_a_twin(
-    tmp_path: Path, make_date: Callable[[], int | None]
+async def test_a_repeat_hours_apart_with_no_usable_date_is_not_a_twin(
+    tmp_path: Path, make_date: Callable[[], int | None], unusable_first: bool
 ) -> None:
-    """"yes" at 09:00, then "yes" at 11:00 whose row has no usable date. The
-    second is a real message. Keyed on the raw date (0 for NULL) it sat before
-    the first and counted as inside the window, so it was dropped silently;
-    keyed on the time it falls back to (now) it is hours after."""
+    """"yes" at 09:00 and "yes" at 11:00, the 11:00 row with no usable date: two
+    real messages, whichever is polled first. Keyed on the raw date (0 for NULL)
+    the unusable row sat before the other and counted as inside the window, so
+    it was dropped silently; keyed on the time it falls back to (now) it is
+    hours from it. Rows come in rowid order, not date order (a sync backfill
+    lands old dates late), so the unusable row can also come first: the gap to
+    the older row is then negative, and a negative gap is no twin either."""
+    rows = [("yes", chat_db_date(time.time() - 2 * 3600)), ("yes", make_date())]
+    texts = await poll_owner_rows(tmp_path, rows[::-1] if unusable_first else rows)
+    assert texts == ["yes", "yes"]
+
+
+async def test_twins_collapse_whichever_row_carries_the_earlier_date(
+    tmp_path: Path,
+) -> None:
+    """Rows come in rowid order, not date order: a twin polled first can carry
+    the later date. That gap is negative, and the pair is still one message."""
+    sent = time.time() - 60
+    texts = await poll_owner_rows(
+        tmp_path, [("ping", chat_db_date(sent + 0.03)), ("ping", chat_db_date(sent))]
+    )
+    assert texts == ["ping"]
+
+
+async def test_twins_collapse_around_a_row_sent_hours_earlier(
+    tmp_path: Path,
+) -> None:
+    """A backfill can land a much older row between a pair of twins. It is
+    behind them in time, so it must not clear the first twin from the window
+    before the second is polled."""
     two_hours_ago = chat_db_date(time.time() - 2 * 3600)
     texts = await poll_owner_rows(
-        tmp_path, [("yes", two_hours_ago), ("yes", make_date())]
+        tmp_path, [("yes", None), ("earlier", two_hours_ago), ("yes", None)]
     )
-    assert texts == ["yes", "yes"]
+    assert texts == ["yes", "earlier"]
 
 
 async def test_self_chat_scope_does_not_leak_other_conversations(

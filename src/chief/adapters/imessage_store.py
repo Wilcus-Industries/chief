@@ -81,8 +81,8 @@ class RecentDedup:
 
     Callers pass when the row was sent *after* :func:`sent_at` has made it a
     usable time. A row with no usable date (NULL, 0) is placed at the poll time,
-    never at its raw date: that is 2001, before every real row, and a negative
-    gap counts as inside the window, so a genuine repeat hours later was dropped.
+    never at its raw date: that is 2001 for every such row, so two of them hours
+    apart would be twins.
     """
 
     def __init__(self, window: float = DEDUP_WINDOW_SECONDS) -> None:
@@ -91,11 +91,17 @@ class RecentDedup:
 
     def is_duplicate(self, key: tuple[str, ...], at: float) -> bool:
         """True when ``key`` was last seen within the window of ``at`` (epoch
-        seconds); either way ``at`` becomes its last sighting."""
+        seconds), before or after it; either way ``at`` becomes its last sighting.
+
+        Rows come in rowid order, not date order: a twin can carry an earlier date
+        than the one polled before it, and a sync backfill can land a repeat from
+        hours ago after one from now. So the match is on the size of the gap, not
+        its sign. The prune is one-sided on purpose: an entry ahead of ``at``
+        stays, because a later row may still be its twin."""
         self._seen = {k: t for k, t in self._seen.items() if at - t <= self._window}
         prev = self._seen.get(key)
         self._seen[key] = at
-        return prev is not None and at - prev <= self._window
+        return prev is not None and abs(at - prev) <= self._window
 
 
 def sent_at(date: int) -> float:

@@ -60,7 +60,10 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
 6. `RecentDedup.is_duplicate()` on `(thread_key, sender, text)` within
    `DEDUP_WINDOW_SECONDS` (5s, in-memory), placed by the message's `at` rather
    than the raw `date`: a row with no usable date sits at the poll time, so a
-   real repeat hours after an earlier one is not taken for its twin.
+   real repeat hours apart from an earlier one is not taken for its twin. The
+   gap counts by size, not sign: rows come in rowid order, not date order, so a
+   twin may carry the earlier date, and a backfilled repeat from hours ago may
+   follow one from now.
 7. `resolve_approval()` is called **at poll stage, before enqueue** — see §5 for
    why that ordering is load-bearing.
 8. `ThreadFifo.put()` (`imessage_fifo.py`) → a per-`thread_key` `asyncio.Queue`
