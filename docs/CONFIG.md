@@ -32,7 +32,7 @@ before. An entry may also declare `timeout` (seconds, any numeric type) —
 how long `McpManager.connect` waits for that one server to become ready
 before failing loudly; a server that resolves or builds dependencies on its
 first launch can outrun the default. Omitting it gets
-`DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.manager`). A
+`DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.config`). A
 timed-out connect cancels its supervising task and raises naming the server;
 the daemon logs it and keeps booting the rest.
 
