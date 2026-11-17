@@ -64,6 +64,7 @@ class OAuthBroker:
     # -- what the supervisor drives -----------------------------------------
 
     def register(self, config: ServerConfig) -> None:
+        """Start tracking an ``auth: oauth`` server (``McpManager.connect`` does)."""
         self._servers[config.name] = ServerAuth(config)
 
     def provider_for(
@@ -85,6 +86,7 @@ class OAuthBroker:
         return self._notices.due(server)
 
     async def send_notice(self, server: str) -> None:
+        """Tell the owner ``server`` needs a login (best effort, once per wall)."""
         await self._notices.send(server)
 
     async def next_login(self, server: str) -> LoginAttempt:
@@ -97,6 +99,7 @@ class OAuthBroker:
                 return record.attempt
 
     def connected(self, server: str, count: int) -> None:
+        """``server`` is up: clear its notice, and end the login that got it here."""
         record = self._servers[server]
         record.state = "connected"
         record.dropped.clear()
@@ -109,13 +112,16 @@ class OAuthBroker:
             self._audit.record("mcp_auth_complete", server=server, reason="connected")
 
     def disconnected(self, server: str) -> None:
+        """A connected ``server`` dropped for a reason that is not a login wall."""
         if self._servers[server].state == "connected":
             self._servers[server].state = "connecting"
 
     def disabled(self, server: str) -> None:
+        """``server`` failed to start and is no longer being retried."""
         self._servers[server].state = "disabled"
 
     def login_failed(self, attempt: LoginAttempt, exc: BaseException) -> None:
+        """End ``attempt`` with the reason; the server stays parked."""
         error = leaf(exc)
         reason = str(error) if isinstance(error, LoginError) else repr(error)
         logger.warning("mcp login for %s failed: %s", attempt.server, reason)
@@ -135,10 +141,12 @@ class OAuthBroker:
     # -- what the owner drives ----------------------------------------------
 
     def state(self, server: str) -> AuthState:
+        """``server``'s login state; ``disabled`` for one this broker does not run."""
         record = self._servers.get(server)
         return record.state if record else "disabled"
 
     def needs_auth(self) -> list[str]:
+        """The servers waiting on a login, sorted."""
         return sorted(n for n, r in self._servers.items() if r.state == "needs_auth")
 
     async def start_login(self, server: str, surface: Surface) -> str:

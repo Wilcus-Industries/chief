@@ -44,6 +44,9 @@ class Supervisor:
         self._live: Live | None = None
 
     async def supervise(self, ready: asyncio.Future[int]) -> None:
+        """Run until cancelled: connect, hold, and recover. ``ready`` resolves
+        with the tool count on the first connect (0 when parked on a login) or
+        fails if the server cannot start."""
         attempt: LoginAttempt | None = None
         try:
             while True:

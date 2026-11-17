@@ -73,7 +73,6 @@ class LoginFlow:
             dict(parse_qsl(urlsplit(url).query)).get("state", ""),
             self._clock(),
             asyncio.get_running_loop().create_future(),
-            attempt.surface,
         )
         record.flow = self._flow = flow
         try:

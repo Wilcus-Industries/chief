@@ -46,13 +46,16 @@ class LoginResult:
 
 @dataclass
 class PendingFlow:
-    """An authorization link the owner has been sent and not yet answered."""
+    """An authorization link the owner has been sent and not yet answered.
+
+    ``future`` is what the SDK's callback step awaits: resolved with
+    ``(code, state)`` when the owner's address arrives, or failed with the
+    reason the link is dead."""
 
     server: str
     state: str
     created_at: float
     future: asyncio.Future[tuple[str, str | None]]
-    surface: Surface
 
 
 @dataclass
