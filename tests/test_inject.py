@@ -100,7 +100,10 @@ async def test_closed_inbox_refuses_offers() -> None:
 async def test_inbox_take_drains_in_order_and_close_requeues_the_rest() -> None:
     inbox, log = open_inbox("a", "b")
     assert inbox.pending()
-    assert await inbox.take() == ["a", "b"]
+    assert await inbox.take() == [
+        {"role": "user", "content": "a"},
+        {"role": "user", "content": "b"},
+    ]
     assert not inbox.pending()
     inbox.offer(item("c", log))
     inbox.close()

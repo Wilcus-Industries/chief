@@ -19,6 +19,7 @@ from chief.agent.loop import OnTool, OnToolResult, TurnResult, run_turn
 from chief.agent.model_call import OnDelta
 from chief.agent.prompt import read_soul
 from chief.agent.restart_gate import RestartGate, TurnTicket, _NullGate
+from chief.agent.timestamps import user_message
 from chief.agent.turn_budget import refuse_over_budget, settle_budget
 from chief.budget import Budget, BudgetState
 from chief.hooks import (
@@ -105,11 +106,15 @@ class Session:
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
         ticket: TurnTicket | None = None,
+        at: float | None = None,
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
         ``on_begin`` fires once the turn holds the thread — the moment its user
         text becomes the conversation's next message, not when it was queued.
+        ``at`` is when that text arrived (epoch seconds; now by default): the
+        message is stamped with it, however long the turn waited for the thread,
+        and with when it was read too if that wait passed ``BACKLOG_SECONDS``.
         ``on_interim`` delivers an answer an injected message overtook (see
         :func:`chief.agent.loop.run_turn`); ``on_reasoning`` streams the
         model's thinking, display only.
@@ -137,7 +142,7 @@ class Session:
                         await on_begin()
                     return await self._one_turn(
                         user_text, on_delta, sender, on_tool, on_tool_result,
-                        on_interim, on_reasoning, ticket,
+                        on_interim, on_reasoning, ticket, at,
                     )
                 finally:
                     try:
@@ -155,12 +160,14 @@ class Session:
         on_interim: OnInterim | None = None,
         on_reasoning: OnDelta | None = None,
         ticket: TurnTicket | None = None,
+        at: float | None = None,
     ) -> TurnResult:
+        user = user_message(user_text, at)
         model = self.model
         status = await self._budget.status() if self._budget else None
         if status is not None and status.state is BudgetState.EXHAUSTED:
             if self._downgrade_model is None:
-                return await refuse_over_budget(self._commit, user_text, status)
+                return await refuse_over_budget(self._commit, user, status)
             model = self._downgrade_model
         await self._maybe_compact()
         system = await self._assemble_system(user_text, sender)
@@ -169,14 +176,13 @@ class Session:
         # the loop produces persist as they land (`_live_append`), not batched
         # at the end, so a thread viewed mid-turn shows real progress instead
         # of nothing (#261's pending tool-call state depends on this).
-        user_message = {"role": "user", "content": user_text}
-        await self._store.append(self.thread_key, [user_message])
+        await self._store.append(self.thread_key, [user])
         if ticket is not None:
             ticket.started()  # a cut-off turn is now woken, not replayed
         transcript = [
             {"role": "system", "content": system},
             *self._messages,
-            user_message,
+            user,
         ]
         baseline = len(transcript)
         try:
@@ -203,9 +209,9 @@ class Session:
             # in-memory history has to catch up to the same point before the
             # exception propagates — otherwise the next turn diverges from
             # what's on disk.
-            self._messages.extend([user_message, *transcript[baseline:]])
+            self._messages.extend([user, *transcript[baseline:]])
             raise
-        new_messages = [user_message, *transcript[baseline:]]
+        new_messages = [user, *transcript[baseline:]]
         self._messages.extend(new_messages)
         if self._hooks is not None:
             await run_post_turn(
@@ -221,8 +227,10 @@ class Session:
         start blocks are added only on a thread's first turn of the process.
 
         The per-turn :class:`TurnContext` handed to the context hooks carries
-        ``self._messages`` as-is — the transcript *before* this user turn is
-        appended — so a hook judges relevance against the conversation so far."""
+        the transcript *before* this user turn is appended, in the form a model
+        is sent it (``for_model(self._messages)``: each message's stamp folded
+        into its content, not the stored text) — so a hook judges relevance
+        against the conversation so far, as the model sees it."""
         first_turn = not self._session_started
         self._session_started = True
         turn = TurnContext(

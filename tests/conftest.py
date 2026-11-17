@@ -103,3 +103,23 @@ def vault(tmp_path: Path) -> Path:
     destination = tmp_path / "vault"
     shutil.copytree(_FIXTURE_VAULT, destination)
     return destination
+
+
+@pytest.fixture(autouse=True)
+def _plain_message_content(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Build transcript messages without an arrival stamp, keeping the clock out
+    of every exact-message assertion; opt back in with
+    ``@pytest.mark.timestamps`` (``tests/test_timestamps.py`` runs them all so).
+
+    Every user and tool message is built by ``chief.agent.timestamps``, which
+    adds the stamp through one function — patched here at its definition, so no
+    call site needs to be listed and a new one is covered the day it appears.
+    """
+    if request.node.get_closest_marker("timestamps"):
+        return
+    monkeypatch.setattr(
+        "chief.agent.timestamps.stamped",
+        lambda message, at=None, read=None: message,
+    )

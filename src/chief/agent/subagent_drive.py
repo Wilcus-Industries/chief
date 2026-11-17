@@ -78,9 +78,7 @@ async def drive(
             timeout = idle_timeout()
             if not await _await_message(run, timeout):
                 return report(run, run.ended(f"killed: idle {_span(timeout)}"))
-            run.messages.extend(
-                {"role": "user", "content": text} for text in await run.take()
-            )
+            run.messages.extend(await run.take())
     except asyncio.CancelledError:
         if run.cancelled_by is not None:
             report(run, run.ended(f"cancelled by {run.cancelled_by}"))

@@ -18,8 +18,14 @@ they stay on disk, and so survive a death mid-resume, until the resume
 ``adopt``s each one and its replay ends it. An adopted record that dies again
 is given up on at the next boot (logged), so a turn that kills the process
 can't crash-loop it (one that never got to start, held behind another
-restart, is not counted). Records past :data:`STALE_SECONDS` since the
-message first arrived are dropped instead of answered hours late.
+restart, is not counted). Records past :data:`STALE_SECONDS` since chief first
+took the message are dropped instead of answered hours late.
+
+A record keeps two times. ``at`` is when the message arrived — what its stamp
+names and a replay restores — which a channel may know to be long before chief
+held it (an iMessage backlog polled after downtime). ``recorded`` is when chief
+took it, and is all staleness counts from: a restart right after such a
+backlog must replay it, not drop it for being old when it was sent.
 """
 
 import json
@@ -37,12 +43,12 @@ INFLIGHT_FILE = "inflight_turns.json"
 STALE_SECONDS = 3600.0
 MAX_ATTEMPTS = 1  # resumes per record; one more death and it is dropped
 _FIELDS = {"thread_key": str, "channel": str, "sender": str, "text": str,
-           "started": bool, "at": float, "attempts": int}
+           "started": bool, "at": float, "recorded": float, "attempts": int}
 
 
 @dataclass(frozen=True)
 class Interrupted:
-    """One message the previous process died holding."""
+    """One message the previous process died holding, and when it arrived."""
 
     turn_id: str
     thread_key: str
@@ -50,6 +56,7 @@ class Interrupted:
     sender: str
     text: str
     started: bool
+    at: float
 
 
 class _Ticket:
@@ -73,11 +80,17 @@ class InflightLog:
         self._entries = self._load()
         self._leftovers = list(self._entries)
 
-    def track(self, thread_key: str, channel: str, sender: str, text: str) -> _Ticket:
+    def track(
+        self, thread_key: str, channel: str, sender: str, text: str,
+        at: float | None = None,
+    ) -> _Ticket:
+        """Record a held message; ``at`` is when it arrived (now by default)."""
         turn_id = uuid.uuid4().hex
+        now = time.time()
         self._entries[turn_id] = {
             "thread_key": thread_key, "channel": channel, "sender": sender,
-            "text": text, "started": False, "at": time.time(), "attempts": 0,
+            "text": text, "started": False, "at": now if at is None else at,
+            "recorded": now, "attempts": 0,
         }
         self._save()
         return _Ticket(self, turn_id)
@@ -89,7 +102,7 @@ class InflightLog:
         self._leftovers = []
         return [
             Interrupted(i, e["thread_key"], e["channel"], e["sender"], e["text"],
-                        e["started"])
+                        e["started"], e["at"])
             for i, e in taken
         ]
 
@@ -125,7 +138,7 @@ class InflightLog:
         for turn_id, entry in data.items():
             if not _well_formed(entry):
                 logger.warning("dropping malformed in-flight record %s", turn_id)
-            elif now - entry["at"] > STALE_SECONDS:
+            elif now - entry["recorded"] > STALE_SECONDS:
                 logger.warning("dropping stale in-flight message on %s",
                                entry["thread_key"])
             elif entry["attempts"] >= MAX_ATTEMPTS:
@@ -149,6 +162,8 @@ class InflightLog:
 def _well_formed(entry: object) -> bool:
     if not isinstance(entry, dict):
         return False
+    # Before ``recorded`` existed, ``at`` was also when chief took the message.
+    entry.setdefault("recorded", entry.get("at"))
     for key, kind in _FIELDS.items():
         value = entry.get(key)
         if kind is float and isinstance(value, int) and not isinstance(value, bool):

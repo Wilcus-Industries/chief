@@ -87,14 +87,30 @@ ProviderEvent = TextDelta | ReasoningDelta | Completion
 # stored with a message, but never part of what a model is sent or measured on.
 DISPLAY_ONLY_KEYS = ("reasoning",)
 
+# A user or tool message's arrival stamp (``chief.agent.timestamps``): kept
+# beside its raw ``content`` and folded in front of it only by ``for_model``, so
+# every other reader of stored content sees what was actually said.
+STAMP_KEY = "stamp"
+
 
 def for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``messages`` without their display-only keys — what a model may see."""
-    return [
-        {k: v for k, v in m.items() if k not in DISPLAY_ONLY_KEYS}
-        if any(k in m for k in DISPLAY_ONLY_KEYS) else m
-        for m in messages
-    ]
+    """``messages`` as a model may see them: display-only keys dropped, and each
+    stored stamp moved in front of its content. The stored dicts are untouched.
+
+    The stamp was formatted once, when its message arrived, and is only
+    prefixed here — so a message reaches the model byte-identical on every
+    call, which is what keeps provider prompt caches hitting."""
+    return [_for_model(m) for m in messages]
+
+
+def _for_model(message: dict[str, Any]) -> dict[str, Any]:
+    hidden = (*DISPLAY_ONLY_KEYS, STAMP_KEY)
+    if not any(k in message for k in hidden):
+        return message
+    shaped = {k: v for k, v in message.items() if k not in hidden}
+    if STAMP_KEY in message:
+        shaped["content"] = f"{message[STAMP_KEY]} {message['content']}"
+    return shaped
 
 
 def parse_arguments(raw: str) -> dict[str, Any]:

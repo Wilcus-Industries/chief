@@ -68,7 +68,8 @@ class Tracker(Protocol):
     """The in-flight record (``chief.selfedit.inflight.InflightLog``)."""
 
     def track(
-        self, thread_key: str, channel: str, sender: str, text: str
+        self, thread_key: str, channel: str, sender: str, text: str,
+        at: float | None = None,
     ) -> TurnTicket: ...
 
 
@@ -136,7 +137,8 @@ class Dispatcher:
         if self._inflight is None or message.sender not in (OWNER, SYSTEM):
             return NullTicket()
         return self._inflight.track(
-            message.thread_key, message.channel, message.sender, message.text
+            message.thread_key, message.channel, message.sender, message.text,
+            message.at,
         )
 
     def hold(self, threads: list[str]) -> None:
@@ -195,7 +197,7 @@ class Dispatcher:
         def leftover() -> None:
             requeue(message, ticket)  # the queue path now owns the record
 
-        if session.inject(Injected(message.text, consumed, leftover)):
+        if session.inject(Injected(message.text, consumed, leftover, message.at)):
             return True
         ticket.done()
         return False
@@ -372,7 +374,7 @@ class Dispatcher:
                 message.text, on_delta, sender=message.sender,
                 on_tool=on_tool, on_tool_result=on_tool_result,
                 on_begin=on_begin, on_interim=on_interim,
-                on_reasoning=on_reasoning, ticket=ticket,
+                on_reasoning=on_reasoning, ticket=ticket, at=message.at,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

@@ -15,6 +15,7 @@ from typing import Any
 
 from chief.agent.subagent_drive import RunDeps, drive
 from chief.agent.subagent_run import RunTools, SubagentRun, describe_all
+from chief.agent.timestamps import user_message
 from chief.audit import AuditLog
 from chief.peers.envelope import PeerMessage, new_id, render, subagent_label
 from chief.subagents import PREAMBLE, AgentDef, FilteredTools
@@ -69,7 +70,7 @@ class SubagentPool:
             parent_channel=parent_channel, agent=agent, task=task,
             messages=[
                 {"role": "system", "content": f"{PREAMBLE}\n\n{agent.system_prompt}"},
-                {"role": "user", "content": task},
+                user_message(task),
             ],
         )
         gated = self._tools_factory(parent_key, parent_channel, run.id)
@@ -103,10 +104,11 @@ class SubagentPool:
         return describe_all(self.live(parent))
 
     def deliver(self, run_id: str, text: str) -> None:
-        """A message for a run: drained at its next tool step, or wakes it idle."""
+        """A message for a run: drained at its next tool step, or wakes it idle.
+        It is stamped now, as it arrives, whichever of the two picks it up."""
         run = self._runs.get(run_id)
         if run is not None:
-            run.inbox.append(text)
+            run.inbox.append(user_message(text))
             run.wake.set()
 
     def report_to_parent(

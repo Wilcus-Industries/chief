@@ -7,6 +7,7 @@ from typing import Any
 from chief.agent.compaction import Compactor
 from chief.agent.restart_gate import RestartGate
 from chief.agent.session import Session
+from chief.agent.timestamps import tool_message
 from chief.agent.wipe import StoreWipe, wipe_thread
 from chief.budget import Budget
 from chief.hooks import HookRegistry
@@ -117,12 +118,11 @@ class SessionManager:
         if not missing:
             return history
         repairs = [
-            {
-                "role": "tool",
-                "tool_call_id": call.get("id"),
-                "content": "error: interrupted before this tool call finished "
+            tool_message(
+                call.get("id"),
+                "error: interrupted before this tool call finished "
                 "(process restarted)",
-            }
+            )
             for call in missing
         ]
         await self._store.append(thread_key, repairs)

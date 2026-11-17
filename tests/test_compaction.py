@@ -6,6 +6,7 @@ from typing import Any
 from chief.agent.compaction import NOTE_PREFIX, Compactor, estimate_tokens
 from chief.agent.session import Session
 from chief.persistence.store import MessageStore
+from chief.provider.base import STAMP_KEY
 from chief.tools import ToolRegistry
 
 from .fakes import FakeProvider, text_turn
@@ -61,6 +62,32 @@ def chat(n: int) -> list[dict[str, Any]]:
         turns.append({"role": "user", "content": f"question {i} " + "x" * 200})
         turns.append({"role": "assistant", "content": f"answer {i} " + "y" * 200})
     return turns
+
+
+STAMP = "[2026-11-12 17:30:05 EST, UTC-05:00]"
+
+
+def test_a_stamp_counts_toward_the_compaction_threshold() -> None:
+    # The threshold measures what a model is sent, and a model is sent the stamp.
+    stored = [{"role": "user", "content": "hi", STAMP_KEY: STAMP}]
+    sent = [{"role": "user", "content": f"{STAMP} hi"}]
+    assert estimate_tokens(stored) == estimate_tokens(sent)
+
+
+async def test_the_summary_sees_stamps_and_the_kept_tail_keeps_them() -> None:
+    provider = FakeProvider([text_turn("summary")])
+    messages = [
+        {**m, STAMP_KEY: STAMP} if m["role"] == "user" else m for m in chat(6)
+    ]
+    compacted = await compactor_for(provider, messages, keep_recent=2).compact(
+        messages, force=True
+    )
+    assert compacted is not None
+    # When things happened is exactly what a summary of the past must keep ...
+    assert STAMP in provider.calls[0][1]["content"]
+    # ... and what stays verbatim keeps its stamp key, so its prefix never moves.
+    assert compacted[1:] == messages[-2:]
+    assert compacted[1][STAMP_KEY] == STAMP
 
 
 async def test_under_threshold_is_untouched() -> None:

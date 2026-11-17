@@ -22,10 +22,14 @@ from chief.tools import ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth
+from chief.web.script_send import PENDING_SCRIPT
 from chief.web.styles import STYLES
 from chief.web.view import render_transcript
 
-from .fakes import FakeProvider
+from .fakes import FakeProvider, text_turn, tool_turn
+from .node_js import needs_node, run_js
+from .test_loop import echo_registry
+from .test_session import noop_delta
 
 HANDLED: list[Message] = []
 # Messages offered mid-turn; INJECT_TAKES decides whether the "turn" takes them.
@@ -613,6 +617,72 @@ async def test_history_tool_returns_args_and_result(web: WebParts) -> None:
         "args": {"path": "/tmp/x"},
         "result": "file contents",
     }
+
+
+async def stamped_turn(store: MessageStore) -> None:
+    """One real session turn on ``web:main`` — the owner's text, a tool call and
+    its result, a reply — over the store the web app reads. Run it under
+    ``@pytest.mark.timestamps`` so the messages carry real arrival stamps."""
+    manager = SessionManager(
+        provider=FakeProvider(
+            [tool_turn("echo", {"text": "hi"}, "c1"), text_turn("deployed")]
+        ),
+        tools_factory=lambda thread, channel: echo_registry(),
+        store=store,
+        default_model="m",
+        system_prompt="s",
+        max_concurrent=1,
+        soul_reader=lambda: "",
+    )
+    session = await manager.get_or_create("web:main", "web")
+    await session.run_turn("deploy it", noop_delta)
+
+
+@pytest.mark.timestamps
+async def test_history_after_a_stamped_turn_shows_what_was_said(
+    web: WebParts,
+) -> None:
+    """The stamp belongs to the model: history shows the owner's own words, and
+    a tool call's full view is the same raw result its live preview showed."""
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await stamped_turn(store)
+
+    rows = (await client.get("/history?thread=web:main")).json()
+    assert [r for r in rows if r["role"] in ("owner", "chief")] == [
+        {"role": "owner", "text": "deploy it"},
+        {"role": "chief", "text": "deployed"},
+    ]
+    loaded = (await client.get("/history/tool?thread=web:main&call_id=c1")).json()
+    assert loaded["result"] == "echo: hi"
+
+
+@pytest.mark.timestamps
+@needs_node
+async def test_a_stamped_turn_still_settles_the_pending_copy_the_cockpit_holds(
+    web: WebParts,
+) -> None:
+    """The cockpit shows a sent message as pending until history has an owner
+    row with the *same text* (``reconcilePending``). A stamp inside the stored
+    text left a stale pending copy behind after a buffer switch or reconnect,
+    so the owner resent."""
+    client, _, _, store, _, _, _ = web
+    await login(client)
+    await stamped_turn(store)
+    rows = (await client.get("/history?thread=web:main")).json()
+
+    left = run_js(
+        PENDING_SCRIPT
+        + """
+const owners = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const list = [{text: "deploy it", mode: "queued", seen: 0}];
+reconcilePending(list, owners);
+process.stdout.write(JSON.stringify(list));
+""",
+        stdin=json.dumps([r["text"] for r in rows if r["role"] == "owner"]),
+    )
+
+    assert left == []
 
 
 async def test_history_ignores_a_coarse_stream_policy(web: WebParts) -> None:

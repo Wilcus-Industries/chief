@@ -1,22 +1,30 @@
 """The adapter interface. Channels are dumb pipes: deliver inbound Messages,
 expose send. Nothing channel-specific lives outside the adapter itself."""
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from chief.agent.restart_gate import TurnTicket
 
 
 @dataclass(frozen=True)
 class Message:
-    """One inbound message from a channel."""
+    """One inbound message from a channel.
+
+    ``at`` is when the message arrived (epoch seconds): the time its transcript
+    stamp names, however long its turn then waits behind others. It defaults to
+    when the message is built; a channel that knows better passes it (iMessage,
+    for a row sent while chief was down). A replay carries the original; it is
+    not part of a message's identity."""
 
     channel: str
     sender: str
     thread_key: str
     text: str
     attachments: tuple[str, ...] = ()
+    at: float = field(default_factory=time.time, compare=False)
 
 
 # ``Dispatcher.try_inject``: offer a message to its thread's running turn, with

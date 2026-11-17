@@ -51,9 +51,21 @@ through the adapter named on the `Message` that started it.
   method on `MessageStore` in `src/chief/persistence/store.py`. `SessionManager`
   (`src/chief/agent/manager.py`) wraps the store with a live-session cache.
   A stored assistant message may carry a display-only `reasoning` key (the
-  model's thinking, shown in the web UI): **anything that sends stored
-  messages to a model must pass them through `provider.base.for_model()`**,
-  which strips it.
+  model's thinking, shown in the web UI). A stored user or tool message
+  carries a `stamp` key beside its raw `content`:
+  `[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` in the host's zone, formatted once
+  when the message *arrived*; `src/chief/agent/timestamps.py` builds every such
+  message. A user message built more than `BACKLOG_SECONDS` (60s) after it
+  arrived — an iMessage backlog polled after downtime, a turn queued behind a
+  long one — adds `; read HH:MM:SS` inside the brackets (its date and/or
+  `TZ, UTC±HH:MM` only when they differ from the first time), so the model has
+  a "now" apart from the send time: the message's relative times ("in an hour")
+  still count from the first time, but nothing is scheduled before the newest
+  time in any stamp. The web history and anything else
+  that reads `content` therefore sees what was said. **Anything that sends stored messages to a model must
+  pass them through `provider.base.for_model()`**: it strips `reasoning` and is
+  the one place a stamp is prefixed onto `content`, which keeps each message
+  byte-identical across calls (prompt caching).
 - **Config keys** — `src/chief/config/` (`schema.py` holds the `Config`
   dataclass, `load.py` the loader, `write.py` the merge writer; the public
   surface re-exports from `chief.config`). Add
@@ -62,8 +74,14 @@ through the adapter named on the `Message` that started it.
   a silent no-op. `mcp_servers` in particular is a runtime value read straight
   from `config.yaml`.
 - **System prompt** — the boot-static base is `src/chief/agent/prompt.py`
-  (`system_prompt` + `ONBOARDING_SUFFIX`); skill one-liners are appended in
-  `boot_prompt` there. The *per-turn* message (soul on top, then base +
+  (`system_prompt` + `ONBOARDING_SUFFIX`); `boot_prompt` there appends the
+  host's own notes after it — the stamp explanation (`STAMP_NOTE`, defined
+  beside `stamp()` in `timestamps.py`; it says what the sent and read times
+  mean, that a message's relative times count from the sent time, that the
+  newest time in any stamp approximates now, and that nothing is scheduled
+  before it) and the skill one-liners — so a
+  `data/system.md` override cannot leave them out. A subagent's `PREAMBLE`
+  carries `STAMP_NOTE` too. The *per-turn* message (soul on top, then base +
   origin note, then package hook blocks) is assembled fresh each turn in
   `Session._assemble_system`. **It is never persisted**, so prompt and package
   edits apply to existing threads on the next turn.

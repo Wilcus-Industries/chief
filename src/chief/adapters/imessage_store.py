@@ -6,6 +6,7 @@ concerns living here:
 * the SQL that selects candidate rows past the cursor, and the read-only
   sqlite executors that run it (:func:`fetch_rows`, :func:`head_rowid`);
 * where chief is in each store — :mod:`.imessage_cursor`;
+* reading a row's ``date`` as when it was sent (:func:`sent_at`);
 * extracting a row's text — which on modern macOS is NOT always in
   ``message.text``. The owner's own sends (``is_from_me = 1``, i.e. every
   self-DM to chief) store their body only in ``message.attributedBody``, an
@@ -14,6 +15,8 @@ concerns living here:
 """
 
 import sqlite3
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Candidate rows past the cursor. A row qualifies when it is a real inbound
@@ -55,7 +58,12 @@ POLL_BATCH_LIMIT = 200
 # one (sometimes more) is_from_me=0 receive twins, same text, dates within tens
 # of ms, different guids. Delivering each would run a turn per copy, so chief
 # answers the one message twice. Dedup by (sender, text) over this window.
-DEDUP_WINDOW_NS = 5_000_000_000  # 5s
+DEDUP_WINDOW_SECONDS = 5.0
+
+# ``message.date`` counts from 2001-01-01 UTC, not 1970. Nothing chief polls
+# predates iMessage, so an earlier date is unset or corrupt.
+APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=UTC).timestamp()
+IMESSAGE_LAUNCH = datetime(2011, 10, 12, tzinfo=UTC).timestamp()
 
 _NSSTRING = b"NSString"
 
@@ -63,26 +71,53 @@ _NSSTRING = b"NSString"
 class RecentDedup:
     """Collapses self-DM twin rows to one delivery.
 
-    A ``(thread_key, sender, text)`` key seen again within ``window_ns`` of its
-    last sighting is a redelivery of the same logical message — skip it. The
+    A ``(thread_key, sender, text)`` key seen again within ``window`` seconds of
+    its last sighting is a redelivery of the same logical message — skip it. The
     thread is part of the key so two people saying "ok" in different group
     chats at once stay two messages. The window keeps a genuine later repeat of
     the same text (owner types it again minutes on) from being swallowed. State
     is in-memory: a fresh boot re-primes from the store cursor, never replaying
     an already-delivered twin.
+
+    Callers pass when the row was sent *after* :func:`sent_at` has made it a
+    usable time. A row with no usable date (NULL, 0) is placed at the poll time,
+    never at its raw date: that is 2001 for every such row, so two of them hours
+    apart would be twins.
     """
 
-    def __init__(self, window_ns: int = DEDUP_WINDOW_NS) -> None:
-        self._window = window_ns
-        self._seen: dict[tuple[str, ...], int] = {}
+    def __init__(self, window: float = DEDUP_WINDOW_SECONDS) -> None:
+        self._window = window
+        self._seen: dict[tuple[str, ...], float] = {}
 
-    def is_duplicate(self, key: tuple[str, ...], date_ns: int) -> bool:
-        self._seen = {
-            k: d for k, d in self._seen.items() if date_ns - d <= self._window
-        }
+    def is_duplicate(self, key: tuple[str, ...], at: float) -> bool:
+        """True when ``key`` was last seen within the window of ``at`` (epoch
+        seconds), before or after it; either way ``at`` becomes its last sighting.
+
+        Rows come in rowid order, not date order: a twin can carry an earlier date
+        than the one polled before it, and a sync backfill can land a repeat from
+        hours ago after one from now. So the match is on the size of the gap, not
+        its sign. The prune is one-sided on purpose: an entry ahead of ``at``
+        stays, because a later row may still be its twin."""
+        self._seen = {k: t for k, t in self._seen.items() if at - t <= self._window}
         prev = self._seen.get(key)
-        self._seen[key] = date_ns
-        return prev is not None and date_ns - prev <= self._window
+        self._seen[key] = at
+        return prev is not None and abs(at - prev) <= self._window
+
+
+def sent_at(date: int) -> float:
+    """When a polled row was sent, as epoch seconds, from its ``message.date``.
+
+    The unit is whichever makes the date a real moment: nanoseconds on a store
+    written since macOS 10.13, seconds in the older rows an upgraded store kept
+    (the two ranges never overlap). A date that is neither — unset (0),
+    negative, from before iMessage, or in the future — gives the time now:
+    chief cannot say when it was sent, only that it has it."""
+    now = time.time()
+    for per_second in (1e9, 1.0):
+        sent = APPLE_EPOCH + date / per_second
+        if IMESSAGE_LAUNCH <= sent <= now:
+            return sent
+    return now
 
 
 def decode_attributed_body(data: bytes) -> str:
@@ -120,7 +155,8 @@ def text_of(text: object, body: object) -> str:
     return ""
 
 
-#: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date).
+#: One polled row: (rowid, sender, text, from_me, group_chat, in_self, date);
+#: ``date`` is the raw ``message.date``, 0 when the store has none.
 PolledRow = tuple[int, str, str, int, str | None, int, int]
 
 
@@ -142,7 +178,7 @@ def fetch_rows(
         return [
             (
                 int(r[0]), str(r[1]), text_of(r[2], r[6]), int(r[3]),
-                None if r[4] is None else str(r[4]), int(r[5]), int(r[7]),
+                None if r[4] is None else str(r[4]), int(r[5]), int(r[7] or 0),
             )
             for r in cur.fetchall()
         ]

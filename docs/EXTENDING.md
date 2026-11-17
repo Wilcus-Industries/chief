@@ -178,10 +178,11 @@ boundary for the restart to fire at).
 
 A spawn is async by default: the run works detached and its result arrives at the
 parent as a message (`wait=true` keeps the blocking form). The core `PREAMBLE` is
-prepended to every definition's prompt — don't repeat it. A subagent can always
-`send_msg` its parent regardless of `tools`, and its calls are gated on the
-parent's thread like the parent's own. Output does not stream. Subagents never
-fire hooks. See SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
+prepended to every definition's prompt — don't repeat it (it also explains the
+time stamp its messages carry). A subagent can always `send_msg` its parent
+regardless of `tools`, and its calls are gated on the parent's thread like the
+parent's own. Output does not stream. Subagents never fire hooks. See
+SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
 
 ## Add a skill
 
@@ -264,7 +265,12 @@ existing file. `obsidian-memory`'s `memory-relevance` gate is the worked
 example.
 
 `TurnContext` carries `user_text`, `messages` (the transcript *before* the
-incoming turn), `sender`, `thread_key`, and `channel`.
+incoming turn, as a model is sent it: user and tool content lead with their
+`[YYYY-MM-DD HH:MM:SS TZ, UTC±HH:MM]` arrival stamp, plus `; read HH:MM:SS`
+for a user message that waited more than a minute, with its date and/or
+`TZ, UTC±HH:MM` only when they differ from the first time), `sender`,
+`thread_key`, and `channel`. `user_text` is the incoming text as written, with
+no stamp.
 
 Rules that matter:
 

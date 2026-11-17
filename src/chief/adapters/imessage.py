@@ -31,7 +31,7 @@ from chief.adapters.imessage_send import (
     RunJxa,
     run_jxa_subprocess,
 )
-from chief.adapters.imessage_store import RecentDedup
+from chief.adapters.imessage_store import RecentDedup, sent_at
 from chief.selfedit.recovery import RestartBoundary
 
 logger = logging.getLogger(__name__)
@@ -143,11 +143,11 @@ class IMessageAdapter(Adapter):
                     # Chief's own reply, seen from the owner's side as an
                     # ordinary inbound row. Polling it would answer itself.
                     continue
-                message = self._map(sender, text, from_me, group_chat, in_self)
+                message = self._map(sender, text, from_me, group_chat, in_self, date)
                 if message is None:
                     continue
                 if not self._dedicated and self._dedup.is_duplicate(
-                    (message.thread_key, message.sender, message.text), date
+                    (message.thread_key, message.sender, message.text), message.at
                 ):
                     continue  # twin rows are a self-DM artefact only
                 if self._resolve_approval is not None and self._resolve_approval(
@@ -164,7 +164,7 @@ class IMessageAdapter(Adapter):
 
     def _map(
         self, sender: str, text: str, from_me: int,
-        group_chat: str | None, in_self: int,
+        group_chat: str | None, in_self: int, date: int,
     ) -> Message | None:
         """Turn a polled row into a deliverable Message, or None to skip it.
 
@@ -178,14 +178,18 @@ class IMessageAdapter(Adapter):
             return None  # chief's own reply echoing back through the store
         if from_me and not in_self:
             return None  # owner->friend sent copy: not the self-chat
+        at = sent_at(date)  # when it was sent, not polled: a backlog is old news
         if group_chat is not None:
             # Raw sender, never "owner", even for an owner handle: that would
             # take the dispatcher's owner path, replying to a group thread_key
             # the one-to-one send path cannot address — and would let anyone in
             # the group present as the owner (docs/SECURITY.md).
             return Message(
-                channel=self.name, sender=sender, thread_key=group_chat, text=text
+                channel=self.name, sender=sender, thread_key=group_chat,
+                text=text, at=at,
             )
         mapped = "owner" if (in_self or sender in self._owner_handles) else sender
-        return Message(channel=self.name, sender=mapped, thread_key=sender, text=text)
+        return Message(
+            channel=self.name, sender=mapped, thread_key=sender, text=text, at=at
+        )
 
