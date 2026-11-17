@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 
+# The gate's json-list-of-names persistence, reused for the same shape of data.
 from chief.gate import load_approved as load_names
 from chief.gate import save_approved as save_names
 from chief.mcpclient.oauth_types import Send, Surface

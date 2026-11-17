@@ -21,6 +21,10 @@ _PAGE = "<!doctype html><title>chief</title><body><p>{}</p></body>"
 
 def build_oauth_routes(broker: OAuthBroker) -> list[Route]:
     async def callback(request: Request) -> Response:
+        if request.method != "GET":
+            # Starlette adds HEAD to any GET route; a link scanner's prefetch
+            # must not spend the login's one answer.
+            return Response(status_code=405, headers={"Allow": "GET"})
         result = await broker.complete_login(str(request.url))
         if not result.ok:
             return HTMLResponse(_PAGE.format(html.escape(result.message)), 400)

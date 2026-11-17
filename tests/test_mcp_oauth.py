@@ -844,6 +844,16 @@ async def test_the_callback_route_reports_a_declined_login(rig: Rig) -> None:
     assert "login denied (access_denied)" in response.text
 
 
+async def test_a_prefetch_of_the_callback_does_not_spend_the_login(rig: Rig) -> None:
+    await connect_parked(rig)
+    await rig.broker.start_login(SERVER, SURFACE)
+    callback = await rig.fake.browser_approve(link_in(rig.sent[-1][1]))
+
+    async with web_client(rig) as client:
+        assert (await client.head(local_path(callback))).status_code == 405
+        assert (await client.get(local_path(callback))).status_code == 200
+
+
 async def test_a_link_answered_twice_connects_once(rig: Rig) -> None:
     await connect_parked(rig)
     await rig.broker.start_login(SERVER, SURFACE)
