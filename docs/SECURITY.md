@@ -34,9 +34,13 @@ is an approved *anything*.
 1. **Unknown tool name** → record `unknown_tool`, pass through to the registry for
    a helpful error. **A hallucinated name must never raise a card**, and must
    never be able to persist an "always" for a tool that doesn't exist.
-2. **`policy.decide(name)`** — `never` → NEVER; `"*"` or an exact name in
-   `approved` → APPROVED; else ASK. **`never` is checked first and beats the `"*"`
-   wildcard.**
+2. **`policy.decide(name)`** — `never` → NEVER; a name in `CORE_APPROVED` →
+   APPROVED; `"*"` or an exact name in `approved` → APPROVED; else ASK. **`never`
+   is checked first and beats both the `"*"` wildcard and `CORE_APPROVED`.**
+   `CORE_APPROVED` is a hard-coded two-name set — `server_login` and
+   `server_login_complete`, the MCP OAuth tools — approved by core rather than by
+   config because they only hand the owner a login link or take back what the
+   owner pasted (see "MCP OAuth" below)
 3. **ASK + `read_only`** → auto-approved and announced.
 4. **ASK otherwise** → approval card. Deliberately *not* announced — the card
    already shows the call, and a second line would double it.
@@ -408,7 +412,8 @@ own reply for input.
 2. **`never` beats everything**, including `"*"`.
 3. **Nothing a stranger sends ever runs a turn**, and **stranger content is never
    persisted**.
-4. **Nothing is auto-approved except tools explicitly marked `read_only=True`.**
+4. **Nothing is auto-approved except tools explicitly marked `read_only=True`
+   and the two `CORE_APPROVED` login tools.**
 5. **A hallucinated tool name never raises a card and never persists an "always".**
 6. **Every executed or denied call produces exactly one audit line.**
 7. **Announcement failure must never break a tool call.** Budget notices and the
