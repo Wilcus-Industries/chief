@@ -59,6 +59,8 @@ class McpManager:
             await asyncio.gather(task, return_exceptions=True)
             self._tasks.pop(config.name, None)
             self._links.pop(config.name, None)
+            if config.auth == "oauth" and self._broker is not None:
+                self._broker.disabled(config.name)  # nothing is running it now
             raise TimeoutError(
                 f"mcp server {config.name} did not connect within "
                 f"{config.timeout:g}s"

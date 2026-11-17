@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from sse_starlette.sse import AppStatus
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -282,5 +283,13 @@ async def serve_fake(**knobs: Any) -> AsyncIterator[FakeOAuth]:
         yield fake
     finally:
         server.should_exit = True
-        await task
-        sock.close()
+        try:
+            await task
+        finally:
+            sock.close()
+            # sse_starlette latches this process-wide flag when its watcher (it
+            # polls every half second) sees a server shutting down, and after
+            # that every SSE response in the process ends at once. A teardown
+            # slowed by a request still in flight would break the next test's
+            # server, so it is cleared here.
+            AppStatus.should_exit = False
