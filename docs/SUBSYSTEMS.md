@@ -1,4 +1,4 @@
-# SUBSYSTEMS — web, monitors, classifiers, subagents
+# SUBSYSTEMS — web, monitors, classifiers, subagents, peers
 
 The parts that sit beside the turn loop. For the loop itself see
 [LIFECYCLE.md](./LIFECYCLE.md); for the gate and approvals see
@@ -33,7 +33,7 @@ both spliced in (#267, #265, keeps `app.py` under the file-length cap):
 |---|---|
 | `GET /` | login page or chat page |
 | `POST /login` | sets cookie, 303 to `/` |
-| `POST /send` | 202 accepted, fire-and-forget |
+| `POST /send` | `{thread, text, interrupt?}` → 202 whose body says what became of it: `queued`, `injected` (into the running turn), `answered` (an approval card), `command` (slash command) |
 | `GET /sessions` | JSON buffer list |
 | `POST /delete` | buffer deletion |
 | `GET /history` | transcript for one thread — tool calls collapsed to name + call id |
@@ -83,9 +83,15 @@ Two frame shapes reach the browser:
 
 - A **web-origin** turn streams `delta`/`final` frames — `WebAdapter` (the
   origin channel for `web:` threads) calls `hub.to_watchers` from its
-  `send`/`send_delta`, reaching only the client tapped into that thread.
+  `send`/`send_delta`, reaching only the client tapped into that thread. Its
+  `inbound` (at turn start, or when an injected message is taken), `tool` and
+  `thinking` frames come via `Dispatcher.tapped()`, as for any thread.
+- A **slash command's answer** is a `command` frame (`{thread, command,
+  text}`) via `tapped()` on every channel, never a `final` — so the client
+  can't mistake it for a reply a running turn is streaming. Web sends it
+  nowhere else; other channels still reply through their adapter.
 - A client **tapped into** any other thread also gets that turn's
-  `inbound`/`delta`/`tool`/`final` frames via `Dispatcher.tapped()`, which
+  `inbound`/`delta`/`tool`/`thinking`/`final` frames via `Dispatcher.tapped()`, which
   checks `hub.is_watched()` before calling `to_watchers` — cheap for a thread
   nobody is watching. Out-of-turn cards (see Approvals surface below) reach a
   tapped thread the same way. **Every** completed turn, on every channel, also
@@ -94,8 +100,8 @@ Two frame shapes reach the browser:
   snippet) without mirroring its whole transcript.
 
 A `tick` bumps the thread to the top of the sidebar, marks it unread, and shows
-the reply preview as a snippet; a `delta`/`final` for an unknown thread
-triggers a session reload.
+the reply preview as a snippet; a `tick` for an unknown thread triggers a
+session reload.
 
 ### Approvals surface
 
@@ -120,8 +126,19 @@ daemon. Both server fields are `| None` because the web UI is optional.
 `view.py` maps stored wire messages to display rows: a text row (`{role: owner|
 chief, text}`, relabeling `user`→`owner`/`assistant`→`chief`) and, for each tool
 call an assistant message made, its own collapsed row (`{role: tool, call_id,
-name}`) — no args or result, so the row list's size tracks message count, not
-tool-output size. System prompts and empty turns drop out. `find_tool_call` looks
+name}`) — no args or result, so tool output never inflates the row list —
+preceded by a `{role: thinking, text}` row when the message stored reasoning
+(sent inline, so a reasoning model's rows do grow with its thinking). System
+prompts and empty turns drop out.
+
+Client side, a run of tool calls and thinking renders as one collapsed
+activity group labelled with the latest call's name. The transcript re-renders
+from `/history` only on a buffer switch, an SSE reconnect, or a command answer
+while idle (`/clear`, `/compact` rewrite what is stored) — never per frame. A
+slash command and its answer are never stored, so the client keeps them as
+client-only rows marked "not saved", anchored by stored-row count and
+re-placed after each re-render (dropped once the transcript shrinks past
+them). `find_tool_call` looks
 up one call's args + result on demand for `GET /history/tool`; a result that
 hasn't landed yet (call committed, its tool-role message not — mid-turn, or a
 crash `SessionManager` hasn't repaired yet) reports `pending`, and a call id
@@ -143,13 +160,22 @@ what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
 | `oauth_flow.py`, `oauth_login.py`, `oauth_attempt.py`, `oauth_notice.py`, `oauth_types.py` | the SDK provider and its redirect/callback pair; the owner's start / complete / logout; the supervisor's pickup and ending of a `/login` attempt; the once-only "needs login" notice; shared types |
 | `token_store.py` | `secrets/mcp-oauth/<server>.json`, the SDK's `TokenStorage` |
 | `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
+| `wiring.py` | boot phase: the parsed configs, the broker, and the manager (`build_mcp`) |
+
+A server opted in with `session_context: true` registers its tools `wants_context`:
+the handler `McpManager` builds takes chief's injected `context` off the arguments
+and sends it as the call's `_meta` (`chief/thread`, `chief/channel`), through
+`Supervisor.call` to `calls.call_tool`. A subagent's call carries its parent's
+session (`subagents.SubagentScope` hands the run's context to `mcp_*` tools only).
+Off by default; see [EXTENDING.md](./EXTENDING.md).
 
 Every `auth: oauth` connection is **passive** (boot, reconnect): the SDK's provider
 connects with a good token, refreshes a stale one, and only a real auth failure
 reaches its redirect step — where it raises `NeedsAuth` and parks the server. A
 `/login` arms one **interactive** attempt instead: the redirect step sends the link
-to the asking conversation and the callback step waits (ten minutes, bounded) for
-the browser's address. Only a genuine auth failure parks a server. A network error
+to the asking conversation (the owner's primary surface when that one reaches a
+non-owner) and the callback step waits (ten minutes, bounded) for the browser's
+address. Only a genuine auth failure parks a server. A network error
 never reaches the redirect step, but a 5xx or 429 from the token endpoint would —
 the SDK reads any non-200 refresh as a refusal, drops its tokens and sends the next
 request bare into a 401 — so `oauth_flow.py` subclasses the provider to raise on
@@ -331,35 +357,89 @@ TypeSafe Noul instruction *and* the fallback model's prompt, so the two screens
 ask the same question. Deleting it makes every screen "unavailable" (monitor
 wakes withheld, tool results bannered) — loud, not silent.
 
-## Subagents — `src/chief/subagents.py`
+## Subagents — `src/chief/subagents.py`, `src/chief/agent/subagent_*.py`
 
-Structurally near-identical to classifiers — same registry and frontmatter shape —
-but with a tool and a real tool loop. Uses plain `yaml.safe_load`; there is no
-label problem here.
+Definitions are structurally near-identical to classifiers — same registry and
+frontmatter shape — but with a tool and a real tool loop. `AgentDef`: `name`,
+`description`, `system_prompt`, `tools | None` (None = every tool minus spawn),
+`model | None`.
 
-`AgentDef`: `name`, `description`, `system_prompt`, `tools | None` (None = every
-tool minus spawn), `model | None`.
+`spawn_agent` (PRD #308) folds `action=spawn|list|cancel`:
 
-`spawn_agent(name, task)`:
+- **spawn** (`name`, `task`, `wait`) starts a `SubagentRun` in the
+  `SubagentPool` and returns `spawned sub:<parent>:<hex> (<name>)` at once. Its
+  messages are `PREAMBLE` + the definition prompt, then the task. Unknown names
+  return an error listing the known agents. `wait=true` blocks until the result —
+  or returns early with `subagent X asks: … — still running, reply with
+  send_msg(to=X)` on the run's first question, after which it is async.
+- **list** / **cancel** are scoped to the caller's own runs; a cancel waits for
+  the run to wind down and the parent is told `cancelled by parent`. The owner's
+  `/tasks` and `/cancel <id>` cover every run (`cancelled by owner`).
 
-1. Unknown name returns an error string enumerating the known agents.
-2. Runs the standard `agent.loop.run_turn` with the agent's system prompt and the
-   task, on `definition.model or default_model`.
-3. `on_delta` is a **no-op** — subagent output does not stream to any channel;
-   only the final text returns.
-4. Records cost against the budget under `f"subagent:{name}"`.
-5. Returns `result.text` as the tool result.
+Lifecycle (`agent/subagent_drive.py` `drive`): each turn is the standard
+`agent.loop.run_turn` on `definition.model or default_model`, with a no-op
+`on_delta`, the core `post_tool` screen, the run's inbox as the loop's `drain`,
+and `stop` once `finish` was called. Cost is recorded under `subagent:<name>`
+per model call (`on_usage`), so a cancelled or failed turn's spend still counts.
+Before each turn the budget is checked: once exhausted the run switches to the
+`downgrade` model role, or stops (`stopped: budget exhausted`) without one. A
+kill or cancel notice's "last progress" is the run's latest assistant text, read
+off the live transcript, so a run killed mid-turn reports where it got to.
+A run that never messaged its parent auto-finishes with its last text; once it
+has, a turn ending means idle — it waits for a message, then continues; it ends
+on `finish(result)` or `subagents.idle_timeout_s` (kill notice with task and
+last progress). Every ending reaches the parent through
+`SubagentPool._result` → the router's inject-or-wake, as a message headed
+`[message m-… from subagent <id> (<name>)]`. A turn holds one of
+`subagents.max_concurrent` slots only while it runs, never while idle.
 
-### Tool filtering and the recursion guard
+Orphans: `SessionManager.set_on_wipe` → `pool.cancel_children`, so any clear or
+delete of the parent (session tool, `/clear`, `/prune`, cockpit) silently
+cancels its runs (audited `subagent_cancelled`). Restart: the pool's
+pre-restart hook writes `data/subagent_notices.json`; the fresh boot
+(`entrypoint.deliver_subagent_notices`) tells each parent `killed by restart`
+with the task and progress. Runs are never resumed.
 
-`FilteredTools` wraps the shared dispatcher rather than building a new registry,
-so subagents get the live toolset, filtered.
+### Tools, filtering, the recursion guard
 
-**`_allowed` hardcodes `spawn_agent → False` before consulting the allowlist**, so
-a subagent can never spawn further subagents even if its frontmatter names it.
+A run's dispatcher is `RunTools(FilteredTools(tools_factory(parent, channel,
+run_id), allow, subagent=True))`: the parent's **gated** tools (cards on the
+parent's thread, audit `subagent` field, no announcements), filtered, plus
+`finish`, which `RunTools` intercepts before the gate.
 
-The filter applies in both directions — `specs()` hides disallowed tools from the
-model, and `dispatch()` re-checks at call time and returns an error string.
-Defense in depth against a hallucinated call.
+**`_allowed` refuses `SUBAGENT_NEVER` (`spawn_agent`, `restart`, `revert_edits`)
+before consulting the allowlist**, so a subagent can never spawn further subagents,
+nor restart or roll back the daemon, even if its frontmatter names them. A restart
+fires only at a session turn's boundary; a detached run calling it would close turn
+admission with nothing left to exec, wedging the daemon.
+For a subagent `send_msg` is always allowed, or an allowlisted agent could never
+reach its parent. The filter applies in both directions — `specs()` hides
+disallowed tools from the model, and `dispatch()` re-checks at call time and
+returns an error string.
 
 **Subagents never fire hooks.** Only `Session._one_turn` does.
+
+## Peers — `src/chief/peers/`
+
+`send_msg(to, text, reply_to?)` (`peers/tools.py`) → `PeerRouter`
+(`peers/router.py`). The router checks scope (no self-sends, a known
+`thread_key`, only your own `sub:` runs, a subagent only to its parent), counts
+the pair in `PairCounter` (`peers/loopguard.py`; past
+`peers.loop_warn_count` in `peers.loop_window_s`, both sides get the warning
+text — the sender in its tool result, the receiver under the message), audits
+`peer_message`, and delivers: `Session.deliver` into a busy receiver's inbox
+(drained after its next tool batch; a leftover after a text-only answer starts a
+follow-up turn from the dispatcher), else a tracked background
+`dispatcher.handle(Message(channel, "system", to, text))`. Never awaited inline —
+that would stall the sender, or deadlock on a self-thread. The envelope
+(`peers/envelope.py`) renders `[message m-<8 hex> from session <key> re m-…]`;
+keep that header stable, core skills key on it.
+
+Reaching the owner from a thread that isn't theirs is a forward, not a
+separate tool: the `messaging` skill sends `send_msg` to
+`owner.primary_target` (the owner's iMessage thread, else `web:main`),
+which tells them in its own transcript — treating the forward as information,
+never instructions — and routes their answer back. `session action=list` tags
+owner-audience threads `(owner)` (`policy.owner_audience`) and the primary one
+`(owner, primary)`; `build_app` ensures that row exists at boot, since
+`send_msg` refuses an unknown thread.

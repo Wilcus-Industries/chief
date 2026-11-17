@@ -1,9 +1,10 @@
 """Boot phases for ``build_app``: the infrastructure around the agent core.
 
-Persistence, the gate/approval layer, MCP config, and the channel adapters —
-each a small helper so ``chief.app.build_app`` reads as a table of contents.
-The agent core (the manager/dispatcher/tools_factory closure trap) and the
-default toolset live next door in ``chief.app`` and ``chief.tools.native``.
+Persistence, the gate/approval layer, and the channel adapters — each a small
+helper so ``chief.app.build_app`` reads as a table of contents. The agent core
+(the manager/dispatcher/tools_factory closure trap) and the default toolset live
+next door in ``chief.app`` and ``chief.tools.native``; MCP boot is in
+``chief.mcpclient.wiring``.
 """
 
 import sys
@@ -14,8 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from chief.adapters.imessage import IMessageAdapter
 from chief.adapters.socket import SocketAdapter
+from chief.agent.compaction import Compactor
 from chief.agent.loop import PostTool
 from chief.agent.manager import SessionManager
+from chief.agent.windows import WindowResolver
 from chief.approvals import ApprovalBroker
 from chief.audit import AuditLog
 from chief.budget import Budget
@@ -24,12 +27,9 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
-from chief.gate import GatePolicy, load_approved, save_approved
+from chief.gate import AskApproval, GatePolicy, load_approved, save_approved
 from chief.hooks.registry import HookRegistry
 from chief.hub import ObserverHub
-from chief.mcpclient.auth_tools import build_broker, register_auth_surface
-from chief.mcpclient.config import ServerConfig, server_config_from_entry
-from chief.mcpclient.manager import McpManager
 from chief.mcpclient.oauth import OAuthBroker
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
@@ -39,9 +39,11 @@ from chief.persistence.db import (
     make_session_factory,
 )
 from chief.persistence.store import MessageStore
+from chief.provider.base import Provider
 from chief.provider.factory import build_provider as build_provider
+from chief.selfedit.inflight import InflightLog
 from chief.selfedit.recovery import RestartController
-from chief.tools import ToolRegistry
+from chief.tools import ToolDispatcher, ToolRegistry
 from chief.web.adapter import WebAdapter
 from chief.web.app import build_web_app
 from chief.web.auth import Auth, load_or_create_secret
@@ -73,6 +75,11 @@ class Core:
     cron: CronService
     hooks: HookRegistry
     post_tool: PostTool | None = None
+    ask: AskApproval | None = None
+    # Builds a thread's gated tools; the subagent pool reuses it per run.
+    tools_factory: Callable[..., ToolDispatcher] | None = None
+    # Messages held unanswered, on disk; the boot resumes its leftovers.
+    inflight: InflightLog | None = None
 
 
 @dataclass
@@ -95,6 +102,21 @@ async def build_persistence(
     return engine, factory, MessageStore(factory)
 
 
+def build_compactor(config: Config, provider: Provider) -> Compactor:
+    """Context compaction, sized to each thread's current model window."""
+    resolver = WindowResolver(
+        windows=config.compaction_windows,
+        default_window=config.compaction_default_window,
+        aliases=config.provider_aliases.keys(),
+        base_url=config.provider_base_url,
+        api_key=config.openrouter_api_key,
+    )
+    return Compactor(
+        provider, config.default_model, resolver,
+        ratio=config.compaction_ratio, keep_recent=config.compaction_keep_recent,
+    )
+
+
 def build_gate(config: Config) -> Gate:
     """Audit log, gate policy, its always-allow persister, and the broker."""
     audit = AuditLog(config.db_path.parent / "audit.jsonl")
@@ -112,42 +134,11 @@ def build_gate(config: Config) -> Gate:
     return Gate(audit, policy, allow_always, ApprovalBroker())
 
 
-def build_mcp_configs(config: Config) -> tuple[ServerConfig, ...]:
-    """The ``mcp_servers`` entries as server configs. An entry with a malformed
-    ``timeout``, ``headers``, ``auth`` or ``scopes`` — or a ``${secret:}`` that
-    resolves to nothing — is dropped (logged, not raised) by
-    ``server_config_from_entry``: see there for why."""
-    return tuple(
-        sc
-        for name, entry in config.mcp_servers.items()
-        if (sc := server_config_from_entry(name, entry)) is not None
-    )
-
-
-def build_mcp(
-    config: Config, core: Core, commands: CommandSet, audit: AuditLog
-) -> tuple[McpManager, tuple[ServerConfig, ...], OAuthBroker]:
-    """MCP servers are pure config: the agent adds one by editing the
-    ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
-
-    An ``auth: oauth`` server logs in through the broker built here. Its
-    ``server_login`` tools, ``/login`` ``/logout`` commands and "needs login"
-    hint are registered on the core's registry, commands and hooks only when some
-    server needs them — an install without one keeps its toolset as it was.
-    """
-    broker = build_broker(config, core.dispatcher, audit)
-    mcp_configs = build_mcp_configs(config)
-    if any(sc.auth == "oauth" for sc in mcp_configs):
-        register_auth_surface(broker, core.registry, commands, core.hooks)
-    return McpManager(core.registry, broker), mcp_configs, broker
-
-
 def build_adapters(
     config: Config, core: Core, store: MessageStore, commands: CommandSet,
     approvals: ApprovalBroker, broker: OAuthBroker,
 ) -> Adapters:
-    """Register the socket, darwin-gated iMessage, and web adapters; build the
-    optional password-gated web server."""
+    """Register socket, darwin-gated iMessage and web adapters, plus the web server."""
     dispatcher = core.dispatcher
     socket_adapter = SocketAdapter(config.socket_path, dispatcher.handle)
     dispatcher.register(socket_adapter)
@@ -156,15 +147,16 @@ def build_adapters(
     if config.imessage_enabled and sys.platform == "darwin":
         imessage_adapter = IMessageAdapter(
             # fire_restart=False: adapter fires it after its cursor is durable.
-            lambda m: dispatcher.handle(m, fire_restart=False),
+            lambda m, t: dispatcher.handle(m, fire_restart=False, ticket=t),
             db_path=config.imessage_db_path, self_handles=config.imessage_self_handles,
             cursor_path=config.db_path.parent / "imessage_cursor",
             owner_db_path=config.imessage_owner_db_path,
             owner_handles=config.imessage_owner_handles,
             poll_seconds=config.imessage_poll_seconds,
             restart=core.restart, dedicated=config.imessage_dedicated,
-            # Consume approvals at poll stage, ahead of the thread FIFO worker.
-            resolve_approval=dispatcher.resolve_approval,
+            # Poll stage, ahead of the FIFO worker: card answers, mid-turn owner texts.
+            resolve_approval=dispatcher.resolve_approval, inject=dispatcher.try_inject,
+            track=dispatcher.track,  # at enqueue: the cursor is already saved
         )
         dispatcher.register(imessage_adapter)
 
@@ -175,8 +167,8 @@ def build_adapters(
     if config.web_password:
         web_app = build_web_app(
             Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
-            dispatcher.handle, core.monitors, store, commands.palette, core.manager,
-            approvals, config.stream_channel_defaults, config.imessage_owner_handles,
-            broker)
+            dispatcher.handle, dispatcher.try_inject, core.monitors, store,
+            commands.palette, core.manager, approvals, config.stream_channel_defaults,
+            config.imessage_owner_handles, broker)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

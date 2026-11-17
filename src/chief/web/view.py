@@ -36,6 +36,10 @@ def render_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = message.get("role")
         if role not in ("user", "assistant"):
             continue
+        # Stored reasoning (display only) leads the step it produced.
+        thinking = str(message.get("reasoning") or "").strip()
+        if thinking:
+            rows.append({"role": "thinking", "text": thinking})
         text = _content_text(message.get("content")).strip()
         if text:
             rows.append(

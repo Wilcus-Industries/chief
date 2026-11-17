@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 RECONNECT_DELAY_SECONDS = 5.0
 
-#: ``(server, tool listing) -> tool count`` — how a connection hands its
+#: ``(server config, tool listing) -> tool count`` — how a connection hands its
 #: discovered tools to whoever owns the registry.
-RegisterTools = Callable[[str, Any], int]
+RegisterTools = Callable[[ServerConfig, Any], int]
 
 
 class Supervisor:
@@ -143,7 +143,7 @@ class Supervisor:
             session = await open_session(stack, config, auth)
             self._drop()  # a refresh retry's predecessor, held until now
             self._live = Live(session, asyncio.Event())
-            count = self._register_tools(config.name, await session.list_tools())
+            count = self._register_tools(config, await session.list_tools())
             if not ready.done():
                 ready.set_result(count)
             if broker is not None:
@@ -160,12 +160,17 @@ class Supervisor:
         if live is not None:
             live.gone.set()
 
-    async def call(self, tool_name: str, arguments: dict[str, Any]) -> str:
+    async def call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+    ) -> str:
         """Run one tool and flatten its text content; failures are strings."""
         live = self._live
         if live is None or self._retrying or self._needs_login():
             return self._unavailable()
-        text = await call_tool(live, tool_name, arguments)
+        text = await call_tool(live, tool_name, arguments, meta)
         return self._unavailable() if text is None else text
 
     def _needs_login(self) -> bool:

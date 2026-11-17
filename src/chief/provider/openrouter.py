@@ -10,6 +10,7 @@ from chief.provider.base import (
     Completion,
     ProviderError,
     ProviderEvent,
+    ReasoningDelta,
     TextDelta,
     ToolCall,
     ToolSpec,
@@ -115,22 +116,25 @@ class OpenRouterProvider:
                 progressed[0] = True
                 if data == "[DONE]":
                     break
-                delta_text = acc.feed(json.loads(data))
-                if delta_text:
-                    yield TextDelta(delta_text)
+                for event in acc.feed(json.loads(data)):
+                    yield event
         yield acc.completion()
 
 
 class _StreamAccumulator:
-    """Assembles SSE chunks into text, tool calls, and usage."""
+    """Assembles SSE chunks into text, reasoning, tool calls, and usage."""
 
     def __init__(self) -> None:
         self._text: list[str] = []
+        self._reasoning: list[str] = []
         self._calls: dict[int, dict[str, str]] = {}
         self._usage = Usage()
 
-    def feed(self, chunk: dict[str, Any]) -> str:
-        """Consume one parsed SSE chunk; return any new assistant text."""
+    def feed(self, chunk: dict[str, Any]) -> list[ProviderEvent]:
+        """Consume one parsed SSE chunk; return its new reasoning/text deltas.
+
+        Reasoning is whatever the model already emits as ``delta.reasoning``
+        — the request does not ask for it, so enabling it changes nothing."""
         if usage := chunk.get("usage"):
             self._usage = Usage(
                 prompt_tokens=usage.get("prompt_tokens", 0),
@@ -139,7 +143,7 @@ class _StreamAccumulator:
             )
         choices = chunk.get("choices") or []
         if not choices:
-            return ""
+            return []
         delta = choices[0].get("delta") or {}
         for tc in delta.get("tool_calls") or []:
             slot = self._calls.setdefault(
@@ -152,11 +156,14 @@ class _StreamAccumulator:
                 slot["name"] += function["name"]
             if function.get("arguments"):
                 slot["arguments"] += function["arguments"]
-        content = delta.get("content")
-        if content:
-            self._text.append(content)
-            return str(content)
-        return ""
+        events: list[ProviderEvent] = []
+        if reasoning := delta.get("reasoning"):
+            self._reasoning.append(str(reasoning))
+            events.append(ReasoningDelta(str(reasoning)))
+        if content := delta.get("content"):
+            self._text.append(str(content))
+            events.append(TextDelta(str(content)))
+        return events
 
     def completion(self) -> Completion:
         calls = tuple(
@@ -167,5 +174,10 @@ class _StreamAccumulator:
             )
             for _, slot in sorted(self._calls.items())
         )
-        return Completion(text="".join(self._text), tool_calls=calls, usage=self._usage)
+        return Completion(
+            text="".join(self._text),
+            tool_calls=calls,
+            usage=self._usage,
+            reasoning="".join(self._reasoning),
+        )
 

@@ -7,12 +7,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chief.agent.subagent_notices import take_notices
 from chief.config.history import snapshot
 from chief.install.basepin import resolve_pending
 from chief.install.migrate import migrate_instance
 from chief.instance_lock import AlreadyRunning, acquire_instance_lock
 from chief.selfedit.notice import mark_notice_rolled_back, take_restart_notice
 from chief.selfedit.recovery import clear_marker, restart_daemon, rollback_if_marked
+from chief.selfedit.resume import resume_interrupted, resume_plan
 
 if TYPE_CHECKING:  # the runtime import stays inside the seatbelt below.
     from chief.daemon import App
@@ -24,17 +26,40 @@ async def report_restart(app: "App", repo_root: Path) -> None:
     """Tell the thread that asked for the restart that chief is back.
 
     Runs once the adapters are serving, so the owner does not have to poke
-    the thread to find out whether the daemon returned. Best effort: a
+    the thread to find out whether the daemon returned. A thread whose surface
+    reaches a non-owner never gets it (PRD #308: nothing auto-sends there);
+    the owner's primary surface does, naming the thread. Best effort: a
     missing channel or a dead adapter must not take the fresh boot down.
     """
+    from chief.owner import primary_target  # inside the boot seatbelt
+    from chief.policy import owner_audience
+
     notice = take_restart_notice(repo_root)
     if notice is None:
         return
+    channel, thread, text = notice.channel, notice.thread_key, notice.text()
+    handles = app.config.imessage_owner_handles
+    if not owner_audience(channel, thread, owner_handles=handles):
+        channel, thread = primary_target(app.config)
+        text = f"{text} [asked in thread {notice.thread_key}]"
     try:
-        adapter = app.dispatcher.adapter(notice.channel)
-        await adapter.send(notice.thread_key, notice.text())
+        await app.dispatcher.adapter(channel).send(thread, text)
     except Exception:
         logger.exception("could not report the restart on %s", notice.channel)
+
+
+async def deliver_subagent_notices(app: "App", data_dir: Path) -> None:
+    """Tell each parent whose subagent died with the old process (PRD #308).
+
+    Each notice reaches the parent like any peer message — injected or waking
+    it — so the parent decides whether to respawn. Never raises: a bad notice
+    file must not take the fresh boot down."""
+    if app.peers is None:
+        return
+    for notice in take_notices(data_dir):
+        app.peers.router.deliver(
+            notice["parent_key"], notice["parent_channel"], notice["text"]
+        )
 
 
 def record_config(config_path: Path, data_dir: Path) -> None:
@@ -63,6 +88,10 @@ async def amain() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
+    # Every model/screen request logs a line at INFO — noise that buries the
+    # daemon's own log. Their warnings and errors still come through.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     repo_root = Path.cwd()
     try:
         # Imported inside the seatbelt: a self-edit that breaks chief.app's
@@ -81,6 +110,10 @@ async def amain() -> None:
         # chat.db and answer every iMessage twice. Held for the whole process.
         _lock = acquire_instance_lock(config.db_path.parent / "chief.lock")
         app = await build_app(config)
+        # The messages the last process died holding. Their threads are held
+        # before any adapter starts, so nothing sent since overtakes them.
+        plan = resume_plan(app.inflight.take_interrupted() if app.inflight else [])
+        app.dispatcher.hold(list(plan))
         await app.start()
     except AlreadyRunning:
         logger.error("another chief instance is already running — refusing to start")
@@ -101,6 +134,11 @@ async def amain() -> None:
     if (version := resolve_pending(repo_root)) is not None:
         logger.info("now running %s", version)
     await report_restart(app, repo_root)
+    await deliver_subagent_notices(app, config.db_path.parent)
+    # Held on to until shutdown; each releases its thread when done.
+    resuming = (
+        resume_interrupted(app.dispatcher, app.inflight, plan) if app.inflight else []
+    )
     logger.info("chief up — socket at %s", config.socket_path)
 
     stop = asyncio.Event()
@@ -108,6 +146,10 @@ async def amain() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     await stop.wait()
+    # A resumed turn still running is cut off like any other; its record
+    # survives the cancel, and the next boot gives up on it (one retry).
+    for task in resuming:
+        task.cancel()
     await app.stop()
     logger.info("chief stopped")
 

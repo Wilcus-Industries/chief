@@ -2,7 +2,10 @@
 expose send. Nothing channel-specific lives outside the adapter itself."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
+
+from chief.agent.restart_gate import TurnTicket
 
 
 @dataclass(frozen=True)
@@ -14,6 +17,13 @@ class Message:
     thread_key: str
     text: str
     attachments: tuple[str, ...] = ()
+
+
+# ``Dispatcher.try_inject``: offer a message to its thread's running turn, with
+# the caller's own queue path to hand it back through if the turn ends first —
+# along with its in-flight record, which the queue path must keep alive.
+Requeue = Callable[[Message, TurnTicket], None]
+Inject = Callable[[Message, Requeue], bool]
 
 
 class Adapter(ABC):

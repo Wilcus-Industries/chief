@@ -20,10 +20,11 @@ monitor / cron wake ────────────────┼─→ Di
 
 `build_app` (`src/chief/app.py`) runs phases in a fixed order:
 `build_persistence` → `build_gate` → `_build_agent_core` → `register_native_tools`
-→ `CommandSet` → `build_mcp` → `build_adapters`. `build_mcp` also builds the OAuth
-broker and — only when some server has `auth: oauth` — registers the login tools,
-`/login` / `/logout` and the "needs login" hint on the core's registry, commands
-and hooks; `build_adapters` hands the broker to the web app for `/oauth/callback`.
+→ `CommandSet` → `build_mcp` (`mcpclient/wiring.py`) → `build_adapters`. `build_mcp`
+also builds the OAuth broker and — only when some server has `auth: oauth` —
+registers the login tools, `/login` / `/logout` and the "needs login" hint on the
+core's registry, commands and hooks; `build_adapters` hands the broker to the web
+app for `/oauth/callback`.
 
 The closure cycle is deliberate: `tools_factory` references `dispatcher`, which
 is constructed *after* it — late binding resolves at call time. Don't "fix" it
@@ -144,7 +145,18 @@ returns a generic message rather than leaking internals.
 
 **Concurrency:** the dispatcher is *not* serial. Serialization comes from three
 places — iMessage's per-thread FIFO worker, `Session._lock` per thread, and
-`SessionManager._semaphore` globally (`max_concurrent_sessions`).
+`SessionManager._semaphore` globally (`max_concurrent_sessions`). Subagent
+turns take a separate semaphore (`subagents.max_concurrent`, held only while a
+subagent turn runs) and never call `enter_turn`, so a restart never waits on
+them.
+
+**Quiet turns:** in a thread `owner_audience` rejects, `_run_turn` sends nothing
+to the adapter — no deltas, final, notice, error — whoever triggered it (see
+SECURITY.md, the non-owner output rule); hub frames still fire.
+
+**Leftover inbox:** right after `session.run_turn` returns (no await between the
+lock release and the take), anything delivered to the session too late for a
+tool step starts a follow-up `system` turn as a tracked background task.
 
 ## 5. Session and the turn — `agent/session.py`, `agent/manager.py`
 
@@ -210,17 +222,26 @@ source attribute — contributed text may be attacker-influenced.
 
 `run_turn` loops up to `MAX_ITERATIONS`:
 
-1. `_stream_once` iterates `provider.stream(...)`; each `TextDelta` is awaited
-   straight out to the adapter. The terminal `Completion` is captured; a stream
-   ending without one raises.
-2. Appends the assistant message.
-3. **No tool calls → return `TurnResult`.** The only success exit.
+1. `stream_once` (`agent/model_call.py`) iterates `provider.stream(...)` over
+   `for_model(messages)`; each `TextDelta` is awaited straight out to the
+   adapter, each `ReasoningDelta` to `on_reasoning`. The terminal `Completion`
+   is captured; a stream ending without one raises.
+2. Appends the assistant message — with its `reasoning`, display-only, when
+   the model sent any.
+3. **No tool calls, and no owner message injected mid-turn waiting → return
+   `TurnResult`.** The only success exit. With one waiting, the text answer
+   goes out via `on_interim` and the loop continues on the injected text.
 4. Per `ToolCall`: the key is `(name, canonical-json args)`. Seen more than
    `REPEAT_LIMIT` times *this turn* → refused with a course-correcting error
    string instead of running. Otherwise `tools.dispatch(call)`, then the
    `post_tool` hooks screen the result — annotate or veto — before step 5
    appends it. The repeat-limit refusal is not screened.
-5. Appends the tool result.
+5. Appends the tool result, then any messages injected since — owner messages
+   (`Dispatcher.try_inject`: a web interrupt, or an iMessage text taken at its
+   poll stage while the thread's turn runs) and peer messages (`PeerRouter.deliver`)
+   share the session's inbox — as user messages. The Anthropic wire folds such a
+   user message into the tool-result turn. Then `stop()` returning True ends the
+   turn with the last assistant text (a subagent's `finish`).
 6. Exhausting the iteration cap returns an explicit error string.
 
 ### Gate, then registry
@@ -234,7 +255,9 @@ tool name is recorded and passed through to the registry for a helpful error —
 a bad-arguments string, anything else becomes an error string. Tool handlers
 follow the same rule — return error strings, don't raise.
 
-Approval cards ride the session's own channel: the `ask` closure resolves
+Approval cards ride the session's own channel (owner threads only — a non-owner
+thread's card goes to the cockpit plus a pointer on the owner's primary surface;
+`gate_surface.py`): the `ask` closure resolves
 `dispatcher.adapter(ctx.channel).send`, so the card appears where the
 conversation is — and also mirrors to any dashboard client tapped into that
 thread via `dispatcher.tapped()`, answerable there through the same broker
@@ -263,6 +286,24 @@ up, and a `KeyError` there is by design a wiring bug rather than a silent drop.
    where the reply is still unsent. `enter_turn` holds new turns while
    `fire_if_requested` waits on idle, bounded by `DRAIN_TIMEOUT_SECONDS`, then
    `os.execv`. See [ARCHITECTURE.md](./ARCHITECTURE.md#self-edit-the-restart-pipeline).
+   Owner/system messages the exec (or a crash, or `chief stop`) kills are
+   recorded in `data/inflight_turns.json` (`selfedit/inflight.py`) by whoever
+   first holds them: the iMessage FIFO at enqueue (the cursor is already
+   saved), `Dispatcher.handle` at entry, `try_inject` while a message waits in
+   a running turn's inbox (an inbox leftover hands its record to the requeue
+   path). A record is flagged `started` once its user message is stored and
+   ends once the reply is sent, or on failure; a cancel keeps it. The next
+   boot (`selfedit/resume.py`) holds each affected thread on the dispatcher
+   before any adapter starts (a held thread takes no injections either),
+   replays each never-started message verbatim
+   through `Dispatcher.replay` (owner/system only, commands run, no second
+   publish), and wakes each cut-off thread once with `RESUME_NOTE`.
+   Records stay on disk until their resume ends them; one that dies again is
+   given up on once it had started, and any older than an hour since it arrived is dropped. Not
+   covered: a message lost before chief records it (an iMessage row between
+   cursor save and enqueue, a web request before `handle` runs), peer
+   messages (`PeerRouter.deliver` injections and wakes), and a
+   reply whose send the exec cuts short (the thread is woken instead).
 3. **Approval answers must be consumed before enqueue** on any channel with a
    serialized per-thread worker — otherwise the answer queues behind the very
    turn it would unblock. This is a fixed deadlock, not an accident.

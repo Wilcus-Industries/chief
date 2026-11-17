@@ -16,6 +16,31 @@ def test_oauth_entry_parses_auth_and_scopes() -> None:
     )
 
 
+def test_session_context_rides_along_with_the_oauth_and_header_keys() -> None:
+    config = server_config_from_entry(
+        "rh",
+        {
+            "url": "https://x/mcp", "auth": "oauth", "scopes": ["internal"],
+            "headers": {"X-Api": "v"}, "timeout": 5, "session_context": True,
+        },
+    )
+    assert config == ServerConfig(
+        name="rh", url="https://x/mcp", auth="oauth", scopes=("internal",),
+        headers={"X-Api": "v"}, timeout=5.0, session_context=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{"timeout": "soon"}, {"timeout": 0}, {"headers": ["x"]}, {"auth": "bearer"}],
+)
+def test_a_bad_key_skips_the_server_even_when_it_opts_in_to_session_context(
+    bad: dict[str, object],
+) -> None:
+    entry = {"url": "https://x/mcp", "session_context": True, **bad}
+    assert server_config_from_entry("rh", entry) is None
+
+
 def test_entry_without_them_keeps_both_unset() -> None:
     config = server_config_from_entry("plain", {"url": "https://x/mcp"})
     assert config is not None

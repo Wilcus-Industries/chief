@@ -2,6 +2,7 @@
 only the LLM provider swapped (PRD #183 testing seam)."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import socket
@@ -11,20 +12,21 @@ from typing import Any
 import httpx
 import pytest
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Message
 from chief.app import App, build_app
 from chief.bus import Event
 from chief.config import AliasSpec, BackendSpec, Config
 from chief.mcpclient.manager import ServerConfig
+from chief.mcpclient.wiring import build_mcp_configs
 from chief.policy import RICH, StreamPolicy
 from chief.provider.anthropic import AnthropicProvider
 from chief.provider.base import Completion, ToolCall
 from chief.provider.openrouter import OpenRouterProvider
 from chief.provider.router import RouterProvider
 from chief.tools.shell.service import GUARD_REFUSED_EXIT_CODE
-from chief.wiring import build_mcp_configs, build_provider
+from chief.wiring import build_provider
 
-from .fakes import FakeProvider, text_turn
+from .fakes import CapturingAdapter, FakeProvider, text_turn
 
 Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 
@@ -638,38 +640,24 @@ async def test_prompt_schedule_creation_raises_no_card(
         await shutdown(app, streams)
 
 
-class _CapturingAdapter(Adapter):
-    """A registered origin adapter that captures its outbound sends — the
-    fake device transport at the edge (#277). Everything upstream of ``send``
-    (the web route, the dispatcher, the session turn) is the real wiring."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.sent: list[tuple[str, str]] = []
-
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
-
-    async def send(self, thread_key: str, text: str) -> None:
-        self.sent.append((thread_key, text))
-
-
 async def test_web_send_drives_the_real_cross_channel_dispatch_path(
     tmp_path: Path, sock_path: Path
 ) -> None:
-    # #277: an authed POST /send for a non-web 1:1 thread runs through the REAL
-    # dispatcher → session turn → the thread's registered origin adapter, and
-    # the outbound reply mirrors to the web hub. Only the model (FakeProvider)
-    # and the device transport (the capturing adapter's send) are faked.
+    # #277: an authed POST /send for the owner's non-web 1:1 thread runs through
+    # the REAL dispatcher → session turn → the thread's registered origin
+    # adapter, and the outbound reply mirrors to the web hub. Only the model
+    # (FakeProvider) and the device transport (the capturing adapter's send) are
+    # faked. (A stranger's thread stays quiet instead: test_owner_audience.)
     # An ephemeral port, so the test never collides with a live daemon on 8130.
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         free_port = probe.getsockname()[1]
     config = make_config(
-        tmp_path, sock_path, web_password="hunter2", web_port=free_port
+        tmp_path, sock_path, web_password="hunter2", web_port=free_port,
+        imessage_owner_handles=("+15551234567",),
     )
     app, streams = await boot(config, FakeProvider([text_turn("on my way")]))
-    device = _CapturingAdapter("imessage")
+    device = CapturingAdapter("imessage")
     app.dispatcher.register(device)
     assert app.web_server is not None
     client = httpx.AsyncClient(
@@ -732,3 +720,49 @@ async def test_scheduled_command_gets_the_owner_send_guard(
     # Refused by the guard before reaching the shell — so `echo` never ran.
     assert f"exit={GUARD_REFUSED_EXIT_CODE}" in fired[0]
     assert not marker.exists()
+
+
+async def test_stop_completes_while_a_web_events_stream_is_open(
+    tmp_path: Path, sock_path: Path
+) -> None:
+    # Regression: an open web UI tab holds a /events SSE stream that only ends
+    # when the hub closes. stop() used to await the web server's graceful
+    # shutdown (which waits for every open connection) BEFORE closing the hub,
+    # so any restart with a tab open hung forever holding the instance lock.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+    config = make_config(
+        tmp_path, sock_path, web_password="hunter2", web_port=free_port
+    )
+    app, streams = await boot(config, FakeProvider([]))
+    base = f"http://127.0.0.1:{free_port}"
+    async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+        for _ in range(100):  # start() only schedules uvicorn; wait for bind
+            with contextlib.suppress(httpx.ConnectError):
+                resp = await client.post("/login", data={"password": "hunter2"})
+                break
+            await asyncio.sleep(0.05)
+        client.cookies.update(resp.cookies)
+        opened = asyncio.Event()
+
+        async def hold_events_open() -> None:
+            async with client.stream("GET", "/events") as events:
+                assert events.status_code == 200
+                opened.set()
+                async for _ in events.aiter_bytes():
+                    pass
+
+        reader = asyncio.create_task(hold_events_open())
+        await asyncio.wait_for(opened.wait(), timeout=5)
+        # Backstop for any other long-lived connection: graceful shutdown of
+        # the web server is bounded, never "wait for every client forever".
+        assert app.web_server is not None
+        assert app.web_server.graceful_shutdown_seconds is not None
+        streams[1].close()
+        # Well under the backstop: the stream must END (hub closed first),
+        # not merely be abandoned when the graceful-shutdown timeout fires.
+        await asyncio.wait_for(app.stop(), timeout=3)
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
+            await reader

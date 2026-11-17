@@ -67,6 +67,15 @@ The next boot connects it and its tools appear as `mcp_<name>_<tool>`. A server
 that fails to start is logged and skipped — a dead sidecar must not keep the whole
 daemon down. Reconnects re-register tools with `replace=True`.
 
+Optional per-server keys: `env` and `cwd` (stdio only; the environment is opt-in),
+`timeout` (connect wait, seconds), and `session_context: true`, which sends each
+tool call's calling session as `_meta` `chief/thread` + `chief/channel` — for a
+server that keeps per-session state (the playwright package's one-tab-per-session
+browser). A subagent's calls carry the session that spawned it. It is off by
+default because thread keys are often phone numbers; only turn it on for a
+server you trust with them. An opted-in server's tools cannot take an argument
+named `context` (chief's context replaces it; registration logs a warning).
+
 A `url` entry may also send static `headers` (header name → string). Never put a
 secret in one by value: write `${secret:name}` and the value is read at boot from
 the env var `NAME` (upper-cased), then the file `secrets/name`. Only that exact
@@ -110,8 +119,9 @@ discovered endpoints (mode 0600). `auth` and `headers` are for `url` entries; on
   model's prompt lists the servers waiting.
 - **Logging in.** Say "connect robinhood" (the model calls `server_login`) or send
   `/login robinhood` (the tools, `/login` and `/logout` exist only while some server
-  has `auth: oauth`). Chief sends a login link to *that conversation*; the model is
-  only told it went out. Approve it in a browser and the browser lands on
+  has `auth: oauth`). Chief sends a login link to *that conversation* (to your
+  primary channel instead when the conversation reaches someone other than you);
+  the model is only told it went out. Approve it in a browser and the browser lands on
   `http://127.0.0.1:<web_port>/oauth/callback?code=…`. On the machine running
   chief's web UI that page says "connected". From a phone it fails to load, which
   is expected: copy the address it tried to open and send it back as
@@ -161,11 +171,17 @@ core services call classifiers by name.
 Drop a `<name>.md` in `agents/` with frontmatter `name`, `description`, optional
 `tools` allowlist and `model`; the body is its system prompt.
 
-Omitting `tools` grants every tool **minus `spawn_agent`** — the recursion guard is
-hardcoded ahead of the allowlist, so a subagent can never spawn another one.
+Omitting `tools` grants every tool **minus `spawn_agent`, `restart` and
+`revert_edits`** — hardcoded ahead of the allowlist, so a subagent can never spawn
+another one, and never restart or roll back the daemon (a detached run has no turn
+boundary for the restart to fire at).
 
-Subagent output does not stream; only the final text returns as the tool result.
-Subagents never fire hooks.
+A spawn is async by default: the run works detached and its result arrives at the
+parent as a message (`wait=true` keeps the blocking form). The core `PREAMBLE` is
+prepended to every definition's prompt — don't repeat it. A subagent can always
+`send_msg` its parent regardless of `tools`, and its calls are gated on the
+parent's thread like the parent's own. Output does not stream. Subagents never
+fire hooks. See SUBSYSTEMS.md for the lifecycle (`finish`, idle timeout, cancel).
 
 ## Add a skill
 

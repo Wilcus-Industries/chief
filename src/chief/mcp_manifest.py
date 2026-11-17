@@ -1,7 +1,7 @@
 """A package manifest's ``mcp_servers`` block: shape validation + parsing.
 
 ``McpServerSpec`` matches ``config.yaml``'s own ``mcp_servers`` entry (see
-``config.Config.mcp_servers``, ``wiring.build_mcp``). Split out of
+``config.Config.mcp_servers``, ``mcpclient.wiring.build_mcp``). Split out of
 ``chief.pkg`` (issue #238) so both the validate() and parse() sides of
 this one concern — and their shared shape checks — have a file of their own.
 """

@@ -15,7 +15,14 @@ from chief.hub import ObserverHub
 from chief.persistence.db import make_session_factory
 from chief.persistence.store import MessageStore
 from chief.policy import RICH, StreamPolicy
-from chief.provider.base import ProviderError, ProviderEvent, ToolSpec
+from chief.provider.base import (
+    Completion,
+    ProviderError,
+    ProviderEvent,
+    ReasoningDelta,
+    TextDelta,
+    ToolSpec,
+)
 from chief.selfedit.recovery import RestartController
 from chief.strangers import StrangerLog
 from chief.tools import Tool, ToolRegistry
@@ -266,6 +273,36 @@ def _drain(queue: asyncio.Queue[dict[str, Any]]) -> list[dict[str, Any]]:
     return frames
 
 
+async def _reasoning_frames(
+    store: MessageStore, policy: StreamPolicy
+) -> list[dict[str, Any]]:
+    """One reasoning + text turn on a tapped ``cli:t`` under ``policy``."""
+    manager = SessionManager(
+        provider=FakeProvider(
+            [[ReasoningDelta("plan"), TextDelta("ok"),
+              Completion(text="ok", reasoning="plan")]]
+        ),
+        tools_factory=lambda thread, channel: ToolRegistry(),
+        store=store, default_model="m", system_prompt="s", max_concurrent=4,
+    )
+    hub = ObserverHub()
+    dispatcher = Dispatcher(manager, hub=hub, channel_defaults={"cli": policy})
+    dispatcher.register(RecordingAdapter())
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("hi"))
+    return _drain(queue)
+
+
+async def test_reasoning_streams_as_thinking_frames(store: MessageStore) -> None:
+    frames = await _reasoning_frames(store, RICH)
+    assert {"type": "thinking", "thread": "cli:t", "text": "plan"} in frames
+
+
+async def test_deltas_off_withholds_thinking_frames(store: MessageStore) -> None:
+    frames = await _reasoning_frames(store, StreamPolicy(tools=True))
+    assert all(f["type"] != "thinking" for f in frames)
+
+
 async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
     """A client tapped into a non-web thread receives that turn's inbound text,
     the name-only tool tick as the call fires, the reply deltas, and the final
@@ -304,6 +341,44 @@ async def test_watched_thread_streams_rich_frames(store: MessageStore) -> None:
         "type": "tick", "thread": "cli:t", "channel": "cli", "preview": "done"
     }
     assert adapter.sent == [("cli:t", "done")]  # origin channel still delivered
+
+
+class _StubCommands:
+    async def run(self, message: Message) -> str | Message | None:
+        return "answer" if message.text.startswith("/") else None
+
+
+async def test_web_command_answer_is_a_command_frame_not_a_final(
+    store: MessageStore,
+) -> None:
+    """A web client must never mistake a command's answer for the reply a turn
+    is streaming, so web gets a dedicated ``command`` frame (no ``final``)."""
+    hub = ObserverHub()
+    dispatcher = Dispatcher(make_manager(FakeProvider([]), store), hub=hub)
+    dispatcher.set_commands(_StubCommands())
+    queue = hub.listen("web:main")
+    await dispatcher.handle(
+        Message(channel="web", sender="owner", thread_key="web:main", text="/help")
+    )
+    assert _drain(queue) == [
+        {"type": "command", "thread": "web:main", "command": "/help", "text": "answer"}
+    ]
+
+
+async def test_tapped_client_sees_another_channels_command_answer(
+    store: MessageStore,
+) -> None:
+    hub = ObserverHub()
+    dispatcher = Dispatcher(make_manager(FakeProvider([]), store), hub=hub)
+    dispatcher.set_commands(_StubCommands())
+    adapter = RecordingAdapter()
+    dispatcher.register(adapter)
+    queue = hub.listen("cli:t")
+    await dispatcher.handle(owner_message("/help"))
+    assert adapter.sent == [("cli:t", "answer")]  # origin channel unchanged
+    assert _drain(queue) == [
+        {"type": "command", "thread": "cli:t", "command": "/help", "text": "answer"}
+    ]
 
 
 def _tool_manager(store: MessageStore) -> SessionManager:
@@ -462,7 +537,8 @@ async def test_web_origin_turn_omits_the_rich_final(store: MessageStore) -> None
     )
     frames = _drain(queue)
     assert not any(f["type"] == "final" for f in frames)
-    assert frames == [{
-        "type": "tick", "thread": "web:main",
-        "channel": "web", "preview": "hello back",
-    }]
+    assert frames == [
+        {"type": "inbound", "thread": "web:main", "text": "hi"},
+        {"type": "tick", "thread": "web:main",
+         "channel": "web", "preview": "hello back"},
+    ]

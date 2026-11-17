@@ -19,6 +19,7 @@ from chief.hooks.registry import HookRegistry
 from chief.mcpclient.oauth import OAuthBroker
 from chief.mcpclient.oauth_types import CALLBACK_PATH, REDIRECT_HOST, Surface
 from chief.owner import primary_target
+from chief.policy import owner_audience
 from chief.provider.base import ToolSpec
 from chief.tools import Tool, ToolContext, ToolRegistry
 
@@ -73,15 +74,25 @@ class CommandRegistry(Protocol):
 
 def build_broker(config: Config, dispatcher: Sender, audit: AuditLog) -> OAuthBroker:
     """The broker for ``config``: links and notices go out through the
-    dispatcher's adapters, the redirect points back at the web UI's callback."""
+    dispatcher's adapters, the redirect points back at the web UI's callback.
+
+    Nothing is auto-sent to a non-owner audience, whoever triggered the turn
+    (PRD #308), and a login link is no exception: asked for in a thread whose
+    surface reaches a non-owner, it goes to the owner's primary surface instead,
+    naming the thread."""
+    primary = primary_target(config)
 
     async def send(surface: Surface, text: str) -> None:
-        await dispatcher.adapter(surface[0]).send(surface[1], text)
+        channel, thread = surface
+        if not owner_audience(channel, thread, config.imessage_owner_handles):
+            text = f"{text}\n\n[asked in thread {thread}]"
+            channel, thread = primary
+        await dispatcher.adapter(channel).send(thread, text)
 
     return OAuthBroker(
         send=send,
         audit=audit,
-        notice_to=primary_target(config),
+        notice_to=primary,
         redirect_uri=f"http://{REDIRECT_HOST}:{config.web_port}{CALLBACK_PATH}",
         token_dir=TOKEN_DIR,
         notified_path=config.db_path.parent / "mcp-oauth-notified.json",

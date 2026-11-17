@@ -10,16 +10,26 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from chief.mcpclient.config import ServerConfig as ServerConfig
-from chief.mcpclient.config import server_config_from_entry as server_config_from_entry
+from chief.mcpclient.config import (
+    DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    ServerConfig,
+    server_config_from_entry,
+)
 from chief.mcpclient.supervisor import Supervisor
 from chief.provider.base import ToolSpec
-from chief.tools import Tool, ToolRegistry
+from chief.tools import Tool, ToolContext, ToolRegistry
 
 if TYPE_CHECKING:
     from chief.mcpclient.oauth import OAuthBroker
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "DEFAULT_CONNECT_TIMEOUT_SECONDS",
+    "McpManager",
+    "ServerConfig",
+    "server_config_from_entry",
+]
 
 
 class McpManager:
@@ -73,23 +83,43 @@ class McpManager:
         self._tasks.clear()
         self._links.clear()
 
-    def _register_tools(self, server: str, listing: Any) -> int:
+    def _register_tools(self, config: ServerConfig, listing: Any) -> int:
+        server = config.name
         for tool in listing.tools:
             spec = ToolSpec(
                 name=f"mcp_{server}_{tool.name}",
                 description=tool.description or "",
                 parameters=tool.inputSchema,
             )
+            props = (tool.inputSchema or {}).get("properties") or {}
+            if config.session_context and "context" in props:
+                logger.warning(
+                    "mcp server %s tool %s takes an argument named 'context'; "
+                    "session_context replaces it with chief's session context",
+                    server, tool.name,
+                )
+            handler = self._make_handler(server, tool.name, config.session_context)
             self._registry.register(
-                Tool(spec, self._make_handler(server, tool.name)), replace=True
+                Tool(spec, handler, wants_context=config.session_context),
+                replace=True,
             )
         return len(listing.tools)
 
-    def _make_handler(self, server: str, tool_name: str) -> Any:
+    def _make_handler(
+        self, server: str, tool_name: str, session_context: bool = False
+    ) -> Any:
         async def call(**arguments: Any) -> str:
+            meta = None
+            if session_context:
+                context: ToolContext | None = arguments.pop("context", None)
+                if context is not None:
+                    meta = {
+                        "chief/thread": context.thread_key,
+                        "chief/channel": context.channel,
+                    }
             link = self._links.get(server)
             if link is None:
                 return f"error: mcp server '{server}' is not connected"
-            return await link.call(tool_name, arguments)
+            return await link.call(tool_name, arguments, meta)
 
         return call

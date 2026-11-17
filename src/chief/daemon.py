@@ -14,7 +14,9 @@ from chief.dispatch import Dispatcher
 from chief.hub import ObserverHub
 from chief.mcpclient.manager import McpManager, ServerConfig
 from chief.monitors.service import MonitorService
+from chief.peers.wiring import Peers
 from chief.persistence.store import MessageStore
+from chief.selfedit.inflight import InflightLog
 from chief.tools.shell.service import ShellService
 from chief.web.adapter import WebAdapter
 from chief.web.server import WebServer
@@ -41,6 +43,8 @@ class App:
     mcp_configs: tuple[ServerConfig, ...]
     imessage_adapter: IMessageAdapter | None
     shell_service: ShellService
+    peers: Peers | None = None
+    inflight: InflightLog | None = None
 
     async def start(self) -> None:
         # Fail closed on monitors written before the scoping rule (#285).
@@ -61,12 +65,18 @@ class App:
 
     async def stop(self) -> None:
         await self.mcp_manager.stop()
+        # End every web UI /events stream BEFORE stopping the web server: its
+        # graceful shutdown waits for open connections, and those streams only
+        # end on hub.close() — closing the hub after it deadlocked every
+        # restart made while a web UI tab was open.
+        self.hub.close()
         if self.web_server is not None:
             await self.web_server.stop()
         await self.cron_service.stop()
+        if self.peers is not None:
+            await self.peers.aclose()
         if self.imessage_adapter is not None:
             await self.imessage_adapter.stop()
-        self.hub.close()
         await self.web_adapter.stop()
         await self.socket_adapter.stop()
         await self.shell_service.aclose()

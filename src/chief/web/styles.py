@@ -1,11 +1,14 @@
-"""The web UI stylesheet, served at /app.css. A gruvbox terminal console."""
+"""The web UI stylesheet, served at /app.css. A gruvbox terminal console.
+Transcript rules live in styles_chat.py (concatenated)."""
+
+from chief.web.styles_chat import CHAT_STYLES
 
 STYLES = """
 :root{
   --bg0:#1d2021; --bg1:#282828; --bg2:#3c3836; --bg3:#504945;
   --fg:#ebdbb2; --dim:#a89984; --faint:#7c6f64;
   --orange:#fe8019; --yellow:#d79921; --aqua:#8ec07c;
-  --blue:#83a598; --red:#fb4934;
+  --blue:#83a598; --red:#fb4934; --purple:#d3869b;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
@@ -37,6 +40,7 @@ body{
 #main{flex:1; display:flex; min-height:0;}
 #buffers{
   flex:0 0 220px; display:flex; flex-direction:column; min-height:0;
+  min-width:0; /* else a long nowrap snippet stretches it past 220px */
   background:var(--bg1); border-right:1px solid var(--bg2);
 }
 .panel-label{padding:.6rem .9rem .4rem; font-size:11px; letter-spacing:.14em;
@@ -59,16 +63,22 @@ body{
   font-size:10px;}
 #buflist .snippet{flex-basis:100%; color:var(--faint); font-size:11px;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-#buflist .kill{color:var(--faint); font-size:13px; line-height:1;
-  padding:0 .15rem; border-radius:2px; opacity:0;}
-#buflist li:hover .kill{opacity:.7;}
+#buflist .kill{font:inherit; font-size:14px; line-height:1; color:var(--faint);
+  padding:.05rem .35rem; background:transparent; border:none; border-radius:2px;
+  cursor:pointer; opacity:.45;}
+#buflist li:hover .kill, #buflist li.active .kill,
+#buflist .kill:focus-visible{opacity:.9;}
 #buflist .kill:hover{opacity:1; color:var(--red); background:var(--bg3);}
-#newbuf{
+#newbuf, #newname{
   margin:.5rem; padding:.45rem; font:inherit; text-align:left;
   background:transparent; color:var(--aqua); border:1px dashed var(--bg3);
   border-radius:2px; cursor:pointer;
 }
 #newbuf:hover{background:var(--bg2); border-style:solid;}
+#newname{cursor:text; color:var(--fg); border-style:solid; border-color:var(--aqua);
+  outline:none;}
+#menu{display:none; font:inherit; font-size:14px; background:transparent;
+  color:var(--fg); border:none; border-right:1px solid var(--bg2); cursor:pointer;}
 /* stream-policy panel */
 #policy{display:flex; align-items:center; gap:.9rem; flex-wrap:wrap;
   padding:.4rem 1.3rem; font-size:12px; color:var(--dim);
@@ -89,43 +99,24 @@ body{
 /* transcript pane */
 #pane{flex:1; display:flex; flex-direction:column; min-height:0; position:relative;}
 #log{flex:1; overflow-y:auto; padding:1.1rem 1.3rem;}
-.msg{max-width:74ch; margin:0 0 1rem; white-space:pre-wrap; word-break:break-word;}
-.msg .who{display:block; font-size:11px; letter-spacing:.1em;
-  text-transform:uppercase; margin-bottom:.15rem;}
-.msg.owner .who{color:var(--orange);}
-.msg.chief .who{color:var(--aqua);}
-.msg.peer .who{color:var(--yellow);}
-.msg.owner .who::before{content:"owner\\2009>\\2009";}
-.msg.chief .who::before{content:"chief\\2009>\\2009";}
-.msg.peer .who::after{content:"\\2009>\\2009";}
-.msg.tool{display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
-  color:var(--dim); font-size:12px;}
-.msg.tool .who{display:inline; margin:0; text-transform:none; color:var(--blue);}
-.toolload{font:inherit; font-size:11px; padding:.1rem .5rem; background:transparent;
-  color:var(--aqua); border:1px solid var(--bg3); border-radius:2px; cursor:pointer;}
-.toolload:hover{background:var(--bg2);}
-.toolbody{flex:1 0 100%; white-space:pre-wrap; word-break:break-word;
-  color:var(--fg); margin-top:.2rem;}
-.msg.approval{border:1px solid var(--yellow); border-radius:3px;
-  padding:.6rem .8rem; background:var(--bg1);}
-.msg.approval .who{color:var(--yellow);}
-.approval-btns{display:flex; gap:.5rem; margin-top:.5rem;}
-.approval-btns button{font:inherit; font-size:12px; padding:.25rem .7rem;
-  background:transparent; color:var(--aqua); border:1px solid var(--bg3);
-  border-radius:2px; cursor:pointer;}
-.approval-btns button:hover{background:var(--bg2);}
-.approval-btns button:disabled{opacity:.5; cursor:default;}
-.empty{color:var(--faint); padding:1.3rem;}
 #readonly{padding:.5rem 1.3rem; font-size:12px; color:var(--yellow);
   background:var(--bg1); border-top:1px solid var(--bg2);}
 /* prompt line */
-#f{display:flex; align-items:center; gap:.6rem; padding:.7rem 1.3rem;
+#f{display:flex; align-items:flex-end; gap:.6rem; padding:.7rem 1.3rem;
   border-top:1px solid var(--bg2); background:var(--bg1); position:relative;}
 #f.disabled{opacity:.5; pointer-events:none;}
-.sigil{color:var(--orange); flex:0 0 auto; font-weight:700;}
+.sigil{color:var(--orange); flex:0 0 auto; font-weight:700; line-height:1.55;}
 #input{flex:1; font:inherit; color:var(--fg); background:transparent;
-  border:none; outline:none; caret-color:var(--orange);}
+  border:none; outline:none; caret-color:var(--orange); resize:none;
+  padding:0; margin:0; min-height:1.55em; overflow-y:auto;}
 #input::placeholder{color:var(--faint);}
+#sendbtn{font:inherit; font-size:12px; padding:.15rem .7rem; flex:0 0 auto;
+  background:transparent; color:var(--orange); border:1px solid var(--bg3);
+  border-radius:2px; cursor:pointer;}
+#sendbtn:hover{background:var(--bg2); border-color:var(--orange);}
+#toast{padding:.4rem 1.3rem; font-size:12px; color:var(--aqua);
+  background:var(--bg1); border-top:1px solid var(--bg2);}
+#toast.bad{color:var(--red);}
 /* readline-style completion popup */
 #complete{
   position:absolute; left:1.3rem; bottom:calc(100% - .2rem); margin:0;
@@ -138,5 +129,22 @@ body{
 #complete li.sel{background:var(--bg3); color:var(--fg);}
 /* focus + motion */
 :focus-visible{outline:2px solid var(--blue); outline-offset:1px;}
-@media (max-width:640px){#buffers{flex-basis:150px}}
-"""
+#working{padding:.3rem 1.3rem; font-size:12px; color:var(--aqua);
+  display:flex; align-items:center; gap:.5rem;}
+#working[hidden]{display:none;}
+.spin{width:8px; height:8px; border-radius:50%; background:var(--aqua);
+  animation:pulse 1s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:.25} 50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+/* narrow screens: the sidebar slides over the transcript */
+@media (max-width:640px){
+  #menu{display:flex;}
+  #model-seg, #mon-seg, #posture-seg{display:none;}
+  #main{position:relative;}
+  #buffers{position:absolute; inset:0 auto 0 0; width:min(80vw,280px); z-index:10;
+    transform:translateX(-100%); transition:transform .15s;
+    box-shadow:4px 0 18px rgba(0,0,0,.5);}
+  body.drawer #buffers{transform:none;}
+  #log, #f, #policy{padding-left:.9rem; padding-right:.9rem;}
+}
+""" + CHAT_STYLES

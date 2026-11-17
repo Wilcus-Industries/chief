@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Any, Protocol
 
-from chief.provider.base import Completion, Provider
+from chief.provider.base import Completion, Provider, for_model
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class WindowSource(Protocol):
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     """Rough token count: serialized length over four."""
-    return sum(len(json.dumps(m)) for m in messages) // 4
+    return sum(len(json.dumps(m)) for m in for_model(messages)) // 4
 
 
 class Compactor:
@@ -104,7 +104,7 @@ class Compactor:
         return len(messages)
 
     async def _summarize(self, old: list[dict[str, Any]]) -> str:
-        transcript = json.dumps(old, ensure_ascii=False)
+        transcript = json.dumps(for_model(old), ensure_ascii=False)
         request = [
             {"role": "system", "content": SUMMARY_INSTRUCTION},
             {"role": "user", "content": transcript},

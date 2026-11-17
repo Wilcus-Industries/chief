@@ -103,7 +103,8 @@ serial queue; threads run concurrently.
 Chief uses its own agent loop over a provider seam rather than a vendor SDK.
 OpenRouter is the provider it ships with. The default tool set is small
 (`read_file`, `grep`, `write_file`, `edit_file`, `shell`, `restart`, `session`,
-`switch_model`, `monitor`, `schedule`, `load_skill`, `spawn_agent`); packages
+`switch_model`, `monitor`, `schedule`, `load_skill`, `spawn_agent`, `send_msg`);
+packages
 register anything else, and package install itself is document-driven through
 `shell` rather than a dedicated tool.
 

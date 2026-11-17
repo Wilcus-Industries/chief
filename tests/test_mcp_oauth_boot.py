@@ -5,20 +5,24 @@ import asyncio
 import json
 import socket
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
+from chief.adapters.base import Message
 from chief.app import App, build_app
 from chief.config import Config
 
 from .fake_oauth import FakeOAuth, serve_fake
-from .fakes import FakeProvider, text_turn, tool_turn
+from .fakes import CapturingAdapter, FakeProvider, text_turn, tool_turn
 from .test_app import Streams, boot, make_config, read_finals, send_frame, shutdown
 
 NOTICE = 'Rh needs login. Say "connect rh" or /login rh.'
 LINK_SENT = "login link sent to the owner"
+OWNER_HANDLE = "+15550000001"
+STRANGER = "+15559990000"
 
 
 @pytest.fixture
@@ -194,3 +198,63 @@ async def test_the_model_starts_and_finishes_a_login_without_ever_seeing_the_lin
         assert provider.calls[-1][-1]["content"] == "rh connected (1 tool)"
     finally:
         await stop(app, streams)
+
+
+@asynccontextmanager
+async def login_asked_from(
+    tmp_path: Path, sock_path: Path, fake: FakeOAuth, thread: str
+) -> AsyncIterator[tuple[CapturingAdapter, CapturingAdapter, FakeProvider]]:
+    """A booted daemon whose model calls ``server_login`` in an iMessage
+    ``thread`` (woken by a system message); yields the captured iMessage device,
+    the captured web surface (the owner's primary one) and the provider."""
+    provider = FakeProvider(
+        [tool_turn("server_login", {"server": "rh"}), text_turn("link sent")]
+    )
+    config = oauth_config(
+        tmp_path, sock_path, fake, imessage_owner_handles=(OWNER_HANDLE,)
+    )
+    app, streams, _ = await boot_watching_web(config, provider)
+    device, web = CapturingAdapter("imessage"), CapturingAdapter("web")
+    app.dispatcher.register(device)
+    app.dispatcher.register(web)
+    await app.store.ensure_session(thread, "imessage")
+    try:
+        ticks = app.hub.listen()
+        wake = Message(
+            channel="imessage", sender="system", thread_key=thread, text="connect rh"
+        )
+        await app.dispatcher.handle(wake)
+        while (await asyncio.wait_for(ticks.get(), 5)).get("thread") != thread:
+            pass
+        yield device, web, provider
+    finally:
+        await stop(app, streams)
+
+
+async def test_a_login_asked_from_a_non_owner_thread_never_sends_its_link_there(
+    tmp_path: Path, sock_path: Path, fake: FakeOAuth
+) -> None:
+    # Nothing is auto-sent to a non-owner audience, whoever triggered the turn
+    # (PRD #308) — an authorization link included. It goes to the owner's primary
+    # surface, which names the thread that asked.
+    async with login_asked_from(tmp_path, sock_path, fake, STRANGER) as (
+        device, web, provider,
+    ):
+        assert device.sent == []
+        ((thread, text),) = web.sent
+        assert thread == "web:main"
+        assert link_in(text).startswith(fake.base_url)
+        assert f"[asked in thread {STRANGER}]" in text
+        assert provider.calls[1][-1]["content"] == LINK_SENT
+
+
+async def test_a_login_asked_from_the_owners_own_thread_is_sent_right_there(
+    tmp_path: Path, sock_path: Path, fake: FakeOAuth
+) -> None:
+    async with login_asked_from(tmp_path, sock_path, fake, OWNER_HANDLE) as (
+        device, web, _provider,
+    ):
+        links = [(t, text) for t, text in device.sent if "Open this link" in text]
+        assert [thread for thread, _ in links] == [OWNER_HANDLE]
+        assert "[asked in thread" not in links[0][1]
+        assert web.sent == []

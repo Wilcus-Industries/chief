@@ -20,33 +20,18 @@ import httpx
 import pytest
 from playwright.async_api import Dialog, Page, async_playwright, expect
 
-from chief.adapters.base import Adapter, Message
+from chief.adapters.base import Message
 from chief.app import App, build_app
 from chief.config import Config
 from chief.policy import RICH
 from chief.provider.base import Completion, ToolCall
 
-from .fakes import FakeProvider, text_turn
+from .fakes import CapturingAdapter, FakeProvider, text_turn
 
 pytestmark = [pytest.mark.browser, pytest.mark.timeout(120)]
 
 PASSWORD = "e2e-owner-pass"
 PEER = "+15551234567"  # an external 1:1 iMessage thread (a non-owner audience)
-
-
-class _CapturingAdapter(Adapter):
-    """A registered origin adapter that records its outbound sends — the fake
-    device transport at the edge. The dispatch path feeding it is fully real."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-        self.sent: list[tuple[str, str]] = []
-
-    async def start(self) -> None: ...
-    async def stop(self) -> None: ...
-
-    async def send(self, thread_key: str, text: str) -> None:
-        self.sent.append((thread_key, text))
 
 
 def _free_port() -> int:
@@ -68,7 +53,7 @@ async def _wait(pred: Callable[[], bool], timeout: float = 10.0) -> None:
 @pytest.fixture
 async def cockpit(
     tmp_path: Path, sock_path: Path
-) -> AsyncIterator[tuple[App, str, _CapturingAdapter]]:
+) -> AsyncIterator[tuple[App, str, CapturingAdapter]]:
     """A live daemon serving the web UI on localhost, with a scripted model and
     a captured iMessage origin. Yields (app, base_url, imessage device)."""
     port = _free_port()
@@ -99,7 +84,7 @@ async def cockpit(
         ]
     )
     app = await build_app(config, provider=provider)
-    device = _CapturingAdapter("imessage")
+    device = CapturingAdapter("imessage")
     app.dispatcher.register(device)
     await app.start()
     await app.store.ensure_session("cli:home", "cli")
@@ -135,7 +120,7 @@ async def _focus(page: Page, app: App, thread: str) -> None:
 
 
 async def test_cockpit_live_mirror_tools_and_controls(
-    cockpit: tuple[App, str, _CapturingAdapter],
+    cockpit: tuple[App, str, CapturingAdapter],
 ) -> None:
     app, base_url, device = cockpit
     async with async_playwright() as pw:
@@ -173,12 +158,14 @@ async def test_cockpit_live_mirror_tools_and_controls(
         await expect(body).to_contain_text("args:")
         await expect(body).to_contain_text("build-imessage")
 
-        # AC: the reply-from-web send guard confirms before a non-owner send.
+        # AC: the reply-from-web send guard confirms before typing into a
+        # non-owner thread — and the reply stays in the cockpit, never sent to
+        # the non-owner (PRD #308's non-owner output rule).
         await _focus(page, app, PEER)
         await page.fill("#input", "you around?")
         await page.press("#input", "Enter")
-        await _wait(lambda: len(device.sent) == 1)
-        assert device.sent[0] == (PEER, "on my way")
+        await expect(log.locator(".msg.chief", has_text="on my way")).to_be_visible()
+        assert device.sent == []
         assert len(dialogs) == 1
         assert PEER in dialogs[0] and "imessage" in dialogs[0]
 
@@ -188,8 +175,8 @@ async def test_cockpit_live_mirror_tools_and_controls(
         await _wait_guard_cleared(page)
         await page.fill("#input", "later then")
         await page.press("#input", "Enter")
-        await _wait(lambda: len(device.sent) == 2)
-        assert device.sent[1] == (PEER, "will do")
+        await expect(log.locator(".msg.chief", has_text="will do")).to_be_visible()
+        assert device.sent == []
         assert len(dialogs) == 1  # no second confirm — the guard is off
 
         await browser.close()

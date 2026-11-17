@@ -63,55 +63,58 @@ class _Shell:
         if syntax_error is not None:
             # Reject up front without touching the shell — writing it would swallow the
             # sentinel and hang until the timeout, losing the session over a typo.
-            return CommandResult(
-                "", syntax_error, SYNTAX_ERROR_EXIT_CODE, truncated=False
-            )
+            return CommandResult("", syntax_error, SYNTAX_ERROR_EXIT_CODE, False)
         async with self._lock:  # one command at a time per shell
-            proc = await self._ensure()
-            assert proc.stdin is not None
-            assert proc.stdout is not None
-            assert proc.stderr is not None
-            marker = self._sentinel
-            # After the command: sentinel + $? on stdout (own line, leading \n) and a
-            # bare sentinel on stderr, so each reader knows to stop.
-            script = (
-                f"{command}\n"
-                f"__chief_rc=$?; "
-                f"printf '\\n%s %s\\n' {marker} \"$__chief_rc\"; "
-                f"printf '%s\\n' {marker} 1>&2\n"
-            )
-            proc.stdin.write(script.encode(ENCODING))
-            await proc.stdin.drain()
-
-            out = _Acc(output_limit)
-            err = _Acc(output_limit)
-            out_task = asyncio.create_task(self._drain(proc.stdout, out, parse_rc=True))
-            err_task = asyncio.create_task(
-                self._drain(proc.stderr, err, parse_rc=False)
-            )
             try:
-                out_end, _ = await asyncio.wait_for(
-                    asyncio.gather(out_task, err_task), timeout=timeout
-                )
-            except TimeoutError:
-                out_task.cancel()
-                err_task.cancel()
-                await asyncio.gather(out_task, err_task, return_exceptions=True)
-                await self._terminate()  # SIGINT then kill; state is lost on respawn
-                return CommandResult(
-                    out.text(), err.text(), TIMEOUT_EXIT_CODE, truncated=True
-                )
-            truncated = out.truncated or err.truncated
-            if not out_end.saw_sentinel:
-                # EOF before the sentinel: the shell died mid-command. Report a distinct
-                # code (not a masking 0) and force a fresh shell next time.
+                return await self._exchange(command, timeout, output_limit)
+            except asyncio.CancelledError:
+                # A cancelled caller (/cancel on a subagent) must not leave the
+                # command running to answer the next one: kill it, respawn.
                 await self._terminate()
-                return CommandResult(
-                    out.text(), err.text(), SHELL_DIED_EXIT_CODE, truncated=truncated
-                )
-            return CommandResult(
-                out.text(), err.text(), out_end.rc, truncated=truncated
+                raise
+
+    async def _exchange(
+        self, command: str, timeout: float, output_limit: int
+    ) -> CommandResult:
+        """Write one framed command and read its output (lock held)."""
+        proc = await self._ensure()
+        assert proc.stdin is not None and proc.stdout is not None
+        assert proc.stderr is not None
+        marker = self._sentinel
+        # After the command: sentinel + $? on stdout (own line, leading \n) and a
+        # bare sentinel on stderr, so each reader knows to stop.
+        script = (
+            f"{command}\n"
+            f"__chief_rc=$?; "
+            f"printf '\\n%s %s\\n' {marker} \"$__chief_rc\"; "
+            f"printf '%s\\n' {marker} 1>&2\n"
+        )
+        proc.stdin.write(script.encode(ENCODING))
+        await proc.stdin.drain()
+
+        out = _Acc(output_limit)
+        err = _Acc(output_limit)
+        out_task = asyncio.create_task(self._drain(proc.stdout, out, parse_rc=True))
+        err_task = asyncio.create_task(self._drain(proc.stderr, err, parse_rc=False))
+        try:
+            out_end, _ = await asyncio.wait_for(
+                asyncio.gather(out_task, err_task), timeout=timeout
             )
+        except TimeoutError:
+            out_task.cancel()
+            err_task.cancel()
+            await asyncio.gather(out_task, err_task, return_exceptions=True)
+            await self._terminate()  # SIGINT then kill; state is lost on respawn
+            return CommandResult(out.text(), err.text(), TIMEOUT_EXIT_CODE, True)
+        truncated = out.truncated or err.truncated
+        if not out_end.saw_sentinel:
+            # EOF before the sentinel: the shell died mid-command. Report a distinct
+            # code (not a masking 0) and force a fresh shell next time.
+            await self._terminate()
+            return CommandResult(
+                out.text(), err.text(), SHELL_DIED_EXIT_CODE, truncated=truncated
+            )
+        return CommandResult(out.text(), err.text(), out_end.rc, truncated=truncated)
 
     async def _drain(
         self, stream: asyncio.StreamReader, acc: _Acc, *, parse_rc: bool

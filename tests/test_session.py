@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from chief.agent.inbox import Injected
 from chief.agent.manager import SessionManager
 from chief.persistence.store import MessageStore
 from chief.provider.base import ProviderEvent, ToolSpec
@@ -401,3 +402,22 @@ async def test_delete_and_clear_wipe_an_idle_thread(store: MessageStore) -> None
     assert await manager.clear("cli:b") is True
     assert await store.load("cli:b") == []
     assert await store.channel("cli:b") == "cli"
+
+
+async def test_inject_refuses_a_lock_held_by_compact_or_wipe(
+    store: MessageStore,
+) -> None:
+    # compact() and a wipe hold the lock with no turn to drain the inbox: a
+    # peer message accepted then would sit until some unrelated turn (or be
+    # lost with the wiped session). Refused, the router wakes a turn instead.
+    manager = make_manager(FakeProvider([]), store)
+    session = await manager.get_or_create("cli:t", "cli")
+    requeued: list[str] = []
+
+    async def consumed() -> None:
+        pass
+
+    async with session.lock:
+        item = Injected("hello", consumed, lambda: requeued.append("hello"))
+        assert session.inject(item) is False
+    assert requeued == []

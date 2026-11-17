@@ -220,3 +220,22 @@ def test_wire_merges_parallel_tool_results_into_one_user_turn() -> None:
         {"type": "tool_result", "tool_use_id": "a", "content": "1"},
         {"type": "tool_result", "tool_use_id": "b", "content": "2"}]}
     assert "system" not in body
+
+
+def test_wire_merges_an_injected_user_message_into_the_result_turn() -> None:
+    # A peer message drained mid-turn follows the tool results; the Messages
+    # API refuses two consecutive user turns, so it rides in the same one.
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "function": {"name": "x", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "1"},
+        {"role": "user", "content": "[message m-1] hi"},
+        {"role": "user", "content": "[message m-2] again"},
+    ]
+    body = to_anthropic_request("m", messages, [], max_tokens=10)
+    assert len(body["messages"]) == 3
+    assert body["messages"][2] == {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "a", "content": "1"},
+        {"type": "text", "text": "[message m-1] hi"},
+        {"type": "text", "text": "[message m-2] again"}]}

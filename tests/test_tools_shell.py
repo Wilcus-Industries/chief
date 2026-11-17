@@ -6,6 +6,7 @@ semantics ported from the old sandbox: thread isolation, state persistence,
 timeout-with-kill, output cap, syntax pre-check, and shell-death reporting.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -200,6 +201,22 @@ async def test_timeout_kills_and_respawns(tmp_path: Path) -> None:
     after = await shell.run("s1", "echo back")
     assert after["stdout"] == "back"
     assert after["exit_code"] == 0
+    await shell.aclose()
+
+
+async def test_a_cancelled_command_is_killed_not_left_to_answer_the_next(
+    shell: ShellService,
+) -> None:
+    # Cancelling a subagent mid-shell-call (/cancel) must stop the command and
+    # leave the shell in sync — not hand its output to the next caller.
+    running = asyncio.create_task(shell.run("s1", "sleep 0.3; echo FIRST"))
+    await asyncio.sleep(0.1)
+    running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
+    after = await shell.run("s1", "echo SECOND")
+    assert after["stdout"] == "SECOND"
+    await asyncio.sleep(0.4)
+    assert (await shell.run("s1", "echo THIRD"))["stdout"] == "THIRD"
     await shell.aclose()
 
 
