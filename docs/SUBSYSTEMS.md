@@ -166,7 +166,7 @@ A server opted in with `session_context: true` registers its tools `wants_contex
 the handler `McpManager` builds takes chief's injected `context` off the arguments
 and sends it as the call's `_meta` (`chief/thread`, `chief/channel`), through
 `Supervisor.call` to `calls.call_tool`. A subagent's call carries its parent's
-session (`subagents.SubagentScope` hands the run's context to `mcp_*` tools only).
+session (`subagents.SubagentScope` hands the run's context to `send_msg` and `mcp_*` tools only).
 Off by default; see [EXTENDING.md](./EXTENDING.md).
 
 Every `auth: oauth` connection is **passive** (boot, reconnect): the SDK's provider
