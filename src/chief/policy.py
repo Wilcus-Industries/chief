@@ -101,8 +101,14 @@ def owner_audience(channel: str, thread: str, owner_handles: tuple[str, ...]) ->
     closed, so a package-added channel is quiet until proven owner-only."""
     if channel in INTERNAL_CHANNELS:
         return True
-    norm = {h.strip().lstrip("+").lower() for h in owner_handles if h.strip()}
-    return thread.strip().lstrip("+").lower() in norm
+    norm = {normalize_handle(h) for h in owner_handles if h.strip()}
+    return normalize_handle(thread) in norm
+
+
+def normalize_handle(handle: str) -> str:
+    """A channel handle in comparable form: trimmed, lowercased, no leading
+    ``+`` (YAML and config parse an unquoted ``+1555…`` as a bare number)."""
+    return handle.strip().lstrip("+").lower()
 
 
 # {n} is a per-message nonce — a fixed close marker is one an attacker can type.

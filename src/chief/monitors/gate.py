@@ -95,14 +95,20 @@ class MonitorGate:
         return await self._classifier.classify(name, text, typesafe=verdict is None)
 
 
-def withheld_body(payload: dict[str, Any], reason: str) -> str:
+def withheld_body(
+    payload: dict[str, Any], reason: str, sender_name: str | None = None
+) -> str:
     """The wake body for a withheld event: sender and thread only, each cut to
     a short handle-like string — they were part of the screened payload, so
-    a channel that puts free text there (a display name) cannot smuggle it."""
+    a channel that puts free text there (a display name) cannot smuggle it.
+    ``sender_name`` comes from the owner's roster, not the payload, so it is
+    kept readable (cut to 64 chars)."""
     who = {
         key: re.sub(r"[^\w@+.:;\-]", "", str(payload.get(key, "")))[:64]
         for key in ("sender", "thread_key")
     }
+    if sender_name:
+        who["sender_name"] = sender_name[:64]
     return (
         f"event (text withheld by the injection screen, {reason}): "
         f"{json.dumps(who)}\nTell the owner a message was withheld and from "
