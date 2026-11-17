@@ -313,3 +313,25 @@ async def test_the_revocation_endpoint_is_the_one_discovery_found(
     assert storage(tmp_path).revocation_endpoint() is None
     await log_in_with_discovery(tmp_path)
     assert storage(tmp_path).revocation_endpoint() == REVOCATION_ENDPOINT
+
+
+# -- a login that was forgotten --------------------------------------------------
+
+
+async def test_a_session_whose_login_was_forgotten_cannot_write_it_back(
+    tmp_path: Path,
+) -> None:
+    # Logout deletes the file while the connection it ends may still refresh on
+    # its way out; that refresh must not resurrect the login.
+    live = [True]
+    store = FileTokenStorage(
+        tmp_path / "mcp-oauth", "rh", URL, REDIRECT, writable=lambda: live[0]
+    )
+    await store.set_tokens(tokens())
+    live[0] = False
+    store.clear()
+
+    await store.set_tokens(tokens(access_token="access-2"))
+    await store.set_client_info(client_info())
+
+    assert not (tmp_path / "mcp-oauth" / "rh.json").exists()

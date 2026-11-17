@@ -363,8 +363,10 @@ so the address reaches neither the transcript nor the gate's audit line.
 directory, written tmp-then-replace, bound to the server url and redirect URI
 (change either and it reads as absent). `/logout` revokes at the provider when it
 advertises a revocation endpoint (best effort), then deletes the file and ends the
-connection. The notice flag file (`data/mcp-oauth-notified.json`) holds server
-names only.
+connection. The connection being ended can still refresh on its way out, so the
+deletion is preceded by shutting its token store: a late refresh cannot write the
+login back, and a restart cannot quietly reconnect as if nobody had logged out. The
+notice flag file (`data/mcp-oauth-notified.json`) holds server names only.
 
 **`CORE_APPROVED`.** `server_login` and `server_login_complete` skip the approval
 card (`gate.py`): they only ever hand the owner a link or take back an address

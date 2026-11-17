@@ -74,7 +74,7 @@ class OAuthBroker:
         ``/login`` driving it, or None for a passive boot/reconnect)."""
         record = self._servers[config.name]
         flow = LoginFlow(record, attempt, self._send, self._clock, self._ttl)
-        storage = self._storage(config)
+        storage = self._storage(record)
         return new_provider(config, storage, flow, self._redirect_uri, self._ttl)
 
     def needs_login(self, server: str) -> bool:
@@ -171,16 +171,21 @@ class OAuthBroker:
         record = self._servers.get(server)
         if record is None:
             return _unknown(server)
-        result = await login.logout(record, self._storage(record.config))
+        result = await login.logout(record, self._storage(record))
         if result.ok:
             self._notices.mark(server)
             self._audit.record("mcp_auth_logout", server=server, reason="requested")
         return result.message
 
-    def _storage(self, config: ServerConfig) -> FileTokenStorage:
+    def _storage(self, record: ServerAuth) -> FileTokenStorage:
+        """A token store that stops writing once a logout bumps the generation
+        it was built in."""
+        config, generation = record.config, record.generation
         assert config.url is not None
-        url, redirect = config.url, self._redirect_uri
-        return FileTokenStorage(self._token_dir, config.name, url, redirect)
+        return FileTokenStorage(
+            self._token_dir, config.name, config.url, self._redirect_uri,
+            writable=lambda: record.generation == generation,
+        )
 
 
 def _unknown(server: str) -> str:

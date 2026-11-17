@@ -160,6 +160,11 @@ advertised. `token_store.py` stores that discovery with the tokens and puts it a
 the expiry back on each fresh provider, and keeps a refresh token a refresh response
 omits; together that is what makes a restart not cost a login.
 
+Each provider gets a store that stops writing once `/logout` bumps the server's
+generation (`ServerAuth.generation`). The connection a logout ends sends its goodbye
+through the OAuth client and may refresh first; without that gate the refresh would
+write the deleted login back.
+
 ## Monitors — `src/chief/monitors/`
 
 A monitor is a persisted, agent-created event subscription: watch a channel,

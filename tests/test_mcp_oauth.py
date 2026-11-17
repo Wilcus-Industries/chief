@@ -719,6 +719,31 @@ async def test_logout_forgets_the_login_ends_the_connection_and_stays_quiet(
     assert rig.sent == sent_before
 
 
+async def test_a_logout_is_not_undone_by_the_dying_connection_refreshing(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The connection ends with a DELETE through the OAuth client, and one whose
+    # access token has aged out refreshes first. That refresh must not write the
+    # login back: the file is all a restart would go by. This server has no
+    # revocation endpoint (like Robinhood) and issues a session id, so the DELETE
+    # is sent.
+    await log_in(rig)
+    run_the_sdk_clock_forward(monkeypatch, 7200)  # the in-memory token has run out
+
+    assert await rig.broker.logout(SERVER) == "rh logged out"
+
+    await eventually(lambda: ("DELETE", "/mcp") in rig.fake.requests)
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token"]  # it did refresh
+    assert not (rig.root / "tokens" / "rh.json").exists()
+    again = await rig.reboot()
+    try:
+        assert await asyncio.wait_for(again.manager.connect(again.config), 10) == 0
+        assert again.broker.state(SERVER) == "needs_auth"  # still logged out
+    finally:
+        await again.manager.stop()
+
+
 async def test_after_a_logout_the_owner_can_log_in_afresh(rig: Rig) -> None:
     await log_in(rig)
     await rig.broker.logout(SERVER)

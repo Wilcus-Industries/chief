@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,15 +38,25 @@ _DISCOVERED: dict[str, type[OAuthMetadata] | type[ProtectedResourceMetadata]] = 
 
 
 class FileTokenStorage:
-    """The SDK's ``TokenStorage`` for one server, persisted to one json file."""
+    """The SDK's ``TokenStorage`` for one server, persisted to one json file.
+
+    ``writable`` is asked before every write. Logout deletes the file while the
+    connection it ends can still refresh on its way out; answering False from
+    then on keeps that refresh from writing the login back."""
 
     def __init__(
-        self, directory: Path, server: str, url: str, redirect_uri: str
+        self,
+        directory: Path,
+        server: str,
+        url: str,
+        redirect_uri: str,
+        writable: Callable[[], bool] = lambda: True,
     ) -> None:
         if not _SAFE_NAME.fullmatch(server):
             raise ValueError(f"unsafe mcp server name {server!r} for a token file")
         self._path = directory / f"{server}.json"
         self._binding = {"url": url, "redirect_uri": redirect_uri}
+        self._writable = writable
         self._context: OAuthContext | None = None
 
     def attach(self, context: OAuthContext) -> None:
@@ -136,6 +147,9 @@ class FileTokenStorage:
         return record if bound else {}
 
     def _save(self, **fields: Any) -> None:
+        if not self._writable():
+            logger.info("dropped a write to %s from a logged-out session", self._path)
+            return
         record = {**self._load(), **self._binding, **fields}
         self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")

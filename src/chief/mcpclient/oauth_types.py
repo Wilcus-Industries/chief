@@ -84,6 +84,8 @@ class ServerAuth:
     dropped: asyncio.Event = field(default_factory=asyncio.Event)  # logout
     attempt: LoginAttempt | None = None
     flow: PendingFlow | None = None
+    #: Bumped by logout. A session built before it may no longer write tokens.
+    generation: int = 0
 
     def reject_flow(self, reason: str) -> None:
         """End the open link: whoever waits on its answer gets ``reason``."""

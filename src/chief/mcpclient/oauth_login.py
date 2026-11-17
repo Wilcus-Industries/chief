@@ -99,6 +99,10 @@ async def logout(record: ServerAuth, storage: FileTokenStorage) -> LoginResult:
     if record.state == "connecting":
         return LoginResult(False, _UNAVAILABLE["connecting"].format(name))
     await _revoke(storage)
+    # The connection this ends can still refresh on its way out (its goodbye is
+    # sent through the OAuth client); bump first so that refresh cannot write the
+    # login back over the deletion. No await sits between the bump and the delete.
+    record.generation += 1
     storage.clear()
     record.reject_flow("logged out")
     if record.state == "connected":
