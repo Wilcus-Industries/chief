@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from chief.policy import normalize_handle
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,13 +26,13 @@ class Roster:
             raw = yaml.safe_load(self._path.read_text()) or {}
         except FileNotFoundError:
             return {}
-        except Exception:
+        except (OSError, yaml.YAMLError):
             logger.exception("contacts roster %s unreadable", self._path)
             return {}
         if not isinstance(raw, dict):
             return {}
         return {
-            str(k).strip().lower(): str(v).strip()
+            normalize_handle(str(k)): str(v).strip()
             for k, v in raw.items()
             if v is not None and str(v).strip()
         }
@@ -38,4 +40,4 @@ class Roster:
     def name_for(self, handle: str) -> str | None:
         if not handle:
             return None
-        return self._load().get(handle.strip().lower())
+        return self._load().get(normalize_handle(handle))

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from chief.adapters.base import Message
 from chief.bus import Event, EventBus
 from chief.classifiers import Classifier, ClassifierRegistry
+from chief.contacts import Roster
 from chief.monitors.gate import withheld_body
 from chief.monitors.service import MonitorService
 from chief.monitors.tools import register_monitor_tools
@@ -928,7 +929,7 @@ async def test_monitor_list_shows_scope_and_disabled_rows(
 
 def screened_service(
     engine: AsyncEngine, bus: EventBus, typesafe: Any = None,
-    judge_provider: FakeProvider | None = None,
+    judge_provider: FakeProvider | None = None, roster: Roster | None = None,
 ) -> tuple[MonitorService, WakeSink]:
     wake = WakeSink()
     classifier = Classifier(
@@ -937,7 +938,7 @@ def screened_service(
     )
     screen = Screen(classifier, threshold=0.5, fallback_model="haiku")
     service = MonitorService(
-        make_session_factory(engine), bus, wake, classifier, screen
+        make_session_factory(engine), bus, wake, classifier, screen, roster=roster
     )
     return service, wake
 

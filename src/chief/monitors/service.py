@@ -168,21 +168,23 @@ class MonitorService:
         logger.info("monitor %s fired on %s", monitor.id, event.type)
         # sender="system" takes the owner path in dispatch.handle, so someone
         # else's words enter the turn as trusted-origin text — frame them (#285).
-        await self._send(monitor, f"event: {json.dumps(self._named(event.payload))}")
+        payload = event.payload
+        name = self._sender_name(payload)
+        if name:  # the roster's label beside the raw handle, which stays the identity
+            payload = {**payload, "sender_name": name}
+        await self._send(monitor, f"event: {json.dumps(payload)}")
 
-    def _named(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Add the roster's ``sender_name`` beside the raw handle, if known."""
-        if self._roster is None:
-            return payload
-        name = self._roster.name_for(str(payload.get("sender", "")))
-        return {**payload, "sender_name": name} if name else payload
+    def _sender_name(self, payload: dict[str, Any]) -> str | None:
+        sender = str(payload.get("sender", ""))
+        return self._roster.name_for(sender) if self._roster else None
 
     async def _fire_withheld(
         self, monitor: MonitorRow, event: Event, reason: str
     ) -> None:
         """Flagged, or unscreenable: wake with who and where only."""
         logger.warning("monitor %s fired but withheld: %s", monitor.id, reason)
-        await self._send(monitor, withheld_body(self._named(event.payload), reason))
+        body = withheld_body(event.payload, reason, self._sender_name(event.payload))
+        await self._send(monitor, body)
 
     async def _send(self, monitor: MonitorRow, body: str) -> None:
         text = (
