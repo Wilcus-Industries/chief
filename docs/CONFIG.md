@@ -38,8 +38,8 @@ timed-out connect cancels its supervising task and raises naming the server
 (an `auth: oauth` server is then `disabled`, and `/login` says it failed to
 start); the daemon logs it and keeps booting the rest. A `url` entry may declare
 `headers` (name → string); a `${secret:name}` in a value is resolved at boot from
-env `NAME` then `secrets/name`, and an unresolvable one skips that server only
-(see [EXTENDING.md](./EXTENDING.md)). `headers` on a `command` entry is refused.
+env `NAME` then `secrets/name`, and one that is missing or unreadable skips that
+server only (see [EXTENDING.md](./EXTENDING.md)). `headers` on a `command` entry is refused.
 A `url` entry may also declare `auth: oauth` (the only value) and `scopes` (a list
 of strings): the server then logs in through the OAuth broker instead of failing on
 a 401, and is parked as `needs_auth` until the owner logs in. An unknown `auth`

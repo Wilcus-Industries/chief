@@ -1,6 +1,7 @@
 """Static MCP headers: ``${secret:name}`` expansion and delivery to a server."""
 
 import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -83,6 +84,53 @@ def test_empty_secret_counts_as_missing(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("EMPTY_KEY", "")
     with pytest.raises(ValueError, match="empty_key"):
         expand_headers({"X": "${secret:empty_key}"}, read=reader({"empty_key": ""}))
+
+
+def unreadable_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Make ``secrets/svc_key`` exist but fail to read: a directory (``exists``
+    is true, ``read_text`` raises ``IsADirectoryError``) or a file nobody may
+    read (``PermissionError``)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SVC_KEY", raising=False)
+    secret = tmp_path / "secrets" / "svc_key"
+    if kind == "directory":
+        secret.mkdir(parents=True)
+        return
+    if os.geteuid() == 0:
+        pytest.skip("root reads any file")
+    secret.parent.mkdir()
+    secret.write_text("s3cr3t")
+    secret.chmod(0)
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_a_secret_that_cannot_be_read_raises_naming_the_header_not_a_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    unreadable_secret(tmp_path, monkeypatch, kind)
+
+    with pytest.raises(ValueError, match=r"X-Key.*svc_key") as caught:
+        expand_headers({"X-Key": "${secret:svc_key}"})
+
+    assert "s3cr3t" not in str(caught.value)
+
+
+@pytest.mark.parametrize("kind", ["directory", "file"])
+def test_config_entry_with_an_unreadable_secret_is_skipped_not_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+) -> None:
+    unreadable_secret(tmp_path, monkeypatch, kind)
+    entry = {"url": "https://x/mcp", "headers": {"X-Key": "${secret:svc_key}"}}
+
+    with caplog.at_level(logging.WARNING):
+        assert server_config_from_entry("svc", entry) is None
+
+    assert "svc" in caplog.text and "X-Key" in caplog.text
 
 
 @pytest.mark.parametrize("name", ["../etc/passwd", "a/b", "a.b", "", "a b"])

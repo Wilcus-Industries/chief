@@ -70,8 +70,9 @@ daemon down. Reconnects re-register tools with `replace=True`.
 A `url` entry may also send static `headers` (header name → string). Never put a
 secret in one by value: write `${secret:name}` and the value is read at boot from
 the env var `NAME` (upper-cased), then the file `secrets/name`. Only that exact
-form expands — any other `${...}` is sent literally — and a missing secret skips
-that one server (logged, naming the header) while the rest of the daemon boots.
+form expands — any other `${...}` is sent literally — and a secret that is missing
+or cannot be read (say, `secrets/name` is a directory or not readable by chief)
+skips that one server (logged, naming the header) while the rest of the daemon boots.
 
 ```yaml
 mcp_servers:

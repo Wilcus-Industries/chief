@@ -23,8 +23,9 @@ def expand_headers(
     """Return ``raw`` with every ``${secret:name}`` replaced by its value.
 
     Raises ``ValueError`` naming the header and the secret (never a value) when
-    a reference is malformed or resolves to nothing, so the caller can skip the
-    one server instead of sending a literal placeholder to it.
+    a reference is malformed, resolves to nothing, or names a secret that cannot
+    be read, so the caller can skip the one server instead of sending a literal
+    placeholder to it.
     """
     return {
         header: _expand(header, value, read) for header, value in raw.items()
@@ -41,7 +42,13 @@ def _resolve(header: str, name: str, read: Callable[[Path], str]) -> str:
             f"header {header!r}: {name!r} is not a valid secret name "
             "(letters, digits, '-' and '_' only)"
         )
-    value = os.environ.get(name.upper()) or read(Path("secrets") / name)
+    try:
+        value = os.environ.get(name.upper()) or read(Path("secrets") / name)
+    except OSError as exc:  # a directory, or a file this user may not read
+        raise ValueError(
+            f"header {header!r}: secret {name!r} could not be read "
+            f"({type(exc).__name__})"
+        ) from exc
     if not value:
         raise ValueError(
             f"header {header!r}: secret {name!r} is not set "

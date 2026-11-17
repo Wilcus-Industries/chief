@@ -377,9 +377,9 @@ send the owner login links. `gate.never` still wins.
 the server and a short reason — never a token, a code, or a URL carrying either.
 
 **Static headers.** Secrets reach a header only as `${secret:name}` (env `NAME`,
-then `secrets/name`). The expanded values stay out of `ServerConfig.__repr__`, an
-unresolvable reference skips just that server, and the warning names the header,
-never a value.
+then `secrets/name`). The expanded values stay out of `ServerConfig.__repr__`, a
+reference that is missing or cannot be read skips just that server, and the warning
+names the header, never a value.
 
 ## Scheduled shell commands — `cron/tools.py`, `tools/shell/service.py`
 
