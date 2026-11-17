@@ -95,9 +95,10 @@ mcp_servers:
 ```
 
 The name may use letters, digits, `-` and `_` only — it becomes
-`secrets/mcp-oauth/<name>.json`, the server's tokens and client registration
-(mode 0600). `auth` and `headers` are for `url` entries; on a `command` entry the
-server is skipped (config) or the manifest fails validation (package).
+`secrets/mcp-oauth/<name>.json`, the server's tokens, client registration and
+discovered endpoints (mode 0600). `auth` and `headers` are for `url` entries; on a
+`command` entry the server is skipped (config) or the manifest fails validation
+(package).
 
 - **Boot never waits on a login.** A server with no good login is parked as
   `needs_auth`, `connect` returns at once with no tools, and the owner gets one

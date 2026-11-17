@@ -1,18 +1,28 @@
 """FileTokenStorage: the per-server OAuth token + client-registration file."""
 
 import json
+import logging
 import stat
 import time
 from pathlib import Path
 
 import pytest
 from mcp.client.auth.oauth2 import OAuthClientProvider
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthMetadata,
+    OAuthToken,
+    ProtectedResourceMetadata,
+)
 
 from chief.mcpclient.token_store import FileTokenStorage
 
 URL = "https://agent.example.com/mcp/trading"
 REDIRECT = "http://127.0.0.1:8130/oauth/callback"
+ISSUER = "https://api.example.com"  # not the MCP server's origin, like the real one
+TOKEN_ENDPOINT = f"{ISSUER}/oauth2/token/"
+REVOCATION_ENDPOINT = f"{ISSUER}/oauth2/revoke/"
 
 
 def storage(
@@ -198,3 +208,108 @@ async def test_a_rotated_refresh_token_replaces_the_old_one(tmp_path: Path) -> N
     stored = await storage(tmp_path).get_tokens()
     assert stored is not None
     assert stored.refresh_token == "refresh-2"
+
+
+# -- what discovery learned ----------------------------------------------------
+
+
+def as_metadata(token_endpoint: str = TOKEN_ENDPOINT) -> OAuthMetadata:
+    return OAuthMetadata.model_validate(
+        {
+            "issuer": ISSUER,
+            "authorization_endpoint": "https://example.com/oauth",
+            "token_endpoint": token_endpoint,
+            "revocation_endpoint": REVOCATION_ENDPOINT,
+        }
+    )
+
+
+def resource_metadata() -> ProtectedResourceMetadata:
+    return ProtectedResourceMetadata.model_validate(
+        {"resource": URL, "authorization_servers": [ISSUER]}
+    )
+
+
+async def log_in_with_discovery(tmp_path: Path) -> None:
+    """Store a login the way the SDK's flow ends one: it has discovered the
+    server by the time its tokens arrive."""
+    store = storage(tmp_path)
+    context = provider_for(store).context
+    context.oauth_metadata = as_metadata()
+    context.protected_resource_metadata = resource_metadata()
+    context.auth_server_url = ISSUER
+    await store.set_client_info(client_info())
+    await store.set_tokens(tokens())
+
+
+async def test_what_discovery_found_comes_back_onto_a_fresh_providers_context(
+    tmp_path: Path,
+) -> None:
+    # A restart builds a fresh provider whose first request can be a refresh,
+    # before any 401 has sent it discovering. Without the stored endpoints the SDK
+    # guesses <mcp origin>/token and hands the refresh token to the wrong host.
+    await log_in_with_discovery(tmp_path)
+    fresh = storage(tmp_path)
+    context = provider_for(fresh).context
+
+    await fresh.get_tokens()
+
+    assert context.oauth_metadata == as_metadata()
+    assert context.protected_resource_metadata == resource_metadata()
+    assert context.auth_server_url == ISSUER
+
+
+async def test_a_session_keeps_what_it_discovered_over_what_is_stored(
+    tmp_path: Path,
+) -> None:
+    await log_in_with_discovery(tmp_path)
+    fresh = storage(tmp_path)
+    context = provider_for(fresh).context
+    moved = as_metadata("https://api.example.com/oauth3/token/")
+    context.oauth_metadata = moved
+    context.auth_server_url = "https://other.example.com"
+
+    await fresh.get_tokens()  # the SDK re-reads after a failed refresh
+
+    assert context.oauth_metadata == moved
+    assert context.auth_server_url == "https://other.example.com"
+
+
+async def test_a_changed_url_does_not_restore_the_old_servers_endpoints(
+    tmp_path: Path,
+) -> None:
+    await log_in_with_discovery(tmp_path)
+    moved = storage(tmp_path, url="https://other.example.com/mcp")
+    context = provider_for(moved).context
+
+    await moved.get_tokens()
+
+    assert context.oauth_metadata is None
+    assert context.protected_resource_metadata is None
+    assert context.auth_server_url is None
+
+
+async def test_unreadable_stored_endpoints_are_ignored_not_fatal(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    await log_in_with_discovery(tmp_path)
+    path = tmp_path / "mcp-oauth" / "rh.json"
+    record = json.loads(path.read_text())
+    record["oauth_metadata"] = {"token_endpoint": "not a url"}
+    path.write_text(json.dumps(record))
+    fresh = storage(tmp_path)
+    context = provider_for(fresh).context
+
+    with caplog.at_level(logging.WARNING):
+        assert await fresh.get_tokens() == tokens()  # the login itself is intact
+
+    assert context.oauth_metadata is None
+    assert "unreadable discovery data" in caplog.text
+
+
+async def test_the_revocation_endpoint_is_the_one_discovery_found(
+    tmp_path: Path,
+) -> None:
+    assert storage(tmp_path).revocation_endpoint() is None
+    await log_in_with_discovery(tmp_path)
+    assert storage(tmp_path).revocation_endpoint() == REVOCATION_ENDPOINT

@@ -5,6 +5,8 @@ tmp-then-replace so a crash never leaves half a file. The record is bound to the
 server url *and* the redirect URI the client was registered with: change either
 and the stored registration and tokens read as absent, so the next login
 registers afresh instead of presenting a registration the server will refuse.
+Beside the login it keeps what the SDK's discovery found (chiefly where the
+token endpoint is), which the SDK itself never restores.
 """
 
 import json
@@ -15,12 +17,23 @@ from pathlib import Path
 from typing import Any
 
 from mcp.client.auth.oauth2 import OAuthContext
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthMetadata,
+    OAuthToken,
+    ProtectedResourceMetadata,
+)
 from mcp.shared.auth_utils import calculate_token_expiry
 
 logger = logging.getLogger(__name__)
 
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+#: The ``OAuthContext`` attributes discovery fills in, with the model each is.
+_DISCOVERED: dict[str, type[OAuthMetadata] | type[ProtectedResourceMetadata]] = {
+    "oauth_metadata": OAuthMetadata,
+    "protected_resource_metadata": ProtectedResourceMetadata,
+}
 
 
 class FileTokenStorage:
@@ -36,19 +49,20 @@ class FileTokenStorage:
         self._context: OAuthContext | None = None
 
     def attach(self, context: OAuthContext) -> None:
-        """Let loaded tokens carry their expiry onto the SDK's context.
+        """Let loaded tokens carry what the SDK would otherwise lose onto its context.
 
-        The SDK restores stored tokens without one and then treats them as valid
-        forever, and a 401 starts a full login rather than a refresh — so a
-        restart would trade a refreshable token for a new login the first time
-        it ran out. Setting the expiry (and the discovered revocation endpoint
-        on the way back) is all this needs from the context."""
+        The SDK restores stored tokens without an expiry (it then treats them as
+        valid forever, and a 401 starts a full login rather than a refresh) and
+        without what discovery found, so the first refresh after a restart posts
+        to a guessed ``<mcp origin>/token`` — the refresh token and client id sent
+        to a host the server never named. ``get_tokens`` puts both back, and
+        ``set_tokens`` reads this context for the discovery to store."""
         self._context = context
 
     async def get_tokens(self) -> OAuthToken | None:
         record = self._load()
         if self._context is not None:
-            self._context.token_expiry_time = record.get("expires_at")
+            self._restore(self._context, record)
         tokens = record.get("tokens")
         return OAuthToken.model_validate(tokens) if tokens else None
 
@@ -59,12 +73,10 @@ class FileTokenStorage:
             # A refresh response may omit the refresh token (RFC 6749 §6); the
             # old one stays good, and the SDK holds this same object in memory.
             tokens.refresh_token = previous
-        metadata = self._context.oauth_metadata if self._context else None
-        found = metadata.revocation_endpoint if metadata else None
         self._save(
             tokens=tokens.model_dump(mode="json", exclude_none=True),
             expires_at=calculate_token_expiry(tokens.expires_in),
-            revocation_endpoint=str(found or record.get("revocation_endpoint") or ""),
+            **self._discovered(),
         )
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -76,11 +88,39 @@ class FileTokenStorage:
 
     def revocation_endpoint(self) -> str | None:
         """The authorization server's revocation endpoint, when it advertised one."""
-        return self._load().get("revocation_endpoint") or None
+        metadata = self._load().get("oauth_metadata") or {}
+        return metadata.get("revocation_endpoint") or None
 
     def clear(self) -> None:
         """Forget this server entirely (logout)."""
         self._path.unlink(missing_ok=True)
+
+    def _restore(self, context: OAuthContext, record: dict[str, Any]) -> None:
+        context.token_expiry_time = record.get("expires_at")
+        try:
+            for name, model in _DISCOVERED.items():
+                # What this session discovered itself is fresher than the file.
+                if getattr(context, name) is None and record.get(name):
+                    setattr(context, name, model.model_validate(record[name]))
+        except ValueError:  # pydantic's ValidationError, e.g. after an SDK upgrade
+            logger.warning("mcp oauth file %s: unreadable discovery data", self._path)
+        stored_server = record.get("auth_server_url")
+        context.auth_server_url = context.auth_server_url or stored_server
+
+    def _discovered(self) -> dict[str, Any]:
+        """What discovery has found so far, as fields to store (none while this
+        storage is not attached, or before any 401 sent the SDK discovering)."""
+        context = self._context
+        if context is None:
+            return {}
+        fields: dict[str, Any] = {
+            name: found.model_dump(mode="json", exclude_none=True)
+            for name in _DISCOVERED
+            if (found := getattr(context, name)) is not None
+        }
+        if context.auth_server_url:
+            fields["auth_server_url"] = context.auth_server_url
+        return fields
 
     def _load(self) -> dict[str, Any]:
         try:

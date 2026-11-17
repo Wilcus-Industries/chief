@@ -520,6 +520,43 @@ async def test_a_session_started_from_stored_tokens_refreshes_in_place_at_expiry
     assert len(rig.sent) == 2  # no notice: nothing was ever wrong
 
 
+async def test_the_refresh_token_only_ever_goes_to_the_advertised_token_endpoint(
+    rig: Rig,
+) -> None:
+    await log_in(rig)
+    for _ in range(2):  # two restarts: each builds a provider that has not discovered
+        age_the_stored_token(rig.root)
+        rig = await rig.reboot()
+        assert await asyncio.wait_for(rig.manager.connect(rig.config), 10) == 1
+    await rig.manager.stop()
+
+    # The SDK's fallback when it has no metadata is <mcp origin>/token, a host
+    # and path the server never named; the refresh token must not be sent there.
+    assert "/token" not in {path for _, path in rig.fake.requests}
+    grants = [r["grant_type"] for r in rig.fake.token_requests]
+    assert grants == ["authorization_code", "refresh_token", "refresh_token"]
+
+
+async def test_a_refresh_after_a_restart_names_the_same_resource_as_the_login(
+    rig: Rig,
+) -> None:
+    # The SDK adds the RFC 8707 resource only once it knows the server's
+    # protected-resource metadata (or a protocol version, which the first request
+    # after a restart has not got yet); the stored metadata keeps that refresh the
+    # same grant the login made.
+    await log_in(rig)
+    age_the_stored_token(rig.root)
+
+    again = await rig.reboot()
+    try:
+        assert await asyncio.wait_for(again.manager.connect(again.config), 10) == 1
+    finally:
+        await again.manager.stop()
+
+    exchange, refresh = rig.fake.token_requests
+    assert refresh["resource"] == exchange["resource"] == rig.fake.mcp_url
+
+
 async def test_a_refresh_that_returns_no_new_refresh_token_keeps_working(
     rig: Rig,
 ) -> None:

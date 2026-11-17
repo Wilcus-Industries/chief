@@ -48,6 +48,11 @@ class FakeOAuth:
         self.revoke_status = 200  # what the revocation endpoint answers
         self.deny_authorize = False  # the browser step answers access_denied
         self.as_base: str | None = None  # where PRM says the AS lives (default: here)
+        # Where the AS metadata puts the token endpoint. Never "/token": that is
+        # where the SDK guesses when it has no metadata, so serving it there would
+        # let a client that forgot the metadata pass. Fixed when the app is built,
+        # so pass it to ``serve_fake``.
+        self.token_path = "/oauth2/token/"
         # Observations.
         self.clients: dict[str, dict[str, Any]] = {}
         self.registrations: list[dict[str, Any]] = []
@@ -55,6 +60,7 @@ class FakeOAuth:
         self.token_requests: list[dict[str, str]] = []
         self.revocations: list[dict[str, str]] = []
         self.seen_headers: list[dict[str, str]] = []
+        self.requests: list[tuple[str, str]] = []  # (method, path), every one
         self._codes: dict[str, dict[str, str]] = {}
         self._access: dict[str, float] = {}
         self._refresh: set[str] = set()
@@ -107,7 +113,7 @@ class FakeOAuth:
         metadata: dict[str, Any] = {
             "issuer": self.base_url,
             "authorization_endpoint": f"{self.base_url}/authorize",
-            "token_endpoint": f"{self.base_url}/token",
+            "token_endpoint": f"{self.base_url}{self.token_path}",
             "registration_endpoint": f"{self.base_url}/register",
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -221,7 +227,7 @@ class FakeOAuth:
             ("/.well-known/oauth-authorization-server", self._as_metadata, "GET"),
             ("/register", self._register, "POST"),
             ("/authorize", self._authorize, "GET"),
-            ("/token", self._token, "POST"),
+            (self.token_path, self._token, "POST"),
             ("/revoke", self._revoke, "POST"),
         ):
             app.add_route(path, handler, methods=[method])
@@ -229,13 +235,15 @@ class FakeOAuth:
 
 
 class _Gate:
-    """ASGI wrapper that records and gates every request to ``/mcp``."""
+    """ASGI wrapper that logs every request and gates the ones to ``/mcp``."""
 
     def __init__(self, app: ASGIApp, fake: FakeOAuth) -> None:
         self._app = app
         self._fake = fake
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            self._fake.requests.append((scope["method"], scope["path"]))
         if scope["type"] == "http" and scope["path"] == "/mcp":
             headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
             self._fake.seen_headers.append(headers)

@@ -152,9 +152,13 @@ to the asking conversation and the callback step waits (ten minutes, bounded) fo
 the browser's address. A network error or 5xx never reaches the redirect step,
 which is why only genuine auth failures park a server.
 
-The SDK restores stored tokens without their expiry and does not refresh on a 401;
-`token_store.py` puts the expiry back and keeps a refresh token a refresh response
-omits, which is what makes a restart not cost a login.
+The SDK restores stored tokens without their expiry, does not refresh on a 401, and
+does not restore what its discovery found — so the first refresh after a restart or
+reconnect would post to a guessed `<server origin>/token` (the refresh token and
+client id sent to a host the server never named) instead of the token endpoint it
+advertised. `token_store.py` stores that discovery with the tokens and puts it and
+the expiry back on each fresh provider, and keeps a refresh token a refresh response
+omits; together that is what makes a restart not cost a login.
 
 ## Monitors — `src/chief/monitors/`
 
