@@ -140,7 +140,7 @@ what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
 | `supervisor.py` | the connect / reconnect loop, and parking on a login wall; releases a tool call whose connection died (`calls.py`) |
 | `transport.py` | opens the stdio or streamable-HTTP transport and a session on it |
 | `oauth.py` | `OAuthBroker`: per-server state (`connecting`, `connected`, `needs_auth`, `disabled`), provider construction, and the facade the supervisor, tools and commands call |
-| `oauth_flow.py`, `oauth_login.py`, `oauth_notice.py`, `oauth_types.py` | the SDK provider and its redirect/callback pair; start / complete / logout; the once-only "needs login" notice; shared types |
+| `oauth_flow.py`, `oauth_login.py`, `oauth_attempt.py`, `oauth_notice.py`, `oauth_types.py` | the SDK provider and its redirect/callback pair; the owner's start / complete / logout; the supervisor's pickup and ending of a `/login` attempt; the once-only "needs login" notice; shared types |
 | `token_store.py` | `secrets/mcp-oauth/<server>.json`, the SDK's `TokenStorage` |
 | `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
 

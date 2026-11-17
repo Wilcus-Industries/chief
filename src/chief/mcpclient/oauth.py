@@ -12,7 +12,6 @@ attempt that sends the owner a link instead and waits, bounded, for the address
 the browser ends up on.
 """
 
-import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +19,7 @@ from pathlib import Path
 from mcp.client.auth import OAuthClientProvider
 
 from chief.audit import AuditLog
+from chief.mcpclient import oauth_attempt as attempts
 from chief.mcpclient import oauth_login as login
 from chief.mcpclient.config import ServerConfig
 from chief.mcpclient.oauth_flow import LoginFlow, new_provider
@@ -28,16 +28,12 @@ from chief.mcpclient.oauth_types import (
     FLOW_TTL_SECONDS,
     AuthState,
     LoginAttempt,
-    LoginError,
     LoginResult,
     Send,
     ServerAuth,
     Surface,
-    leaf,
 )
 from chief.mcpclient.token_store import FileTokenStorage
-
-logger = logging.getLogger(__name__)
 
 
 class OAuthBroker:
@@ -94,12 +90,7 @@ class OAuthBroker:
 
     async def next_login(self, server: str) -> LoginAttempt:
         """Wait until the owner asks to log in to ``server``."""
-        record = self._servers[server]
-        while True:
-            await record.wake.wait()
-            record.wake.clear()
-            if record.attempt is not None and not record.attempt.done.done():
-                return record.attempt
+        return await attempts.next_attempt(self._servers[server])
 
     def connected(self, server: str, count: int) -> None:
         """``server`` is up: clear its notice, and end the login that got it here."""
@@ -107,11 +98,7 @@ class OAuthBroker:
         record.state = "connected"
         record.dropped.clear()
         self._notices.clear(server)
-        attempt, record.attempt = record.attempt, None
-        if attempt is not None and not attempt.connected:
-            attempt.connected = True
-            plural = "tool" if count == 1 else "tools"
-            attempt.finish(LoginResult(True, f"{server} connected ({count} {plural})"))
+        if attempts.connected(record, count):
             self._audit.record("mcp_auth_complete", server=server, reason="connected")
 
     def disconnected(self, server: str) -> None:
@@ -125,15 +112,9 @@ class OAuthBroker:
 
     def login_failed(self, attempt: LoginAttempt, exc: BaseException) -> None:
         """End ``attempt`` with the reason; the server stays parked."""
-        error = leaf(exc)
-        reason = str(error) if isinstance(error, LoginError) else repr(error)
-        logger.warning("mcp login for %s failed: %s", attempt.server, reason)
-        name = type(error).__name__
-        self._audit.record("mcp_auth_fail", server=attempt.server, reason=name)
-        attempt.finish(LoginResult(False, f"login failed: {reason}"))
         record = self._servers[attempt.server]
-        if record.attempt is attempt:
-            record.attempt = None
+        reason = attempts.failed(record, attempt, exc)
+        self._audit.record("mcp_auth_fail", server=attempt.server, reason=reason)
 
     async def logged_out(self, server: str) -> None:
         """Wait for ``logout`` to ask the live connection to end."""
