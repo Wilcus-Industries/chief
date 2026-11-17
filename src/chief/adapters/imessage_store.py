@@ -58,7 +58,7 @@ POLL_BATCH_LIMIT = 200
 # one (sometimes more) is_from_me=0 receive twins, same text, dates within tens
 # of ms, different guids. Delivering each would run a turn per copy, so chief
 # answers the one message twice. Dedup by (sender, text) over this window.
-DEDUP_WINDOW_NS = 5_000_000_000  # 5s
+DEDUP_WINDOW_SECONDS = 5.0
 
 # ``message.date`` counts from 2001-01-01 UTC, not 1970. Nothing chief polls
 # predates iMessage, so an earlier date is unset or corrupt.
@@ -71,26 +71,31 @@ _NSSTRING = b"NSString"
 class RecentDedup:
     """Collapses self-DM twin rows to one delivery.
 
-    A ``(thread_key, sender, text)`` key seen again within ``window_ns`` of its
-    last sighting is a redelivery of the same logical message — skip it. The
+    A ``(thread_key, sender, text)`` key seen again within ``window`` seconds of
+    its last sighting is a redelivery of the same logical message — skip it. The
     thread is part of the key so two people saying "ok" in different group
     chats at once stay two messages. The window keeps a genuine later repeat of
     the same text (owner types it again minutes on) from being swallowed. State
     is in-memory: a fresh boot re-primes from the store cursor, never replaying
     an already-delivered twin.
+
+    Callers pass when the row was sent *after* :func:`sent_at` has made it a
+    usable time. A row with no usable date (NULL, 0) is placed at the poll time,
+    never at its raw date: that is 2001, before every real row, and a negative
+    gap counts as inside the window, so a genuine repeat hours later was dropped.
     """
 
-    def __init__(self, window_ns: int = DEDUP_WINDOW_NS) -> None:
-        self._window = window_ns
-        self._seen: dict[tuple[str, ...], int] = {}
+    def __init__(self, window: float = DEDUP_WINDOW_SECONDS) -> None:
+        self._window = window
+        self._seen: dict[tuple[str, ...], float] = {}
 
-    def is_duplicate(self, key: tuple[str, ...], date_ns: int) -> bool:
-        self._seen = {
-            k: d for k, d in self._seen.items() if date_ns - d <= self._window
-        }
+    def is_duplicate(self, key: tuple[str, ...], at: float) -> bool:
+        """True when ``key`` was last seen within the window of ``at`` (epoch
+        seconds); either way ``at`` becomes its last sighting."""
+        self._seen = {k: t for k, t in self._seen.items() if at - t <= self._window}
         prev = self._seen.get(key)
-        self._seen[key] = date_ns
-        return prev is not None and date_ns - prev <= self._window
+        self._seen[key] = at
+        return prev is not None and at - prev <= self._window
 
 
 def sent_at(date: int) -> float:

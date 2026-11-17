@@ -294,8 +294,13 @@ async def test_owner_self_dm_twin_delivered_once(tmp_path: Path) -> None:
     is_from_me=0 row, same text, same self-chat, same instant (different guids).
     Only one turn may run — else chief answers the one message twice."""
     harness = Harness(tmp_path)
-    harness.store.add_message(OWNER, "ping", from_me=0, chat=OWNER, date=100)
-    harness.store.add_message(OWNER, "ping", from_me=1, chat=OWNER, date=100)
+    sent = time.time() - 60
+    harness.store.add_message(
+        OWNER, "ping", from_me=0, chat=OWNER, date=chat_db_date(sent)
+    )
+    harness.store.add_message(
+        OWNER, "ping", from_me=1, chat=OWNER, date=chat_db_date(sent + 0.03)
+    )
     adapter = harness.adapter()
     await adapter.poll_once()
     await adapter.drain()
@@ -308,9 +313,13 @@ async def test_owner_repeats_text_after_window_delivers_both(
     """Dedup is time-bounded: the owner legitimately sending the same text
     again well after the twin window must still run a second turn."""
     harness = Harness(tmp_path)
-    later = 10_000_000_000  # 10s in ns, past the dedup window
-    harness.store.add_message(OWNER, "ok", from_me=1, chat=OWNER, date=0)
-    harness.store.add_message(OWNER, "ok", from_me=1, chat=OWNER, date=later)
+    sent = time.time() - 60
+    harness.store.add_message(
+        OWNER, "ok", from_me=1, chat=OWNER, date=chat_db_date(sent)
+    )
+    harness.store.add_message(  # 10s on: past the dedup window
+        OWNER, "ok", from_me=1, chat=OWNER, date=chat_db_date(sent + 10)
+    )
     adapter = harness.adapter()
     await adapter.poll_once()
     await adapter.drain()
@@ -389,6 +398,51 @@ async def test_an_unusable_date_falls_back_to_the_time_it_was_polled(
 ) -> None:
     before, at, after = await poll_one_row(tmp_path, make_date())
     assert before <= at <= after
+
+
+async def poll_owner_rows(
+    tmp_path: Path, rows: list[tuple[str, int | None]]
+) -> list[str]:
+    """Poll one tick over owner self-DM rows, ``(text, date)`` each; the texts
+    of the messages that ran a turn."""
+    harness = Harness(tmp_path)
+    for text, date in rows:
+        harness.store.add_message(OWNER, text, from_me=1, chat=OWNER, date=date)
+    adapter = harness.adapter()
+    await adapter.poll_once()
+    await adapter.drain()
+    return [m.text for m in harness.delivered]
+
+
+@pytest.mark.parametrize(
+    "make_date", UNUSABLE_DATES.values(), ids=UNUSABLE_DATES.keys()
+)
+async def test_twins_with_no_usable_date_still_collapse(
+    tmp_path: Path, make_date: Callable[[], int | None]
+) -> None:
+    """Both twins fall back to the poll time, a moment apart and well inside the
+    dedup window, so the one message still runs one turn."""
+    texts = await poll_owner_rows(
+        tmp_path, [("ping", make_date()), ("ping", make_date())]
+    )
+    assert texts == ["ping"]
+
+
+@pytest.mark.parametrize(
+    "make_date", UNUSABLE_DATES.values(), ids=UNUSABLE_DATES.keys()
+)
+async def test_a_repeat_hours_later_with_no_usable_date_is_not_a_twin(
+    tmp_path: Path, make_date: Callable[[], int | None]
+) -> None:
+    """"yes" at 09:00, then "yes" at 11:00 whose row has no usable date. The
+    second is a real message. Keyed on the raw date (0 for NULL) it sat before
+    the first and counted as inside the window, so it was dropped silently;
+    keyed on the time it falls back to (now) it is hours after."""
+    two_hours_ago = chat_db_date(time.time() - 2 * 3600)
+    texts = await poll_owner_rows(
+        tmp_path, [("yes", two_hours_ago), ("yes", make_date())]
+    )
+    assert texts == ["yes", "yes"]
 
 
 async def test_self_chat_scope_does_not_leak_other_conversations(

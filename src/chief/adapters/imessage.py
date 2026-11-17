@@ -147,7 +147,7 @@ class IMessageAdapter(Adapter):
                 if message is None:
                     continue
                 if not self._dedicated and self._dedup.is_duplicate(
-                    (message.thread_key, message.sender, message.text), date
+                    (message.thread_key, message.sender, message.text), message.at
                 ):
                     continue  # twin rows are a self-DM artefact only
                 if self._resolve_approval is not None and self._resolve_approval(

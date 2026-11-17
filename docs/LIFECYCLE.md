@@ -58,7 +58,9 @@ All converge on `Dispatcher.handle` (`dispatch.py`).
    stamp's source, `sent_at` in `imessage_store.py`); a missing or implausible
    date falls back to the poll time.
 6. `RecentDedup.is_duplicate()` on `(thread_key, sender, text)` within
-   `DEDUP_WINDOW_NS` (5s, in-memory).
+   `DEDUP_WINDOW_SECONDS` (5s, in-memory), placed by the message's `at` rather
+   than the raw `date`: a row with no usable date sits at the poll time, so a
+   real repeat hours after an earlier one is not taken for its twin.
 7. `resolve_approval()` is called **at poll stage, before enqueue** — see §5 for
    why that ordering is load-bearing.
 8. `ThreadFifo.put()` (`imessage_fifo.py`) → a per-`thread_key` `asyncio.Queue`
