@@ -31,7 +31,7 @@ async def report_restart(app: "App", repo_root: Path) -> None:
     the owner's primary surface does, naming the thread. Best effort: a
     missing channel or a dead adapter must not take the fresh boot down.
     """
-    from chief.cron.updates import primary_target  # inside the boot seatbelt
+    from chief.owner import primary_target  # inside the boot seatbelt
     from chief.policy import owner_audience
 
     notice = take_restart_notice(repo_root)

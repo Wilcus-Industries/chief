@@ -15,6 +15,14 @@ them that way.
 
 Both are set by the installer wizard; re-run it any time with `chief wizard`.
 
+## MCP server secrets
+
+A static header for an `mcp_servers` entry reads its secret from a file here (or
+the upper-cased env var) by reference — `${secret:example_token}` reads
+`secrets/example_token`; never put the value in `config.yaml`. An
+`auth: oauth` server's login is kept by chief itself in `mcp-oauth/<server>.json`
+(mode 0600) — leave it alone, and use `/logout <server>` to forget it.
+
 ## Package secrets
 
 Packages declare the secrets they need in their manifest (e.g. Google OAuth

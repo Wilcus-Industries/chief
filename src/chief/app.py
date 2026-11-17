@@ -1,9 +1,9 @@
 """Application wiring: build the whole daemon from a Config.
 
 ``build_app`` reads as a table of contents — each phase is a helper called in
-order. Persistence, gate, MCP, and adapters live in ``chief.wiring``; the
-default toolset in ``chief.tools.native``; hook assembly in ``chief.hooks.boot``;
-the agent-core closure trap stays here.
+order. Persistence, gate, and adapters live in ``chief.wiring`` (MCP in
+``chief.mcpclient.wiring``); the default toolset in ``chief.tools.native``; hook
+assembly in ``chief.hooks.boot``; the agent-core closure trap stays here.
 Tests boot exactly this wiring with only the provider swapped for the
 deterministic fake (the one scripted fake CI allows, PRD #183).
 """
@@ -21,7 +21,7 @@ from chief.commands import CommandSet
 from chief.config import Config
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
-from chief.cron.updates import ensure_update_schedule, primary_target
+from chief.cron.updates import ensure_update_schedule
 from chief.daemon import App
 from chief.dispatch import Dispatcher
 from chief.gate import GatedTools
@@ -29,7 +29,9 @@ from chief.gate_surface import approval_asker, card_pointer, channel_announcer
 from chief.hooks.boot import build_hooks
 from chief.hooks.posttool import tool_screener
 from chief.hub import ObserverHub
+from chief.mcpclient.wiring import build_mcp
 from chief.monitors.service import MonitorService
+from chief.owner import primary_target
 from chief.peers.wiring import build_peers
 from chief.persistence.db import SessionFactory
 from chief.persistence.store import MessageStore
@@ -51,7 +53,6 @@ from chief.wiring import (
     build_adapters,
     build_compactor,
     build_gate,
-    build_mcp,
     build_persistence,
     build_provider,
 )
@@ -126,7 +127,7 @@ async def _build_agent_core(
     # Subagent turns get the same post_tool seam (core injection screen first).
     post_tool = tool_screener(hooks, config.hooks_timeout_seconds, logger)
     return Core(budget, bus, hub, registry, restart, manager, dispatcher,
-                monitors, cron, post_tool, ask, tools_factory, inflight)
+                monitors, cron, hooks, post_tool, ask, tools_factory, inflight)
 
 
 async def build_app(config: Config, provider: Provider | None = None) -> App:
@@ -172,8 +173,8 @@ async def build_app(config: Config, provider: Provider | None = None) -> App:
         model_aliases=model_aliases, pool=peers.pool,
     )
     core.dispatcher.set_commands(commands)
-    mcp_manager, mcp_configs = build_mcp(config, core.registry)
-    adapters = build_adapters(config, core, store, commands, gate.approvals)
+    mcp_manager, mcp_configs, broker = build_mcp(config, core, commands, gate.audit)
+    adapters = build_adapters(config, core, store, commands, gate.approvals, broker)
 
     return App(
         config=config, engine=engine, store=store, dispatcher=core.dispatcher,

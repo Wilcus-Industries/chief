@@ -31,6 +31,12 @@ class Decision(Enum):
     ASK = "ask"
 
 
+# Approved by core itself, not by config: they only ever hand the owner a login
+# link or take back what the owner pasted, and a card would put a prompt in
+# front of a flow the owner has already started. ``never`` still wins.
+CORE_APPROVED: frozenset[str] = frozenset({"server_login", "server_login_complete"})
+
+
 @dataclass
 class GatePolicy:
     """The code-enforced lists; anything on neither list asks.
@@ -48,6 +54,8 @@ class GatePolicy:
     def decide(self, tool_name: str) -> Decision:
         if tool_name in self.never:
             return Decision.NEVER
+        if tool_name in CORE_APPROVED:
+            return Decision.APPROVED
         if "*" in self.approved or tool_name in self.approved:
             return Decision.APPROVED
         return Decision.ASK

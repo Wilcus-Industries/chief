@@ -1,9 +1,10 @@
 """Boot phases for ``build_app``: the infrastructure around the agent core.
 
-Persistence, the gate/approval layer, MCP config, and the channel adapters —
-each a small helper so ``chief.app.build_app`` reads as a table of contents.
-The agent core (the manager/dispatcher/tools_factory closure trap) and the
-default toolset live next door in ``chief.app`` and ``chief.tools.native``.
+Persistence, the gate/approval layer, and the channel adapters — each a small
+helper so ``chief.app.build_app`` reads as a table of contents. The agent core
+(the manager/dispatcher/tools_factory closure trap) and the default toolset live
+next door in ``chief.app`` and ``chief.tools.native``; MCP boot is in
+``chief.mcpclient.wiring``.
 """
 
 import sys
@@ -27,12 +28,9 @@ from chief.config import Config
 from chief.cron.service import CronService
 from chief.dispatch import Dispatcher
 from chief.gate import AskApproval, GatePolicy, load_approved, save_approved
+from chief.hooks.registry import HookRegistry
 from chief.hub import ObserverHub
-from chief.mcpclient.manager import (
-    McpManager,
-    ServerConfig,
-    server_config_from_entry,
-)
+from chief.mcpclient.oauth import OAuthBroker
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -75,6 +73,7 @@ class Core:
     dispatcher: Dispatcher
     monitors: MonitorService
     cron: CronService
+    hooks: HookRegistry
     post_tool: PostTool | None = None
     ask: AskApproval | None = None
     # Builds a thread's gated tools; the subagent pool reuses it per run.
@@ -135,26 +134,9 @@ def build_gate(config: Config) -> Gate:
     return Gate(audit, policy, allow_always, ApprovalBroker())
 
 
-def build_mcp(
-    config: Config, registry: ToolRegistry
-) -> tuple[McpManager, tuple[ServerConfig, ...]]:
-    """MCP servers are pure config: the agent adds one by editing the
-    ``mcp_servers`` key (then ``restart``), and it connects on the next boot.
-
-    An entry with a malformed ``timeout`` is dropped (logged, not raised) by
-    ``server_config_from_entry`` — see there for why.
-    """
-    mcp_configs = tuple(
-        sc
-        for name, entry in config.mcp_servers.items()
-        if (sc := server_config_from_entry(name, entry)) is not None
-    )
-    return McpManager(registry), mcp_configs
-
-
 def build_adapters(
     config: Config, core: Core, store: MessageStore, commands: CommandSet,
-    approvals: ApprovalBroker,
+    approvals: ApprovalBroker, broker: OAuthBroker,
 ) -> Adapters:
     """Register socket, darwin-gated iMessage and web adapters, plus the web server."""
     dispatcher = core.dispatcher
@@ -187,6 +169,6 @@ def build_adapters(
             Auth(config.web_password, load_or_create_secret()), web_adapter, core.hub,
             dispatcher.handle, dispatcher.try_inject, core.monitors, store,
             commands.palette, core.manager, approvals, config.stream_channel_defaults,
-            config.imessage_owner_handles)
+            config.imessage_owner_handles, broker)
         web_server = WebServer(web_app, config.web_host, config.web_port)
     return Adapters(socket_adapter, imessage_adapter, web_adapter, web_server)

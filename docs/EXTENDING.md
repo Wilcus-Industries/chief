@@ -76,6 +76,83 @@ default because thread keys are often phone numbers; only turn it on for a
 server you trust with them. An opted-in server's tools cannot take an argument
 named `context` (chief's context replaces it; registration logs a warning).
 
+A `url` entry may also send static `headers` (header name → string). Never put a
+secret in one by value: write `${secret:name}` and the value is read at boot from
+the env var `NAME` (upper-cased), then the file `secrets/name`. Only that exact
+form expands — any other `${...}` is sent literally — and a secret that is missing
+or cannot be read (say, `secrets/name` is a directory or not readable by chief)
+skips that one server (logged, naming the header) while the rest of the daemon boots.
+
+```yaml
+mcp_servers:
+  example:
+    url: https://example.com/mcp
+    headers:
+      Authorization: "Bearer ${secret:example_token}"
+```
+
+### A server that wants a login (OAuth)
+
+A server that sits behind OAuth (Robinhood's `https://agent.robinhood.com/mcp/trading`
+is the motivating one) takes `auth: oauth`, and `scopes` if discovery needs help:
+
+```yaml
+mcp_servers:
+  robinhood:
+    url: https://agent.robinhood.com/mcp/trading
+    auth: oauth
+    scopes: [internal]   # optional: overrides what the server advertises
+```
+
+The name may use letters, digits, `-` and `_` only — it becomes
+`secrets/mcp-oauth/<name>.json`, the server's tokens, client registration and
+discovered endpoints (mode 0600). `auth` and `headers` are for `url` entries; on a
+`command` entry the server is skipped (config) or the manifest fails validation
+(package).
+
+- **Boot never waits on a login.** A server with no good login is parked as
+  `needs_auth`, `connect` returns at once with no tools, and the owner gets one
+  notice on their primary channel — `Robinhood needs login. Say "connect
+  robinhood" or /login robinhood.` — not repeated on later boots. A channel that
+  does not take it within ten seconds is logged and skipped (the notice stays due
+  for the next boot), so a hung channel cannot keep `/login` from being heard. The
+  model's prompt lists the servers waiting.
+- **Logging in.** Say "connect robinhood" (the model calls `server_login`) or send
+  `/login robinhood` (the tools, `/login` and `/logout` exist only while some server
+  has `auth: oauth`). Chief sends a login link to *that conversation* (to your
+  primary channel instead when the conversation reaches someone other than you);
+  the model is only told it went out. Approve it in a browser and the browser lands on
+  `http://127.0.0.1:<web_port>/oauth/callback?code=…`. On the machine running
+  chief's web UI that page says "connected". From a phone it fails to load, which
+  is expected: copy the address it tried to open and send it back as
+  `/login robinhood <address>` (no model call) or just paste it and the model calls
+  `server_login_complete`. A link is good for ten minutes and a second `/login`
+  replaces it. The tools appear live — no restart.
+- **Staying logged in.** The access token refreshes on its own, across restarts
+  too, a minute before it expires. A server that turns the token away early (or
+  never said when it expires) gets one refresh and a reconnect first, the call that
+  found out answering `error: mcp server '<server>' is not connected`. Only a real
+  auth failure — the token endpoint refuses that refresh (a 4xx such as
+  `invalid_grant`) — parks the server again (one notice, and a tool call in flight
+  answers `error: <server> needs login; call server_login`). A network error, a
+  5xx or a 429 — the token endpoint's included — is not a login problem: the
+  stored login is kept and the connection takes the ordinary reconnect/backoff (a
+  call in flight answers `error: mcp server '<server>' is not connected`). At boot
+  the server fails to start, like any that is down, and is not retried until the
+  next restart.
+- **`/logout robinhood`** forgets the login: it asks the provider to revoke it when
+  the provider offers a revocation endpoint (not all do), deletes the token file,
+  and ends the connection, quietly. Its tools stay listed but answer with the
+  login error until the next `/login`.
+- Without a `web_password` there is no web listener, so the paste-back is the only
+  path; that is fine, and it is the usual one from a phone.
+
+The redirect URI is `http://127.0.0.1:<web_port>/oauth/callback`. Changing
+`web_port`, or `REDIRECT_HOST` in `chief.mcpclient.oauth_types` (a provider that
+only accepts `localhost` needs that one-line change), makes the next login
+register afresh — a registration is only good for the redirect it was made with.
+Security properties are in [SECURITY.md](./SECURITY.md).
+
 ## Add a classifier
 
 Drop a `<name>.md` in `classifiers/` with frontmatter `name`, `description`,
@@ -136,7 +213,7 @@ A package is a directory with `manifest.yaml`:
 | `secrets` | list[str] | filenames expected under `secrets/` |
 | `python_deps` | list[str] | **import** names (`yaml`), never dist names (`PyYAML`) |
 | `hooks` | mapping | `{module, register}` |
-| `mcp_servers` | mapping | `{<name>: {url}}` or `{<name>: {command}}` — exactly one |
+| `mcp_servers` | mapping | `{<name>: {url}}` or `{<name>: {command}}` — exactly one. A `url` entry may add `auth: oauth`, `headers` (name → string; secrets only as `${secret:name}` refs, never by value) and `scopes` (list of str); `auth`/`headers` on a `command` entry fail validation |
 
 Plus `INSTALL.md` / `UNINSTALL.md`, and ideally an `install.sh` for the
 deterministic path.
