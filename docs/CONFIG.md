@@ -34,7 +34,10 @@ before failing loudly; a server that resolves or builds dependencies on its
 first launch can outrun the default. Omitting it gets
 `DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.config`). A
 timed-out connect cancels its supervising task and raises naming the server;
-the daemon logs it and keeps booting the rest.
+the daemon logs it and keeps booting the rest. A `url` entry may declare
+`headers` (name → string); a `${secret:name}` in a value is resolved at boot from
+env `NAME` then `secrets/name`, and an unresolvable one skips that server only
+(see [EXTENDING.md](./EXTENDING.md)). `headers` on a `command` entry is refused.
 
 The same applies to `web_host`, `web_port`, `skills_dir`, `agents_dir`,
 `classifiers_dir`, and `imessage.db_path` — all have dataclass defaults but no

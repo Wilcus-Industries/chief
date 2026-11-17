@@ -68,7 +68,7 @@ class Supervisor:
         async with AsyncExitStack() as stack:
             if config.url is not None:
                 read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(config.url)
+                    streamablehttp_client(config.url, headers=config.headers)
                 )
             elif config.command:
                 params = StdioServerParameters(
