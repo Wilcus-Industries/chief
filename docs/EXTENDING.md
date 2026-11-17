@@ -103,8 +103,10 @@ discovered endpoints (mode 0600). `auth` and `headers` are for `url` entries; on
 - **Boot never waits on a login.** A server with no good login is parked as
   `needs_auth`, `connect` returns at once with no tools, and the owner gets one
   notice on their primary channel — `Robinhood needs login. Say "connect
-  robinhood" or /login robinhood.` — not repeated on later boots. The model's
-  prompt lists the servers waiting.
+  robinhood" or /login robinhood.` — not repeated on later boots. A channel that
+  does not take it within ten seconds is logged and skipped (the notice stays due
+  for the next boot), so a hung channel cannot keep `/login` from being heard. The
+  model's prompt lists the servers waiting.
 - **Logging in.** Say "connect robinhood" (the model calls `server_login`) or send
   `/login robinhood` (the tools, `/login` and `/logout` exist only while some server
   has `auth: oauth`). Chief sends a login link to *that conversation*; the model is

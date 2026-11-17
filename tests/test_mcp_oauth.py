@@ -76,11 +76,14 @@ def build(
     root: Path,
     sent: list[tuple[Surface, str]],
     dead_channel: bool = False,
+    hang_notices: bool = False,
     **options: Any,
 ) -> Rig:
     async def send(surface: Surface, text: str) -> None:
         if dead_channel:
             raise ConnectionError("the owner's channel is down")
+        if hang_notices and surface == NOTICE_TO:
+            await asyncio.Event().wait()  # the owner's channel never answers
         sent.append((surface, text))
 
     broker = OAuthBroker(
@@ -188,6 +191,28 @@ async def test_a_notice_that_could_not_be_sent_is_retried_on_the_next_boot(
     finally:
         await up.manager.stop()
     assert sent == [(NOTICE_TO, NOTICE)]
+
+
+async def test_a_notice_that_never_sends_does_not_stop_the_owner_logging_in(
+    tmp_path: Path,
+    fake: FakeOAuth,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("chief.mcpclient.oauth_notice.NOTICE_TIMEOUT_SECONDS", 0.2)
+    rig = build(fake, tmp_path, [], hang_notices=True)
+    try:
+        with caplog.at_level(logging.ERROR):
+            await connect_parked(rig)  # boot is not held up by the notice either
+            link = await asyncio.wait_for(rig.broker.start_login(SERVER, SURFACE), 5)
+
+        assert link == LINK_SENT  # the supervisor was listening, not stuck sending
+        assert "could not tell the owner" in caplog.text
+        assert not (tmp_path / "notified.json").exists()  # still due: boot retries
+        callback = await fake.browser_approve(link_in(rig.sent[-1][1]))
+        assert (await rig.broker.complete_login(callback, SERVER)).ok
+    finally:
+        await rig.manager.stop()
 
 
 async def test_an_unreadable_notice_file_is_ignored_not_fatal(

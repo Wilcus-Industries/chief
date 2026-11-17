@@ -1,5 +1,6 @@
 """Telling the owner a server needs login: once per wall, across restarts."""
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -9,6 +10,10 @@ from chief.gate import save_approved as save_names
 from chief.mcpclient.oauth_types import Send, Surface
 
 logger = logging.getLogger(__name__)
+
+#: How long a notice may take to send. A channel that hangs must not keep the
+#: supervisor from listening for the owner's /login.
+NOTICE_TIMEOUT_SECONDS = 10.0
 
 
 class Notices:
@@ -32,13 +37,15 @@ class Notices:
         return server not in self._sent
 
     async def send(self, server: str) -> None:
-        """Best effort: a dead channel is logged, and the notice stays due."""
+        """Best effort: a dead or hung channel is logged, and the notice stays due."""
         text = (
             f'{server.capitalize()} needs login. '
             f'Say "connect {server}" or /login {server}.'
         )
         try:
-            await self._send(self._target, text)
+            await asyncio.wait_for(
+                self._send(self._target, text), NOTICE_TIMEOUT_SECONDS
+            )
         except Exception:
             logger.exception("could not tell the owner %s needs login", server)
             return
