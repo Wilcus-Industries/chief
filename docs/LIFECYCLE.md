@@ -20,7 +20,10 @@ monitor / cron wake ────────────────┼─→ Di
 
 `build_app` (`src/chief/app.py`) runs phases in a fixed order:
 `build_persistence` → `build_gate` → `_build_agent_core` → `register_native_tools`
-→ `CommandSet` → `build_mcp` → `build_adapters`.
+→ `CommandSet` → `build_mcp` → `build_adapters`. `build_mcp` also builds the OAuth
+broker and registers the login tools, `/login` / `/logout` and the "needs login" hint
+on the core's registry, commands and hooks; `build_adapters` hands the broker to
+the web app for `/oauth/callback`.
 
 The closure cycle is deliberate: `tools_factory` references `dispatcher`, which
 is constructed *after* it — late binding resolves at call time. Don't "fix" it
@@ -28,6 +31,8 @@ by reordering. `MonitorService` and `CronService` both receive `dispatcher.handl
 as their `wake` callable.
 
 `App.start()` (`daemon.py`) then starts socket → imessage → cron → web → MCP.
+An `auth: oauth` server with no login does not fail or block here: it is parked and
+`connect` returns 0 (see EXTENDING.md).
 
 ## 2. Inbound — three channels plus system wakes
 

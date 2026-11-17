@@ -20,7 +20,8 @@ Because `load_config` passes all fields explicitly, **every
 `field(default_factory=...)` on the dataclass is dead at runtime**. The real
 default is the inline literal in the `Config(...)` call.
 
-`mcp_servers` is the canonical case: no env override, no template entry, and
+`mcp_servers` is the canonical case: no env override, only a commented example
+in the template, and
 `mcp_servers=dict(raw.get("mcp_servers") or {})`. Editing the `default_factory`
 in `config/schema.py` without touching the `Config(...)` call in
 `config/load.py` is a **silent no-op**. To add an MCP server you edit `config.yaml`
@@ -38,6 +39,12 @@ the daemon logs it and keeps booting the rest. A `url` entry may declare
 `headers` (name → string); a `${secret:name}` in a value is resolved at boot from
 env `NAME` then `secrets/name`, and an unresolvable one skips that server only
 (see [EXTENDING.md](./EXTENDING.md)). `headers` on a `command` entry is refused.
+A `url` entry may also declare `auth: oauth` (the only value) and `scopes` (a list
+of strings): the server then logs in through the OAuth broker instead of failing on
+a 401, and is parked as `needs_auth` until the owner logs in. An unknown `auth`
+value, `auth` on a `command` entry, a server name outside letters/digits/`-`/`_`,
+or malformed `scopes` skips that one server with a warning. The redirect URI the
+login registers is `http://127.0.0.1:<web_port>/oauth/callback`.
 
 The same applies to `web_host`, `web_port`, `skills_dir`, `agents_dir`,
 `classifiers_dir`, and `imessage.db_path` — all have dataclass defaults but no
@@ -205,7 +212,8 @@ one that came up fine (`gate: {approved: ["*"]}` parses and boots).
 |---|---|
 | `chief.db` | sqlite sessions + transcripts; schema created at boot, **no migrations** |
 | `chief.sock` | unix socket for `chief-cli` |
-| `audit.jsonl` | every gated tool call |
+| `audit.jsonl` | every gated tool call, and each MCP login step (`mcp_auth_*`: server + reason only) |
+| `mcp-oauth-notified.json` | MCP servers the owner has already been told need a login (cleared by a successful login) |
 | `gate_approved.json` | persisted "always allow" set, minus config-approved |
 | `installed.yaml` | package install registry |
 | `config-history/` | a copy of every `config.yaml` that booted healthy (see above) |

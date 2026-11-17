@@ -45,6 +45,7 @@ both spliced in (#267, #265, keeps `app.py` under the file-length cap):
 | `POST /policy` | set (or, with `policy: null`, clear) the thread's override |
 | `GET /monitors` | plaintext monitor list |
 | `GET /app.css`, `GET /app.js` | static assets, unauthenticated |
+| `GET /oauth/callback` | where an MCP login's browser redirect lands (`web/oauth_routes.py`), unauthenticated — the link's `state` is the check, see [SECURITY.md](./SECURITY.md) |
 
 Auth is covered in [SECURITY.md](./SECURITY.md) — the short version is that it
 fails closed twice, and with no password **no HTTP listener is built at all**.
@@ -126,6 +127,34 @@ hasn't landed yet (call committed, its tool-role message not — mid-turn, or a
 crash `SessionManager` hasn't repaired yet) reports `pending`, and a call id
 absent from the transcript altogether reports `pending` while the thread is
 mid-turn or `compacted` once it isn't (folded away by compaction).
+
+## MCP client — `src/chief/mcpclient/`
+
+`McpManager` (`manager.py`) owns one `Supervisor` task per server and registers
+what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
+
+| Module | Job |
+|---|---|
+| `config.py` | `ServerConfig` and the strict parse of one `mcp_servers` entry; a bad entry skips only that server |
+| `headers.py` | `${secret:name}` expansion for static headers |
+| `supervisor.py` | the connect / reconnect loop, and parking on a login wall; releases a tool call whose connection died (`calls.py`) |
+| `transport.py` | opens the stdio or streamable-HTTP transport and a session on it |
+| `oauth.py` | `OAuthBroker`: per-server state (`connecting`, `connected`, `needs_auth`, `disabled`), provider construction, and the facade the supervisor, tools and commands call |
+| `oauth_flow.py`, `oauth_login.py`, `oauth_notice.py`, `oauth_types.py` | the redirect/callback pair the SDK drives; start / complete / logout; the once-only "needs login" notice; shared types |
+| `token_store.py` | `secrets/mcp-oauth/<server>.json`, the SDK's `TokenStorage` |
+| `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
+
+Every `auth: oauth` connection is **passive** (boot, reconnect): the SDK's provider
+connects with a good token, refreshes a stale one, and only a real auth failure
+reaches its redirect step — where it raises `NeedsAuth` and parks the server. A
+`/login` arms one **interactive** attempt instead: the redirect step sends the link
+to the asking conversation and the callback step waits (ten minutes, bounded) for
+the browser's address. A network error or 5xx never reaches the redirect step,
+which is why only genuine auth failures park a server.
+
+The SDK restores stored tokens without their expiry and does not refresh on a 401;
+`token_store.py` puts the expiry back and keeps a refresh token a refresh response
+omits, which is what makes a restart not cost a login.
 
 ## Monitors — `src/chief/monitors/`
 

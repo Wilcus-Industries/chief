@@ -326,7 +326,58 @@ Default bind is `127.0.0.1:8130` — loopback only. `web_password` is deliberate
 **not** read from YAML: only from `CHIEF_WEB_PASSWORD` or `secrets/web_password`.
 
 `/app.css` and `/app.js` are intentionally unauthenticated; every other route
-re-checks `is_authed`.
+re-checks `is_authed` — except `/oauth/callback`, whose check is the link's
+`state` instead (next section).
+
+## MCP OAuth — `mcpclient/oauth*.py`, `token_store.py`, `web/oauth_routes.py`
+
+An `auth: oauth` MCP server logs in through the SDK's own OAuth provider
+(discovery, dynamic registration, PKCE) wrapped by `OAuthBroker`. Chief is a
+**public client**: PKCE S256, no client secret, and the PKCE verifier exists only
+in the daemon's memory for the life of one link.
+
+**The model never sees the link.** `server_login` makes the broker send the
+authorization link straight to the asking conversation's adapter and returns the
+fixed text `login link sent to the owner`. So the model can neither leak the link
+nor learn the `state` that ties a pasted address to it.
+
+**`/oauth/callback` takes no password, on purpose** — the owner's browser arrives
+from the provider with no session cookie. What stands in for the check is the
+link's `state` (32 random bytes from the SDK): `OAuthBroker` matches the address's
+`state` in constant time against the links this daemon opened and completes
+nothing else. An unknown, missing, expired or already-used `state` is a 400; a
+link is consumed by its first answer; a link lives 10 minutes; a newer `/login`
+replaces it; HEAD is refused so a prefetch cannot spend it; the authorization
+code is never echoed back. That is the login-CSRF defence: an attacker can't get
+the owner's browser to complete *their* login without knowing a live `state`.
+
+**The code in a transcript is accepted, reasoned.** A pasted callback address
+carries a single-use authorization code. Pasted to the model it lands in the
+transcript, and the gate audits `server_login_complete`'s arguments verbatim like
+any tool's. That is tolerable because the code is spent the moment it is
+exchanged and is useless without the PKCE verifier, which never leaves memory.
+`/login <server> <address>` is the cleaner path — commands run before the model,
+so the address reaches neither the transcript nor the gate's audit line.
+
+**Tokens at rest.** `secrets/mcp-oauth/<server>.json`, mode 0600 in a 0700
+directory, written tmp-then-replace, bound to the server url and redirect URI
+(change either and it reads as absent). `/logout` revokes at the provider when it
+advertises a revocation endpoint (best effort), then deletes the file and ends the
+connection. The notice flag file (`data/mcp-oauth-notified.json`) holds server
+names only.
+
+**`CORE_APPROVED`.** `server_login` and `server_login_complete` skip the approval
+card (`gate.py`): they only ever hand the owner a link or take back an address
+that must match a live `state`, and the worst a hostile prompt can do with them is
+send the owner login links. `gate.never` still wins.
+
+**Audit.** `mcp_auth_needed`, `_start`, `_complete`, `_fail` and `_logout` record
+the server and a short reason — never a token, a code, or a URL carrying either.
+
+**Static headers.** Secrets reach a header only as `${secret:name}` (env `NAME`,
+then `secrets/name`). The expanded values stay out of `ServerConfig.__repr__`, an
+unresolvable reference skips just that server, and the warning names the header,
+never a value.
 
 ## Scheduled shell commands — `cron/tools.py`, `tools/shell/service.py`
 
@@ -430,7 +481,11 @@ own reply for input.
     flow — it reports what the owner should run. The boundary is accident-scoped,
     not adversary-proof: see "What the boundary does not cover".
 13. **A non-interactive install never creates a system account.**
+14. **An MCP login completes only against a live `state`.** No token or login link
+    reaches the model, and no `mcp_auth_*` audit line carries a code, token or URL
+    (a pasted address's single-use code can reach the transcript — see "MCP OAuth").
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,
-`test_auth.py`, `test_dispatch.py`.
+`test_auth.py`, `test_dispatch.py`, and for MCP logins `test_mcp_oauth.py`,
+`test_mcp_oauth_boot.py`, `test_mcp_token_store.py`.

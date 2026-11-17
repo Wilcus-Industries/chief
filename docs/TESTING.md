@@ -88,6 +88,15 @@ explicitly (`Config.packages_dir` plus a re-pointed
 any scripted `tool_turn` against one needs it in `gate_approved` or the gate
 raises an approval card and the script desyncs.
 
+`tests/fake_oauth.py` is the same idea for OAuth: one uvicorn app on an ephemeral
+loopback port serving protected-resource and authorization-server metadata, dynamic
+registration, authorize / token (PKCE S256 verified) / revoke, and a FastMCP
+streamable-HTTP endpoint behind a bearer or static-header gate, with knobs that make
+a grant fail. `tests/test_mcp_oauth.py` drives the real SDK provider and supervisor
+against it — "the owner's browser" is `FakeOAuth.browser_approve` — and
+`tests/test_mcp_oauth_boot.py` boots the whole daemon through a login. Nothing
+touches a real provider.
+
 Mock external dependencies (network, filesystem, services) — but prefer this seam
 over mocking chief's own internals.
 

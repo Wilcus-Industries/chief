@@ -81,6 +81,56 @@ mcp_servers:
       Authorization: "Bearer ${secret:example_token}"
 ```
 
+### A server that wants a login (OAuth)
+
+A server that sits behind OAuth (Robinhood's `https://agent.robinhood.com/mcp/trading`
+is the motivating one) takes `auth: oauth`, and `scopes` if discovery needs help:
+
+```yaml
+mcp_servers:
+  robinhood:
+    url: https://agent.robinhood.com/mcp/trading
+    auth: oauth
+    scopes: [internal]   # optional: overrides what the server advertises
+```
+
+The name may use letters, digits, `-` and `_` only — it becomes
+`secrets/mcp-oauth/<name>.json`, the server's tokens and client registration
+(mode 0600). `auth` and `headers` are for `url` entries; on a `command` entry the
+server is skipped (config) or the manifest fails validation (package).
+
+- **Boot never waits on a login.** A server with no good login is parked as
+  `needs_auth`, `connect` returns at once with no tools, and the owner gets one
+  notice on their primary channel — `Robinhood needs login. Say "connect
+  robinhood" or /login robinhood.` — not repeated on later boots. The model's
+  prompt lists the servers waiting.
+- **Logging in.** Say "connect robinhood" (the model calls `server_login`) or send
+  `/login robinhood`. Chief sends a login link to *that conversation*; the model is
+  only told it went out. Approve it in a browser and the browser lands on
+  `http://127.0.0.1:<web_port>/oauth/callback?code=…`. On the machine running
+  chief's web UI that page says "connected". From a phone it fails to load, which
+  is expected: copy the address it tried to open and send it back as
+  `/login robinhood <address>` (no model call) or just paste it and the model calls
+  `server_login_complete`. A link is good for ten minutes and a second `/login`
+  replaces it. The tools appear live — no restart.
+- **Staying logged in.** The access token refreshes on its own, across restarts
+  too. Only a real auth failure — the refresh is refused, or the server stops
+  honouring the token — parks the server again (one notice, and a tool call in
+  flight answers `error: <server> needs login; call server_login`). A network
+  error or a 5xx is not a login problem: it keeps the ordinary reconnect/backoff.
+- **`/logout robinhood`** forgets the login: it asks the provider to revoke it when
+  the provider offers a revocation endpoint (not all do), deletes the token file,
+  and ends the connection, quietly. Its tools stay listed but answer with the
+  login error until the next `/login`.
+- Without a `web_password` there is no web listener, so the paste-back is the only
+  path; that is fine, and it is the usual one from a phone.
+
+The redirect URI is `http://127.0.0.1:<web_port>/oauth/callback`. Changing
+`web_port`, or `REDIRECT_HOST` in `chief.mcpclient.oauth_types` (a provider that
+only accepts `localhost` needs that one-line change), makes the next login
+register afresh — a registration is only good for the redirect it was made with.
+Security properties are in [SECURITY.md](./SECURITY.md).
+
 ## Add a classifier
 
 Drop a `<name>.md` in `classifiers/` with frontmatter `name`, `description`,
