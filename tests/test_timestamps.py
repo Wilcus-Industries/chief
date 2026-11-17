@@ -327,14 +327,30 @@ def test_for_model_passes_unstamped_messages_through() -> None:
 
 
 def test_the_stamp_note_says_what_each_time_means_and_which_one_is_now() -> None:
-    # Without this the model reads a backlog message's send time as the time it
-    # is, and schedules "in an hour" from the past.
+    # A message that waited carries two times, and each answers a different
+    # question. Counting "tomorrow" from the read time is a day late (sent 23:40,
+    # read 07:15 next morning); counting "in an hour" from a send time that is
+    # long past schedules into the past (sent 09:00, read 10:30). So a message's
+    # relative times count from when it was sent, now is the newest time
+    # anywhere, and nothing is scheduled before it.
     assert "; read" in STAMP_NOTE  # the shape a waiting message's stamp takes
-    assert "when the owner sent it" in STAMP_NOTE
-    assert "when chief received it" in STAMP_NOTE
     assert "same zone" in STAMP_NOTE
-    assert "closest thing to now" in STAMP_NOTE
-    assert "latest stamp" in STAMP_NOTE  # the fallback when there is no read time
+    # Relative times mean what they meant when the message was written. Stamps
+    # also go on group, stranger, system and peer messages, so not "the owner".
+    assert "count from when it was sent" in STAMP_NOTE
+    assert "when the owner sent it" not in STAMP_NOTE
+    assert "never from the sent time" not in STAMP_NOTE  # the old anchoring
+    # The read time is when chief got to the message: one queued behind a long
+    # turn was received at the sent time.
+    assert "when chief got to it" in STAMP_NOTE
+    assert "when chief received it" not in STAMP_NOTE
+    # Now is the newest time, not the last stamp: in a subagent a delivered
+    # message can sit after a tool result stamped later.
+    assert "newest time in any stamp" in STAMP_NOTE
+    assert "latest stamp" not in STAMP_NOTE
+    # A time that has passed is acted on now or reported missed, never pushed on.
+    assert "Never schedule anything before now" in STAMP_NOTE
+    assert "act on it now or say it was missed" in STAMP_NOTE
 
 
 # ---- the loop ---------------------------------------------------------------

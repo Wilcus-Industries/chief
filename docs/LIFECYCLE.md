@@ -201,8 +201,9 @@ one busy thread can't starve every concurrency slot.
    `Message.at` the dispatcher passes — when the text *arrived*, not when the
    turn got the lock — as its `stamp`; one that waited more than
    `BACKLOG_SECONDS` (60s) for its turn also says when it was read (now), so the
-   model's clock is not the message's send time; `refuse_over_budget` stores that
-   same message.
+   model's clock is not the message's send time (`STAMP_NOTE`: its relative
+   times still count from the send time, but nothing is scheduled before now);
+   `refuse_over_budget` stores that same message.
 4. Calls `agent.loop.run_turn`, which **mutates `transcript` in place** and, via
    the `on_commit` hook, persists each assistant turn and tool result to the
    store the instant it's produced (`Session._live_append`) — not batched at

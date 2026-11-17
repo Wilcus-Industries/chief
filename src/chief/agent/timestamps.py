@@ -8,12 +8,14 @@ stamp in front of it when a model is sent the transcript.
 
 The stamp names when the message *arrived*, not when it was processed: one
 queued behind a long turn, injected mid-turn, or replayed after a restart keeps
-its own time. On its own that gives the model a wrong clock: an iMessage sent at
-09:00 and read at 10:30 would look like 09:00 now, and "in an hour" would become
-a time already past. So a user message built more than ``BACKLOG_SECONDS`` after
-it arrived also says when it was read, ``[… ; read HH:MM:SS]``, and
-``STAMP_NOTE`` tells the model to take that as now. A tool result is built as it
-lands, so it never waits and never needs one.
+its own time. That is the time its relative words ("in an hour", "tomorrow")
+were written against, so they count from it. On its own, though, it is a wrong
+clock: an iMessage sent at 09:00 and read at 10:30 would look like 09:00 now,
+and "in an hour" would be scheduled for 10:00, a time already past. So a
+user message built more than ``BACKLOG_SECONDS`` after it arrived also says when
+it was read, ``[… ; read HH:MM:SS]``, and ``STAMP_NOTE`` tells the model to take
+the newest time in any stamp as now and never schedule before it. A tool result
+is built as it lands, so it never waits and never needs one.
 
 Both times are formatted once, here, and persisted, so the model-facing prefix
 is byte-stable and provider prompt caches keep hitting.
@@ -30,8 +32,8 @@ from chief.provider.base import STAMP_KEY
 
 # How long a message may wait between arriving and being built into the
 # transcript before its stamp also says when it was read. Within a minute the
-# arrival time is as good as "now" for scheduling; past it, a model counting
-# from the arrival time lands in the past.
+# arrival time is as good as "now"; past it, a model taking it for now would
+# schedule into the past.
 BACKLOG_SECONDS = 60.0
 
 # The one explanation of the stamp, for every system prompt whose model is sent
@@ -39,14 +41,16 @@ BACKLOG_SECONDS = 60.0
 # ``stamp`` so a change of format and of its explanation travel together.
 STAMP_NOTE = (
     "User messages and tool results begin with a host-added local-time stamp, "
-    "[date time zone, UTC offset], saying when they arrived: use it to reason "
+    "[date time zone, UTC offset], saying when each was sent: use it to reason "
     "about time, but never write one yourself or repeat it in a reply. A "
     "message that waited (chief was down or busy) adds '; read <time>' inside "
-    "the stamp: the first time is when the owner sent it, the read time when "
-    "chief received it, in the same zone (its date or UTC offset is spelled "
-    "out only when it differs from the first). The read time, or else the "
-    "latest stamp in the conversation, is the closest thing to now: count "
-    '"in an hour" or "tomorrow" from that, never from the sent time.'
+    "the stamp: when chief got to it, in the same zone (its date or UTC offset "
+    "is spelled out only when it differs from the first time). Relative times "
+    'in a message ("in an hour", "tomorrow", "tonight") count from when it was '
+    "sent, the first time. The newest time in any stamp (the read time, or a "
+    "later stamp such as a tool result's) is the best estimate of now. Never "
+    "schedule anything before now: if a requested time has already passed, act "
+    "on it now or say it was missed; don't push it later."
 )
 
 
