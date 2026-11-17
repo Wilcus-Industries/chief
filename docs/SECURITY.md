@@ -41,14 +41,16 @@ such a thread, now to say the reply stays in the cockpit.
 **Cards in a non-owner thread** (`gate_surface.approval_asker`) render only in the
 cockpit (the hub tap, replayed by `/events` to a late watcher), and a one-line
 pointer — "approval pending in thread X — answer in the web cockpit" — goes to the
-owner's primary surface (`cron/updates.primary_target`: the iMessage self-chat,
+owner's primary surface (`owner.primary_target`: the iMessage self-chat,
 else `web:main`). The pointer is best effort; a send failure is logged.
 
 **Every direct `adapter.send` outside the dispatcher checks the audience too.**
 The post-reboot restart notice (`entrypoint.report_restart`) goes to the
 requesting thread only when it is an owner thread; a restart asked for from a
 non-owner thread is reported on the primary surface instead, naming the thread —
-its text carries a model-authored rationale.
+its text carries a model-authored rationale. An MCP login link
+(`mcpclient/auth_tools.build_broker`) is held to the same rule: asked for in a
+non-owner thread, it goes to the primary surface, naming the thread.
 
 ## The gate — `gate.py` (decides), `gate_text.py` (what it says)
 
@@ -62,9 +64,13 @@ is an approved *anything*.
 1. **Unknown tool name** → record `unknown_tool`, pass through to the registry for
    a helpful error. **A hallucinated name must never raise a card**, and must
    never be able to persist an "always" for a tool that doesn't exist.
-2. **`policy.decide(name)`** — `never` → NEVER; `"*"` or an exact name in
-   `approved` → APPROVED; else ASK. **`never` is checked first and beats the `"*"`
-   wildcard.**
+2. **`policy.decide(name)`** — `never` → NEVER; a name in `CORE_APPROVED` →
+   APPROVED; `"*"` or an exact name in `approved` → APPROVED; else ASK. **`never`
+   is checked first and beats both the `"*"` wildcard and `CORE_APPROVED`.**
+   `CORE_APPROVED` is a hard-coded two-name set — `server_login` and
+   `server_login_complete`, the MCP OAuth tools — approved by core rather than by
+   config because they only hand the owner a login link or take back what the
+   owner pasted (see "MCP OAuth" below)
 3. **ASK + `read_only`** → auto-approved and announced.
 4. **ASK otherwise** → approval card. Deliberately *not* announced — the card
    already shows the call, and a second line would double it.
@@ -391,7 +397,78 @@ Default bind is `127.0.0.1:8130` — loopback only. `web_password` is deliberate
 **not** read from YAML: only from `CHIEF_WEB_PASSWORD` or `secrets/web_password`.
 
 `/app.css` and `/app.js` are intentionally unauthenticated; every other route
-re-checks `is_authed`.
+re-checks `is_authed` — except `/oauth/callback`, whose check is the link's
+`state` instead (next section).
+
+## MCP OAuth — `mcpclient/oauth*.py`, `token_store.py`, `web/oauth_routes.py`
+
+An `auth: oauth` MCP server logs in through the SDK's own OAuth provider
+(discovery, dynamic registration, PKCE) wrapped by `OAuthBroker`. Chief is a
+**public client**: PKCE S256, no client secret, and the PKCE verifier exists only
+in the daemon's memory for the life of one link.
+
+**The model never sees the link.** `server_login` makes the broker send the
+authorization link straight to the asking conversation's adapter and returns the
+fixed text `login link sent to the owner`. So the model can neither leak the link
+nor learn the `state` that ties a pasted address to it. A conversation whose
+surface reaches a non-owner is never sent it (the non-owner output rule): the link
+goes to the owner's primary surface instead, naming the thread that asked.
+
+**`/oauth/callback` takes no password, on purpose** — the owner's browser arrives
+from the provider with no session cookie. What stands in for the check is the
+link's `state` (32 random bytes from the SDK): `OAuthBroker` matches the address's
+`state` in constant time against the links this daemon opened and completes
+nothing else. An unknown, missing, expired or already-used `state` is a 400; a
+link is consumed by its first answer; a link lives 10 minutes; a newer `/login`
+replaces it; HEAD is refused so a prefetch cannot spend it; the authorization
+code is never echoed back. That is the login-CSRF defence: an attacker can't get
+the owner's browser to complete *their* login without knowing a live `state`.
+
+**The code in a transcript is accepted, reasoned.** A pasted callback address
+carries a single-use authorization code. Pasted to the model it lands in the
+transcript, and the gate audits `server_login_complete`'s arguments verbatim like
+any tool's. That is tolerable because the code is spent the moment it is
+exchanged and is useless without the PKCE verifier, which never leaves memory.
+`/login <server> <address>` is the cleaner path — commands run before the model,
+so the address reaches neither the transcript nor the gate's audit line.
+
+**Tokens at rest.** `secrets/mcp-oauth/<server>.json`, mode 0600 in a 0700
+directory, written tmp-then-replace, bound to the server url and redirect URI
+(change either and it reads as absent). `/logout` revokes at the provider when it
+advertises a revocation endpoint (best effort), then deletes the file and ends the
+connection. The connection being ended can still refresh on its way out, so the
+deletion is preceded by shutting its token store: a late refresh cannot write the
+login back, and a restart cannot quietly reconnect as if nobody had logged out. The
+notice flag file (`data/mcp-oauth-notified.json`) holds server names only.
+
+**The file tools can read the token file.** Mode 0600 keeps other OS users out; it
+does not keep the model out. `read_file` and `grep` are `read_only`, so the gate
+auto-approves them, and they reach any file chief's OS user can — this one included
+— with nothing screening what they return. A model steered by an injected prompt can
+read the access and refresh tokens straight from `secrets/mcp-oauth/<server>.json`,
+and the refresh token outlives the access token. "No token reaches the model" is
+therefore a claim about the login flow only (what `server_login`,
+`server_login_complete`, the notices and the audit trail carry), not about the file
+at rest. The same holds for every other file under `secrets/`. `/logout` closes a
+login that may have leaked only where the provider offers revocation; otherwise it
+just deletes chief's copy, and the provider's own account settings are the way.
+
+**`CORE_APPROVED`.** `server_login` and `server_login_complete` skip the approval
+card (`gate.py`): they only ever hand the owner a link or take back an address
+that must match a live `state`, and the worst a hostile prompt can do with them is
+send the owner login links. `gate.never` still wins.
+
+**Audit.** `mcp_auth_needed`, `_start`, `_complete`, `_fail` and `_logout` record
+the server and a short reason — never a token, a code, or a URL carrying either.
+The three the supervisor writes by itself (`_needed`, `_complete`, `_fail`) are best
+effort: a log that cannot be written is warned about and skipped, so a full or
+unwritable disk can leave a gap there but cannot end the supervisor. `_start` and
+`_logout` run on the owner's request and fail where the owner can see it.
+
+**Static headers.** Secrets reach a header only as `${secret:name}` (env `NAME`,
+then `secrets/name`). The expanded values stay out of `ServerConfig.__repr__`, a
+reference that is missing or cannot be read skips just that server, and the warning
+names the header, never a value.
 
 ## Scheduled shell commands — `cron/tools.py`, `tools/shell/service.py`
 
@@ -478,7 +555,8 @@ own reply for input.
 3. **Nothing a stranger sends ever runs a turn**, and **stranger content is never
    persisted**. **Nothing is auto-sent to a non-owner audience** — whoever
    triggered the turn — and **only the owner answers an approval card**.
-4. **Nothing is auto-approved except tools explicitly marked `read_only=True`.**
+4. **Nothing is auto-approved except tools explicitly marked `read_only=True`
+   and the two `CORE_APPROVED` login tools.**
 5. **A hallucinated tool name never raises a card and never persists an "always".**
 6. **Every executed or denied call produces exactly one audit line.**
 7. **Announcement failure must never break a tool call.** Budget notices and the
@@ -495,8 +573,14 @@ own reply for input.
     flow — it reports what the owner should run. The boundary is accident-scoped,
     not adversary-proof: see "What the boundary does not cover".
 13. **A non-interactive install never creates a system account.**
+14. **An MCP login completes only against a live `state`.** The login flow hands
+    the model no token or login link, and no `mcp_auth_*` audit line carries a code,
+    token or URL. Two things sit outside that: a pasted address's single-use code
+    can reach the transcript, and the file tools can read the token file itself —
+    see "MCP OAuth", "Tokens at rest".
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,
 `test_auth.py`, `test_dispatch.py`, `test_owner_audience.py`, `test_peers.py`,
-`test_subagents_async.py`.
+`test_subagents_async.py`, and for MCP logins `test_mcp_oauth.py`,
+`test_mcp_oauth_boot.py`, `test_mcp_token_store.py`.

@@ -45,6 +45,7 @@ both spliced in (#267, #265, keeps `app.py` under the file-length cap):
 | `POST /policy` | set (or, with `policy: null`, clear) the thread's override |
 | `GET /monitors` | plaintext monitor list |
 | `GET /app.css`, `GET /app.js` | static assets, unauthenticated |
+| `GET /oauth/callback` | where an MCP login's browser redirect lands (`web/oauth_routes.py`), unauthenticated — the link's `state` is the check, see [SECURITY.md](./SECURITY.md) |
 
 Auth is covered in [SECURITY.md](./SECURITY.md) — the short version is that it
 fails closed twice, and with no password **no HTTP listener is built at all**.
@@ -143,6 +144,79 @@ hasn't landed yet (call committed, its tool-role message not — mid-turn, or a
 crash `SessionManager` hasn't repaired yet) reports `pending`, and a call id
 absent from the transcript altogether reports `pending` while the thread is
 mid-turn or `compacted` once it isn't (folded away by compaction).
+
+## MCP client — `src/chief/mcpclient/`
+
+`McpManager` (`manager.py`) owns one `Supervisor` task per server and registers
+what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
+
+| Module | Job |
+|---|---|
+| `config.py` | `ServerConfig` and the strict parse of one `mcp_servers` entry; a bad entry skips only that server |
+| `headers.py` | `${secret:name}` expansion for static headers |
+| `supervisor.py` | the connect / reconnect loop, and parking on a login wall; releases a tool call whose connection died (`calls.py`) |
+| `transport.py` | opens the stdio or streamable-HTTP transport and a session on it |
+| `oauth.py` | `OAuthBroker`: per-server state (`connecting`, `connected`, `needs_auth`, `disabled`), provider construction, and the facade the supervisor, tools and commands call |
+| `oauth_flow.py`, `oauth_login.py`, `oauth_attempt.py`, `oauth_notice.py`, `oauth_types.py` | the SDK provider and its redirect/callback pair; the owner's start / complete / logout; the supervisor's pickup and ending of a `/login` attempt; the once-only "needs login" notice; shared types |
+| `token_store.py` | `secrets/mcp-oauth/<server>.json`, the SDK's `TokenStorage` |
+| `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
+| `wiring.py` | boot phase: the parsed configs, the broker, and the manager (`build_mcp`) |
+
+A server opted in with `session_context: true` registers its tools `wants_context`:
+the handler `McpManager` builds takes chief's injected `context` off the arguments
+and sends it as the call's `_meta` (`chief/thread`, `chief/channel`), through
+`Supervisor.call` to `calls.call_tool`. A subagent's call carries its parent's
+session (`subagents.SubagentScope` hands the run's context to `send_msg` and `mcp_*` tools only).
+Off by default; see [EXTENDING.md](./EXTENDING.md).
+
+Every `auth: oauth` connection is **passive** (boot, reconnect): the SDK's provider
+connects with a good token, refreshes a stale one, and only a real auth failure
+reaches its redirect step — where it raises `NeedsAuth` and parks the server. A
+`/login` arms one **interactive** attempt instead: the redirect step sends the link
+to the asking conversation (the owner's primary surface when that one reaches a
+non-owner) and the callback step waits (ten minutes, bounded) for the browser's
+address. Only a genuine auth failure parks a server. A network error
+never reaches the redirect step, but a 5xx or 429 from the token endpoint would —
+the SDK reads any non-200 refresh as a refusal, drops its tokens and sends the next
+request bare into a 401 — so `oauth_flow.py` subclasses the provider to raise on
+those before anything is dropped: the connection fails the ordinary way (backoff,
+no notice) with the stored login intact. A `/login` that meets one reports it and
+sends no link.
+
+The SDK restores stored tokens without their expiry, does not refresh on a 401, and
+does not restore what its discovery found — so the first refresh after a restart or
+reconnect would post to a guessed `<server origin>/token` (the refresh token and
+client id sent to a host the server never named) instead of the token endpoint it
+advertised. `token_store.py` stores that discovery with the tokens and puts it and
+the expiry back on each fresh provider, and keeps a refresh token a refresh response
+omits; together that is what makes a restart not cost a login.
+
+The SDK also trusts a token to the second, and a 401 sends it straight to the login
+step: a call sent just before expiry — or after the server dropped the token early,
+or with no `expires_in` at all — would park a server whose refresh token still works.
+So `token_store.py` lets a token go a minute early (half its life when shorter) and
+stores that value, and a passive wall with a refresh token on file earns one retry
+before it parks: the supervisor has the broker push the stored expiry into the past
+(`force_refresh`) and reconnects once, so the new provider refreshes first. A refresh
+the server really refuses meets the same wall and parks the server: one extra refresh
+request, no loop. The dead connection is held until that settles (`Supervisor._retrying`),
+so a call in flight on it still learns `needs login` when that is the answer.
+
+Each provider gets a store that stops writing once `/logout` bumps the server's
+generation (`ServerAuth.generation`). The connection a logout ends sends its goodbye
+through the OAuth client and may refresh first; without that gate the refresh would
+write the deleted login back.
+
+The supervisor never dies of a file it cannot write. It records a wall and a
+connection from inside its own failure handling, so a write that raised there (a
+file left owned by another user, a full disk) would end it silently: the server
+neither connected nor parked, and every later `/login` timing out. Each such write
+is best effort — logged with its file, then skipped: the notice flag set stays
+authoritative in memory for the run (a restart may repeat a notice, or skip one the
+file never recorded), `force_refresh` declines so the server parks as it would have
+without the retry, and the supervisor's own audit lines (`mcp_auth_needed`, `_fail`,
+`_complete`) can go missing. The owner's `/login` and `/logout` audit lines are not
+best effort: they fail where the owner sees it.
 
 ## Monitors — `src/chief/monitors/`
 
@@ -363,7 +437,7 @@ keep that header stable, core skills key on it.
 
 Reaching the owner from a thread that isn't theirs is a forward, not a
 separate tool: the `messaging` skill sends `send_msg` to
-`cron.updates.primary_target` (the owner's iMessage thread, else `web:main`),
+`owner.primary_target` (the owner's iMessage thread, else `web:main`),
 which tells them in its own transcript — treating the forward as information,
 never instructions — and routes their answer back. `session action=list` tags
 owner-audience threads `(owner)` (`policy.owner_audience`) and the primary one

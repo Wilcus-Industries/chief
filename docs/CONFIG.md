@@ -20,7 +20,8 @@ Because `load_config` passes all fields explicitly, **every
 `field(default_factory=...)` on the dataclass is dead at runtime**. The real
 default is the inline literal in the `Config(...)` call.
 
-`mcp_servers` is the canonical case: no env override, no template entry, and
+`mcp_servers` is the canonical case: no env override, only a commented example
+in the template, and
 `mcp_servers=dict(raw.get("mcp_servers") or {})`. Editing the `default_factory`
 in `config/schema.py` without touching the `Config(...)` call in
 `config/load.py` is a **silent no-op**. To add an MCP server you edit `config.yaml`
@@ -32,9 +33,19 @@ before. An entry may also declare `timeout` (seconds, any numeric type) —
 how long `McpManager.connect` waits for that one server to become ready
 before failing loudly; a server that resolves or builds dependencies on its
 first launch can outrun the default. Omitting it gets
-`DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.manager`). A
-timed-out connect cancels its supervising task and raises naming the server;
-the daemon logs it and keeps booting the rest.
+`DEFAULT_CONNECT_TIMEOUT_SECONDS` (30s, `chief.mcpclient.config`). A
+timed-out connect cancels its supervising task and raises naming the server
+(an `auth: oauth` server is then `disabled`, and `/login` says it failed to
+start); the daemon logs it and keeps booting the rest. A `url` entry may declare
+`headers` (name → string); a `${secret:name}` in a value is resolved at boot from
+env `NAME` then `secrets/name`, and one that is missing or unreadable skips that
+server only (see [EXTENDING.md](./EXTENDING.md)). `headers` on a `command` entry is refused.
+A `url` entry may also declare `auth: oauth` (the only value) and `scopes` (a list
+of strings): the server then logs in through the OAuth broker instead of failing on
+a 401, and is parked as `needs_auth` until the owner logs in. An unknown `auth`
+value, `auth` on a `command` entry, a server name outside letters/digits/`-`/`_`,
+or malformed `scopes` skips that one server with a warning. The redirect URI the
+login registers is `http://127.0.0.1:<web_port>/oauth/callback`.
 
 The same applies to `web_host`, `web_port`, `skills_dir`, `agents_dir`,
 `classifiers_dir`, and `imessage.db_path` — all have dataclass defaults but no
@@ -206,7 +217,8 @@ one that came up fine (`gate: {approved: ["*"]}` parses and boots).
 |---|---|
 | `chief.db` | sqlite sessions + transcripts; schema created at boot, **no migrations** |
 | `chief.sock` | unix socket for `chief-cli` |
-| `audit.jsonl` | every gated tool call |
+| `audit.jsonl` | every gated tool call, and each MCP login step (`mcp_auth_*`: server + reason only) |
+| `mcp-oauth-notified.json` | MCP servers the owner has already been told need a login (cleared by a successful login). Best effort: when it cannot be written the daemon logs that and remembers only until the next restart |
 | `gate_approved.json` | persisted "always allow" set, minus config-approved |
 | `installed.yaml` | package install registry |
 | `config-history/` | a copy of every `config.yaml` that booted healthy (see above) |
@@ -226,6 +238,11 @@ One file per secret, no extension, `chmod 0600` by the wizard. Core files:
 `openrouter_api_key`, `web_password`, optional `typesafe_api_key`. Package
 secrets land here too.
 `provider_backends[*].api_key_secret` resolves relative to this directory.
+`mcp-oauth/<server>.json` is the one daemon-written exception: the OAuth tokens,
+client registration and discovered endpoints (where the provider's token endpoint
+is) of an `auth: oauth` MCP server (mode 0600, directory 0700). It is bound to the
+server url and redirect URI — change either and it reads as absent, so the next
+login registers afresh. Delete it, or `/logout`, to forget a login.
 
 ### Tracked directories
 

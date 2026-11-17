@@ -18,12 +18,14 @@ from chief.adapters.socket import HandleMessage
 from chief.agent.manager import SessionManager
 from chief.approvals import ApprovalBroker
 from chief.hub import ObserverHub
+from chief.mcpclient.oauth import OAuthBroker
 from chief.monitors.service import MonitorService
 from chief.persistence.store import MessageStore
 from chief.policy import StreamPolicy, guard_audience
 from chief.web.adapter import WebAdapter
 from chief.web.auth import COOKIE_NAME, Auth
 from chief.web.live import build_live_routes
+from chief.web.oauth_routes import build_oauth_routes
 from chief.web.pages import CHAT_PAGE, LOGIN_PAGE
 from chief.web.policy_routes import build_policy_routes
 from chief.web.script import SCRIPT
@@ -46,6 +48,7 @@ def build_web_app(
     approvals: ApprovalBroker,
     channel_defaults: dict[str, StreamPolicy],
     owner_handles: tuple[str, ...],
+    oauth: OAuthBroker | None = None,
 ) -> Starlette:
     """Assemble the routes around the shared core services.
 
@@ -58,7 +61,8 @@ def build_web_app(
     resolves it directly, so a dashboard answer and an origin-channel answer
     race for the identical pending future (#267); ``channel_defaults`` is the
     same map ``Dispatcher`` resolves against, so ``/policy`` reports the exact
-    provenance (override vs channel default) a turn will stream under (#265).
+    provenance (override vs channel default) a turn will stream under (#265);
+    ``oauth`` mounts the password-free ``/oauth/callback`` an MCP login ends on.
     """
 
     def unauthorized() -> Response:
@@ -160,6 +164,7 @@ def build_web_app(
                 store, channel_defaults, auth.is_authed, unauthorized
             ),
             *build_status_routes(monitors, auth.is_authed, unauthorized),
+            *(build_oauth_routes(oauth) if oauth is not None else []),
             Route("/app.css", app_css),
             Route("/app.js", app_js),
         ]

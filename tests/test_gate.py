@@ -10,6 +10,7 @@ from chief.approvals import Approval, ApprovalBroker
 from chief.audit import AuditLog
 from chief.dispatch import Dispatcher
 from chief.gate import (
+    CORE_APPROVED,
     Decision,
     GatedTools,
     GatePolicy,
@@ -53,6 +54,21 @@ def test_star_wildcard_approves_every_tool() -> None:
     assert policy.decide("rm_rf") is Decision.NEVER
 
 
+def test_core_approved_tools_need_no_list_entry() -> None:
+    # The two login tools only ever hand the owner a link or take back what the
+    # owner pasted; they are approved by core, not by config.
+    assert CORE_APPROVED == {"server_login", "server_login_complete"}
+    policy = GatePolicy()
+    for name in CORE_APPROVED:
+        assert policy.decide(name) is Decision.APPROVED
+
+
+def test_never_still_beats_core_approved() -> None:
+    policy = GatePolicy(never=frozenset({"server_login"}))
+    assert policy.decide("server_login") is Decision.NEVER
+    assert policy.decide("server_login_complete") is Decision.APPROVED
+
+
 def make_gated(
     tmp_path: Path,
     answer: Approval,
@@ -70,6 +86,7 @@ def make_gated(
         ToolSpec(name="rm_rf", description=".", parameters={}),
         ToolSpec(name="gray", description=".", parameters={}),
         ToolSpec(name="peek", description=".", parameters={}, read_only=True),
+        ToolSpec(name="server_login", description=".", parameters={}),
     ]
     for spec in specs:
         registry.register(Tool(spec=spec, handler=echo))
@@ -115,6 +132,15 @@ async def test_approved_tool_runs_without_asking(tmp_path: Path) -> None:
         ToolCall(id="1", name="echo", arguments={"text": "x"})
     )
     assert result == "ran:x"
+    assert questions == []
+
+
+async def test_core_approved_tool_runs_without_a_card(tmp_path: Path) -> None:
+    gated, questions = make_gated(tmp_path, Approval.DENY)
+    result = await gated.dispatch(
+        ToolCall(id="1", name="server_login", arguments={"text": "rh"})
+    )
+    assert result == "ran:rh"
     assert questions == []
 
 

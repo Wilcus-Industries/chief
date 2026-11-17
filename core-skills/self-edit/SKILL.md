@@ -60,6 +60,13 @@ There is no add-server tool. An MCP server is config: `edit_file` the
 a `command` argv list for stdio), then `restart`. Its tools show up as
 `mcp_<name>_<tool>` after the daemon comes back up.
 
+A `url` entry can send static `headers`; never write a secret into one — put the
+value in `secrets/<name>` and write `${secret:<name>}` (env `NAME` also works). A
+server behind OAuth takes `auth: oauth` (and optionally `scopes`) instead: after
+the restart it is parked until the owner logs in — when they ask to use it, call
+`server_login`, which sends them a link; you never see it. Details are in
+`docs/EXTENDING.md`.
+
 ## Loosening or tightening your own permissions
 
 The approval gate is config too (`gate.never` / `gate.approved` in

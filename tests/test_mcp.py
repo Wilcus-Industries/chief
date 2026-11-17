@@ -13,6 +13,7 @@ import pytest
 
 from chief.mcpclient.manager import McpManager, ServerConfig, server_config_from_entry
 from chief.provider.base import ToolCall
+from chief.subagents import SubagentScope
 from chief.tools import ToolContext, ToolRegistry
 
 SERVER_SCRIPT = """
@@ -296,6 +297,33 @@ async def test_opted_in_server_learns_the_calling_session(tmp_path: Path) -> Non
     # A server that keeps per-session state (e.g. one browser tab per chief
     # session) needs to know which session is calling.
     assert await _whoami(tmp_path, session_context=True) == {
+        "chief/thread": "+15551234567",
+        "chief/channel": "imessage",
+    }
+
+
+async def test_a_subagents_call_reaches_an_opted_in_server_as_its_parent_session(
+    tmp_path: Path,
+) -> None:
+    # A detached subagent's gate context is its parent's thread plus its own run
+    # id; an opted-in server must see the parent, through the real call path.
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    try:
+        await manager.connect(
+            ServerConfig(
+                name="metasrv",
+                command=write_meta_server(tmp_path),
+                session_context=True,
+            )
+        )
+        result = await SubagentScope(registry).dispatch(
+            ToolCall(id="1", name="mcp_metasrv_whoami", arguments={}),
+            ToolContext(thread_key="+15551234567", channel="imessage", subagent="sa-1"),
+        )
+    finally:
+        await manager.stop()
+    assert json.loads(result) == {
         "chief/thread": "+15551234567",
         "chief/channel": "imessage",
     }

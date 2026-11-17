@@ -69,7 +69,7 @@ def supervise_tasks() -> set[asyncio.Task[Any]]:
     return {
         task
         for task in asyncio.all_tasks()
-        if "_supervise" in getattr(task.get_coro(), "__qualname__", "")
+        if "supervise" in getattr(task.get_coro(), "__qualname__", "")
     }
 
 

@@ -66,7 +66,7 @@ def register_session_tools(
     """Expose the session tool (list/create/delete/clear) backed by the manager.
 
     ``owner_handles`` tags owner-audience threads in ``list``; ``primary`` (the
-    ``(channel, thread)`` from ``cron.updates.primary_target``) is tagged
+    ``(channel, thread)`` from ``owner.primary_target``) is tagged
     ``(owner, primary)`` — the one thread a forward to the owner goes to."""
 
     def _tag(channel: str, thread: str) -> str:

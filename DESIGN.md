@@ -122,6 +122,8 @@ its first call.
 - **MCP servers are config.** There is no add-server tool: the agent wires in a new
   server (url or command) by self-editing the `mcp_servers` config key, and the manager
   connects it on the next boot — the same seatbelt and audit trail as any self-edit.
+  A url server may carry static headers (secrets by `${secret:}` reference only) or sit
+  behind OAuth: it parks until the owner logs in from chat, never blocking boot.
 
 ### Events + monitors + cron
 
