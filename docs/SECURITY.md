@@ -368,6 +368,18 @@ deletion is preceded by shutting its token store: a late refresh cannot write th
 login back, and a restart cannot quietly reconnect as if nobody had logged out. The
 notice flag file (`data/mcp-oauth-notified.json`) holds server names only.
 
+**The file tools can read the token file.** Mode 0600 keeps other OS users out; it
+does not keep the model out. `read_file` and `grep` are `read_only`, so the gate
+auto-approves them, and they reach any file chief's OS user can — this one included
+— with nothing screening what they return. A model steered by an injected prompt can
+read the access and refresh tokens straight from `secrets/mcp-oauth/<server>.json`,
+and the refresh token outlives the access token. "No token reaches the model" is
+therefore a claim about the login flow only (what `server_login`,
+`server_login_complete`, the notices and the audit trail carry), not about the file
+at rest. The same holds for every other file under `secrets/`. `/logout` closes a
+login that may have leaked only where the provider offers revocation; otherwise it
+just deletes chief's copy, and the provider's own account settings are the way.
+
 **`CORE_APPROVED`.** `server_login` and `server_login_complete` skip the approval
 card (`gate.py`): they only ever hand the owner a link or take back an address
 that must match a live `state`, and the worst a hostile prompt can do with them is
@@ -483,9 +495,11 @@ own reply for input.
     flow — it reports what the owner should run. The boundary is accident-scoped,
     not adversary-proof: see "What the boundary does not cover".
 13. **A non-interactive install never creates a system account.**
-14. **An MCP login completes only against a live `state`.** No token or login link
-    reaches the model, and no `mcp_auth_*` audit line carries a code, token or URL
-    (a pasted address's single-use code can reach the transcript — see "MCP OAuth").
+14. **An MCP login completes only against a live `state`.** The login flow hands
+    the model no token or login link, and no `mcp_auth_*` audit line carries a code,
+    token or URL. Two things sit outside that: a pasted address's single-use code
+    can reach the transcript, and the file tools can read the token file itself —
+    see "MCP OAuth", "Tokens at rest".
 
 Tests for this layer: `tests/test_gate.py`, `test_approvals.py`,
 `test_audit_and_bus.py`, `test_budget.py`, `test_instance_lock.py`,
