@@ -72,4 +72,19 @@ When you may write, follow Obsidian conventions so the vault stays coherent:
 - Save **durable** facts (preferences, decisions, people, projects), not
   transient chatter. When in doubt, ask before writing.
 
+### People
+
+Keep one note per person (e.g. `contacts/<name>.md`), and one per group chat
+for its running context (members, inside jokes, events).
+
+- **Write people facts as you learn them, without asking.** The turn you learn
+  something new and durable about someone — interests, humor, plans,
+  relationships, something they said that matters — or meet someone new,
+  update their note, creating it if needed. Every thread, group chats
+  included: that is where most of it is said.
+- **Search before you talk.** Before talking with or about someone, search
+  memory for them, so you never ask what you were already told.
+- Record handles (phone, email) in their note; the display name chief shows in
+  wakes comes from `data/contacts.yaml`, so add them there too.
+
 See `packages/obsidian-memory/docs/best-practices.md` for vault-layout options.

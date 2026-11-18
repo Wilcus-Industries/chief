@@ -54,7 +54,7 @@ class SessionManager:
         self._hooks_timeout_seconds = hooks_timeout_seconds
         self._sessions: dict[str, Session] = {}
         self._create_lock = asyncio.Lock()
-        self._on_wipe: Callable[[str], None] | None = None
+        self._on_wipe: list[Callable[[str], None]] = []
 
     async def get_or_create(self, thread_key: str, channel: str) -> Session:
         """Return the live session for a thread, resuming history from disk."""
@@ -171,10 +171,11 @@ class SessionManager:
         return await session.compact()
 
     def set_on_wipe(self, callback: Callable[[str], None]) -> None:
-        """Called with the thread key after each successful clear/delete (the
-        subagent pool cancels that thread's orphaned subagents). Late-bound:
-        the pool is built after the manager."""
-        self._on_wipe = callback
+        """Add a callback run with the thread key after each successful
+        clear/delete (the subagent pool cancels that thread's orphaned
+        subagents; monitors forget their cursors into it). Late-bound: both
+        are built after the manager."""
+        self._on_wipe.append(callback)
 
     async def clear(self, thread_key: str) -> bool:
         """Wipe a thread's transcript (keep the row); mid-turn refuses — see
@@ -187,6 +188,7 @@ class SessionManager:
 
     async def _wipe(self, thread_key: str, op: StoreWipe) -> bool:
         wiped = await wipe_thread(self._sessions, thread_key, op)
-        if wiped and self._on_wipe is not None:
-            self._on_wipe(thread_key)
+        if wiped:
+            for callback in self._on_wipe:
+                callback(thread_key)
         return wiped

@@ -19,7 +19,6 @@ from chief.budget import Budget
 from chief.bus import EventBus
 from chief.commands import CommandSet
 from chief.config import Config
-from chief.contacts import Roster
 from chief.cron.service import CronService
 from chief.cron.timing import parse_quiet_hours
 from chief.cron.updates import ensure_update_schedule
@@ -31,7 +30,7 @@ from chief.hooks.boot import build_hooks
 from chief.hooks.posttool import tool_screener
 from chief.hub import ObserverHub
 from chief.mcpclient.wiring import build_mcp
-from chief.monitors.service import MonitorService
+from chief.monitors.build import build_monitors
 from chief.owner import primary_target
 from chief.peers.wiring import build_peers
 from chief.persistence.db import SessionFactory
@@ -119,9 +118,10 @@ async def _build_agent_core(
     )
     pointer = card_pointer(dispatcher, primary_target(config))
     ask = approval_asker(dispatcher, gate.approvals, audience, pointer)
-    monitors = MonitorService(factory, bus, dispatcher.handle, classifier, screen,
-                              config.imessage_owner_handles,
-                              Roster(config.db_path.parent / "contacts.yaml"))
+    monitors = build_monitors(
+        config, factory, bus, dispatcher.handle, classifier, screen
+    )
+    manager.set_on_wipe(monitors.forget_wake)
     cron = CronService(
         factory, dispatcher.handle, parse_quiet_hours(config.quiet_hours),
         run_command=guarded_runner(shell_service, shell_guards),

@@ -242,24 +242,64 @@ only `code` and `classifier` exist.
 | `classifier` + `fire_label` | `{kind: classifier, classifier, fire_label, scope}` |
 
 Both classifier forms carry a `scope` — `{sender}` or `{thread_key}` — checked
-in `_on_event` **before** `_matches`, so an out-of-scope event never reaches the
+in `MonitorRouter.on_event` **before** the gate, so an out-of-scope event never reaches the
 model. The pattern form takes none. That is a prompt-injection boundary, not an
 optimization: see `docs/SECURITY.md`.
 
 Evaluation in `MonitorGate.evaluate` (`monitors/gate.py`), once per event over
-every in-scope monitor:
+every in-scope monitor, routed by `MonitorRouter` (`monitors/router.py`):
 
 - `code` reads **exactly one** payload field (default `text`) and runs
   `re.search(pattern, value, re.I)` — locally, no request.
-- If any `code` matched or any `classifier` is in scope, the payload goes to the
-  injection screen in **one** call carrying a `judge_<id>` Choice per
+- If any `code` matched or any `classifier` is in scope, the event's chat log
+  (`monitors/wake.py`: the event plus up to 8 earlier lines of its thread, chief's
+  own included) goes to the injection screen in **one** call carrying a `judge_<id>` Choice per
   classifier monitor (its definition prompt plus the instruction). When
   TypeSafe did not answer the judges, each falls back to its own model turn
-  (payload with the instruction prepended for the sugar form). A monitor fires
+  (chat log with the instruction prepended for the sugar form). A monitor fires
   iff its label equals `fire_label`; one judge raising skips only that monitor.
 - Unknown kind never fires.
-- A flagged or unscreenable event fires **withheld** (`_fire_withheld`: sender
-  and thread only). See SECURITY.md "Injection screen".
+- A flagged or unscreenable event fires **withheld** (every non-owner line's
+  text replaced). The screen is skipped only when every judged line is the
+  owner's or chief's own. See SECURITY.md "Injection screen".
+
+### What a wake carries — `monitors/wake.py`, `history.py`, `transcript.py`
+
+A wake is the watched thread as a chat log, read from the channel's own record
+when it has one (`HistorySource`; iMessage reads `chat.db` by chat identifier,
+`adapters/imessage_history.py`), else the event alone:
+
+```
+thread chat123: 2 new since you last looked (▶ marks new; "you" is you)
+people: Will (owner) = +1555…; Henry = +1555…
+5:01 PM  Will (owner): "Brady which frat?"
+5:02 PM  you: "SAE vs DTD is a real one"
+▶ 5:04 PM  Henry: "Ur an idiot chief"
+```
+
+- **Since the last wake.** `SeenCursors` (`data/monitor_seen.json`) keeps, per
+  monitor *and watched thread* (store + thread key, since ids are per-store
+  ROWIDs), the newest line its last wake showed, so lines a judge let pass and
+  lines said while chief was down ride the next wake. A line a wake already
+  showed (a burst read in one go) never wakes that monitor again. The event
+  names its store and row (`Message.store`/`rowid`, in the bus payload), so
+  only that store is read and the event is found exactly. Retarget and delete
+  drop a monitor's cursors.
+- **Read only when something can fire.** No regex hit and no judge in scope:
+  the thread is not read at all. A monitor with no cursor
+  (first wake, or its wake session was cleared/deleted — `forget_wake`, via the
+  manager's wipe callbacks) also gets 10 earlier lines.
+- **Who said what is set by chief.** `you` is chief's own send (`is_from_me` in
+  a dedicated store); names are the roster's first name (full name on a clash);
+  `(owner)` comes from the handle, never the roster file; an unknown handle is
+  shown stripped to handle characters. Text is a JSON string, so a newline in a
+  message can never start a forged speaker line.
+- **Nothing unscreened.** Any untrusted line in the wake that was not in the
+  judge's screened window (e.g. one a non-matching `code` monitor skipped) is
+  screened by the wake itself first.
+- **Photos.** The owner's photos in the shown lines ride the wake as
+  `Message.attachments` (read `[photo]` in the log); anyone else's read
+  `[photo, not shown]` and are never loaded (SECURITY.md).
 
 **`MATCHABLE_FIELDS` is `("text", "sender", "thread_key")`** and is validated at
 create time. A field outside that set would match `""` forever and never fire
@@ -282,9 +322,9 @@ immediately without a restart.
 
 ### The self-wake loop is cut in two places
 
-1. `_on_event` returns immediately when `sender == "owner"` — owner messages
+1. `MonitorRouter.on_event` returns immediately when `sender == "owner"` — owner messages
    already dispatch a turn on every channel, so firing on them would double-wake.
-2. `_fire` wakes with **`sender="system"`**, which the dispatcher refuses to
+2. `MonitorRouter._send` wakes with **`sender="system"`**, which the dispatcher refuses to
    re-publish to the bus.
 
 Strangers — published but never dispatched — are the intended trigger. That is
@@ -351,7 +391,7 @@ accumulate.
 ### The shipped classifiers
 
 `classifiers/wake-judge.md` — labels `[YES, NO]`, no model pin. Its prompt expects
-an instruction plus an event payload, the shape `MonitorGate` builds, and is the
+an instruction plus the event's chat log, the shape `MonitorGate` builds, and is the
 hardcoded target of the `instruction` sugar.
 
 `classifiers/injection-screen.md` — labels `[INJECTION, CLEAN]`. Its body is the

@@ -57,6 +57,7 @@ class Interrupted:
     text: str
     started: bool
     at: float
+    attachments: tuple[str, ...] = ()
 
 
 class _Ticket:
@@ -82,15 +83,16 @@ class InflightLog:
 
     def track(
         self, thread_key: str, channel: str, sender: str, text: str,
-        at: float | None = None,
+        at: float | None = None, attachments: tuple[str, ...] = (),
     ) -> _Ticket:
-        """Record a held message; ``at`` is when it arrived (now by default)."""
+        """Record a held message; ``at`` is when it arrived (now by default),
+        ``attachments`` its photo paths."""
         turn_id = uuid.uuid4().hex
         now = time.time()
         self._entries[turn_id] = {
             "thread_key": thread_key, "channel": channel, "sender": sender,
             "text": text, "started": False, "at": now if at is None else at,
-            "recorded": now, "attempts": 0,
+            "recorded": now, "attempts": 0, "attachments": list(attachments),
         }
         self._save()
         return _Ticket(self, turn_id)
@@ -102,7 +104,7 @@ class InflightLog:
         self._leftovers = []
         return [
             Interrupted(i, e["thread_key"], e["channel"], e["sender"], e["text"],
-                        e["started"], e["at"])
+                        e["started"], e["at"], _paths(e.get("attachments")))
             for i, e in taken
         ]
 
@@ -173,3 +175,10 @@ def _well_formed(entry: object) -> bool:
         if not isinstance(value, kind):
             return False
     return True
+
+
+def _paths(raw: object) -> tuple[str, ...]:
+    """A record's photo paths; anything malformed reads as none."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(p for p in raw if isinstance(p, str))

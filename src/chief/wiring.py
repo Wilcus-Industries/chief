@@ -31,6 +31,7 @@ from chief.gate import AskApproval, GatePolicy, load_approved, save_approved
 from chief.hooks.registry import HookRegistry
 from chief.hub import ObserverHub
 from chief.mcpclient.oauth import OAuthBroker
+from chief.monitors.build import photo_stash
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -39,6 +40,7 @@ from chief.persistence.db import (
     make_session_factory,
 )
 from chief.persistence.store import MessageStore
+from chief.policy import owner_audience
 from chief.provider.base import Provider
 from chief.provider.factory import build_provider as build_provider
 from chief.selfedit.inflight import InflightLog
@@ -111,9 +113,13 @@ def build_compactor(config: Config, provider: Provider) -> Compactor:
         base_url=config.provider_base_url,
         api_key=config.openrouter_api_key,
     )
+    def budgeted(thread: str, channel: str) -> bool:
+        return not owner_audience(channel, thread, config.imessage_owner_handles)
+
     return Compactor(
         provider, config.default_model, resolver,
         ratio=config.compaction_ratio, keep_recent=config.compaction_keep_recent,
+        message_budget=config.compaction_message_budget, budgeted=budgeted,
     )
 
 
@@ -157,6 +163,7 @@ def build_adapters(
             # Poll stage, ahead of the FIFO worker: card answers, mid-turn owner texts.
             resolve_approval=dispatcher.resolve_approval, inject=dispatcher.try_inject,
             track=dispatcher.track,  # at enqueue: the cursor is already saved
+            stash=photo_stash(config),  # the owner's photos, for a model to see
         )
         dispatcher.register(imessage_adapter)
 

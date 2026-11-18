@@ -12,7 +12,7 @@ twin-row dedup (``imessage_store``), the BOT_PREFIX stamped on replies and
 filtered on the way back, the out-of-band send guard (``imessage_send``).
 ``dedicated``: chief holds its own Apple ID in its own user session, the owner
 is an ordinary correspondent, and all four switch off (the guard, in
-``app.py``; see :meth:`IMessageAdapter._map` for delivery). The scope is
+``app.py``; see :func:`.imessage_map.map_row` for delivery). The scope is
 turned *off*, never repointed at the owner's handle — that chat is now chief's
 real conversation with them, so scoping it would poll chief's own replies back
 as owner input.
@@ -21,22 +21,26 @@ as owner input.
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from chief.adapters.base import Adapter, Inject, Message
+from chief.adapters.imessage_attachments import ImageStash, Labelled
 from chief.adapters.imessage_cursor import RowCursor, Store
 from chief.adapters.imessage_fifo import HandleTicketed, ThreadFifo, Track
+from chief.adapters.imessage_map import BOT_PREFIX, map_row
 from chief.adapters.imessage_send import (
     SEND_TEXT_SCRIPT,
     RunJxa,
     run_jxa_subprocess,
 )
-from chief.adapters.imessage_store import RecentDedup, sent_at
+from chief.adapters.imessage_store import RecentDedup
+from chief.agent.restart_gate import TurnTicket
 from chief.selfedit.recovery import RestartBoundary
 
 logger = logging.getLogger(__name__)
 
-BOT_PREFIX = "\U0001f916 "  # 🤖 — marks chief's replies in the shared self-chat
+__all__ = ["BOT_PREFIX", "IMessageAdapter"]
 
 
 class IMessageAdapter(Adapter):
@@ -60,11 +64,14 @@ class IMessageAdapter(Adapter):
         owner_db_path: Path | None = None,
         self_handles: tuple[str, ...] = (),
         track: Track | None = None,
+        stash: ImageStash | None = None,
     ) -> None:
         self._on_message = on_message
         self._owner_handles = frozenset(owner_handles)
         self._self_handles = frozenset(self_handles)
         self._dedicated = dedicated
+        self._stash = stash  # the owner's photos, for a model to see
+        self._photo_rows: set[tuple[str, int]] = set()  # owner photo turns queued
         self._poll_seconds = poll_seconds
         self._run_jxa = run_jxa
         # Drained at poll stage, ahead of the FIFO worker: a gated turn suspends
@@ -76,7 +83,9 @@ class IMessageAdapter(Adapter):
         self._inject = inject
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
-        self._fifo = ThreadFifo(on_message, restart, track)
+        # The worker stashes a photo turn's photos as it starts: a photo still
+        # downloading then holds up only its own thread, never the poll loop.
+        self._fifo = ThreadFifo(self._deliver, restart, track)
         self._stores = [Store(db_path, RowCursor(cursor_path))]
         if owner_db_path is not None and owner_db_path != db_path:
             self._stores.append(
@@ -143,53 +152,44 @@ class IMessageAdapter(Adapter):
                     # Chief's own reply, seen from the owner's side as an
                     # ordinary inbound row. Polling it would answer itself.
                     continue
-                message = self._map(sender, text, from_me, group_chat, in_self, date)
+                owner = bool(in_self) or sender in self._owner_handles
+                labelled = Labelled(text)
+                if self._stash is not None:
+                    labelled = await asyncio.to_thread(
+                        self._stash.label, store.db_path, rowid, text, owner)
+                message = map_row(self.name, sender, labelled.text, from_me,
+                                  group_chat, in_self, date, self._owner_handles,
+                                  self._dedicated)
                 if message is None:
                     continue
                 if not self._dedicated and self._dedup.is_duplicate(
-                    (message.thread_key, message.sender, message.text), message.at
+                    (message.thread_key, message.sender, message.text,
+                     labelled.fingerprint), message.at
                 ):
                     continue  # twin rows are a self-DM artefact only
+                message = replace(message, store=str(store.db_path), rowid=rowid)
+                photo = labelled.owner_photos and message.sender == "owner"
+                if photo:
+                    self._photo_rows.add((message.store, rowid))
                 if self._resolve_approval is not None and self._resolve_approval(
                     message
                 ):
                     continue  # answered a pending card — bypass the FIFO worker
-                if self._inject is not None and self._inject(message, self._fifo.put):
+                # An injected turn carries text only: a photo turn queues.
+                if not photo and self._inject is not None and self._inject(
+                    message, self._fifo.put
+                ):
                     continue  # taken by the thread's running turn
                 self._fifo.put(message)
+
+    async def _deliver(self, message: Message, ticket: TurnTicket) -> None:
+        """The worker's delivery: an owner photo turn's photos stash here."""
+        key = (message.store, message.rowid)
+        if key in self._photo_rows and self._stash is not None:
+            self._photo_rows.discard(key)
+            message = await asyncio.to_thread(self._stash.attach, message)
+        await self._on_message(message, ticket)
 
     async def drain(self) -> None:
         """Block until every per-thread queue is empty (test seam)."""
         await self._fifo.drain()
-
-    def _map(
-        self, sender: str, text: str, from_me: int,
-        group_chat: str | None, in_self: int, date: int,
-    ) -> Message | None:
-        """Turn a polled row into a deliverable Message, or None to skip it.
-
-        A group message threads on its chat, not on whoever spoke — the one
-        case where ``sender`` and ``thread_key`` differ. Groups are never the
-        owner's self-chat, so they take the stranger path: published for
-        monitors, never answered. Which groups matter is monitor policy."""
-        if not text:
-            return None  # attachment-only row: attributedBody held no text
-        if text.startswith(BOT_PREFIX) and not self._dedicated:
-            return None  # chief's own reply echoing back through the store
-        if from_me and not in_self:
-            return None  # owner->friend sent copy: not the self-chat
-        at = sent_at(date)  # when it was sent, not polled: a backlog is old news
-        if group_chat is not None:
-            # Raw sender, never "owner", even for an owner handle: that would
-            # take the dispatcher's owner path, replying to a group thread_key
-            # the one-to-one send path cannot address — and would let anyone in
-            # the group present as the owner (docs/SECURITY.md).
-            return Message(
-                channel=self.name, sender=sender, thread_key=group_chat,
-                text=text, at=at,
-            )
-        mapped = "owner" if (in_self or sender in self._owner_handles) else sender
-        return Message(
-            channel=self.name, sender=mapped, thread_key=sender, text=text, at=at
-        )
-

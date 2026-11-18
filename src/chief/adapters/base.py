@@ -17,7 +17,9 @@ class Message:
     stamp names, however long its turn then waits behind others. It defaults to
     when the message is built; a channel that knows better passes it (iMessage,
     for a row sent while chief was down). A replay carries the original; it is
-    not part of a message's identity."""
+    not part of a message's identity. ``attachments`` are stashed photo paths.
+    ``store``/``rowid`` say which record row it came from (iMessage), so a
+    monitor reads its thread from that record and finds the event exactly."""
 
     channel: str
     sender: str
@@ -25,6 +27,8 @@ class Message:
     text: str
     attachments: tuple[str, ...] = ()
     at: float = field(default_factory=time.time, compare=False)
+    store: str = field(default="", compare=False)
+    rowid: int = field(default=0, compare=False)
 
 
 # ``Dispatcher.try_inject``: offer a message to its thread's running turn, with

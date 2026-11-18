@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from chief.provider.images import IMAGES_KEY, loadable, with_images
+
 
 class ProviderError(RuntimeError):
     """A model call failed (HTTP error, malformed stream, refused request)."""
@@ -93,23 +95,31 @@ DISPLAY_ONLY_KEYS = ("reasoning",)
 STAMP_KEY = "stamp"
 
 
-def for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def for_model(
+    messages: list[dict[str, Any]], *, images: bool = False
+) -> list[dict[str, Any]]:
     """``messages`` as a model may see them: display-only keys dropped, and each
     stored stamp moved in front of its content. The stored dicts are untouched.
 
     The stamp was formatted once, when its message arrived, and is only
     prefixed here — so a message reaches the model byte-identical on every
-    call, which is what keeps provider prompt caches hitting."""
-    return [_for_model(m) for m in messages]
+    call, which is what keeps provider prompt caches hitting. ``images`` loads
+    stored photo paths as content parts (only the real model call does);
+    without it they read as ``[photo]`` stubs (see ``provider.images``)."""
+    load = loadable(messages) if images else {}
+    return [_for_model(m, load.get(i, 0)) for i, m in enumerate(messages)]
 
 
-def _for_model(message: dict[str, Any]) -> dict[str, Any]:
-    hidden = (*DISPLAY_ONLY_KEYS, STAMP_KEY)
+def _for_model(message: dict[str, Any], images: int) -> dict[str, Any]:
+    hidden = (*DISPLAY_ONLY_KEYS, STAMP_KEY, IMAGES_KEY)
     if not any(k in message for k in hidden):
         return message
     shaped = {k: v for k, v in message.items() if k not in hidden}
     if STAMP_KEY in message:
         shaped["content"] = f"{message[STAMP_KEY]} {message['content']}"
+    if paths := message.get(IMAGES_KEY):
+        shaped["content"] = with_images(str(shaped.get("content") or ""),
+                                        list(paths), images)
     return shaped
 
 
