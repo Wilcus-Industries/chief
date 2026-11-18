@@ -119,12 +119,12 @@ UNTRUSTED_OPEN = (
 UNTRUSTED_CLOSE = "[end untrusted content {n}]"
 
 
-def frame_untrusted(body: str) -> str:
+def frame_untrusted(body: str, opener: str = UNTRUSTED_OPEN) -> str:
     """Wrap a non-owner's words that enter a turn as trusted-origin text — a
     monitor wake (#285), a peer message from a non-owner thread (#308)."""
     nonce = secrets.token_hex(3)
     return (
-        f"{UNTRUSTED_OPEN.format(n=nonce)}\n{body}\n"
+        f"{opener.format(n=nonce)}\n{body}\n"
         f"{UNTRUSTED_CLOSE.format(n=nonce)}"
     )
 

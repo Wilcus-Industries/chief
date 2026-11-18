@@ -4,31 +4,35 @@ Predicates come in two kinds: ``code`` (a cheap regex over one event payload
 field) and ``classifier`` (a named categorical-label classifier, which must be
 scoped — see predicate.py). The tool's three forms are ``pattern`` (code),
 ``instruction`` (sugar for the wake-judge classifier), and ``classifier``.
-Matching and the injection screen live in gate.py; flagged wakes are withheld.
+Routing an event to its wakes lives in router.py, matching and the injection
+screen in gate.py, and what a judge reads and a wake carries (the thread's
+chat log) in wake.py.
 """
 
-import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Mapping
 from typing import Any
 
 from sqlalchemy import select
 
-from chief.adapters.base import Message
-from chief.bus import Event, EventBus
+from chief.bus import EventBus
 from chief.classifiers import Classifier, ClassifierDef
 from chief.contacts import Roster
-from chief.monitors.gate import MonitorGate, withheld_body
-from chief.monitors.predicate import in_scope, is_unscoped_classifier
+from chief.monitors.gate import MonitorGate
+from chief.monitors.history import HistorySource, SeenCursors
+from chief.monitors.predicate import is_unscoped_classifier
+from chief.monitors.router import MonitorRouter, WakeAgent
+from chief.monitors.transcript import Namer
+from chief.monitors.wake import WakeLog
 from chief.persistence.db import SessionFactory
 from chief.persistence.models import MonitorRow
 from chief.persistence.store import MessageStore
-from chief.policy import frame_untrusted
 from chief.screen import Screen
 
 logger = logging.getLogger(__name__)
 
-WakeAgent = Callable[[Message], Awaitable[None]]
+__all__ = ["MonitorService", "WakeAgent"]
+
 
 class MonitorService:
     """Loads monitors, subscribes to the bus, and fires wakes."""
@@ -42,14 +46,18 @@ class MonitorService:
         screen: Screen | None = None,
         owner_handles: tuple[str, ...] = (),
         roster: Roster | None = None,
+        histories: Mapping[str, HistorySource] | None = None,
+        cursors: SeenCursors | None = None,
     ) -> None:
         self._factory = factory
-        self._roster = roster
         self.store = MessageStore(factory)  # the tool resolves wake targets here
-        self._wake = wake
         self._classifier = classifier
-        self._gate = MonitorGate(classifier, screen, owner_handles)
-        bus.subscribe(self._on_event)
+        self._cursors = cursors or SeenCursors()
+        log = WakeLog(histories or {}, Namer(roster, owner_handles), self._cursors)
+        router = MonitorRouter(
+            self.list_monitors, MonitorGate(classifier, screen), log, wake
+        )
+        bus.subscribe(router.on_event)
 
     async def create(
         self,
@@ -132,68 +140,9 @@ class MonitorService:
             await db.commit()
             return True
 
+    def forget_wake(self, wake_thread: str) -> None:
+        """That session was wiped: its monitors' next wakes bring context again."""
+        self._cursors.forget_wake(wake_thread)
+
     def classifier_def(self, name: str) -> ClassifierDef | None:
         return self._classifier.definition(name)
-
-    async def _on_event(self, event: Event) -> None:
-        # Inbound only. An outbound event (chief's own reply, published so the
-        # web cockpit can mirror it) has an empty sender, which a ``^(?!owner$)``
-        # predicate would match — self-wake in a loop.
-        if event.type != "message.inbound":
-            return
-        # Owner messages already dispatch a turn on every channel, so firing on
-        # them would double-wake. Strangers are the intended trigger.
-        if event.payload.get("sender") == "owner":
-            return
-        # Scope before the gate: an out-of-scope event never reaches a model.
-        monitors = [
-            m for m in await self.list_monitors()
-            if m.watch_channel == event.channel and in_scope(m.predicate, event.payload)
-        ]
-        try:
-            fired, verdict = await self._gate.evaluate(monitors, event.payload)
-        except Exception:
-            logger.exception("monitor gate errored on %s", event.type)
-            return
-        for monitor in fired:  # one wake raising must not drop its siblings
-            try:
-                if verdict is not None and verdict.withhold:
-                    await self._fire_withheld(monitor, event, verdict.reason())
-                else:
-                    await self._fire(monitor, event)
-            except Exception:
-                logger.exception("monitor %s errored", monitor.id)
-
-    async def _fire(self, monitor: MonitorRow, event: Event) -> None:
-        logger.info("monitor %s fired on %s", monitor.id, event.type)
-        # sender="system" takes the owner path in dispatch.handle, so someone
-        # else's words enter the turn as trusted-origin text — frame them (#285).
-        payload = event.payload
-        name = self._sender_name(payload)
-        if name:  # the roster's label beside the raw handle, which stays the identity
-            payload = {**payload, "sender_name": name}
-        await self._send(monitor, f"event: {json.dumps(payload)}")
-
-    def _sender_name(self, payload: dict[str, Any]) -> str | None:
-        sender = str(payload.get("sender", ""))
-        return self._roster.name_for(sender) if self._roster else None
-
-    async def _fire_withheld(
-        self, monitor: MonitorRow, event: Event, reason: str
-    ) -> None:
-        """Flagged, or unscreenable: wake with who and where only."""
-        logger.warning("monitor %s fired but withheld: %s", monitor.id, reason)
-        body = withheld_body(event.payload, reason, self._sender_name(event.payload))
-        await self._send(monitor, body)
-
-    async def _send(self, monitor: MonitorRow, body: str) -> None:
-        text = (
-            f"[monitor #{monitor.id} fired: {monitor.description}]\n"
-            f"{frame_untrusted(body)}"
-        )
-        # sender="system": runs a turn but is never re-published to the bus,
-        # so a monitor can't trigger itself.
-        await self._wake(Message(
-            channel=monitor.wake_channel, sender="system",
-            thread_key=monitor.wake_thread, text=text,
-        ))
