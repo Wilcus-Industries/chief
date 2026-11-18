@@ -6,6 +6,7 @@ concerns, not app wiring.
 """
 
 from chief.adapters.imessage import BOT_PREFIX
+from chief.adapters.imessage_attachments import ImageStash
 from chief.adapters.imessage_history import HistoryStore, IMessageHistory
 from chief.bus import EventBus
 from chief.classifiers import Classifier
@@ -17,6 +18,12 @@ from chief.persistence.db import SessionFactory
 from chief.screen import Screen
 
 CURSORS_FILE = "monitor_seen.json"
+PHOTOS_DIR = "attachments/imessage"  # under the data dir
+
+
+def photo_stash(config: Config) -> ImageStash:
+    """The one place the owner's iMessage photos are kept (adapter + wakes)."""
+    return ImageStash(config.db_path.parent / PHOTOS_DIR)
 
 
 def build_monitors(
@@ -42,4 +49,4 @@ def histories(config: Config) -> dict[str, HistorySource]:
     else:
         stores = [HistoryStore(config.imessage_db_path, "prefixed")]
     return {"imessage": IMessageHistory(
-        stores, config.imessage_owner_handles, BOT_PREFIX)}
+        stores, config.imessage_owner_handles, BOT_PREFIX, photo_stash(config))}

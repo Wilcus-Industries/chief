@@ -31,6 +31,7 @@ from chief.gate import AskApproval, GatePolicy, load_approved, save_approved
 from chief.hooks.registry import HookRegistry
 from chief.hub import ObserverHub
 from chief.mcpclient.oauth import OAuthBroker
+from chief.monitors.build import photo_stash
 from chief.monitors.service import MonitorService
 from chief.persistence.db import (
     SessionFactory,
@@ -162,6 +163,7 @@ def build_adapters(
             # Poll stage, ahead of the FIFO worker: card answers, mid-turn owner texts.
             resolve_approval=dispatcher.resolve_approval, inject=dispatcher.try_inject,
             track=dispatcher.track,  # at enqueue: the cursor is already saved
+            stash=photo_stash(config),  # the owner's photos, for a model to see
         )
         dispatcher.register(imessage_adapter)
 

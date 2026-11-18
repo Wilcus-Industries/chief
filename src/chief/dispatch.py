@@ -179,6 +179,8 @@ class Dispatcher:
         message."""
         if message.sender != OWNER or message.text.startswith("/"):
             return False
+        if message.attachments:
+            return False  # an injected turn carries text only; queue the photo
         if message.thread_key in self._held:
             return False  # queue behind the boot's replays, never overtake them
         session = self._manager.peek(message.thread_key)
@@ -375,6 +377,7 @@ class Dispatcher:
                 on_tool=on_tool, on_tool_result=on_tool_result,
                 on_begin=on_begin, on_interim=on_interim,
                 on_reasoning=on_reasoning, ticket=ticket, at=message.at,
+                images=message.attachments,
             )
         except ProviderError as exc:
             # A backend failure is the owner's to see (e.g. proxy down, bad

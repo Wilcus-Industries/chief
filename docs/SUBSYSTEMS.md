@@ -290,6 +290,9 @@ people: Will (owner) = +1555…; Henry = +1555…
 - **Nothing unscreened.** Any untrusted line in the wake that was not in the
   judge's screened window (e.g. one a non-matching `code` monitor skipped) is
   screened by the wake itself first.
+- **Photos.** The owner's photos in the shown lines ride the wake as
+  `Message.attachments` (read `[photo]` in the log); anyone else's read
+  `[photo, not shown]` and are never loaded (SECURITY.md).
 
 **`MATCHABLE_FIELDS` is `("text", "sender", "thread_key")`** and is validated at
 create time. A field outside that set would match `""` forever and never fire

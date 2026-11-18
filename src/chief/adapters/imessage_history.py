@@ -17,8 +17,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from chief.adapters.imessage_attachments import OBJECT_MARK, ImageStash
 from chief.adapters.imessage_store import sent_at, text_of
 from chief.monitors.history import Line
+from chief.policy import normalize_handle
 
 # Newest first so LIMIT keeps the tail; reversed into oldest-first after.
 # associated_message_type = 0 drops tapbacks and edits, as the poller does.
@@ -32,7 +34,6 @@ HISTORY_QUERY = (
     "WHERE chat.chat_identifier = ? AND message.associated_message_type = 0 "
     "GROUP BY message.ROWID ORDER BY message.ROWID DESC LIMIT ?"
 )
-OBJECT_MARK = "￼"  # where an attachment sits in a row's text
 
 
 @dataclass(frozen=True)
@@ -49,11 +50,13 @@ class IMessageHistory:
 
     def __init__(
         self, stores: Sequence[HistoryStore], owner_handles: Sequence[str] = (),
-        prefix: str = "",
+        prefix: str = "", stash: ImageStash | None = None,
     ) -> None:
         self._stores = tuple(stores)
         self._owner = owner_handles[0] if owner_handles else ""
+        self._owners = frozenset(normalize_handle(h) for h in owner_handles)
         self._prefix = prefix
+        self._stash = stash
 
     def recent(self, thread_key: str, limit: int) -> list[Line]:
         for store in self._stores:
@@ -79,7 +82,7 @@ class IMessageHistory:
         self, store: HistoryStore, rowid: int, sender: str, text: object,
         body: object, from_me: int, date: int | None,
     ) -> Line:
-        said = text_of(text, body).replace(OBJECT_MARK, "").strip()
+        said = text_of(text, body).strip()
         mine = False
         if from_me:
             if store.from_me == "chief":
@@ -89,5 +92,10 @@ class IMessageHistory:
             ):
                 mine, said = True, said[len(self._prefix.strip()):].strip()
             sender = "" if mine else self._owner
+        images: tuple[str, ...] = ()
+        if self._stash is not None and not mine:
+            owner = normalize_handle(str(sender)) in self._owners
+            said, images = self._stash.resolve(store.db_path, rowid, said, owner)
+        said = said.replace(OBJECT_MARK, "").strip()
         return Line(id=int(rowid), at=sent_at(int(date or 0)), sender=str(sender),
-                    text=said, mine=mine)
+                    text=said, mine=mine, images=images)

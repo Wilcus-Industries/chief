@@ -31,7 +31,8 @@ async def stream_once(
     The model is sent ``messages`` minus display-only keys (stored reasoning)."""
     completion: Completion | None = None
     stream = provider.stream(
-        model=model, messages=for_model(messages), tools=tools.specs()
+        model=model, messages=for_model(messages, images=True),
+        tools=tools.specs(),
     )
     async for event in stream:
         if isinstance(event, TextDelta):

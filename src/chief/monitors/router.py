@@ -99,12 +99,15 @@ class MonitorRouter:
             logger.info("monitor %s fired on %s", monitor.id, log.thread_key)
         body = self._log.body(log, lines, new_after, clipped=clipped, withheld=withheld)
         self._log.mark_seen(monitor, log)
-        await self._send(monitor, body)
+        images = tuple(path for line in lines for path in line.images)
+        await self._send(monitor, body, images)
 
     def _untrusted(self, lines: list[Line]) -> bool:
         return any(not self._log.namer.trusted(line) for line in lines)
 
-    async def _send(self, monitor: MonitorRow, body: str) -> None:
+    async def _send(
+        self, monitor: MonitorRow, body: str, images: tuple[str, ...] = ()
+    ) -> None:
         text = (
             f"[monitor #{monitor.id} fired: {monitor.description}]\n"
             f"{frame_untrusted(body, UNTRUSTED_THREAD_OPEN)}"
@@ -113,5 +116,5 @@ class MonitorRouter:
         # so a monitor can't trigger itself.
         await self._wake(Message(
             channel=monitor.wake_channel, sender="system",
-            thread_key=monitor.wake_thread, text=text,
+            thread_key=monitor.wake_thread, text=text, attachments=images,
         ))

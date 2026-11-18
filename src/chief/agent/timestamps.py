@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from chief.provider.base import STAMP_KEY
+from chief.provider.images import IMAGES_KEY
 
 # How long a message may wait between arriving and being built into the
 # transcript before its stamp also says when it was read. Within a minute the
@@ -102,13 +103,19 @@ def stamped(
     return {**message, STAMP_KEY: stamp(at, read)}
 
 
-def user_message(text: str, at: float | None = None) -> dict[str, Any]:
+def user_message(
+    text: str, at: float | None = None, images: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """A user turn: ``text`` raw, stamped with when it arrived (``at``; now by
     default). One built more than ``BACKLOG_SECONDS`` after ``at`` also says when
-    it was read: now, the moment it is built."""
+    it was read: now, the moment it is built. ``images`` are photo paths, kept
+    as paths (``provider.images``)."""
     now = time.time()
     waited = at is not None and now - at > BACKLOG_SECONDS
-    return stamped({"role": "user", "content": text}, at, now if waited else None)
+    message: dict[str, Any] = {"role": "user", "content": text}
+    if images:
+        message[IMAGES_KEY] = list(images)
+    return stamped(message, at, now if waited else None)
 
 
 def tool_message(call_id: str, result: str) -> dict[str, Any]:

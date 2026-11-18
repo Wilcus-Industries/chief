@@ -23,13 +23,15 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Line:
     """One message in a thread. ``id`` orders lines within their channel's
-    store; ``sender`` is the raw handle; ``mine`` marks chief's own sends."""
+    store; ``sender`` is the raw handle; ``mine`` marks chief's own sends;
+    ``images`` are stashed photo paths (the owner's only)."""
 
     id: int
     at: float
     sender: str
     text: str
     mine: bool = False
+    images: tuple[str, ...] = ()
 
 
 class HistorySource(Protocol):

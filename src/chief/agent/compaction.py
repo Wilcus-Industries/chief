@@ -24,6 +24,7 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from chief.provider.base import Completion, Provider, for_model
+from chief.provider.images import IMAGE_TOKENS, image_count
 
 Budgeted = Callable[[str, str], bool]  # (thread_key, channel) -> under the budget?
 
@@ -48,8 +49,10 @@ class WindowSource(Protocol):
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
-    """Rough token count: serialized length over four."""
-    return sum(len(json.dumps(m)) for m in for_model(messages)) // 4
+    """Rough token count: serialized length over four, plus a flat
+    :data:`IMAGE_TOKENS` per stored photo."""
+    text = sum(len(json.dumps(m)) for m in for_model(messages)) // 4
+    return text + IMAGE_TOKENS * image_count(messages)
 
 
 def message_tokens(messages: list[dict[str, Any]]) -> int:

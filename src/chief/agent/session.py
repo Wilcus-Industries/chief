@@ -107,6 +107,7 @@ class Session:
         on_reasoning: OnDelta | None = None,
         ticket: TurnTicket | None = None,
         at: float | None = None,
+        images: tuple[str, ...] = (),
     ) -> TurnResult:
         """Queue one user turn; returns once the model finishes its reply.
 
@@ -127,6 +128,7 @@ class Session:
 
         ``ticket`` is the message's in-flight record; the caller owns it (and
         ends it), the session only marks it started once the text is stored.
+        ``images`` are photo paths the turn carries (``provider.images``).
         """
         async with self._lock:
             async with self._semaphore:
@@ -142,7 +144,7 @@ class Session:
                         await on_begin()
                     return await self._one_turn(
                         user_text, on_delta, sender, on_tool, on_tool_result,
-                        on_interim, on_reasoning, ticket, at,
+                        on_interim, on_reasoning, ticket, at, images,
                     )
                 finally:
                     try:
@@ -161,8 +163,9 @@ class Session:
         on_reasoning: OnDelta | None = None,
         ticket: TurnTicket | None = None,
         at: float | None = None,
+        images: tuple[str, ...] = (),
     ) -> TurnResult:
-        user = user_message(user_text, at)
+        user = user_message(user_text, at, images)
         model = self.model
         status = await self._budget.status() if self._budget else None
         if status is not None and status.state is BudgetState.EXHAUSTED:

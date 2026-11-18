@@ -192,6 +192,14 @@ lets notify policy (e.g. a whitelist tier) be agent policy rather than hardcoded
 Group chats are never trusted. A group `sender` stays the raw handle and must
 never map to `owner`.
 
+**Only the owner's photos reach a model.** The injection screen reads text, so a
+picture could carry instructions it never sees. `adapters/imessage_attachments`
+stashes (converts with `sips` into `data/attachments/imessage/`) only photos
+whose sender is an owner handle — in a 1:1, the self-chat, or a group — and a
+monitor wake attaches only those. Anyone else's photo is never read from disk:
+it shows as `[photo, not shown]`. The transcript stores photo *paths*
+(`provider.images.IMAGES_KEY`); only the real model call loads them.
+
 ## Monitor scope — the prompt-injection boundary (`monitors/`)
 
 A `classifier` predicate sends the event in context — the thread's recent

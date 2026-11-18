@@ -90,12 +90,31 @@ def _turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif message["role"] == "user" and turns and _is_result_turn(turns[-1]):
             # A message injected mid-turn follows the tool results; the API
             # refuses two consecutive user turns, so it joins theirs.
-            text = str(message.get("content") or EMPTY_TURN)
-            turns[-1]["content"].append({"type": "text", "text": text})
+            content = _blocks(message.get("content") or EMPTY_TURN)
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            turns[-1]["content"].extend(content)
         else:
-            content = message.get("content") or EMPTY_TURN
+            content = _blocks(message.get("content") or EMPTY_TURN)
             turns.append({"role": message["role"], "content": content})
     return turns
+
+
+def _blocks(content: Any) -> Any:
+    """OpenAI content parts as Anthropic blocks: text stays text, a data-URL
+    ``image_url`` becomes a base64 ``image`` block. A string passes through."""
+    if not isinstance(content, list):
+        return content
+    blocks: list[dict[str, Any]] = []
+    for part in content:
+        if part.get("type") == "image_url":
+            header, _, data = str(part["image_url"]["url"]).partition(",")
+            media = header.removeprefix("data:").split(";", 1)[0]
+            blocks.append({"type": "image", "source": {
+                "type": "base64", "media_type": media, "data": data}})
+        else:
+            blocks.append({"type": "text", "text": str(part.get("text", ""))})
+    return blocks
 
 
 def _is_result_turn(turn: dict[str, Any]) -> bool:

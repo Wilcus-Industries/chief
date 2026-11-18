@@ -21,22 +21,25 @@ as owner input.
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from chief.adapters.base import Adapter, Inject, Message
+from chief.adapters.imessage_attachments import ImageStash
 from chief.adapters.imessage_cursor import RowCursor, Store
 from chief.adapters.imessage_fifo import HandleTicketed, ThreadFifo, Track
+from chief.adapters.imessage_map import BOT_PREFIX, map_row
 from chief.adapters.imessage_send import (
     SEND_TEXT_SCRIPT,
     RunJxa,
     run_jxa_subprocess,
 )
-from chief.adapters.imessage_store import RecentDedup, sent_at
+from chief.adapters.imessage_store import RecentDedup
 from chief.selfedit.recovery import RestartBoundary
 
 logger = logging.getLogger(__name__)
 
-BOT_PREFIX = "\U0001f916 "  # 🤖 — marks chief's replies in the shared self-chat
+__all__ = ["BOT_PREFIX", "IMessageAdapter"]
 
 
 class IMessageAdapter(Adapter):
@@ -60,11 +63,13 @@ class IMessageAdapter(Adapter):
         owner_db_path: Path | None = None,
         self_handles: tuple[str, ...] = (),
         track: Track | None = None,
+        stash: ImageStash | None = None,
     ) -> None:
         self._on_message = on_message
         self._owner_handles = frozenset(owner_handles)
         self._self_handles = frozenset(self_handles)
         self._dedicated = dedicated
+        self._stash = stash  # the owner's photos, for a model to see
         self._poll_seconds = poll_seconds
         self._run_jxa = run_jxa
         # Drained at poll stage, ahead of the FIFO worker: a gated turn suspends
@@ -143,9 +148,16 @@ class IMessageAdapter(Adapter):
                     # Chief's own reply, seen from the owner's side as an
                     # ordinary inbound row. Polling it would answer itself.
                     continue
-                message = self._map(sender, text, from_me, group_chat, in_self, date)
+                owner = bool(in_self) or sender in self._owner_handles
+                images: tuple[str, ...] = ()
+                if self._stash is not None:
+                    text, images = await asyncio.to_thread(
+                        self._stash.resolve, store.db_path, rowid, text, owner)
+                message = map_row(self.name, sender, text, from_me, group_chat,
+                                  in_self, date, self._owner_handles, self._dedicated)
                 if message is None:
                     continue
+                message = replace(message, attachments=images)
                 if not self._dedicated and self._dedup.is_duplicate(
                     (message.thread_key, message.sender, message.text), message.at
                 ):
@@ -161,35 +173,3 @@ class IMessageAdapter(Adapter):
     async def drain(self) -> None:
         """Block until every per-thread queue is empty (test seam)."""
         await self._fifo.drain()
-
-    def _map(
-        self, sender: str, text: str, from_me: int,
-        group_chat: str | None, in_self: int, date: int,
-    ) -> Message | None:
-        """Turn a polled row into a deliverable Message, or None to skip it.
-
-        A group message threads on its chat, not on whoever spoke — the one
-        case where ``sender`` and ``thread_key`` differ. Groups are never the
-        owner's self-chat, so they take the stranger path: published for
-        monitors, never answered. Which groups matter is monitor policy."""
-        if not text:
-            return None  # attachment-only row: attributedBody held no text
-        if text.startswith(BOT_PREFIX) and not self._dedicated:
-            return None  # chief's own reply echoing back through the store
-        if from_me and not in_self:
-            return None  # owner->friend sent copy: not the self-chat
-        at = sent_at(date)  # when it was sent, not polled: a backlog is old news
-        if group_chat is not None:
-            # Raw sender, never "owner", even for an owner handle: that would
-            # take the dispatcher's owner path, replying to a group thread_key
-            # the one-to-one send path cannot address — and would let anyone in
-            # the group present as the owner (docs/SECURITY.md).
-            return Message(
-                channel=self.name, sender=sender, thread_key=group_chat,
-                text=text, at=at,
-            )
-        mapped = "owner" if (in_self or sender in self._owner_handles) else sender
-        return Message(
-            channel=self.name, sender=mapped, thread_key=sender, text=text, at=at
-        )
-
