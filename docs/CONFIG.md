@@ -101,6 +101,7 @@ template line.
 | `compaction.keep_recent` | `compaction_keep_recent` | `int` | `20` | — |
 | `compaction.default_window` | `compaction_default_window` | `int` | `60000` | — |
 | `compaction.windows.<model>` | `compaction_windows` | `dict[str,int]` | `{}` | — |
+| `compaction.message_budget` | `compaction_message_budget` | `int` | `90000` | — |
 | `stream.channel_defaults.<channel>` | `stream_channel_defaults` | `dict[str,StreamPolicy]` | `{imessage,web: rich}` | — |
 | `subagents.max_concurrent` | `subagents_max_concurrent` | positive `int` | `6` | — |
 | `subagents.idle_timeout_s` | `subagents_idle_timeout_s` | positive `int` | `1800` | — |
@@ -157,6 +158,12 @@ Notes on specific keys:
   `default_window`. Set a `windows` entry for any model on a non-OpenRouter
   backend (a local proxy). `/compact` (and `chief compact <thread>`) forces a
   compaction now regardless of the threshold.
+- **`compaction.message_budget`** also compacts a thread whose audience is more
+  than the owner (a group chat, a friend's 1:1, a monitor's named session —
+  anything `policy.owner_audience` rejects) once its messages alone pass that
+  many tokens; the leading summary note and the system prompt do not count.
+  It keeps `keep_recent` messages plus the summary, as the window path does.
+  `0` turns it off; owner threads only ever use the window.
 - **`stream.channel_defaults` seeds the per-thread live stream policy** — each
   channel maps to `{deltas, tools, results: lazy|inline|off, send_guard}`,
   fields unset default off. `imessage` and `web` ship rich (the observer

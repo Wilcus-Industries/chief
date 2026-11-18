@@ -11,13 +11,21 @@ The threshold is ``ratio * window``, where the window tracks the thread's
 and ``ratio``/``keep_recent`` come from the ``compaction:`` config block — all
 owner-configurable. ``force=True`` (the ``/compact`` command, nightly autocompact)
 bypasses the threshold and compacts whatever old history exists.
+
+A thread whose audience is more than the owner (a group chat, a friend's 1:1)
+also compacts once its messages alone pass ``message_budget`` tokens — the
+system prompt and the summary note are not counted. Those threads are where a
+long transcript costs most and helps least; owner threads keep the window.
 """
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from chief.provider.base import Completion, Provider, for_model
+
+Budgeted = Callable[[str, str], bool]  # (thread_key, channel) -> under the budget?
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +52,19 @@ def estimate_tokens(messages: list[dict[str, Any]]) -> int:
     return sum(len(json.dumps(m)) for m in for_model(messages)) // 4
 
 
+def message_tokens(messages: list[dict[str, Any]]) -> int:
+    """What the message budget counts: the transcript minus a leading summary
+    note (the system prompt is never in it)."""
+    if messages and is_note(messages[0]):
+        messages = messages[1:]
+    return estimate_tokens(messages)
+
+
+def is_note(message: dict[str, Any]) -> bool:
+    return message.get("role") == "system" and str(
+        message.get("content", "")).startswith(NOTE_PREFIX)
+
+
 class Compactor:
     """Summarizes a long transcript down to a note plus its recent tail."""
 
@@ -55,12 +76,16 @@ class Compactor:
         *,
         ratio: float = DEFAULT_RATIO,
         keep_recent: int = KEEP_RECENT,
+        message_budget: int = 0,
+        budgeted: Budgeted | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
         self._resolver = resolver
         self._ratio = ratio
         self._keep_recent = keep_recent
+        self._message_budget = message_budget
+        self._budgeted = budgeted
 
     async def compact(
         self,
@@ -68,16 +93,16 @@ class Compactor:
         *,
         model: str | None = None,
         force: bool = False,
+        thread: tuple[str, str] | None = None,
     ) -> list[dict[str, Any]] | None:
         """The compacted transcript, or None when nothing needs compacting.
 
         ``model`` is the thread's current model, used to look up the window;
         it defaults to the summarizer model. ``force`` bypasses the threshold.
+        ``thread`` is ``(thread_key, channel)``, for the message budget.
         """
-        if not force:
-            window = await self._resolver.resolve(model or self._model)
-            if estimate_tokens(messages) < int(self._ratio * window):
-                return None
+        if not force and not await self._due(messages, model, thread):
+            return None
         split = self._split_index(messages)
         old, recent = messages[:split], messages[split:]
         if not old:
@@ -93,6 +118,19 @@ class Compactor:
             "compacted %d messages into a note, kept %d", len(old), len(recent)
         )
         return [{"role": "system", "content": NOTE_PREFIX + summary}, *recent]
+
+    async def _due(
+        self, messages: list[dict[str, Any]], model: str | None,
+        thread: tuple[str, str] | None,
+    ) -> bool:
+        if (
+            self._message_budget > 0 and thread is not None
+            and self._budgeted is not None and self._budgeted(*thread)
+            and message_tokens(messages) >= self._message_budget
+        ):
+            return True
+        window = await self._resolver.resolve(model or self._model)
+        return estimate_tokens(messages) >= int(self._ratio * window)
 
     def _split_index(self, messages: list[dict[str, Any]]) -> int:
         """First user message at or past the tail mark — a turn boundary, so

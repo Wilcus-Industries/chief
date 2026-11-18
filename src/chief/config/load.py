@@ -151,6 +151,7 @@ def load_config(path: Path = Path("config.yaml")) -> Config:
         compaction_keep_recent=int(compaction.get("keep_recent", 20)),
         compaction_default_window=int(compaction.get("default_window", 60_000)),
         compaction_windows=coerce.windows(compaction.get("windows") or {}),
+        compaction_message_budget=int(compaction.get("message_budget", 90_000)),
         update_autonomy=coerce.autonomy(update.get("autonomy", "clean-only")),
         update_schedule=str(update.get("schedule") or ""),
         stream_channel_defaults=coerce.stream_channel_defaults(

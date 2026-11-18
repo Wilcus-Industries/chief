@@ -267,7 +267,10 @@ class Session:
         window; the persisted transcript is truncated to match."""
         if self._compactor is None:
             return
-        compacted = await self._compactor.compact(self._messages, model=self.model)
+        thread = (self.thread_key, self._origin_channel or "")
+        compacted = await self._compactor.compact(
+            self._messages, model=self.model, thread=thread
+        )
         if compacted is not None:
             self._messages = compacted
             await self._store.replace(self.thread_key, compacted)

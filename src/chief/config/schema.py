@@ -132,6 +132,9 @@ class Config:
     compaction_keep_recent: int = 20
     compaction_default_window: int = 60_000
     compaction_windows: dict[str, int] = field(default_factory=dict)
+    # Threads reaching more than the owner (groups, friends' 1:1s) also compact
+    # once their messages alone pass this many tokens; 0 turns it off.
+    compaction_message_budget: int = 90_000
     # What a *scheduled* self-update may do with nobody present: off = manual
     # only, clean-only = apply clean updates and ask on a collision, full =
     # resolve collisions unattended and report afterwards. The owner asking
