@@ -21,6 +21,9 @@ IMAGES_KEY = "images"
 # compaction on the first picture.
 IMAGE_TOKENS = 1_600
 MAX_IMAGE_BYTES = 5 * 1024 * 1024  # the provider-side cap for one image
+# Photos loaded per model call, newest first; older ones read as stubs. Keeps a
+# photo-heavy thread under request-size and per-request image caps.
+MAX_LOADED = 8
 MEDIA_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
     ".gif": "image/gif", ".webp": "image/webp",
@@ -60,6 +63,19 @@ def data_url(path: Path) -> str | None:
         logger.warning("transcript image %s over %d bytes", path, MAX_IMAGE_BYTES)
         return None
     return f"data:{media};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def loadable(messages: list[dict[str, Any]]) -> set[int]:
+    """Indexes of the messages whose photos load: the newest :data:`MAX_LOADED`
+    photos' messages (a message's photos load or stub together)."""
+    chosen: set[int] = set()
+    budget = MAX_LOADED
+    for i in range(len(messages) - 1, -1, -1):
+        count = len(messages[i].get(IMAGES_KEY) or ())
+        if count and count <= budget:
+            chosen.add(i)
+            budget -= count
+    return chosen
 
 
 def image_count(messages: list[dict[str, Any]]) -> int:

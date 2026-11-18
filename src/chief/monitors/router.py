@@ -61,34 +61,51 @@ class MonitorRouter:
             m for m in await self._list()
             if m.watch_channel == event.channel and in_scope(m.predicate, event.payload)
         ]
-        if not monitors:
+        # Nothing can fire (no regex hit, no judge in scope): read nothing.
+        if not monitors or not self._gate.could_fire(monitors, event.payload):
             return
         log = await self._log.read(event.channel, event.payload)
-        judged = self._log.judged(log)
+        # A burst read in one go: a wake that already showed this line must
+        # not wake again for it.
+        monitors = [m for m in monitors if not self._log.already_shown(m.id, log)]
+        # One screen + judge request per distinct window: a sender-scoped
+        # judge reads only lines its scope admits, so windows can differ.
+        groups: dict[tuple[int, ...], list[MonitorRow]] = {}
+        for monitor in monitors:
+            ids = tuple(line.id for line in self._log.judged(log, monitor))
+            groups.setdefault(ids, []).append(monitor)
+        for group in groups.values():
+            await self._judge(event, log, group)
+
+    async def _judge(
+        self, event: Event, log: ThreadLog, monitors: list[MonitorRow]
+    ) -> None:
+        judged = self._log.judged(log, monitors[0])
         try:
             fired, verdict = await self._gate.evaluate(
-                monitors, event.payload, self._log.judge_text(log),
+                monitors, event.payload, self._log.judge_text(judged),
                 untrusted=self._untrusted(judged),
             )
         except Exception:
             logger.exception("monitor gate errored on %s", event.type)
             return
+        screened = {line.id for line in judged}
         for monitor in fired:  # one wake raising must not drop its siblings
             try:
-                await self._fire(monitor, log, verdict)
+                await self._fire(event.channel, monitor, log, verdict, screened)
             except Exception:
                 logger.exception("monitor %s errored", monitor.id)
 
     async def _fire(
-        self, monitor: MonitorRow, log: ThreadLog, verdict: Verdict | None
+        self, channel: str, monitor: MonitorRow, log: ThreadLog,
+        verdict: Verdict | None, screened: set[int],
     ) -> None:
         """Wake with the thread since this monitor's last wake. Any untrusted
         line the judge's screen did not cover is screened here first, so no
         one's words reach the session unscreened."""
         lines, new_after, clipped = self._log.shown(monitor.id, log)
         unscreened = {line.id for line in lines if not self._log.namer.trusted(line)}
-        unscreened -= {line.id for line in self._log.judged(log)}
-        if unscreened and not (verdict is not None and verdict.withhold):
+        if unscreened - screened and not (verdict is not None and verdict.withhold):
             text = render(lines, self._log.namer, new_after=new_after)
             verdict = await self._gate.screen(text) or verdict
         flagged = verdict is not None and verdict.withhold
@@ -97,6 +114,7 @@ class MonitorRouter:
             logger.warning("monitor %s fired but withheld: %s", monitor.id, withheld)
         else:
             logger.info("monitor %s fired on %s", monitor.id, log.thread_key)
+        lines = await self._log.with_photos(channel, log, lines)
         body = self._log.body(log, lines, new_after, clipped=clipped, withheld=withheld)
         self._log.mark_seen(monitor, log)
         images = tuple(path for line in lines for path in line.images)

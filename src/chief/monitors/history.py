@@ -5,8 +5,8 @@ messages that fired: never chief's own replies, nothing a judge let pass, and
 nothing that arrived while chief was down. A channel that keeps its own record
 (iMessage's ``chat.db``) now supplies the thread's recent lines through a
 :class:`HistorySource`, and :class:`SeenCursors` remembers, per monitor, the
-newest line its last wake showed, so "new since you last looked" survives a
-restart.
+newest line its last wake showed in each thread, so "new since you last
+looked" survives a restart.
 """
 
 import json
@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Line:
     """One message in a thread. ``id`` orders lines within their channel's
-    store; ``sender`` is the raw handle; ``mine`` marks chief's own sends;
-    ``images`` are stashed photo paths (the owner's only)."""
+    store; ``sender`` is the raw handle; ``mine`` marks chief's own sends.
+    ``shared`` marks a send from an account chief shares with the owner, which
+    could be either of them. ``owner_photos``: the owner attached photos, which
+    a wake stashes into ``images`` (paths) only when it shows the line."""
 
     id: int
     at: float
@@ -32,39 +34,57 @@ class Line:
     text: str
     mine: bool = False
     images: tuple[str, ...] = ()
+    owner_photos: bool = False
+    shared: bool = False
 
 
 class HistorySource(Protocol):
     """A channel's own record of its threads."""
 
-    def recent(self, thread_key: str, limit: int) -> list[Line]:
-        """The thread's newest ``limit`` lines, oldest first; ``[]`` when the
-        record has no such thread. Synchronous: callers thread it off the loop."""
+    def recent(
+        self, thread_key: str, limit: int, store: str = ""
+    ) -> tuple[str, list[Line]]:
+        """``(store, lines)``: the thread's newest ``limit`` lines, oldest
+        first, and which store held them — ``store`` itself when the event
+        named one. ``[]`` lines when no store has the thread. Synchronous:
+        callers thread these off the loop."""
+        ...
+
+    def photos(self, store: str, line: Line) -> tuple[str, ...]:
+        """Stash ``line``'s owner photos; their paths."""
         ...
 
 
 class SeenCursors:
-    """Per monitor, the newest line id its last wake showed, and the thread it
-    woke — so wiping that thread can forget the cursor and the next wake
-    starts with context again. Persisted as JSON; ``path=None`` keeps it in
-    memory (tests)."""
+    """Per monitor and watched thread (``key``), the newest line id its last
+    wake there showed, and the session it woke — so wiping that session can
+    forget the cursor and the next wake starts with context again. Persisted
+    as JSON; ``path=None`` keeps it in memory (tests)."""
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path
         self._seen: dict[str, dict[str, object]] = self._load()
 
-    def get(self, monitor_id: int) -> int | None:
-        entry = self._seen.get(str(monitor_id))
+    def get(self, monitor_id: int, key: str) -> int | None:
+        entry = self._seen.get(f"{monitor_id}\x00{key}")
         line = entry.get("line") if entry else None
         return line if isinstance(line, int) else None
 
-    def set(self, monitor_id: int, line_id: int, wake_thread: str) -> None:
-        self._seen[str(monitor_id)] = {"line": line_id, "wake": wake_thread}
+    def set(self, monitor_id: int, key: str, line_id: int, wake_thread: str) -> None:
+        self._seen[f"{monitor_id}\x00{key}"] = {
+            "monitor": monitor_id, "line": line_id, "wake": wake_thread}
         self._save()
 
     def forget_wake(self, wake_thread: str) -> None:
         """Drop every cursor whose wake went to ``wake_thread`` (it was wiped)."""
-        kept = {k: v for k, v in self._seen.items() if v.get("wake") != wake_thread}
+        self._drop(lambda v: v.get("wake") == wake_thread)
+
+    def forget_monitor(self, monitor_id: int) -> None:
+        """Drop a monitor's cursors (deleted, or re-pointed at a new session)."""
+        self._drop(lambda v: v.get("monitor") == monitor_id)
+
+    def _drop(self, gone: Callable[[dict[str, object]], bool]) -> None:
+        kept = {k: v for k, v in self._seen.items() if not gone(v)}
         if len(kept) != len(self._seen):
             self._seen = kept
             self._save()

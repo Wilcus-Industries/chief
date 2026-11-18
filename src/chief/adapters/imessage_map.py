@@ -9,6 +9,9 @@ from chief.adapters.base import Message
 from chief.adapters.imessage_store import sent_at
 
 BOT_PREFIX = "\U0001f916 "  # 🤖 — marks chief's replies in the shared self-chat
+# Senders that mean something to the dispatcher. A raw handle spelled like one
+# (an SMS alphanumeric sender ID "owner") must never be read as it.
+RESERVED_SENDERS = ("owner", "system")
 
 
 def map_row(
@@ -28,16 +31,17 @@ def map_row(
     if from_me and not in_self:
         return None  # owner->friend sent copy: not the self-chat
     at = sent_at(date)  # when it was sent, not polled: a backlog is old news
+    raw = f"handle:{sender}" if sender in RESERVED_SENDERS else sender
     if group_chat is not None:
         # Raw sender, never "owner", even for an owner handle: that would
         # take the dispatcher's owner path, replying to a group thread_key
         # the one-to-one send path cannot address — and would let anyone in
         # the group present as the owner (docs/SECURITY.md).
         return Message(
-            channel=channel, sender=sender, thread_key=group_chat,
+            channel=channel, sender=raw, thread_key=group_chat,
             text=text, at=at,
         )
-    mapped = "owner" if (in_self or sender in owner_handles) else sender
+    mapped = "owner" if (in_self or sender in owner_handles) else raw
     return Message(
-        channel=channel, sender=mapped, thread_key=sender, text=text, at=at
+        channel=channel, sender=mapped, thread_key=raw, text=text, at=at
     )

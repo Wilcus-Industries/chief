@@ -242,7 +242,7 @@ only `code` and `classifier` exist.
 | `classifier` + `fire_label` | `{kind: classifier, classifier, fire_label, scope}` |
 
 Both classifier forms carry a `scope` — `{sender}` or `{thread_key}` — checked
-in `_on_event` **before** `_matches`, so an out-of-scope event never reaches the
+in `MonitorRouter.on_event` **before** the gate, so an out-of-scope event never reaches the
 model. The pattern form takes none. That is a prompt-injection boundary, not an
 optimization: see `docs/SECURITY.md`.
 
@@ -278,8 +278,15 @@ people: Will (owner) = +1555…; Henry = +1555…
 ```
 
 - **Since the last wake.** `SeenCursors` (`data/monitor_seen.json`) keeps, per
-  monitor, the newest line its last wake showed, so lines a judge let pass and
-  lines said while chief was down ride the next wake. A monitor with no cursor
+  monitor *and watched thread* (store + thread key, since ids are per-store
+  ROWIDs), the newest line its last wake showed, so lines a judge let pass and
+  lines said while chief was down ride the next wake. A line a wake already
+  showed (a burst read in one go) never wakes that monitor again. The event
+  names its store and row (`Message.store`/`rowid`, in the bus payload), so
+  only that store is read and the event is found exactly. Retarget and delete
+  drop a monitor's cursors.
+- **Read only when something can fire.** No regex hit and no judge in scope:
+  the thread is not read at all. A monitor with no cursor
   (first wake, or its wake session was cleared/deleted — `forget_wake`, via the
   manager's wipe callbacks) also gets 10 earlier lines.
 - **Who said what is set by chief.** `you` is chief's own send (`is_from_me` in
@@ -315,9 +322,9 @@ immediately without a restart.
 
 ### The self-wake loop is cut in two places
 
-1. `_on_event` returns immediately when `sender == "owner"` — owner messages
+1. `MonitorRouter.on_event` returns immediately when `sender == "owner"` — owner messages
    already dispatch a turn on every channel, so firing on them would double-wake.
-2. `_fire` wakes with **`sender="system"`**, which the dispatcher refuses to
+2. `MonitorRouter._send` wakes with **`sender="system"`**, which the dispatcher refuses to
    re-publish to the bus.
 
 Strangers — published but never dispatched — are the intended trigger. That is

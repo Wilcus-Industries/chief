@@ -7,8 +7,10 @@ One line per message, time then speaker then text::
 Who said what must be unmistakable, so the speaker comes first and is always
 set by chief: ``you`` for chief's own sends, the roster's first name (full
 name when two speakers share one), ``(owner)`` decided from the handle, and
-the bare handle only for someone the roster does not know. The text is a JSON
-string, so a message holding a newline can never start a forged speaker line.
+the bare handle only for someone the roster does not know. Parentheses never
+survive into a name or handle, so ``(owner)`` cannot be forged, and a speaker
+named like ``you`` is tagged ``(contact)``. The text is a JSON string with
+every line separator escaped, so a message can never start a forged line.
 """
 
 import json
@@ -25,7 +27,10 @@ NEW_MARK = "▶ "
 WITHHELD = "[text withheld]"
 
 _UNSAFE = re.compile(r"[^\w@+.:;\-]")  # a handle shown bare: no free text
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
+# Separators json.dumps leaves raw with ensure_ascii=False.
+_SEPARATORS = {"\x85": "\\u0085", "\u2028": "\\u2028", "\u2029": "\\u2029"}
+RESERVED_LABELS = ("you", "owner")
 
 
 class Namer:
@@ -57,7 +62,9 @@ class Namer:
             label = (name if firsts.count(first) > 1 else first) if name else ""
             label = label or _UNSAFE.sub("", handle)[:64] or "someone"
             if self.is_owner(handle):
-                label = f"{label} (owner)" if name else "owner"
+                label = f"{label} (owner)" if name else "(owner)"
+            elif label.casefold() in RESERVED_LABELS:
+                label = f"{label} (contact)"
             labels[handle] = label
         return labels
 
@@ -92,12 +99,21 @@ def render(
     for line in lines:
         new = new_after is not None and line.id > new_after and not line.mine
         who = "you" if line.mine else labels[line.sender]
-        text = json.dumps(line.text, ensure_ascii=False)
+        if line.shared:  # a send from the account chief shares with the owner
+            who = f"{who} or you"
+        text = _quote(line.text)
         if withhold and not namer.trusted(line):
             text = WITHHELD
         mark = NEW_MARK if new else ""
         out.append(f"{mark}{_when(line.at, today)}  {who}: {text}")
     return "\n".join(out)
+
+
+def _quote(text: str) -> str:
+    quoted = json.dumps(text, ensure_ascii=False)
+    for raw, escaped in _SEPARATORS.items():
+        quoted = quoted.replace(raw, escaped)
+    return quoted
 
 
 def _when(at: float, today: date) -> str:

@@ -81,3 +81,14 @@ def test_budget_config_defaults_and_override(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("compaction:\n  message_budget: 50000\n")
     assert load_config(path).compaction_message_budget == 50_000
+
+
+async def test_a_tail_that_alone_passes_the_budget_does_not_thrash() -> None:
+    """Folding a note plus a sliver every turn would summarize a summary each
+    time; the budget fires only when there is real history to fold."""
+    provider = FakeProvider([])
+    note = {"role": "system", "content": NOTE_PREFIX + "old summary"}
+    tail = chat(2)  # keep_recent=4: all of this stays
+    compactor = budgeted(provider, message_tokens(tail) - 1)
+    assert await compactor.compact([note, *tail], thread=("chat123", "x")) is None
+    assert provider.calls == []

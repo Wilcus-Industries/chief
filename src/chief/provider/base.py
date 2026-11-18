@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from chief.provider.images import IMAGES_KEY, with_images
+from chief.provider.images import IMAGES_KEY, loadable, with_images
 
 
 class ProviderError(RuntimeError):
@@ -106,7 +106,8 @@ def for_model(
     call, which is what keeps provider prompt caches hitting. ``images`` loads
     stored photo paths as content parts (only the real model call does);
     without it they read as ``[photo]`` stubs (see ``provider.images``)."""
-    return [_for_model(m, images) for m in messages]
+    load = loadable(messages) if images else set()
+    return [_for_model(m, i in load) for i, m in enumerate(messages)]
 
 
 def _for_model(message: dict[str, Any], images: bool) -> dict[str, Any]:

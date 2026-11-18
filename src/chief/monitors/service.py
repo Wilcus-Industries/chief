@@ -129,7 +129,8 @@ class MonitorService:
                 return "unknown-target", ""
             row.wake_channel, row.wake_thread = resolved
             await db.commit()
-            return "ok", resolved[1]
+        self._cursors.forget_monitor(monitor_id)  # the new session has no context
+        return "ok", resolved[1]
 
     async def delete(self, monitor_id: int) -> bool:
         async with self._factory() as db:
@@ -138,7 +139,8 @@ class MonitorService:
                 return False
             await db.delete(row)
             await db.commit()
-            return True
+        self._cursors.forget_monitor(monitor_id)  # sqlite may reuse the id
+        return True
 
     def forget_wake(self, wake_thread: str) -> None:
         """That session was wiped: its monitors' next wakes bring context again."""

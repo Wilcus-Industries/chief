@@ -69,7 +69,7 @@ class Tracker(Protocol):
 
     def track(
         self, thread_key: str, channel: str, sender: str, text: str,
-        at: float | None = None,
+        at: float | None = None, attachments: tuple[str, ...] = (),
     ) -> TurnTicket: ...
 
 
@@ -138,7 +138,7 @@ class Dispatcher:
             return NullTicket()
         return self._inflight.track(
             message.thread_key, message.channel, message.sender, message.text,
-            message.at,
+            message.at, message.attachments,
         )
 
     def hold(self, threads: list[str]) -> None:
@@ -320,6 +320,9 @@ class Dispatcher:
                     "thread_key": message.thread_key,
                     "sender": message.sender,
                     "text": message.text,
+                    # Which record row it is, so monitors read the right one.
+                    **({"store": message.store, "rowid": message.rowid}
+                       if message.rowid else {}),
                 },
             )
         )

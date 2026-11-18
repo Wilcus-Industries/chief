@@ -130,6 +130,10 @@ class Compactor:
             self._message_budget > 0 and thread is not None
             and self._budgeted is not None and self._budgeted(*thread)
             and message_tokens(messages) >= self._message_budget
+            # Only when there is real history to fold: a kept tail that alone
+            # passes the budget would otherwise re-summarize every turn.
+            and message_tokens(messages[: self._split_index(messages)])
+            >= self._message_budget // 4
         ):
             return True
         window = await self._resolver.resolve(model or self._model)

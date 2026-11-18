@@ -12,7 +12,7 @@ twin-row dedup (``imessage_store``), the BOT_PREFIX stamped on replies and
 filtered on the way back, the out-of-band send guard (``imessage_send``).
 ``dedicated``: chief holds its own Apple ID in its own user session, the owner
 is an ordinary correspondent, and all four switch off (the guard, in
-``app.py``; see :meth:`IMessageAdapter._map` for delivery). The scope is
+``app.py``; see :func:`.imessage_map.map_row` for delivery). The scope is
 turned *off*, never repointed at the owner's handle — that chat is now chief's
 real conversation with them, so scoping it would poll chief's own replies back
 as owner input.
@@ -25,7 +25,12 @@ from dataclasses import replace
 from pathlib import Path
 
 from chief.adapters.base import Adapter, Inject, Message
-from chief.adapters.imessage_attachments import ImageStash
+from chief.adapters.imessage_attachments import (
+    PHOTO,
+    UNREADABLE,
+    ImageStash,
+    Labelled,
+)
 from chief.adapters.imessage_cursor import RowCursor, Store
 from chief.adapters.imessage_fifo import HandleTicketed, ThreadFifo, Track
 from chief.adapters.imessage_map import BOT_PREFIX, map_row
@@ -149,17 +154,19 @@ class IMessageAdapter(Adapter):
                     # ordinary inbound row. Polling it would answer itself.
                     continue
                 owner = bool(in_self) or sender in self._owner_handles
-                images: tuple[str, ...] = ()
+                labelled = Labelled(text)
                 if self._stash is not None:
-                    text, images = await asyncio.to_thread(
-                        self._stash.resolve, store.db_path, rowid, text, owner)
-                message = map_row(self.name, sender, text, from_me, group_chat,
-                                  in_self, date, self._owner_handles, self._dedicated)
+                    labelled = await asyncio.to_thread(
+                        self._stash.label, store.db_path, rowid, text, owner)
+                message = map_row(self.name, sender, labelled.text, from_me,
+                                  group_chat, in_self, date, self._owner_handles,
+                                  self._dedicated)
                 if message is None:
                     continue
-                message = replace(message, attachments=images)
+                message = await self._with_photos(message, labelled, store, rowid)
                 if not self._dedicated and self._dedup.is_duplicate(
-                    (message.thread_key, message.sender, message.text), message.at
+                    (message.thread_key, message.sender, message.text,
+                     labelled.fingerprint), message.at
                 ):
                     continue  # twin rows are a self-DM artefact only
                 if self._resolve_approval is not None and self._resolve_approval(
@@ -169,6 +176,19 @@ class IMessageAdapter(Adapter):
                 if self._inject is not None and self._inject(message, self._fifo.put):
                     continue  # taken by the thread's running turn
                 self._fifo.put(message)
+
+    async def _with_photos(
+        self, message: Message, labelled: Labelled, store: Store, rowid: int
+    ) -> Message:
+        """Tag the row's origin (monitors read its thread from there); stash
+        the owner's photos for a turn of their own — a group's ride wakes."""
+        images: tuple[str, ...] = ()
+        text = message.text
+        if labelled.owner_photos and message.sender == "owner" and self._stash:
+            images = await asyncio.to_thread(self._stash.stash, store.db_path, rowid)
+            text = text if images else text.replace(PHOTO, UNREADABLE, 1)
+        return replace(message, text=text, attachments=images,
+                       store=str(store.db_path), rowid=rowid)
 
     async def drain(self) -> None:
         """Block until every per-thread queue is empty (test seam)."""

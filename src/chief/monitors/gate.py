@@ -61,6 +61,12 @@ class MonitorGate:
                 fired.append(monitor)
         return fired, verdict
 
+    def could_fire(self, monitors: list[MonitorRow], payload: dict[str, Any]) -> bool:
+        """A regex hit or a judge in scope: only then is the thread worth reading."""
+        return any(
+            m.predicate.get("kind") == "classifier" or _code_match(m, payload)
+            for m in monitors)
+
     async def screen(self, text: str) -> Verdict | None:
         """Screen a wake's lines the judge did not see; ``None`` without a screen."""
         if self._screen is None:
