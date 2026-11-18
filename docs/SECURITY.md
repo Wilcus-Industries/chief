@@ -228,6 +228,12 @@ point; don't "simplify" it into one uniform rule.
   sender-scoped classifier reads only its named senders' lines plus the
   owner's and chief's own, never another group member's. A thread-scoped one
   reads the whole thread, as it already trusts every member.
+- **Accepted exception — the wake, not the judge.** Once a monitor fires, its
+  wake shows the whole thread since its last wake, so a sender-scoped
+  monitor's wake also brings other members' lines into the woken (owner-path)
+  turn. They are screened first and framed as untrusted, like every wake;
+  the owner chose this (context is the point of the wake). Before, only the
+  named sender's words reached that session.
 - A classifier row with no usable scope matches nothing (`in_scope` fails
   closed — including a hand-written row scoping on *both* fields), and
   `disable_unscoped()` — run from `App.start` — disables it at boot, logging

@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import sqlite3
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,13 +17,14 @@ from chief.adapters.imessage_attachments import NOT_SHOWN, PHOTO, ImageStash
 from chief.adapters.imessage_history import HistoryStore, IMessageHistory
 from chief.adapters.imessage_map import map_row
 from chief.agent.compaction import estimate_tokens
+from chief.agent.model_call import stream_once
 from chief.agent.restart_gate import TurnTicket
 from chief.agent.session import Session
 from chief.agent.timestamps import user_message
 from chief.bus import EventBus
 from chief.persistence.store import MessageStore
 from chief.provider.anthropic_wire import to_anthropic_request
-from chief.provider.base import for_model
+from chief.provider.base import Completion, ProviderError, for_model
 from chief.provider.images import (
     IMAGE_TOKENS,
     IMAGES_KEY,
@@ -171,7 +173,8 @@ async def test_owner_photo_reaches_the_turn_and_a_strangers_does_not(
         stash=ImageStash(tmp_path / "stash", CopyConvert(), wait=0))
     await adapter.poll_once()
     await adapter.drain()
-    owner, stranger = delivered
+    # Threads run in parallel: the photo stash holds up only its own thread.
+    owner, stranger = sorted(delivered, key=lambda m: m.sender != "owner")
     assert owner.sender == "owner" and owner.text == f"{PHOTO} what is this"
     assert len(owner.attachments) == 1
     assert stranger.text == NOT_SHOWN and stranger.attachments == ()
@@ -289,3 +292,105 @@ def test_a_handle_spelled_like_a_role_is_never_that_role() -> None:
         group = map_row("imessage", sender, "hi", 0, "chat1", 0, 0, frozenset(), True)
         assert one is not None and one.sender == f"handle:{sender}"
         assert group is not None and group.sender == f"handle:{sender}"
+
+
+
+def test_one_message_with_many_photos_loads_its_newest(tmp_path: Path) -> None:
+    path = tmp_path / "a.jpg"
+    path.write_bytes(JPEG)
+    message = user_message("album", images=tuple(str(path) for _ in range(10)))
+    parts = for_model([message], images=True)[0]["content"]
+    assert sum(1 for part in parts if part["type"] == "image_url") == MAX_LOADED
+    assert parts[0]["text"].endswith(f"album {STUB} {STUB}")
+
+
+def test_a_failed_photo_is_never_waited_on_twice(tmp_path: Path) -> None:
+    store = PhotoStore(tmp_path / "chat.db")
+    rowid = store.add_photo(OWNER, "", tmp_path / "offloaded.heic")
+    convert = CopyConvert()
+    stash = ImageStash(tmp_path / "s", convert, wait=0)
+    assert stash.stash(store.path, rowid) == ()
+    assert stash.stash(store.path, rowid) == ()
+    assert convert.calls == [], "a missing file is never handed to sips"
+
+
+class RefusesImages:
+    """A text-only backend: any image part fails the request up front."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[dict[str, Any]]] = []
+
+    async def stream(self, *, model: str, messages: list[dict[str, Any]],
+                     tools: list[Any]) -> AsyncIterator[Any]:
+        self.calls.append(messages)
+        if any(isinstance(m.get("content"), list) for m in messages):
+            raise ProviderError("model does not support images")
+        yield Completion(text="described in words")
+
+
+async def test_a_text_only_model_gets_the_photos_as_stubs(tmp_path: Path) -> None:
+    path = tmp_path / "a.jpg"
+    path.write_bytes(JPEG)
+    provider = RefusesImages()
+
+    async def nothing(text: str) -> None:
+        return None
+
+    done = await stream_once(
+        provider, "m", [user_message("look", images=(str(path),))],
+        ToolRegistry(), nothing, None)
+    assert done.text == "described in words" and len(provider.calls) == 2
+    assert STUB in provider.calls[1][0]["content"]
+
+
+async def test_a_photo_turn_is_never_injected_and_keeps_its_photo(
+    tmp_path: Path,
+) -> None:
+    store = PhotoStore(tmp_path / "chat.db")
+    store.add_photo(OWNER, "mid-turn pic", picture(tmp_path), chat=OWNER)
+    store.add_message(OWNER, "mid-turn text", chat=OWNER)
+    delivered: list[Message] = []
+    injected: list[Message] = []
+
+    async def on_message(message: Message, ticket: TurnTicket) -> None:
+        delivered.append(message)
+
+    async def run_jxa(script: str, argv: tuple[str, ...]) -> str:
+        return "sent"
+
+    def inject(message: Message, requeue: object) -> bool:
+        injected.append(message)
+        return True
+
+    adapter = IMessageAdapter(
+        on_message, db_path=store.path, cursor_path=tmp_path / "cursor",
+        owner_handles=(OWNER,), run_jxa=run_jxa, dedicated=True, inject=inject,
+        stash=ImageStash(tmp_path / "stash", CopyConvert(), wait=0))
+    await adapter.poll_once()
+    await adapter.drain()
+    assert [m.text for m in injected] == ["mid-turn text"]
+    (photo,) = delivered
+    assert len(photo.attachments) == 1
+
+
+async def test_self_mode_keeps_two_caption_less_photos(tmp_path: Path) -> None:
+    store = PhotoStore(tmp_path / "chat.db")
+    other = tmp_path / "IMG_2.HEIC"
+    other.write_bytes(JPEG + b"2")
+    store.add_photo(OWNER, "", picture(tmp_path), from_me=1, chat=OWNER, date=100)
+    store.add_photo(OWNER, "", other, from_me=1, chat=OWNER, date=100)
+    delivered: list[Message] = []
+
+    async def on_message(message: Message, ticket: TurnTicket) -> None:
+        delivered.append(message)
+
+    async def run_jxa(script: str, argv: tuple[str, ...]) -> str:
+        return "sent"
+
+    adapter = IMessageAdapter(
+        on_message, db_path=store.path, cursor_path=tmp_path / "cursor",
+        owner_handles=(OWNER,), run_jxa=run_jxa,
+        stash=ImageStash(tmp_path / "stash", CopyConvert(), wait=0))
+    await adapter.poll_once()
+    await adapter.drain()
+    assert len(delivered) == 2, "two photos are two messages, not twins"

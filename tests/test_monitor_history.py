@@ -13,7 +13,7 @@ from chief.contacts import Roster
 from chief.monitors.history import Line, SeenCursors
 from chief.monitors.service import MonitorService
 from chief.monitors.transcript import Namer, render
-from chief.monitors.wake import FRESH_CONTEXT, JUDGE_CONTEXT
+from chief.monitors.wake import FRESH_CONTEXT, JUDGE_CONTEXT, READ_LIMIT
 from chief.persistence.db import make_session_factory
 from chief.screen import Screen
 
@@ -47,10 +47,11 @@ class FakeHistory:
             "store": "fake", "rowid": rowid})
 
     def recent(
-        self, thread_key: str, limit: int, store: str = ""
+        self, thread_key: str, limit: int, store: str = "", upto: int | None = None
     ) -> tuple[str, list[Line]]:
         self.reads += 1
-        mine = [x for x in self.lines if self.threads[x.id] == thread_key]
+        mine = [x for x in self.lines if self.threads[x.id] == thread_key
+                and (upto is None or x.id <= upto)]
         return ("fake", mine[-limit:]) if mine else ("", [])
 
     def photos(self, store: str, line: Line) -> tuple[str, ...]:
@@ -399,3 +400,19 @@ def test_labels_cannot_be_forged(tmp_path: Path) -> None:
                   new_after=0, clock=lambda: NOON)
     assert "\u2028" not in text and "\x85" not in text
     assert len(text.splitlines()) == 1
+
+
+
+async def test_a_backlog_past_the_read_window_still_finds_its_event(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    bus, history = EventBus(), FakeHistory()
+    service, wake = gc_service(engine, bus, history, tmp_path)
+    await watch(service)
+    event = history.say(HENRY, "chief the old one")
+    for n in range(READ_LIMIT + 5):
+        history.say(BRADY, f"later {n}")
+    await bus.publish(event)
+    text = wake.messages[0].text
+    assert '▶ ' in text and 'Henry: "chief the old one"' in text
+    assert "later 0" not in text, "the wake reads up to its own event"

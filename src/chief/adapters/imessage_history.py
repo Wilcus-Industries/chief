@@ -38,6 +38,7 @@ HISTORY_QUERY = (
     "JOIN chat ON chat.ROWID = chat_message_join.chat_id "
     "LEFT JOIN handle ON handle.ROWID = message.handle_id "
     "WHERE chat.chat_identifier = ? AND message.associated_message_type = 0 "
+    "AND message.ROWID <= ? "
     "GROUP BY message.ROWID ORDER BY message.ROWID DESC LIMIT ?"
 )
 
@@ -65,11 +66,11 @@ class IMessageHistory:
         self._stash = stash
 
     def recent(
-        self, thread_key: str, limit: int, store: str = ""
+        self, thread_key: str, limit: int, store: str = "", upto: int | None = None
     ) -> tuple[str, list[Line]]:
         named = [s for s in self._stores if str(s.db_path) == store]
         for candidate in named or ([] if store else self._stores):
-            if lines := self._read(candidate, thread_key, limit):
+            if lines := self._read(candidate, thread_key, limit, upto):
                 return str(candidate.db_path), lines
         return "", []
 
@@ -78,11 +79,15 @@ class IMessageHistory:
             return ()
         return self._stash.stash(Path(store), line.id)
 
-    def _read(self, store: HistoryStore, thread_key: str, limit: int) -> list[Line]:
+    def _read(
+        self, store: HistoryStore, thread_key: str, limit: int, upto: int | None
+    ) -> list[Line]:
+        bound = upto if upto is not None else 2**62
         try:
             conn = sqlite3.connect(f"file:{store.db_path}?mode=ro", uri=True)
             try:
-                rows = conn.execute(HISTORY_QUERY, (thread_key, limit)).fetchall()
+                rows = conn.execute(
+                    HISTORY_QUERY, (thread_key, bound, limit)).fetchall()
             finally:
                 conn.close()
         except sqlite3.Error as exc:

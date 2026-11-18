@@ -123,7 +123,7 @@ iterates handlers **sequentially and awaits each**, wrapping each in try/except:
 a failing handler can't block the others, but a *slow* one can.
 
 Only publisher: `Dispatcher._publish`, type `"message.inbound"`. Only in-tree
-subscriber: `MonitorService._on_event`.
+subscriber: `MonitorRouter.on_event`.
 
 **Publish invariant:** strangers are published but not dispatched; owner messages
 are published *and* dispatched; `system` senders are dispatched but **never

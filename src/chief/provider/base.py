@@ -106,11 +106,11 @@ def for_model(
     call, which is what keeps provider prompt caches hitting. ``images`` loads
     stored photo paths as content parts (only the real model call does);
     without it they read as ``[photo]`` stubs (see ``provider.images``)."""
-    load = loadable(messages) if images else set()
-    return [_for_model(m, i in load) for i, m in enumerate(messages)]
+    load = loadable(messages) if images else {}
+    return [_for_model(m, load.get(i, 0)) for i, m in enumerate(messages)]
 
 
-def _for_model(message: dict[str, Any], images: bool) -> dict[str, Any]:
+def _for_model(message: dict[str, Any], images: int) -> dict[str, Any]:
     hidden = (*DISPLAY_ONLY_KEYS, STAMP_KEY, IMAGES_KEY)
     if not any(k in message for k in hidden):
         return message

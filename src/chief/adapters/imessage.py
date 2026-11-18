@@ -25,12 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from chief.adapters.base import Adapter, Inject, Message
-from chief.adapters.imessage_attachments import (
-    PHOTO,
-    UNREADABLE,
-    ImageStash,
-    Labelled,
-)
+from chief.adapters.imessage_attachments import ImageStash, Labelled
 from chief.adapters.imessage_cursor import RowCursor, Store
 from chief.adapters.imessage_fifo import HandleTicketed, ThreadFifo, Track
 from chief.adapters.imessage_map import BOT_PREFIX, map_row
@@ -40,6 +35,7 @@ from chief.adapters.imessage_send import (
     run_jxa_subprocess,
 )
 from chief.adapters.imessage_store import RecentDedup
+from chief.agent.restart_gate import TurnTicket
 from chief.selfedit.recovery import RestartBoundary
 
 logger = logging.getLogger(__name__)
@@ -75,6 +71,7 @@ class IMessageAdapter(Adapter):
         self._self_handles = frozenset(self_handles)
         self._dedicated = dedicated
         self._stash = stash  # the owner's photos, for a model to see
+        self._photo_rows: set[tuple[str, int]] = set()  # owner photo turns queued
         self._poll_seconds = poll_seconds
         self._run_jxa = run_jxa
         # Drained at poll stage, ahead of the FIFO worker: a gated turn suspends
@@ -86,7 +83,9 @@ class IMessageAdapter(Adapter):
         self._inject = inject
         self._dedup = RecentDedup()
         self._task: asyncio.Task[None] | None = None
-        self._fifo = ThreadFifo(on_message, restart, track)
+        # The worker stashes a photo turn's photos as it starts: a photo still
+        # downloading then holds up only its own thread, never the poll loop.
+        self._fifo = ThreadFifo(self._deliver, restart, track)
         self._stores = [Store(db_path, RowCursor(cursor_path))]
         if owner_db_path is not None and owner_db_path != db_path:
             self._stores.append(
@@ -163,32 +162,33 @@ class IMessageAdapter(Adapter):
                                   self._dedicated)
                 if message is None:
                     continue
-                message = await self._with_photos(message, labelled, store, rowid)
                 if not self._dedicated and self._dedup.is_duplicate(
                     (message.thread_key, message.sender, message.text,
                      labelled.fingerprint), message.at
                 ):
                     continue  # twin rows are a self-DM artefact only
+                message = replace(message, store=str(store.db_path), rowid=rowid)
+                photo = labelled.owner_photos and message.sender == "owner"
+                if photo:
+                    self._photo_rows.add((message.store, rowid))
                 if self._resolve_approval is not None and self._resolve_approval(
                     message
                 ):
                     continue  # answered a pending card — bypass the FIFO worker
-                if self._inject is not None and self._inject(message, self._fifo.put):
+                # An injected turn carries text only: a photo turn queues.
+                if not photo and self._inject is not None and self._inject(
+                    message, self._fifo.put
+                ):
                     continue  # taken by the thread's running turn
                 self._fifo.put(message)
 
-    async def _with_photos(
-        self, message: Message, labelled: Labelled, store: Store, rowid: int
-    ) -> Message:
-        """Tag the row's origin (monitors read its thread from there); stash
-        the owner's photos for a turn of their own — a group's ride wakes."""
-        images: tuple[str, ...] = ()
-        text = message.text
-        if labelled.owner_photos and message.sender == "owner" and self._stash:
-            images = await asyncio.to_thread(self._stash.stash, store.db_path, rowid)
-            text = text if images else text.replace(PHOTO, UNREADABLE, 1)
-        return replace(message, text=text, attachments=images,
-                       store=str(store.db_path), rowid=rowid)
+    async def _deliver(self, message: Message, ticket: TurnTicket) -> None:
+        """The worker's delivery: an owner photo turn's photos stash here."""
+        key = (message.store, message.rowid)
+        if key in self._photo_rows and self._stash is not None:
+            self._photo_rows.discard(key)
+            message = await asyncio.to_thread(self._stash.attach, message)
+        await self._on_message(message, ticket)
 
     async def drain(self) -> None:
         """Block until every per-thread queue is empty (test seam)."""

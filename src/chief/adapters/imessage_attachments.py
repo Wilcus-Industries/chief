@@ -15,8 +15,10 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+from chief.adapters.base import Message
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +72,8 @@ class ImageStash:
         self._folder = folder
         self._convert = convert
         self._wait = wait
+        # Photos that would not stash (gone, offloaded): never waited on twice.
+        self._failed: set[Path] = set()
 
     def label(self, db_path: Path, rowid: int, text: str, owner: bool) -> Labelled:
         """``text`` with attachment marks turned into a label. Nothing is
@@ -90,6 +94,12 @@ class ImageStash:
         sources = [src for src, _, _ in self._images(db_path, rowid)]
         return tuple(p for i, src in enumerate(sources)
                      if (p := self._stash(db_path, rowid, i, src)))
+
+    def attach(self, message: Message) -> Message:
+        """An owner photo turn with its row's photos stashed onto it."""
+        images = self.stash(Path(message.store), message.rowid)
+        text = message.text if images else message.text.replace(PHOTO, UNREADABLE, 1)
+        return replace(message, text=text, attachments=images)
 
     def _images(self, db_path: Path, rowid: int) -> list[tuple[Path, str, int]]:
         try:
@@ -118,9 +128,9 @@ class ImageStash:
         dst = self._folder / f"{store}-{rowid}-{index}.jpg"
         if dst.exists():
             return str(dst)
-        deadline = time.monotonic() + self._wait
-        while not src.exists() and time.monotonic() < deadline:
-            time.sleep(0.5)
+        if dst in self._failed or not _downloaded(src, self._wait):
+            self._failed.add(dst)
+            return None
         try:
             self._folder.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -128,5 +138,21 @@ class ImageStash:
             return None
         if not self._convert(src, dst):
             logger.warning("photo %s not stashed", src)
+            self._failed.add(dst)
             return None
         return str(dst)
+
+
+def _downloaded(src: Path, wait: float) -> bool:
+    """Whether ``src`` is there and done growing, waiting up to ``wait``
+    seconds: an incoming photo's row lands before its file finishes."""
+    deadline = time.monotonic() + wait
+    last = -1
+    while True:
+        size = src.stat().st_size if src.exists() else -1
+        if size > 0 and size == last:
+            return True
+        if time.monotonic() >= deadline:
+            return size > 0
+        last = size
+        time.sleep(0.5)

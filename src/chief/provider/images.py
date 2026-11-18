@@ -33,13 +33,16 @@ MISSING = "[photo no longer available]"
 
 
 def with_images(
-    content: str, paths: list[str], load: bool
+    content: str, paths: list[str], load: int
 ) -> str | list[dict[str, Any]]:
-    """``content`` plus its photos: content parts when ``load``, else stubs."""
-    if not load:
+    """``content`` plus its photos: the newest ``load`` as content parts, the
+    rest as stubs (``0``: all stubs, a plain string)."""
+    if load <= 0:
         return " ".join([content, *(STUB for _ in paths)]).strip()
-    parts: list[dict[str, Any]] = [{"type": "text", "text": content or STUB}]
-    for path in paths:
+    stubbed = len(paths) - min(load, len(paths))
+    parts: list[dict[str, Any]] = [{"type": "text", "text": " ".join(
+        [content or STUB, *(STUB for _ in range(stubbed))]).strip()}]
+    for path in paths[stubbed:]:
         url = data_url(Path(path))
         if url is None:
             parts.append({"type": "text", "text": MISSING})
@@ -65,16 +68,16 @@ def data_url(path: Path) -> str | None:
     return f"data:{media};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def loadable(messages: list[dict[str, Any]]) -> set[int]:
-    """Indexes of the messages whose photos load: the newest :data:`MAX_LOADED`
-    photos' messages (a message's photos load or stub together)."""
-    chosen: set[int] = set()
+def loadable(messages: list[dict[str, Any]]) -> dict[int, int]:
+    """``{message index: photos to load}`` for the newest :data:`MAX_LOADED`
+    photos across the transcript; everything older is a stub."""
+    chosen: dict[int, int] = {}
     budget = MAX_LOADED
     for i in range(len(messages) - 1, -1, -1):
         count = len(messages[i].get(IMAGES_KEY) or ())
-        if count and count <= budget:
-            chosen.add(i)
-            budget -= count
+        if count and budget:
+            chosen[i] = min(count, budget)
+            budget -= chosen[i]
     return chosen
 
 

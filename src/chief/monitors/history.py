@@ -42,12 +42,12 @@ class HistorySource(Protocol):
     """A channel's own record of its threads."""
 
     def recent(
-        self, thread_key: str, limit: int, store: str = ""
+        self, thread_key: str, limit: int, store: str = "", upto: int | None = None
     ) -> tuple[str, list[Line]]:
-        """``(store, lines)``: the thread's newest ``limit`` lines, oldest
-        first, and which store held them — ``store`` itself when the event
-        named one. ``[]`` lines when no store has the thread. Synchronous:
-        callers thread these off the loop."""
+        """``(store, lines)``: the thread's newest ``limit`` lines (no newer
+        than ``upto``, when given), oldest first, and which store held them —
+        ``store`` itself when the event named one. ``[]`` lines when no store
+        has the thread. Synchronous: callers thread these off the loop."""
         ...
 
     def photos(self, store: str, line: Line) -> tuple[str, ...]:

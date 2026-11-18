@@ -64,8 +64,15 @@ class WakeLog:
         source = self._histories.get(channel)
         store, lines = "", list[Line]()
         if source is not None:
+            named = str(payload.get("store", ""))
             store, lines = await asyncio.to_thread(
-                source.recent, thread, READ_LIMIT, str(payload.get("store", "")))
+                source.recent, thread, READ_LIMIT, named)
+            rowid = payload.get("rowid")
+            if isinstance(rowid, int) and lines and lines[-1].id > rowid and all(
+                line.id != rowid for line in lines
+            ):  # a backlog past the read window: read up to the event itself
+                store, lines = await asyncio.to_thread(
+                    source.recent, thread, READ_LIMIT, named, rowid)
         if not lines:
             return ThreadLog(thread, "", [payload_line(payload, self._clock)], 0, False)
         return ThreadLog(thread, store, lines, _event_index(lines, payload), True)
