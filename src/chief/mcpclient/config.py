@@ -81,10 +81,9 @@ def _matches(tool: str, patterns: tuple[str, ...]) -> bool:
 
 def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig | None:
     """Build a ``ServerConfig`` from a ``config.yaml`` entry; ``None`` (logged)
-    on a malformed ``timeout``, ``headers``, ``auth``, ``scopes`` or tool filter
-    so a typo or
-    a missing secret confines its damage to this one server, not the whole
-    daemon boot."""
+    on a malformed ``timeout``, ``headers``, ``auth``, ``scopes`` or tool
+    filter, so a typo or a missing secret confines its damage to this one
+    server, not the whole daemon boot."""
     try:
         timeout = _timeout(entry)
         headers = _headers(entry)

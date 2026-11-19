@@ -15,7 +15,8 @@ from chief.wiring import Core
 
 def build_mcp_configs(config: Config) -> tuple[ServerConfig, ...]:
     """The ``mcp_servers`` entries as server configs. An entry with a malformed
-    ``timeout``, ``headers``, ``auth`` or ``scopes`` — or a ``${secret:}`` that
+    ``timeout``, ``headers``, ``auth``, ``scopes`` or tool filter
+    (``include_tools`` / ``exclude_tools``) — or a ``${secret:}`` that
     resolves to nothing — is dropped (logged, not raised) by
     ``server_config_from_entry``: see there for why."""
     return tuple(

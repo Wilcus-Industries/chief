@@ -414,8 +414,12 @@ def test_a_filter_glob_matching_no_tool_warns(
     warned = " ".join(
         r.getMessage() for r in caplog.records if r.levelname == "WARNING"
     )
-    assert "get_portfolo" in warned and "plce_*" in warned
-    assert "'get_portfolio'" not in warned
+    assert "get_portfolo, plce_*" in warned
+    # A glob that matched must not be reported, or a correct config warns
+    # on every boot.
+    assert config.unmatched_globs(["get_portfolio", "place_equity_order"]) == [
+        "get_portfolo", "plce_*",
+    ]
 
 
 def test_an_unfiltered_server_registers_every_tool() -> None:
