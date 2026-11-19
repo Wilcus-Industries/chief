@@ -96,6 +96,11 @@ quiet_hours: ""
 #     url: https://agent.robinhood.com/mcp/trading
 #     auth: oauth
 #     scopes: [internal]   # optional: overrides the scopes the server advertises
+#     # optional, any server: fnmatch globs over its own tool names. A tool
+#     # must match an include (absent = all) and no exclude; filtered tools
+#     # never register, so their specs cost no prompt tokens.
+#     include_tools: [get_accounts, get_portfolio, "get_equity_*"]
+#     exclude_tools: [get_equity_tax_lots]
 
 # Packages: bundled defaults live in packages_dir; more come from the public
 # chief-packages repo (cloned into data/packages by the chief-pkg CLI on first

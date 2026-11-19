@@ -86,3 +86,66 @@ def test_an_oauth_server_name_must_be_a_safe_filename(
         config = server_config_from_entry(name, entry)
     assert config is None
     assert "name" in caplog.text
+
+
+def test_tool_filters_parse_as_glob_tuples() -> None:
+    config = server_config_from_entry(
+        "rh",
+        {
+            "url": "https://x/mcp",
+            "include_tools": ["get_*", "search"],
+            "exclude_tools": ["get_bank*"],
+        },
+    )
+    assert config is not None
+    assert config.include_tools == ("get_*", "search")
+    assert config.exclude_tools == ("get_bank*",)
+
+
+def test_tool_filters_default_to_every_tool() -> None:
+    config = server_config_from_entry("plain", {"command": ["x"]})
+    assert config is not None
+    assert (config.include_tools, config.exclude_tools) == (None, ())
+    assert config.tool_enabled("anything")
+
+
+@pytest.mark.parametrize("key", ["include_tools", "exclude_tools"])
+@pytest.mark.parametrize("bad", ["get_*", [""], ["ok", 3], {"a": 1}])
+def test_a_malformed_tool_filter_skips_the_server(
+    key: str, bad: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        config = server_config_from_entry("rh", {"url": "https://x/mcp", key: bad})
+    assert config is None
+    assert key in caplog.text
+
+
+def test_an_empty_include_list_keeps_nothing() -> None:
+    config = server_config_from_entry(
+        "rh", {"url": "https://x/mcp", "include_tools": []}
+    )
+    assert config is not None
+    assert not config.tool_enabled("get_portfolio")
+
+
+@pytest.mark.parametrize(
+    ("include", "exclude", "name", "enabled"),
+    [
+        (None, (), "place_equity_order", True),
+        (("get_*",), (), "get_portfolio", True),
+        (("get_*",), (), "place_equity_order", False),
+        (None, ("place_*",), "place_equity_order", False),
+        (None, ("place_*",), "get_portfolio", True),
+        (("get_*",), ("get_bank*",), "get_bank_accounts", False),
+        (("get_*",), ("get_bank*",), "get_accounts", True),
+        # Case-sensitive, like the typesafe screen_tools globs.
+        (("GET_*",), (), "get_portfolio", False),
+    ],
+)
+def test_tool_enabled_applies_include_then_exclude(
+    include: tuple[str, ...] | None, exclude: tuple[str, ...], name: str, enabled: bool
+) -> None:
+    config = ServerConfig(
+        name="rh", url="https://x/mcp", include_tools=include, exclude_tools=exclude
+    )
+    assert config.tool_enabled(name) is enabled
