@@ -84,8 +84,22 @@ class McpManager:
         self._links.clear()
 
     def _register_tools(self, config: ServerConfig, listing: Any) -> int:
+        """Register the server's tools that pass its filters; returns how many."""
         server = config.name
-        for tool in listing.tools:
+        tools = [tool for tool in listing.tools if config.tool_enabled(tool.name)]
+        stale = config.unmatched_globs([tool.name for tool in listing.tools])
+        if stale:
+            # A typo'd include silently drops a tool the owner meant to keep.
+            logger.warning(
+                "mcp server %s: tool filter globs match no tool: %s",
+                server, ", ".join(stale),
+            )
+        if len(tools) < len(listing.tools):
+            logger.info(
+                "mcp server %s: registered %d of %d tools (include/exclude_tools)",
+                server, len(tools), len(listing.tools),
+            )
+        for tool in tools:
             spec = ToolSpec(
                 name=f"mcp_{server}_{tool.name}",
                 description=tool.description or "",
@@ -103,7 +117,7 @@ class McpManager:
                 Tool(spec, handler, wants_context=config.session_context),
                 replace=True,
             )
-        return len(listing.tools)
+        return len(tools)
 
     def _make_handler(
         self, server: str, tool_name: str, session_context: bool = False

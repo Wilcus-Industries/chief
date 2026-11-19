@@ -164,6 +164,10 @@ what each discovers as `mcp_<server>_<tool>`. The pieces, each small on purpose:
 | `auth_tools.py` | `server_login`, `server_login_complete`, `/login`, `/logout`, the pre-turn hint, and `build_broker` |
 | `wiring.py` | boot phase: the parsed configs, the broker, and the manager (`build_mcp`) |
 
+`McpManager._register_tools` registers only the tools that pass the server's
+`include_tools` / `exclude_tools` globs (`ServerConfig.tool_enabled`); a filtered
+tool never reaches the registry, so neither its spec nor its dispatch exists.
+
 A server opted in with `session_context: true` registers its tools `wants_context`:
 the handler `McpManager` builds takes chief's injected `context` off the arguments
 and sends it as the call's `_meta` (`chief/thread`, `chief/channel`), through

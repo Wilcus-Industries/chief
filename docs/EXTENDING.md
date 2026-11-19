@@ -76,6 +76,15 @@ default because thread keys are often phone numbers; only turn it on for a
 server you trust with them. An opted-in server's tools cannot take an argument
 named `context` (chief's context replaces it; registration logs a warning).
 
+Any server can trim what it registers with `include_tools` / `exclude_tools`:
+lists of fnmatch globs (case-sensitive) over the server's own tool names
+(`get_portfolio`, not `mcp_robinhood_get_portfolio`). A tool registers only if it
+matches an include (no `include_tools` = every tool) and no exclude. Every
+registered tool's spec rides on every model call, so a 95-tool server costs
+tens of thousands of prompt tokens. Filter to the tools chief actually uses. A
+glob that matches no tool logs a warning (a typo would otherwise silently drop
+a tool), and a malformed list skips the server like any other bad key.
+
 A `url` entry may also send static `headers` (header name → string). Never put a
 secret in one by value: write `${secret:name}` and the value is read at boot from
 the env var `NAME` (upper-cased), then the file `secrets/name`. Only that exact

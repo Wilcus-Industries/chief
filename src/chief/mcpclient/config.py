@@ -3,6 +3,7 @@
 Split out of ``manager`` (file-length cap); ``manager`` re-exports the public names.
 """
 
+import fnmatch
 import logging
 import re
 from dataclasses import dataclass, field
@@ -42,6 +43,11 @@ class ServerConfig:
     per session). Off by default — thread keys are often phone numbers and are
     never sent to a server that did not ask in ``config.yaml``. (An opted-in
     server's tools cannot take an argument named ``context``.)
+
+    ``include_tools`` / ``exclude_tools`` are fnmatch globs over the server's
+    own tool names (``get_portfolio``, not ``mcp_rh_get_portfolio``) that trim
+    what registers: a tool must match an include (absent = every tool) and no
+    exclude. A filtered tool never registers, so its spec costs no prompt.
     """
 
     name: str
@@ -54,18 +60,37 @@ class ServerConfig:
     auth: Literal["oauth"] | None = None
     scopes: tuple[str, ...] | None = None
     session_context: bool = False
+    include_tools: tuple[str, ...] | None = None
+    exclude_tools: tuple[str, ...] = ()
+
+    def tool_enabled(self, tool: str) -> bool:
+        """Whether this server's tool passes the include/exclude filters."""
+        if self.include_tools is not None and not _matches(tool, self.include_tools):
+            return False
+        return not _matches(tool, self.exclude_tools)
+
+    def unmatched_globs(self, tools: list[str]) -> list[str]:
+        """Filter globs that match none of ``tools`` (likely typos)."""
+        globs = (*(self.include_tools or ()), *self.exclude_tools)
+        return [g for g in globs if not any(_matches(t, (g,)) for t in tools)]
+
+
+def _matches(tool: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(tool, pattern) for pattern in patterns)
 
 
 def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig | None:
     """Build a ``ServerConfig`` from a ``config.yaml`` entry; ``None`` (logged)
-    on a malformed ``timeout``, ``headers``, ``auth`` or ``scopes`` so a typo or
-    a missing secret confines its damage to this one server, not the whole
-    daemon boot."""
+    on a malformed ``timeout``, ``headers``, ``auth``, ``scopes`` or tool
+    filter, so a typo or a missing secret confines its damage to this one
+    server, not the whole daemon boot."""
     try:
         timeout = _timeout(entry)
         headers = _headers(entry)
         auth = _auth(name, entry)
-        scopes = _scopes(entry)
+        scopes = _string_list(entry, "scopes")
+        include = _string_list(entry, "include_tools")
+        exclude = _string_list(entry, "exclude_tools") or ()
     except ValueError as exc:
         logger.warning("mcp server %r skipped: %s", name, exc)
         return None
@@ -76,6 +101,7 @@ def server_config_from_entry(name: str, entry: dict[str, Any]) -> ServerConfig |
         headers=headers, auth=auth, scopes=scopes,
         # Only a real boolean opts in; anything else stays off (fail closed).
         session_context=entry.get("session_context") is True,
+        include_tools=include, exclude_tools=exclude,
     )
 
 
@@ -119,12 +145,13 @@ def _auth(name: str, entry: dict[str, Any]) -> Literal["oauth"] | None:
     return "oauth"
 
 
-def _scopes(entry: dict[str, Any]) -> tuple[str, ...] | None:
-    scopes = entry.get("scopes")
-    if scopes is None:
+def _string_list(entry: dict[str, Any], key: str) -> tuple[str, ...] | None:
+    """``entry[key]`` as a tuple of non-empty strings; ``None`` when absent."""
+    raw = entry.get(key)
+    if raw is None:
         return None
-    if not isinstance(scopes, list) or not all(
-        isinstance(scope, str) and scope.strip() for scope in scopes
+    if not isinstance(raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in raw
     ):
-        raise ValueError("scopes must be a list of non-empty strings")
-    return tuple(scopes)
+        raise ValueError(f"{key} must be a list of non-empty strings")
+    return tuple(raw)

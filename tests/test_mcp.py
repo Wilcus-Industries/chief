@@ -8,6 +8,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -368,3 +369,64 @@ def test_session_context_is_parsed_from_config_and_off_by_default() -> None:
     assert off is not None and off.session_context is False
     # Only a real boolean opts in; anything else stays off (fail closed).
     assert junk is not None and junk.session_context is False
+
+
+def _listing(*names: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        tools=[
+            SimpleNamespace(
+                name=name, description=f"{name} tool", inputSchema={"type": "object"}
+            )
+            for name in names
+        ]
+    )
+
+
+def test_filtered_tools_are_never_registered() -> None:
+    # A filtered tool's spec must not reach the model at all: the point is the
+    # per-call prompt size, not only refusing the call.
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    config = ServerConfig(
+        name="rh", url="https://x/mcp",
+        include_tools=("get_*",), exclude_tools=("get_bank*",),
+    )
+    count = manager._register_tools(
+        config, _listing("get_portfolio", "get_bank_accounts", "place_equity_order")
+    )
+    assert count == 1
+    assert [spec.name for spec in registry.specs()] == ["mcp_rh_get_portfolio"]
+
+
+def test_a_filter_glob_matching_no_tool_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A typo'd name would otherwise silently drop a tool the owner meant to keep.
+    manager = McpManager(ToolRegistry())
+    config = ServerConfig(
+        name="rh", url="https://x/mcp",
+        include_tools=("get_portfolio", "get_portfolo"), exclude_tools=("plce_*",),
+    )
+    with caplog.at_level("WARNING"):
+        manager._register_tools(
+            config, _listing("get_portfolio", "place_equity_order")
+        )
+    warned = " ".join(
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    )
+    assert "get_portfolo, plce_*" in warned
+    # A glob that matched must not be reported, or a correct config warns
+    # on every boot.
+    assert config.unmatched_globs(["get_portfolio", "place_equity_order"]) == [
+        "get_portfolo", "plce_*",
+    ]
+
+
+def test_an_unfiltered_server_registers_every_tool() -> None:
+    registry = ToolRegistry()
+    manager = McpManager(registry)
+    count = manager._register_tools(
+        ServerConfig(name="s", command=("x",)), _listing("a", "b")
+    )
+    assert count == 2
+    assert len(registry.specs()) == 2
